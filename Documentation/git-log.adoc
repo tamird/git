@@ -27,9 +27,12 @@ each commit introduces are shown.
 OPTIONS
 -------
 
+`--no-follow`::
 `--follow`::
 	Continue listing the history of a file beyond renames
-	(works only for a single file).
+	(works only for a single file).  `--no-follow` disables this
+	behavior, including when it was enabled by the
+	`log.follow` configuration variable.
 
 `--no-decorate`::
 `--decorate[=(short|full|auto|no)]`::
