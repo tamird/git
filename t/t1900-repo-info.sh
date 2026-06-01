@@ -184,6 +184,7 @@ test_expect_success 'setup test repository layout for path fields' '
 	mkdir -p test-repo/sub
 '
 
+test_repo_info_path 'commondir' '../.git'
 test_repo_info_path 'gitdir' '../.git'
 
 test_done
