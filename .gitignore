@@ -77,6 +77,7 @@
 /git-fsmonitor--daemon
 /git-gc
 /git-get-tar-commit-id
+/git-grep-index
 /git-grep
 /git-hash-object
 /git-help

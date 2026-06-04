@@ -1,0 +1,819 @@
+#!/bin/sh
+
+test_description='git grep content index'
+
+. ./test-lib.sh
+
+test_lazy_prereq ENHANCED_BRE '
+	test-tool regex --silent "a\|b" a
+'
+
+test_expect_success 'setup' '
+	printf x >short &&
+	printf ab >fixed-pcre &&
+	echo "present needle" >present &&
+	echo "import sample_ext.vendor_internal" >agent-regex &&
+	echo "ordinary contents" >ordinary &&
+	echo "import sample_ext.__private" >escaped-dot &&
+	echo "present.needle" >escaped-dot-ere &&
+	echo ".a" >escaped-dot-quantified &&
+	echo "from _private" >outer-from &&
+	echo "import _private" >outer-import &&
+	echo "from _p)" >outer-boundary &&
+	echo "from unicorn_sfi.eval.chz" >mixed-unicorn &&
+	echo "import gunicorn.conf" >mixed-gunicorn &&
+	echo "class Image" >escaped-ere-atom &&
+	echo "from present.private" >structured-from &&
+	echo "import ordinary.internal" >structured-import &&
+	echo "from libdemo_cpp.internal" >structured-middle-from &&
+	echo "import libdemo_cpp_ext.private" >structured-middle-import &&
+	echo "frm present" >structured-optional &&
+	printf "%s\n" "literal|()[]\\suffix" >escaped-ere &&
+	git add short fixed-pcre present agent-regex ordinary escaped-dot \
+		escaped-dot-ere escaped-dot-quantified outer-from outer-import \
+		outer-boundary mixed-unicorn mixed-gunicorn escaped-ere-atom \
+		structured-from structured-import structured-middle-from \
+		structured-middle-import structured-optional escaped-ere &&
+	git commit -m initial
+'
+
+test_expect_success 'write shared content index' '
+	git grep-index --no-progress &&
+	test_path_is_file .git/objects/info/grep-index/chain &&
+	test_line_count = 1 .git/objects/info/grep-index/chain &&
+	segment=$(cat .git/objects/info/grep-index/chain) &&
+	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
+'
+
+test_expect_success 'content index prunes impossible blobs' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached "absent(pattern)" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -F "absent pattern" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached --no-content-index \
+		"absent pattern" 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git -c grep.useContentIndex=false grep --cached \
+		"absent pattern" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'content index prunes cached worktree blobs' '
+	test_when_finished "rm -f .git/fsmonitor-ordinary \
+			    .git/index.grep-worktree &&
+			    git update-index --no-fsmonitor &&
+			    git checkout -- ordinary" &&
+	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+		if test -f .git/fsmonitor-ordinary
+		then
+			printf "ordinary\0"
+		fi
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-test &&
+	test_config grep.worktreeBlobCache true &&
+	git update-index --fsmonitor &&
+	git status --porcelain >/dev/null &&
+	test_must_fail git grep "absent cached worktree" -- ordinary &&
+	test_path_is_file .git/index.grep-worktree &&
+	test_must_fail git grep "absent cached worktree" -- ordinary &&
+	echo "worktree-only-needle" >ordinary &&
+	>.git/fsmonitor-ordinary &&
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+
+	echo "ordinary:worktree-only-needle" >expected &&
+	git grep "worktree-only-needle" -- ordinary >actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index prunes impossible multiple patterns' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		-e "absent alpha" -e "absent beta" 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success ENHANCED_BRE \
+	'content index prunes impossible basic alternation' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"absent alpha\|absent beta" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"absent alpha|absent beta" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached \
+		"absent alpha.*absent omega\|absent beta" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached \
+		"from [A-Za-z]* absent\|import [0-9]* missing" \
+		-- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached "absent.alpha" 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index prunes basic bracket expressions' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"present[[:space:]]*absent" -- present 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached \
+		"present[ A-Za-z0-9_.]*absent" -- present 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index prunes agent basic bracket expression' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"import [A-Za-z0-9_.]*absent" -- agent-regex 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index bridges escaped dot literal' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
+		-- agent-regex 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success ENHANCED_BRE \
+	'content index bridges escaped dot alternation' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"from [A-Za-z0-9_.]* import __[A-Za-z0-9_]*\|import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
+		-- agent-regex 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index bridges escaped ERE dot literal' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^present\\.needle$" -- present 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index prunes anchored escaped regexes' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^absent alpha\\.suffix$|^absent beta\\.suffix$" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^absent alpha\\.(internal|private|_[A-Za-z])|^absent beta\\.(internal|private|_[A-Za-z])" \
+		2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"__absent_path__[[:space:]]*=|absent_extend_path|absent_declare_namespace" \
+		2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^from (absent|missing)(\\.|[[:space:]])|^import (absent|missing)\\." \
+		2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^from (absent_alpha|absent_beta)(\\.|[[:space:]])|^import (absent_alpha|absent_beta)\\." \
+		2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^(absent_alpha|absent_beta)+$" 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached \
+		"^absent alpha\\.suffix$" 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index combines required ERE groups' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(present|ordinary) (absent_alpha|absent_beta) (contents|needle)$" \
+		2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index combines ERE literals and groups' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	pattern="from (present|ordinary)(\\.[A-Za-z0-9_]*_private|\\._|\\.internal|\\.private)|import (present|ordinary)(\\.[A-Za-z0-9_]*_private|\\._|\\.internal|\\.private)" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- present 2>err &&
+	test_must_be_empty err &&
+	git grep --cached -E "$pattern" -- structured-from >actual &&
+	cat >expect <<-\EOF &&
+	structured-from:from present.private
+	EOF
+	test_cmp expect actual &&
+	git grep --cached -E "$pattern" -- structured-import >actual &&
+	cat >expect <<-\EOF &&
+	structured-import:import ordinary.internal
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'content index combines middle ERE literals and groups' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	pattern="(from|import) libdemo_cpp([._]| import).*(_|internal|private)|(from|import) libdemo_cpp_ext([._]| import).*(_|internal|private)" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- agent-regex 2>err &&
+	test_must_be_empty err &&
+	git grep --cached -E "$pattern" -- structured-middle-from >actual &&
+	cat >expect <<-\EOF &&
+	structured-middle-from:from libdemo_cpp.internal
+	EOF
+	test_cmp expect actual &&
+	git grep --cached -E "$pattern" -- structured-middle-import >actual &&
+	cat >expect <<-\EOF &&
+	structured-middle-import:import libdemo_cpp_ext.private
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'optional ERE branch literal uses normal blob reads' '
+	git grep --cached -E "fro?m (present|ordinary)" \
+	-- structured-optional >actual &&
+	cat >expect <<-\EOF &&
+	structured-optional:frm present
+	EOF
+	test_cmp expect actual &&
+	git grep --cached -E \
+		"(foo|bar){0,2}(present|ordinary)" -- present >actual &&
+	cat >expect <<-\EOF &&
+	present:present needle
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'content index prefers stronger ERE literals' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"(from|import)[[:space:]]+unicorn_sfi\\.eval\\.chz" \
+		-- agent-regex 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"(^|[[:space:]])(from|import)[[:space:]]+gunicorn\\.conf" \
+		-- agent-regex 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index skips escaped ERE atoms' '
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"class Image\\b" -- ordinary 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^class\\s* Image$" -- ordinary 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index decodes escaped ERE groups' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(present|ordinary) (absent\\.alpha|absent\\.beta) (contents|needle)$" \
+		2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^(present|ordinary) (absent\\|alpha|missing\\(beta\\)|never\\[gamma]|none\\\\delta) (contents|needle)$" \
+		2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index decodes singleton ERE classes' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"(^| )(impor[t]|fro[m]) (applie[d]|qsta[r])(\.| import).*(_privat[e]|interna[l]|privat[e])" \
+		-- agent-regex 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index unwraps whole ERE group' '
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)$" \
+		-- ordinary 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'unsupported searches use normal blob reads' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i "absent pattern" 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E "^|absent needle" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E "^(a\\.|b\\*)$" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached "absent alpha*" 2>err &&
+	test_grep "unable to read" err &&
+	git grep --cached -L "absent pattern" >/dev/null 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached x -- short 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 'content index prunes impossible PCRE literal' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P "absent pattern" 2>err &&
+	test_must_fail git grep --cached -P "^absent\\.pattern$" 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'possible matches use normal blob reads' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "present needle" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible basic bracket expression uses normal blob reads' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"present[[:space:]]*needle" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached \
+		"present[ A-Za-z0-9_.]*needle" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached \
+		"present[0-9]* needle" -- present 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible agent basic bracket expression reads blob' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"import [A-Za-z0-9_.]*vendor_internal" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible escaped dot literal reads blob' '
+	oid=$(git rev-parse :escaped-dot) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
+		-- escaped-dot 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success ENHANCED_BRE \
+	'possible escaped dot alternation reads blob' '
+	oid=$(git rev-parse :escaped-dot) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"from [A-Za-z0-9_.]* import __[A-Za-z0-9_]*\|import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
+		-- escaped-dot 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified escaped dot suffix reads blob' '
+	oid=$(git rev-parse :escaped-dot-quantified) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "\\.ab*" \
+		-- escaped-dot-quantified 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 'fixed pattern follows PCRE2 matching semantics' '
+	oid=$(git rev-parse :fixed-pcre) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -F "a\\E.*b" -- fixed-pcre 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible anchored escaped regex uses normal blob reads' '
+	oid=$(git rev-parse :escaped-dot-ere) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^present\\.needle$" -- escaped-dot-ere 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible escaped ERE group uses normal blob reads' '
+	oid=$(git rev-parse :escaped-ere) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(literal\\|\\(\\)\\[]\\\\suffix|absent)$" \
+		-- escaped-ere 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 \
+	'possible anchored escaped PCRE uses normal blob reads' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"^import sample_ext\\.vendor_internal$" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'nested ERE group uses normal blob reads' '
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^absent((nested)|[)]|\\))*suffix$|^ordinary contents$" \
+		-- ordinary 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^ordinary[[:space:]]+contents$" \
+		-- ordinary 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible agent regex uses normal blob reads' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^from sample_ext\\.(internal|private|_[A-Za-z])|^import sample_ext\\.(vendor_internal|[[:space:]]|_[A-Za-z])|from sample_ext import (internal|private|_[A-Za-z])" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^from (absent_alpha|absent_beta)\\.|^import (sample_ext|absent_beta)\\." \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^(absent_alpha|import sample_ext.vendor_internal)+$" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^(absent|import) (sample_ext|missing)\\.(vendor_internal|private)$" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^(absent|import) (sample_ext\\.vendor_internal|missing\\.private)$" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'stronger ERE literals preserve possible matches' '
+	unicorn_oid=$(git rev-parse :mixed-unicorn) &&
+	unicorn_object=.git/objects/$(test_oid_to_path "$unicorn_oid") &&
+	gunicorn_oid=$(git rev-parse :mixed-gunicorn) &&
+	gunicorn_object=.git/objects/$(test_oid_to_path "$gunicorn_oid") &&
+	mv "$unicorn_object" "$unicorn_object.save" &&
+	mv "$gunicorn_object" "$gunicorn_object.save" &&
+	test_when_finished "mv \"$unicorn_object.save\" \"$unicorn_object\"" &&
+	test_when_finished "mv \"$gunicorn_object.save\" \"$gunicorn_object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"(from|import)[[:space:]]+unicorn_sfi\\.eval\\.chz" \
+		-- mixed-unicorn 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"(^|[[:space:]])(from|import)[[:space:]]+gunicorn\\.conf" \
+		-- mixed-gunicorn 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'escaped ERE atoms preserve possible matches' '
+	oid=$(git rev-parse :escaped-ere-atom) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"class Image\\b" -- escaped-ere-atom 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^class\\s* Image$" -- escaped-ere-atom 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible singleton ERE classes use normal blob reads' '
+	oid=$(git rev-parse :agent-regex) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"(^| )(impor[t]|fro[m]) (sample_ex[t]|missing)(\.| import).*(vendor_interna[l]|private)" \
+		-- agent-regex 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified singleton ERE classes read blobs' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"(present[x]*|absent)" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"(present[x]?|absent)" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"(present[x]{0}|absent)" -- present 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'whole ERE group matches use normal blob reads' '
+	from_oid=$(git rev-parse :outer-from) &&
+	from_object=.git/objects/$(test_oid_to_path "$from_oid") &&
+	import_oid=$(git rev-parse :outer-import) &&
+	import_object=.git/objects/$(test_oid_to_path "$import_oid") &&
+	boundary_oid=$(git rev-parse :outer-boundary) &&
+	boundary_object=.git/objects/$(test_oid_to_path "$boundary_oid") &&
+	mv "$from_object" "$from_object.save" &&
+	mv "$import_object" "$import_object.save" &&
+	mv "$boundary_object" "$boundary_object.save" &&
+	test_when_finished "mv \"$from_object.save\" \"$from_object\"" &&
+	test_when_finished "mv \"$import_object.save\" \"$import_object\"" &&
+	test_when_finished "mv \"$boundary_object.save\" \"$boundary_object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)$" \
+		-- outer-from 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)$" \
+		-- outer-import 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"^(from _[A-Za-z][)]|import _[A-Za-z]\\))$" \
+		-- outer-boundary 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified whole ERE group reads blob' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)*" \
+		-- short 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible multiple pattern uses normal blob reads' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		-e "absent alpha" -e "present needle" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success ENHANCED_BRE \
+	'possible basic alternation uses normal blob reads' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"absent alpha\|present needle" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"absent alpha|present needle" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached \
+		"absent alpha.*absent omega\|present.*needle" \
+		-- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached "present.needle" -- present 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'unknown blobs use normal blob reads' '
+	printf y >unknown &&
+	git add unknown &&
+	oid=$(git rev-parse :unknown) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'structurally invalid segment is ignored' '
+	segment=$(cat .git/objects/info/grep-index/chain) &&
+	index=.git/objects/info/grep-index/grep-$segment.idx &&
+	cp "$index" "$index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	chmod +w "$index" &&
+	: >"$index" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'segment with truncated trailer is ignored' '
+	segment=$(cat .git/objects/info/grep-index/chain) &&
+	index=.git/objects/info/grep-index/grep-$segment.idx &&
+	cp "$index" "$index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	chmod +w "$index" &&
+	size=$(wc -c <"$index") &&
+	test_copy_bytes $((size - 1)) <"$index" >"$index.truncated" &&
+	mv "$index.truncated" "$index" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'writer retries unreadable blobs' '
+	echo "retry alpha 0123456789" >retry-alpha &&
+	echo "retry beta abcdefghij" >retry-beta &&
+	echo "retry gamma klmnopqrst" >retry-gamma &&
+	git add retry-alpha retry-beta retry-gamma &&
+	git ls-files -s retry-alpha retry-beta retry-gamma |
+		sort -k2,2 >retry-entries &&
+	middle_oid=$(awk "NR == 2 { print \$2 }" retry-entries) &&
+	middle_path=$(awk "NR == 2 { print \$4 }" retry-entries) &&
+	middle_object=.git/objects/$(test_oid_to_path "$middle_oid") &&
+	mv "$middle_object" "$middle_object.save" &&
+	test_when_finished "test ! -e \"$middle_object.save\" ||
+			    mv \"$middle_object.save\" \"$middle_object\"" &&
+
+	git grep-index --no-progress &&
+	test_line_count = 2 .git/objects/info/grep-index/chain &&
+	while read mode oid stage path
+	do
+		test "$oid" = "$middle_oid" && continue
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		pattern=$(cat "$path") &&
+		test_must_fail git grep --cached -F "$pattern" -- "$path" \
+			2>err &&
+		test_grep "$oid" err &&
+		mv "$object.save" "$object" ||
+		return 1
+	done <retry-entries &&
+	test_must_fail git grep --cached -F "absent retry needle" \
+		-- "$middle_path" 2>err &&
+	test_grep "$middle_oid" err &&
+
+	mv "$middle_object.save" "$middle_object" &&
+	git grep-index --no-progress &&
+	test_line_count = 3 .git/objects/info/grep-index/chain &&
+	mv "$middle_object" "$middle_object.save" &&
+	test_must_fail git grep --cached -F "absent retry needle" \
+		-- "$middle_path" 2>err &&
+	test_must_be_empty err &&
+	mv "$middle_object.save" "$middle_object"
+'
+
+test_expect_success 'write incremental segment' '
+	printf z >incremental &&
+	git add incremental &&
+	git grep-index --no-progress &&
+	test_line_count = 4 .git/objects/info/grep-index/chain &&
+	oid=$(git rev-parse :incremental) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'writer includes linked worktree indexes' '
+	git worktree add ../grep-index-worktree -b grep-index-worktree &&
+	test_when_finished "git worktree remove --force ../grep-index-worktree &&
+			    git branch -D grep-index-worktree" &&
+	printf q >../grep-index-worktree/linked-short &&
+	git -C ../grep-index-worktree add linked-short &&
+	git grep-index --no-progress &&
+	oid=$(git -C ../grep-index-worktree rev-parse :linked-short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git -C ../grep-index-worktree grep --cached \
+		"absent pattern" 2>err &&
+	test_must_be_empty err
+'
+
+test_done

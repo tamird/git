@@ -112,6 +112,7 @@ git-format-rev                          plumbinginterrogators
 git-fsck                                ancillaryinterrogators          complete
 git-gc                                  mainporcelain
 git-get-tar-commit-id                   plumbinginterrogators
+git-grep-index                          plumbingmanipulators
 git-grep                                mainporcelain           info
 git-gui                                 mainporcelain
 git-hash-object                         plumbingmanipulators

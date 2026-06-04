@@ -28,6 +28,7 @@ git grep [-a | --text] [-I] [--textconv] [-i | --ignore-case] [-w | --word-regex
 	   [-f <file>] [-e] <pattern>
 	   [--and|--or|--not|(|)|-e <pattern>...]
 	   [--recurse-submodules] [--parent-basename <basename>]
+	   [--[no-]content-index]
 	   [ [--[no-]exclude-standard] [--cached | --untracked | --no-index] | <tree>...]
 	   [--] [<pathspec>...]
 
@@ -44,6 +45,13 @@ OPTIONS
 `--cached`::
 	Instead of searching tracked files in the working tree, search
 	blobs registered in the index file.
+
+`--content-index`::
+`--no-content-index`::
+	Use grep acceleration indexes, when available, to avoid reading blobs
+	that cannot contain a case-sensitive literal pattern. This is the
+	default. The indexes are created and updated by
+	linkgit:git-grep-index[1].
 
 `--untracked`::
 	In addition to searching in the tracked files in the working
