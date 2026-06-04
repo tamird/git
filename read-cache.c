@@ -2213,6 +2213,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 
 	istate->timestamp.sec = 0;
 	istate->timestamp.nsec = 0;
+	istate->index_file_identity_valid = 0;
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
@@ -2308,7 +2309,12 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 		p.src_offset = src_offset;
 		load_index_extensions(&p);
 	}
-	munmap((void *)mmap, mmap_size);
+	if (istate->retain_index_file_mapping) {
+		istate->retained_index_file_map = mmap;
+		istate->retained_index_file_map_size = mmap_size;
+	} else {
+		munmap((void *)mmap, mmap_size);
+	}
 
 	trace2_data_intmax("index", istate->repo, "read/version",
 			   istate->version);
@@ -2331,6 +2337,28 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 unmap:
 	munmap((void *)mmap, mmap_size);
 	die(_("index file corrupt"));
+}
+
+int ensure_index_file_identity(struct index_state *istate)
+{
+	struct git_hash_ctx ctx;
+
+	if (istate->index_file_identity_valid)
+		return 0;
+	if (!istate->retained_index_file_map)
+		return -1;
+
+	istate->repo->hash_algo->init_fn(&ctx);
+	git_hash_update(&ctx, istate->retained_index_file_map,
+			istate->retained_index_file_map_size -
+			istate->repo->hash_algo->rawsz);
+	git_hash_final_oid(&istate->index_file_identity, &ctx);
+	istate->index_file_identity_valid = 1;
+	munmap((void *)istate->retained_index_file_map,
+	       istate->retained_index_file_map_size);
+	istate->retained_index_file_map = NULL;
+	istate->retained_index_file_map_size = 0;
+	return 0;
 }
 
 /*
@@ -2439,6 +2467,9 @@ void release_index(struct index_state *istate)
 	cache_tree_free(&(istate->cache_tree));
 	free(istate->fsmonitor_last_update);
 	free(istate->cache);
+	if (istate->retained_index_file_map)
+		munmap((void *)istate->retained_index_file_map,
+		       istate->retained_index_file_map_size);
 	discard_split_index(istate);
 	free_untracked_cache(istate->untracked);
 

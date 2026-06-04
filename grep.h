@@ -1,6 +1,7 @@
 #ifndef GREP_H
 #define GREP_H
 #include "color.h"
+#include "hash.h"
 #ifdef USE_LIBPCRE2
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
@@ -228,17 +229,23 @@ struct grep_source {
 
 	enum grep_source_type {
 		GREP_SOURCE_OID,
+		GREP_SOURCE_OID_OR_FILE,
 		GREP_SOURCE_FILE,
 		GREP_SOURCE_BUF,
 	} type;
 	void *identifier;
-	struct repository *repo; /* if GREP_SOURCE_OID */
+	struct repository *repo; /* if GREP_SOURCE_OID[_OR_FILE] or worktree_blob */
 
 	const char *buf;
 	unsigned long size;
 
-	char *path; /* for attribute lookups */
+	char *path; /* worktree path and attribute lookups */
 	struct userdiff_driver *driver;
+	struct object_id worktree_blob_oid;
+	unsigned worktree_blob_candidate : 1;
+	unsigned worktree_blob_observed : 1;
+	unsigned worktree_blob_match : 1;
+	unsigned worktree_blob_used : 1;
 };
 
 void grep_source_init_file(struct grep_source *gs, const char *name,

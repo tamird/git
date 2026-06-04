@@ -5,6 +5,7 @@
 #include "gettext.h"
 #include "grep.h"
 #include "hex.h"
+#include "object-file.h"
 #include "odb.h"
 #include "pretty.h"
 #include "userdiff.h"
@@ -1863,6 +1864,11 @@ static void grep_source_init_buf(struct grep_source *gs,
 	gs->size = size;
 	gs->driver = NULL;
 	gs->identifier = NULL;
+	gs->repo = NULL;
+	gs->worktree_blob_candidate = 0;
+	gs->worktree_blob_observed = 0;
+	gs->worktree_blob_match = 0;
+	gs->worktree_blob_used = 0;
 }
 
 int grep_buffer(struct grep_opt *opt, const char *buf, unsigned long size)
@@ -1887,7 +1893,12 @@ void grep_source_init_file(struct grep_source *gs, const char *name,
 	gs->buf = NULL;
 	gs->size = 0;
 	gs->driver = NULL;
-	gs->identifier = xstrdup(path);
+	gs->identifier = NULL;
+	gs->repo = NULL;
+	gs->worktree_blob_candidate = 0;
+	gs->worktree_blob_observed = 0;
+	gs->worktree_blob_match = 0;
+	gs->worktree_blob_used = 0;
 }
 
 void grep_source_init_oid(struct grep_source *gs, const char *name,
@@ -1902,6 +1913,10 @@ void grep_source_init_oid(struct grep_source *gs, const char *name,
 	gs->driver = NULL;
 	gs->identifier = oiddup(oid);
 	gs->repo = repo;
+	gs->worktree_blob_candidate = 0;
+	gs->worktree_blob_observed = 0;
+	gs->worktree_blob_match = 0;
+	gs->worktree_blob_used = 0;
 }
 
 void grep_source_clear(struct grep_source *gs)
@@ -1917,6 +1932,7 @@ void grep_source_clear_data(struct grep_source *gs)
 	switch (gs->type) {
 	case GREP_SOURCE_FILE:
 	case GREP_SOURCE_OID:
+	case GREP_SOURCE_OID_OR_FILE:
 		/* these types own the buffer */
 		free((char *)gs->buf);
 		gs->buf = NULL;
@@ -1943,8 +1959,9 @@ static int grep_source_load_oid(struct grep_source *gs)
 
 static int grep_source_load_file(struct grep_source *gs)
 {
-	const char *filename = gs->identifier;
+	const char *filename = gs->path;
 	struct stat st;
+	struct object_id oid;
 	char *data;
 	size_t size;
 	int i;
@@ -1972,6 +1989,11 @@ static int grep_source_load_file(struct grep_source *gs)
 
 	gs->buf = data;
 	gs->size = size;
+	if (gs->worktree_blob_candidate) {
+		hash_object_file(gs->repo->hash_algo, data, size, OBJ_BLOB, &oid);
+		gs->worktree_blob_observed = 1;
+		gs->worktree_blob_match = oideq(&oid, &gs->worktree_blob_oid);
+	}
 	return 0;
 }
 
@@ -1985,6 +2007,26 @@ static int grep_source_load(struct grep_source *gs)
 		return grep_source_load_file(gs);
 	case GREP_SOURCE_OID:
 		return grep_source_load_oid(gs);
+	case GREP_SOURCE_OID_OR_FILE: {
+		enum object_type type;
+		struct object_info oi = OBJECT_INFO_INIT;
+		void *data = NULL;
+
+		oi.typep = &type;
+		oi.sizep = &gs->size;
+		oi.contentp = &data;
+		if (!odb_read_object_info_extended(
+			    gs->repo->objects, gs->identifier, &oi,
+			    OBJECT_INFO_QUICK |
+			    OBJECT_INFO_SKIP_FETCH_OBJECT) &&
+		    type == OBJ_BLOB) {
+			gs->buf = data;
+			gs->worktree_blob_used = 1;
+			return 0;
+		}
+		free(data);
+		return grep_source_load_file(gs);
+	}
 	case GREP_SOURCE_BUF:
 		return gs->buf ? 0 : -1;
 	}
