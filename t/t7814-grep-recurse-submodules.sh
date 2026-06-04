@@ -39,6 +39,30 @@ test_expect_success 'grep correctly finds patterns in a submodule' '
 	test_cmp expect actual
 '
 
+test_expect_success PTHREADS 'worktree cache survives gitmodules pre-read' '
+	test_when_finished "rm -f .git/index.grep-worktree trace &&
+		git update-index --no-fsmonitor" &&
+	mkdir -p .git/hooks &&
+	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-test &&
+	test_config grep.worktreeBlobCache true &&
+	test_config index.skipHash true &&
+	git update-index --fsmonitor &&
+	git status --porcelain >/dev/null &&
+	git update-index --force-write-index &&
+	test_trailing_hash .git/index >actual &&
+	echo $(test_oid zero) >expected &&
+	test_cmp expected actual &&
+	test_expect_code 1 git grep --threads=2 --recurse-submodules \
+		"missing worktree cache" -- a &&
+	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/trace" \
+		git grep --threads=2 --recurse-submodules \
+		"missing worktree cache" -- a &&
+	test_trace2_data grep worktree_blob/hits 1 <trace
+'
+
 test_expect_success 'grep finds patterns in a submodule via config' '
 	test_config submodule.recurse true &&
 	# expect from previous test

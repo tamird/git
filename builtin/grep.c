@@ -10,6 +10,7 @@
 #include "builtin.h"
 #include "abspath.h"
 #include "environment.h"
+#include "fsmonitor-settings.h"
 #include "gettext.h"
 #include "hex.h"
 #include "config.h"
@@ -19,6 +20,7 @@
 #include "string-list.h"
 #include "run-command.h"
 #include "grep.h"
+#include "grep-worktree.h"
 #include "quote.h"
 #include "dir.h"
 #include "pathspec.h"
@@ -46,7 +48,16 @@ static char const * const grep_usage[] = {
 
 static int recurse_submodules;
 
+enum worktree_blob_cache_mode {
+	WORKTREE_BLOB_CACHE_AUTO,
+	WORKTREE_BLOB_CACHE_ALWAYS,
+	WORKTREE_BLOB_CACHE_NEVER,
+};
+
 static int num_threads;
+static enum worktree_blob_cache_mode worktree_blob_cache_mode =
+	WORKTREE_BLOB_CACHE_NEVER;
+static struct grep_worktree_cache *worktree_cache;
 
 static pthread_t *threads;
 
@@ -56,6 +67,7 @@ static pthread_t *threads;
  */
 struct work_item {
 	struct grep_source source;
+	size_t worktree_blob_pos;
 	char done;
 	struct strbuf out;
 };
@@ -107,7 +119,8 @@ static pthread_cond_t cond_result;
 
 static int skip_first_line;
 
-static void add_work(struct grep_opt *opt, struct grep_source *gs)
+static void add_work(struct grep_opt *opt, struct grep_source *gs,
+		     size_t worktree_blob_pos)
 {
 	if (opt->binary != GREP_BINARY_TEXT)
 		grep_source_load_driver(gs, opt->repo->index);
@@ -119,6 +132,7 @@ static void add_work(struct grep_opt *opt, struct grep_source *gs)
 	}
 
 	todo[todo_end].source = *gs;
+	todo[todo_end].worktree_blob_pos = worktree_blob_pos;
 	todo[todo_end].done = 0;
 	strbuf_reset(&todo[todo_end].out);
 	todo_end = (todo_end + 1) % ARRAY_SIZE(todo);
@@ -172,6 +186,12 @@ static void work_done(struct work_item *w)
 
 			write_or_die(1, p, len);
 		}
+		if (w->source.worktree_blob_observed)
+			grep_worktree_cache_record(
+				worktree_cache, w->worktree_blob_pos,
+				w->source.worktree_blob_match);
+		if (w->source.worktree_blob_used)
+			grep_worktree_cache_hit(worktree_cache);
 		grep_source_clear(&w->source);
 	}
 
@@ -320,6 +340,21 @@ static int grep_cmd_config(const char *var, const char *value,
 		}
 	}
 
+	if (!strcmp(var, "grep.worktreeblobcache")) {
+		int value_bool;
+
+		if (value && !strcasecmp(value, "auto")) {
+			worktree_blob_cache_mode = WORKTREE_BLOB_CACHE_AUTO;
+		} else if ((value_bool = git_parse_maybe_bool(value)) >= 0) {
+			worktree_blob_cache_mode = value_bool ?
+				WORKTREE_BLOB_CACHE_ALWAYS :
+				WORKTREE_BLOB_CACHE_NEVER;
+		} else {
+			return error(_("invalid value for '%s': '%s'"),
+				     var, value);
+		}
+	}
+
 	if (!strcmp(var, "submodule.recurse"))
 		recurse_submodules = git_config_bool(var, value);
 
@@ -360,13 +395,15 @@ static void grep_source_name(struct grep_opt *opt, const char *filename,
 
 static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		     const char *filename, int tree_name_len,
-		     const char *path)
+		     const char *path, int fallback_to_file, size_t pos)
 {
 	struct strbuf pathbuf = STRBUF_INIT;
 	struct grep_source gs;
 
 	grep_source_name(opt, filename, tree_name_len, &pathbuf);
 	grep_source_init_oid(&gs, pathbuf.buf, path, oid, opt->repo);
+	if (fallback_to_file)
+		gs.type = GREP_SOURCE_OID_OR_FILE;
 	strbuf_release(&pathbuf);
 
 	if (num_threads > 1) {
@@ -374,25 +411,33 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		 * add_work() copies gs and thus assumes ownership of
 		 * its fields, so do not call grep_source_clear()
 		 */
-		add_work(opt, &gs);
+		add_work(opt, &gs, pos);
 		return 0;
 	} else {
 		int hit;
 
 		hit = grep_source(opt, &gs);
+		if (gs.worktree_blob_used)
+			grep_worktree_cache_hit(worktree_cache);
 
 		grep_source_clear(&gs);
 		return hit;
 	}
 }
 
-static int grep_file(struct grep_opt *opt, const char *filename)
+static int grep_file(struct grep_opt *opt, const char *filename,
+		     const struct cache_entry *ce, size_t pos)
 {
 	struct strbuf buf = STRBUF_INIT;
 	struct grep_source gs;
 
 	grep_source_name(opt, filename, 0, &buf);
 	grep_source_init_file(&gs, buf.buf, filename);
+	if (ce) {
+		gs.repo = opt->repo;
+		oidcpy(&gs.worktree_blob_oid, &ce->oid);
+		gs.worktree_blob_candidate = 1;
+	}
 	strbuf_release(&buf);
 
 	if (num_threads > 1) {
@@ -400,12 +445,15 @@ static int grep_file(struct grep_opt *opt, const char *filename)
 		 * add_work() copies gs and thus assumes ownership of
 		 * its fields, so do not call grep_source_clear()
 		 */
-		add_work(opt, &gs);
+		add_work(opt, &gs, pos);
 		return 0;
 	} else {
 		int hit;
 
 		hit = grep_source(opt, &gs);
+		if (gs.worktree_blob_observed)
+			grep_worktree_cache_record(worktree_cache,
+						   pos, gs.worktree_blob_match);
 
 		grep_source_clear(&gs);
 		return hit;
@@ -545,12 +593,24 @@ static int grep_submodule(struct grep_opt *opt,
 	return hit;
 }
 
+static int can_cache_worktree_blob(const struct cache_entry *ce)
+{
+	return !ce_stage(ce) && !ce_intent_to_add(ce) &&
+	       !(ce->ce_flags & CE_VALID) &&
+	       (ce->ce_flags & CE_FSMONITOR_VALID);
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached)
 {
 	struct repository *repo = opt->repo;
 	int hit = 0;
 	int nr;
+	int *selected = NULL;
+	size_t selected_nr = 0;
+	size_t selected_alloc = 0;
+	size_t selected_pos = 0;
+	int use_selected = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	if (repo->submodule_prefix) {
@@ -560,11 +620,62 @@ static int grep_cache(struct grep_opt *opt,
 
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
+	if (repo == the_repository && !cached && !opt->allow_textconv &&
+	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
+	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
+	     !opt->status_only)) {
+		uint64_t min_bytes = worktree_blob_cache_mode ==
+					     WORKTREE_BLOB_CACHE_ALWAYS ?
+					     0 :
+						     git_env_ulong(
+							     "GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
+							     GREP_WORKTREE_CACHE_MIN_BYTES);
+		uint64_t worktree_bytes = 0;
 
-	for (nr = 0; nr < repo->index->cache_nr; nr++) {
-		const struct cache_entry *ce = repo->index->cache[nr];
+		use_selected = min_bytes && !recurse_submodules;
+		for (nr = 0; min_bytes && nr < repo->index->cache_nr; nr++) {
+			const struct cache_entry *ce = repo->index->cache[nr];
 
-		if (!cached && ce_skip_worktree(ce))
+			if (ce_skip_worktree(ce) || !S_ISREG(ce->ce_mode) ||
+			    !match_pathspec(repo->index, pathspec, ce->name,
+					    ce_namelen(ce), 0, NULL, 0))
+				continue;
+			if (use_selected) {
+				ALLOC_GROW(selected, selected_nr + 1,
+					   selected_alloc);
+				selected[selected_nr++] = nr;
+			}
+			if (can_cache_worktree_blob(ce)) {
+				if (UINT64_MAX - worktree_bytes <
+				    ce->ce_stat_data.sd_size)
+					worktree_bytes = UINT64_MAX;
+				else
+					worktree_bytes +=
+						ce->ce_stat_data.sd_size;
+			}
+			if (ce_stage(ce)) {
+				while (nr + 1 < repo->index->cache_nr &&
+				       !strcmp(ce->name,
+					       repo->index->cache[nr + 1]->name))
+					nr++;
+			}
+		}
+		if (worktree_bytes >= min_bytes)
+			worktree_cache = grep_worktree_cache_load(repo,
+								  repo->index);
+	}
+
+	for (nr = 0;
+	     use_selected ? selected_pos < selected_nr :
+			    nr < repo->index->cache_nr;
+	     use_selected ? selected_pos++ : nr++) {
+		const struct cache_entry *ce;
+
+		if (use_selected)
+			nr = selected[selected_pos];
+		ce = repo->index->cache[nr];
+
+		if (!use_selected && !cached && ce_skip_worktree(ce))
 			continue;
 
 		strbuf_setlen(&name, name_base_len);
@@ -589,18 +700,46 @@ static int grep_cache(struct grep_opt *opt,
 		    match_pathspec(repo->index, pathspec, name.buf, name.len, 0, NULL,
 				   S_ISDIR(ce->ce_mode) ||
 				   S_ISGITLINK(ce->ce_mode))) {
+			enum grep_worktree_cache_result cache_result =
+				GREP_WORKTREE_CACHE_UNKNOWN;
+			const struct cache_entry *cache_candidate = NULL;
+			int can_cache =
+				repo == the_repository && !cached &&
+				!opt->allow_textconv &&
+				can_cache_worktree_blob(ce) &&
+				worktree_cache;
+			int use_worktree_blob;
+
+			if (can_cache && num_threads > 1)
+				grep_lock();
+			if (can_cache)
+				cache_result = grep_worktree_cache_lookup(
+					worktree_cache, nr);
+			if (can_cache && num_threads > 1)
+				grep_unlock();
+			use_worktree_blob =
+				cache_result == GREP_WORKTREE_CACHE_EQUAL;
+			if (cache_result == GREP_WORKTREE_CACHE_UNKNOWN)
+				cache_candidate = ce;
+
 			/*
 			 * If CE_VALID is on, we assume worktree file and its
 			 * cache entry are identical, even if worktree file has
-			 * been modified, so use cache version instead
+			 * been modified, so use cache version instead. We can
+			 * also use it when a previous scan observed identical
+			 * worktree and blob bytes and fsmonitor reports no
+			 * subsequent change.
 			 */
-			if (cached || (ce->ce_flags & CE_VALID)) {
+			if (cached || (ce->ce_flags & CE_VALID) ||
+			    use_worktree_blob) {
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
 				hit |= grep_oid(opt, &ce->oid, name.buf,
-						 0, name.buf);
+						0, name.buf, use_worktree_blob, nr);
 			} else {
-				hit |= grep_file(opt, name.buf);
+				hit |= grep_file(opt, name.buf,
+						 can_cache ? cache_candidate : NULL,
+						 nr);
 			}
 		} else if (recurse_submodules && S_ISGITLINK(ce->ce_mode) &&
 			   submodule_path_match(repo->index, pathspec, name.buf, NULL)) {
@@ -610,7 +749,7 @@ static int grep_cache(struct grep_opt *opt,
 			continue;
 		}
 
-		if (ce_stage(ce)) {
+		if (!use_selected && ce_stage(ce)) {
 			do {
 				nr++;
 			} while (nr < repo->index->cache_nr &&
@@ -621,6 +760,7 @@ static int grep_cache(struct grep_opt *opt,
 			break;
 	}
 
+	free(selected);
 	strbuf_release(&name);
 	return hit;
 }
@@ -661,7 +801,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (S_ISREG(entry.mode)) {
 			hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
-					 check_attr ? base->buf + tn_len : NULL);
+					 check_attr ? base->buf + tn_len : NULL,
+					 0, 0);
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
 			struct tree_desc sub;
@@ -837,7 +978,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct object *obj, const char *name, const char *path)
 {
 	if (obj->type == OBJ_BLOB)
-		return grep_oid(opt, &obj->oid, name, 0, path);
+		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0);
 	if (obj->type == OBJ_COMMIT || obj->type == OBJ_TREE) {
 		struct tree_desc tree;
 		void *data;
@@ -924,7 +1065,7 @@ static int grep_directory(struct grep_opt *opt, const struct pathspec *pathspec,
 
 	fill_directory(&dir, opt->repo->index, pathspec);
 	for (i = 0; i < dir.nr; i++) {
-		hit |= grep_file(opt, dir.entries[i]->name);
+		hit |= grep_file(opt, dir.entries[i]->name, NULL, 0);
 		if (hit && opt->status_only)
 			break;
 	}
@@ -1249,6 +1390,13 @@ int cmd_grep(int argc,
 	if (opt.invert)
 		opt.only_matching = 0;
 
+	if (use_index && !cached && !untracked && !opt.allow_textconv &&
+	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
+	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
+	     !opt.status_only) &&
+	    fsm_settings__get_mode(the_repository) > FSMONITOR_MODE_DISABLED)
+		the_repository->index->retain_index_file_mapping = 1;
+
 	/*
 	 * We have to find "--" in a separate pass, because its presence
 	 * influences how we will parse arguments that come before it.
@@ -1316,6 +1464,8 @@ int cmd_grep(int argc,
 	pathspec.max_depth = opt.max_depth;
 	pathspec.recursive = 1;
 	pathspec.recurse_submodules = !!recurse_submodules;
+	if (list.nr)
+		the_repository->index->retain_index_file_mapping = 0;
 
 	if (recurse_submodules && untracked)
 		die(_("--untracked not supported with --recurse-submodules"));
@@ -1433,6 +1583,9 @@ int cmd_grep(int argc,
 	ret = !hit;
 
 out:
+	grep_worktree_cache_write(worktree_cache);
+	grep_worktree_cache_free(worktree_cache);
+	worktree_cache = NULL;
 	clear_pathspec(&pathspec);
 	string_list_clear(&path_list, 0);
 	free_grep_patterns(&opt);

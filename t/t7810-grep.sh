@@ -1881,6 +1881,415 @@ test_expect_success 'grep can find things only in the work tree' '
 	test_must_fail git grep --quiet "find in work tree" HEAD
 '
 
+test_expect_success 'grep reuses observed worktree blob bytes' '
+	test_when_finished "rm -f .git/fsmonitor-attributes \
+		.git/fsmonitor-equal .git/index.grep-worktree \
+		.git/index.grep-worktree.lock \
+		.git/index.grep-worktree.save \
+		grep-worktree-trace-* &&
+		rm -rf grep-worktree-other &&
+		git update-index --no-fsmonitor &&
+		git rm -f --ignore-unmatch .gitattributes grep-worktree-equal \
+			grep-worktree-converted grep-worktree-index-change" &&
+	{
+		echo "grep-worktree-converted text" &&
+		echo "grep-worktree-equal diff=worktree"
+	} >.gitattributes &&
+	echo "equal worktree blob" >grep-worktree-equal &&
+	printf "converted worktree blob\r\n" >grep-worktree-converted &&
+	git add .gitattributes grep-worktree-equal grep-worktree-converted &&
+	test_config diff.worktree.textconv cat &&
+	if test -z "$GIT_TEST_SPLIT_INDEX"
+	then
+		test_config index.skipHash true &&
+		git update-index --force-write-index &&
+		test_trailing_hash .git/index >actual &&
+		echo $(test_oid zero) >expected &&
+		test_cmp expected actual
+	fi &&
+	test "$(git hash-object --no-filters grep-worktree-converted)" != \
+		"$(git rev-parse :grep-worktree-converted)" &&
+	test_expect_code 1 git -c core.fsmonitor=false grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+		if test -f .git/fsmonitor-attributes
+		then
+			printf ".gitattributes\0"
+		fi
+		if test -f .git/fsmonitor-equal
+		then
+			printf "grep-worktree-equal\0"
+		fi
+	EOF
+	fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+	test_config core.fsmonitor "$fsmonitor_hook" &&
+	git update-index --fsmonitor &&
+	git status --porcelain >/dev/null &&
+	test_expect_code 1 git grep "absent worktree blob" -- \
+		grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_config grep.worktreeBlobCache true &&
+	test_must_fail git -c grep.worktreeBlobCache=invalid grep \
+		"absent worktree blob" -- grep-worktree-equal 2>err &&
+	test_grep "invalid value for '\''grep.worktreeblobcache'\'': '\''invalid'\''" \
+		err &&
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1073741824 \
+		git -c grep.worktreeBlobCache=auto grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-auto-create" \
+		git -c grep.worktreeBlobCache=auto grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_file .git/index.grep-worktree &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-auto-create &&
+	rm .git/index.grep-worktree &&
+	test_expect_code 1 git -c grep.worktreeBlobCache=false grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_expect_code 1 git --no-optional-locks grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	>.git/index.grep-worktree.lock &&
+	test_expect_code 1 git grep "absent worktree blob" -- \
+		grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	rm .git/index.grep-worktree.lock &&
+
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-1" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-1b" \
+		git grep "absent worktree blob" -- grep-worktree-converted &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-1 &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-1 &&
+	test_trace2_data grep worktree_blob/recorded_different 0 \
+		<grep-worktree-trace-1 &&
+	cp .git/index.grep-worktree .git/index.grep-worktree.save &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-textconv" \
+		git grep --textconv "absent worktree blob" -- \
+		grep-worktree-equal &&
+	test_cmp .git/index.grep-worktree.save \
+		.git/index.grep-worktree &&
+	test_grep ! "worktree_blob/" grep-worktree-trace-textconv &&
+	rm .git/index.grep-worktree.save &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-1b &&
+	test_trace2_data grep worktree_blob/recorded_equal 0 \
+		<grep-worktree-trace-1b &&
+	test_trace2_data grep worktree_blob/recorded_different 1 \
+		<grep-worktree-trace-1b &&
+
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-2" \
+		git grep --threads=1 "absent worktree blob" -- \
+			grep-worktree-equal grep-worktree-converted &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-2 &&
+	test_trace2_data grep worktree_blob/recorded_equal 0 \
+		<grep-worktree-trace-2 &&
+	test_trace2_data grep worktree_blob/recorded_different 0 \
+		<grep-worktree-trace-2 &&
+	env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-quiet" \
+		git -c grep.worktreeBlobCache=auto grep --quiet \
+		"equal worktree blob" -- grep-worktree-equal &&
+	test_grep ! "worktree_blob/" grep-worktree-trace-quiet &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-quiet-true" \
+		git -c grep.worktreeBlobCache=true grep --quiet \
+		"equal worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-quiet-true &&
+	echo "disabled worktree blob" >grep-worktree-equal &&
+	echo "grep-worktree-equal:disabled worktree blob" >expected &&
+	git -c grep.worktreeBlobCache=false grep \
+		"disabled worktree blob" -- grep-worktree-equal >actual &&
+	test_cmp expected actual &&
+	echo "no fsmonitor worktree blob" >grep-worktree-equal &&
+	echo "grep-worktree-equal:no fsmonitor worktree blob" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-no-fsmonitor" \
+		git -c core.fsmonitor=false grep \
+		"no fsmonitor worktree blob" -- grep-worktree-equal \
+		>actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err &&
+	test_grep ! "worktree_blob/" grep-worktree-trace-no-fsmonitor &&
+	echo "equal worktree blob" >grep-worktree-equal &&
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1073741824 \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-auto" \
+		git -c grep.worktreeBlobCache=auto grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_grep ! "worktree_blob/" grep-worktree-trace-auto &&
+	cp .git/index.grep-worktree .git/index.grep-worktree.save &&
+	rm .git/index.grep-worktree &&
+	printf "truncated sidecar" >.git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-malformed" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-malformed &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-recovered" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-recovered &&
+	rm .git/index.grep-worktree &&
+	mv .git/index.grep-worktree.save .git/index.grep-worktree &&
+
+	git update-index --force-write-index &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-rewrite" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-rewrite &&
+	test_trace2_data grep worktree_blob/recorded_equal 0 \
+		<grep-worktree-trace-rewrite &&
+
+	echo "changed worktree blob" >grep-worktree-equal &&
+	>.git/fsmonitor-equal &&
+	echo "grep-worktree-equal:changed worktree blob" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-changed" \
+		git grep "changed worktree blob" -- grep-worktree-equal >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-changed &&
+	echo "equal worktree blob" >grep-worktree-equal &&
+	rm .git/fsmonitor-equal &&
+
+	echo "grep-worktree-converted -text" >.gitattributes &&
+	>.git/fsmonitor-attributes &&
+	pattern=$(printf "worktree blob\r") &&
+	printf "grep-worktree-converted:converted worktree blob\r\n" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-3" \
+		git grep "$pattern" -- grep-worktree-converted >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-3 &&
+	test_trace2_data grep worktree_blob/recorded_equal 0 \
+		<grep-worktree-trace-3 &&
+	test_trace2_data grep worktree_blob/recorded_different 0 \
+		<grep-worktree-trace-3 &&
+
+	echo "index change" >grep-worktree-index-change &&
+	git add grep-worktree-index-change &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-4" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-4 &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-4 &&
+
+	oid=$(git rev-parse :grep-worktree-equal) &&
+	echo "replacement blob" >replacement &&
+	replacement=$(git hash-object -w replacement) &&
+	rm replacement &&
+	git replace "$oid" "$replacement" &&
+	test_when_finished "test_might_fail git replace -d $oid" &&
+	echo "grep-worktree-equal:equal worktree blob" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-5" \
+		git grep "equal worktree blob" -- grep-worktree-equal >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-5 &&
+	git replace -d "$oid" &&
+
+	repository_format=$(
+		git config --get core.repositoryFormatVersion || echo 0
+	) &&
+	test_when_finished "git config core.repositoryFormatVersion \
+		$repository_format" &&
+	git config core.repositoryFormatVersion 1 &&
+	test_config extensions.partialClone origin &&
+	test_config remote.origin.promisor true &&
+	test_config remote.origin.url "$PWD/grep-worktree-missing-remote" &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+		mv \"$object.save\" \"$object\"" &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-6" \
+		git grep "equal worktree blob" -- grep-worktree-equal >actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err &&
+	test_grep ! "\"key\":\"fetch_count\"" grep-worktree-trace-6 &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-6 &&
+	mv "$object.save" "$object" &&
+	mv "$object" "$object.save" &&
+	>"$object" &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-corrupt" \
+		git grep "equal worktree blob" -- grep-worktree-equal \
+		>actual 2>err &&
+	test_cmp expected actual &&
+	test_grep "object file .* is empty" err &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-corrupt &&
+	rm "$object" &&
+	mv "$object.save" "$object" &&
+
+	{
+		echo "grep-worktree-converted -text" &&
+		echo "grep-worktree-equal text"
+	} >.gitattributes &&
+	printf "equal worktree blob\r\n" >grep-worktree-equal &&
+	git add .gitattributes grep-worktree-equal &&
+	test "$oid" = "$(git rev-parse :grep-worktree-equal)" &&
+	pattern=$(printf "worktree blob\r") &&
+	printf "grep-worktree-equal:equal worktree blob\r\n" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-same-oid" \
+		git grep "$pattern" -- grep-worktree-equal >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-same-oid &&
+	test_trace2_data grep worktree_blob/recorded_equal 0 \
+		<grep-worktree-trace-same-oid &&
+	test_trace2_data grep worktree_blob/recorded_different 1 \
+		<grep-worktree-trace-same-oid &&
+
+	mkdir grep-worktree-other &&
+	echo "other worktree blob" >grep-worktree-other/grep-worktree-equal &&
+	echo "grep-worktree-equal:other worktree blob" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-other" \
+		git --no-optional-locks \
+			--work-tree="$PWD/grep-worktree-other" \
+			grep "other worktree blob" -- grep-worktree-equal \
+			>actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-other
+'
+
+test_expect_success 'grep rejects cache after index replacement' '
+	test_config grep.worktreeBlobCache true &&
+	test_when_finished "rm -f .git/fsmonitor-replace-index \
+		.git/index.original .git/index.replace \
+		.git/index.replace.stale \
+		.git/index.grep-worktree grep-worktree-trace-race \
+		grep-worktree-trace-race-newer &&
+		git update-index --no-fsmonitor &&
+		git rm -f --ignore-unmatch grep-worktree-race-before \
+			grep-worktree-race-equal grep-worktree-race-zafter" &&
+	echo "equal before index replacement" >grep-worktree-race-equal &&
+	echo "after cached entry" >grep-worktree-race-zafter &&
+	git add grep-worktree-race-equal grep-worktree-race-zafter &&
+	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+		if test -f .git/fsmonitor-replace-index
+		then
+			mv .git/index.replace .git/index
+			rm .git/fsmonitor-replace-index
+			git grep "absent newer sidecar" -- \
+				grep-worktree-race-equal >/dev/null 2>&1
+			test $? = 1 || exit 1
+		fi
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-test &&
+	git update-index --fsmonitor &&
+	git status --porcelain >/dev/null &&
+	test_expect_code 1 git grep "absent before replacement" -- \
+		grep-worktree-race-equal &&
+	test_path_is_file .git/index.grep-worktree &&
+	cp .git/index .git/index.original &&
+
+	echo "indexed before replacement" >grep-worktree-race-before &&
+	git add grep-worktree-race-before &&
+	git rm --cached grep-worktree-race-zafter &&
+	git status --porcelain >/dev/null &&
+	cp .git/index .git/index.replace &&
+	rawsz=$(test_oid rawsz) &&
+	replace_size=$(wc -c <.git/index.replace) &&
+	test_copy_bytes $((replace_size - rawsz)) \
+		<.git/index.replace >.git/index.replace.stale &&
+	tail -c "$rawsz" .git/index.original \
+		>>.git/index.replace.stale &&
+	mv .git/index.replace.stale .git/index.replace &&
+	mv .git/index.original .git/index &&
+	echo "worktree after replacement" >grep-worktree-race-before &&
+	>.git/fsmonitor-replace-index &&
+
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-race" \
+		git grep "absent after replacement" -- \
+		grep-worktree-race-equal grep-worktree-race-zafter &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-race &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-race-newer" \
+		git grep "absent newer sidecar" -- \
+			grep-worktree-race-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-race-newer &&
+	echo "grep-worktree-race-before:worktree after replacement" >expected &&
+	git grep "worktree after replacement" -- \
+		grep-worktree-race-before >actual &&
+	test_cmp expected actual
+'
+
+test_lazy_prereq NO_FORCED_SPLIT_INDEX '
+	! test_bool_env GIT_TEST_SPLIT_INDEX false
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache follows sparse-index identity' '
+	test_when_finished "rm -rf grep-worktree-sparse \
+		grep-worktree-trace-sparse-*" &&
+	git init grep-worktree-sparse &&
+	mkdir -p grep-worktree-sparse/inside \
+		grep-worktree-sparse/outside \
+		grep-worktree-sparse/.git/hooks &&
+	echo "inside sparse index" >grep-worktree-sparse/inside/file &&
+	echo "outside sparse index" >grep-worktree-sparse/outside/file &&
+	git -C grep-worktree-sparse add . &&
+	git -C grep-worktree-sparse commit -m initial &&
+	test_hook -C grep-worktree-sparse --setup --clobber \
+		fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+	EOF
+	git -C grep-worktree-sparse config \
+		core.fsmonitor .git/hooks/fsmonitor-test &&
+	git -C grep-worktree-sparse config grep.worktreeBlobCache true &&
+	git -C grep-worktree-sparse sparse-checkout init \
+		--cone --sparse-index &&
+	git -C grep-worktree-sparse sparse-checkout set inside &&
+	git -C grep-worktree-sparse status --porcelain >/dev/null &&
+	test_expect_code 1 git -C grep-worktree-sparse grep \
+		"absent sparse index" -- inside/file &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-sparse-hit" \
+		git -C grep-worktree-sparse grep \
+		"absent sparse index" -- inside/file &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-sparse-hit &&
+	git -C grep-worktree-sparse sparse-checkout reapply \
+		--no-sparse-index &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-sparse-full" \
+		git -C grep-worktree-sparse grep \
+		"absent sparse index" -- inside/file &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-sparse-full &&
+	git -C grep-worktree-sparse sparse-checkout reapply \
+		--sparse-index &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-sparse-collapsed" \
+		git -C grep-worktree-sparse grep \
+		"absent sparse index" -- inside/file &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-sparse-collapsed
+'
+
 test_expect_success 'grep can find things only in the work tree (i-t-a)' '
 	echo "intend to add this" >intend-to-add &&
 	git add -N intend-to-add &&
