@@ -20,6 +20,9 @@
 	Number of grep worker threads to use. If unset (or set to 0), Git will
 	use as many threads as the number of logical cores available.
 
+`grep.useContentIndex`::
+	If set to `false`, disable use of the shared grep content index.
+
 `grep.worktreeBlobCache`::
 	Control whether `git grep` remembers worktree files that match their
 	indexed blobs. This requires fsmonitor. `false`, the default, disables

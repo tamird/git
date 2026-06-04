@@ -61,6 +61,7 @@ manpages = {
   'git-fsmonitor--daemon.adoc' : 1,
   'git-gc.adoc' : 1,
   'git-get-tar-commit-id.adoc' : 1,
+  'git-grep-index.adoc' : 1,
   'git-grep.adoc' : 1,
   'git-gui.adoc' : 1,
   'git-hash-object.adoc' : 1,

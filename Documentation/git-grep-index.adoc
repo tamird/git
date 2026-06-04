@@ -1,0 +1,37 @@
+git-grep-index(1)
+=================
+
+NAME
+----
+git-grep-index - Write grep acceleration indexes
+
+
+SYNOPSIS
+--------
+[verse]
+'git grep-index' [--[no-]progress]
+
+DESCRIPTION
+-----------
+Write an incremental content index for blobs registered in the indexes of
+all worktrees that share the repository. The index is stored in the common
+object directory, so all of those worktrees and concurrent `git grep`
+processes share it.
+
+The content index contains Bloom filters for blob trigrams. For supported
+case-sensitive literal searches, linkgit:git-grep[1] uses the filters to
+avoid reading blobs that cannot contain the pattern. Blobs not present in
+the content index are searched normally.
+
+OPTIONS
+-------
+
+--progress::
+--no-progress::
+	Turn progress reporting on or off explicitly. If neither is
+	specified, progress is shown if standard error is connected to a
+	terminal.
+
+GIT
+---
+Part of the linkgit:git[1] suite

@@ -20,6 +20,7 @@
 #include "string-list.h"
 #include "run-command.h"
 #include "grep.h"
+#include "grep-index.h"
 #include "grep-worktree.h"
 #include "quote.h"
 #include "dir.h"
@@ -57,6 +58,9 @@ enum worktree_blob_cache_mode {
 };
 
 static int num_threads;
+static int use_content_index = 1;
+static struct grep_index *content_index;
+static struct grep_index_query *content_index_query;
 static enum worktree_blob_cache_mode worktree_blob_cache_mode =
 	WORKTREE_BLOB_CACHE_NEVER;
 static struct grep_worktree_cache *worktree_cache;
@@ -472,6 +476,9 @@ static int grep_cmd_config(const char *var, const char *value,
 		}
 	}
 
+	if (!strcmp(var, "grep.usecontentindex"))
+		use_content_index = git_config_bool(var, value);
+
 	if (!strcmp(var, "submodule.recurse"))
 		recurse_submodules = git_config_bool(var, value);
 
@@ -516,6 +523,18 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 {
 	struct strbuf pathbuf = STRBUF_INIT;
 	struct grep_source gs;
+
+	if (!content_index && content_index_query &&
+	    opt->repo == the_repository) {
+		content_index = grep_index_load(the_repository);
+		if (!content_index) {
+			grep_index_query_free(content_index_query);
+			content_index_query = NULL;
+		}
+	}
+	if (!grep_index_maybe_contains(content_index, opt->repo, oid,
+				       content_index_query))
+		return 0;
 
 	grep_source_name(opt, filename, tree_name_len, &pathbuf);
 	grep_source_init_oid(&gs, pathbuf.buf, path, oid, opt->repo);
@@ -1321,6 +1340,8 @@ int cmd_grep(int argc,
 	struct option options[] = {
 		OPT_BOOL(0, "cached", &cached,
 			N_("search in index instead of in the work tree")),
+		OPT_BOOL(0, "content-index", &use_content_index,
+			N_("use the shared content index when possible")),
 		OPT_NEGBIT(0, "no-index", &use_index,
 			 N_("find in contents not managed by git"), 1),
 		OPT_BOOL(0, "untracked", &untracked,
@@ -1594,6 +1615,9 @@ int cmd_grep(int argc,
 	if (recurse_submodules && untracked)
 		die(_("--untracked not supported with --recurse-submodules"));
 
+	if (use_content_index && use_index && !untracked && !opt.allow_textconv)
+		content_index_query = grep_index_query_create(&opt);
+
 	/*
 	 * Optimize out the case where the amount of matches is limited to zero.
 	 * We do this to keep results consistent with GNU grep(1).
@@ -1732,6 +1756,8 @@ out:
 		grep_result_cache.hits = 0;
 		grep_result_cache.initialized = 0;
 	}
+	grep_index_query_free(content_index_query);
+	grep_index_free(content_index);
 	free_repos();
 	return ret;
 }
