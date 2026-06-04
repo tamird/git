@@ -171,12 +171,21 @@ struct index_state {
 	struct cache_tree *cache_tree;
 	struct split_index *split_index;
 	struct cache_time timestamp;
+	/*
+	 * Set retain_index_file_mapping before reading the index to keep the
+	 * exact mapped bytes available for ensure_index_file_identity().
+	 */
+	struct object_id index_file_identity;
+	const char *retained_index_file_map;
+	size_t retained_index_file_map_size;
 	unsigned name_hash_initialized : 1,
 		 initialized : 1,
 		 drop_cache_tree : 1,
 		 updated_workdir : 1,
 		 updated_skipworktree : 1,
-		 fsmonitor_has_run_once : 1;
+		 fsmonitor_has_run_once : 1,
+		 retain_index_file_mapping : 1,
+		 index_file_identity_valid : 1;
 	enum sparse_index_mode sparse_index;
 	struct hashmap name_hash;
 	struct hashmap dir_hash;
@@ -205,6 +214,7 @@ struct index_state {
 }
 void index_state_init(struct index_state *istate, struct repository *r);
 void release_index(struct index_state *istate);
+int ensure_index_file_identity(struct index_state *istate);
 
 /* Cache entry creation and cleanup */
 
