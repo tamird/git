@@ -28,6 +28,7 @@
 #include "object-file.h"
 #include "object-name.h"
 #include "odb.h"
+#include "hashmap.h"
 #include "oid-array.h"
 #include "oidset.h"
 #include "packfile.h"
@@ -35,6 +36,7 @@
 #include "path.h"
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
+#include "trace2.h"
 #include "write-or-die.h"
 
 static const char *grep_prefix;
@@ -49,6 +51,22 @@ static int recurse_submodules;
 static int num_threads;
 
 static pthread_t *threads;
+
+#define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 16)
+
+struct grep_result_cache_entry {
+	struct hashmap_entry ent;
+	struct object_id oid;
+	const char *gitdir;
+	int binary;
+};
+
+static struct {
+	struct hashmap map;
+	size_t hits;
+	/* Set before workers start and cleared after they join. */
+	int initialized;
+} grep_result_cache;
 
 /* We use one producer thread and THREADS consumer
  * threads. The producer adds struct work_items to 'todo' and the
@@ -106,6 +124,95 @@ static pthread_cond_t cond_write;
 static pthread_cond_t cond_result;
 
 static int skip_first_line;
+
+static int grep_result_cache_cmp(const void *data UNUSED,
+				 const struct hashmap_entry *eptr,
+				 const struct hashmap_entry *entry_or_key,
+				 const void *keydata UNUSED)
+{
+	const struct grep_result_cache_entry *a =
+		container_of(eptr, const struct grep_result_cache_entry, ent);
+	const struct grep_result_cache_entry *b =
+		container_of(entry_or_key,
+			     const struct grep_result_cache_entry, ent);
+
+	return a->binary != b->binary ||
+	       strcmp(a->gitdir, b->gitdir) ||
+	       !oideq(&a->oid, &b->oid);
+}
+
+static void grep_result_cache_lock(void)
+{
+	if (num_threads > 1)
+		grep_lock();
+}
+
+static void grep_result_cache_unlock(void)
+{
+	if (num_threads > 1)
+		grep_unlock();
+}
+
+static void grep_result_cache_key(struct grep_opt *opt,
+				  struct grep_source *gs,
+				  struct grep_result_cache_entry *key)
+{
+	const struct object_id *oid = gs->identifier;
+	const char *gitdir = repo_get_git_dir(gs->repo);
+
+	hashmap_entry_init(&key->ent, oidhash(oid) ^ strhash(gitdir));
+	oidcpy(&key->oid, oid);
+	key->gitdir = gitdir;
+	if (opt->binary == GREP_BINARY_TEXT) {
+		key->binary = 0;
+	} else {
+		grep_source_load_driver(gs, gs->repo->index);
+		key->binary = gs->driver->binary;
+	}
+}
+
+static int grep_result_cache_contains(struct grep_opt *opt,
+				      struct grep_source *gs)
+{
+	struct grep_result_cache_entry key;
+	struct grep_result_cache_entry *entry;
+
+	if (!grep_result_cache.initialized)
+		return 0;
+
+	grep_result_cache_key(opt, gs, &key);
+	grep_result_cache_lock();
+	entry = hashmap_get_entry(&grep_result_cache.map, &key, ent, NULL);
+	if (entry)
+		grep_result_cache.hits++;
+	grep_result_cache_unlock();
+	return !!entry;
+}
+
+static void grep_result_cache_add(struct grep_opt *opt,
+				  struct grep_source *gs)
+{
+	struct grep_result_cache_entry key;
+	struct grep_result_cache_entry *entry;
+
+	if (!grep_result_cache.initialized)
+		return;
+
+	grep_result_cache_key(opt, gs, &key);
+	grep_result_cache_lock();
+	entry = hashmap_get_entry(&grep_result_cache.map, &key, ent, NULL);
+	if (!entry &&
+	    hashmap_get_size(&grep_result_cache.map) <
+		    GREP_RESULT_CACHE_MAX_ENTRIES) {
+		CALLOC_ARRAY(entry, 1);
+		hashmap_entry_init(&entry->ent, key.ent.hash);
+		oidcpy(&entry->oid, &key.oid);
+		entry->gitdir = key.gitdir;
+		entry->binary = key.binary;
+		hashmap_add(&grep_result_cache.map, &entry->ent);
+	}
+	grep_result_cache_unlock();
+}
 
 static void add_work(struct grep_opt *opt, struct grep_source *gs)
 {
@@ -208,7 +315,17 @@ static void *run(void *arg)
 			break;
 
 		opt->output_priv = w;
-		hit |= grep_source(opt, &w->source);
+		if (!grep_result_cache_contains(opt, &w->source)) {
+			int source_hit = grep_source(opt, &w->source);
+
+			/*
+			 * grep_source() also returns zero after a load
+			 * failure. Only cache successfully loaded blobs.
+			 */
+			if (!source_hit && w->source.buf)
+				grep_result_cache_add(opt, &w->source);
+			hit |= source_hit;
+		}
 		grep_source_clear_data(&w->source);
 		work_done(w);
 	}
@@ -369,6 +486,11 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 	grep_source_init_oid(&gs, pathbuf.buf, path, oid, opt->repo);
 	strbuf_release(&pathbuf);
 
+	if (grep_result_cache_contains(opt, &gs)) {
+		grep_source_clear(&gs);
+		return 0;
+	}
+
 	if (num_threads > 1) {
 		/*
 		 * add_work() copies gs and thus assumes ownership of
@@ -380,6 +502,8 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		int hit;
 
 		hit = grep_source(opt, &gs);
+		if (!hit && gs.buf)
+			grep_result_cache_add(opt, &gs);
 
 		grep_source_clear(&gs);
 		return hit;
@@ -1341,6 +1465,12 @@ int cmd_grep(int argc,
 	else if (num_threads == 0)
 		num_threads = HAVE_THREADS ? online_cpus() : 1;
 
+	if (list.nr > 1 && !opt.allow_textconv) {
+		hashmap_init(&grep_result_cache.map, grep_result_cache_cmp,
+			     NULL, 0);
+		grep_result_cache.initialized = 1;
+	}
+
 	if (num_threads > 1) {
 		if (!HAVE_THREADS)
 			BUG("Somebody got num_threads calculation wrong!");
@@ -1437,6 +1567,18 @@ out:
 	string_list_clear(&path_list, 0);
 	free_grep_patterns(&opt);
 	object_array_clear(&list);
+	if (grep_result_cache.initialized) {
+		trace2_data_intmax("grep", the_repository,
+				   "result_cache/entries",
+				   hashmap_get_size(&grep_result_cache.map));
+		trace2_data_intmax("grep", the_repository,
+				   "result_cache/hits",
+				   grep_result_cache.hits);
+		hashmap_clear_and_free(&grep_result_cache.map,
+				       struct grep_result_cache_entry, ent);
+		grep_result_cache.hits = 0;
+		grep_result_cache.initialized = 0;
+	}
 	free_repos();
 	return ret;
 }

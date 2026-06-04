@@ -1131,6 +1131,184 @@ do
 	"
 done
 
+test_expect_success 'setup repeated revision grep' '
+	git init result-cache &&
+	(
+		cd result-cache &&
+		echo haystack >shared &&
+		git add shared &&
+		git commit -m base &&
+		git tag cache-base &&
+
+		echo unrelated >other &&
+		git add other &&
+		git commit -m tip &&
+		git tag cache-tip &&
+
+		write_script textconv <<-\EOF &&
+		if test -n "$RESULT_CACHE_TEXTCONV_LOG"
+		then
+			echo textconv >>"$RESULT_CACHE_TEXTCONV_LOG"
+		fi
+		cat "$1"
+		EOF
+		git config diff.cache.textconv "\"$(pwd)/textconv\"" &&
+
+		printf "needle\n\0" >binary &&
+		cp binary text &&
+		printf "text diff\nshared diff=cache\n" >.gitattributes &&
+		git add binary text .gitattributes &&
+		git commit -m drivers &&
+		git tag cache-drivers &&
+
+		printf "before\nneedle one\nafter\n" >match &&
+		git add match &&
+		git commit -m format-one &&
+		git tag cache-format-one &&
+		sed "s/one/two/" match >match.new &&
+		mv match.new match &&
+		git commit -am format-two &&
+		git tag cache-format-two &&
+		sed "s/two/three/" match >match.new &&
+		mv match.new match &&
+		git commit -am format-three &&
+		git tag cache-format-three
+	)
+'
+
+test_expect_success 'grep caches repeated no-output blobs' '
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-no-output.trace" \
+		git -C result-cache grep --threads=1 \
+		needle cache-base cache-tip -- shared >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-no-output.trace &&
+	test_trace2_data grep result_cache/hits 1 \
+		<result-cache-no-output.trace
+'
+
+test_expect_success 'grep caches repeated -L suppression' '
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-L.trace" \
+		git -C result-cache grep --threads=1 -L \
+		haystack cache-base cache-tip -- shared >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-L.trace &&
+	test_trace2_data grep result_cache/hits 1 \
+		<result-cache-L.trace
+'
+
+test_expect_success 'grep caches repeated --all-match rejection' '
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-all-match.trace" \
+		git -C result-cache grep --threads=1 --all-match \
+		-e haystack -e absent cache-base cache-tip -- shared >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-all-match.trace &&
+	test_trace2_data grep result_cache/hits 1 \
+		<result-cache-all-match.trace
+'
+
+test_expect_success PTHREADS \
+	'threaded grep reuses completed no-output scans' '
+	revisions= &&
+	for i in $(test_seq 1 256)
+	do
+		revisions="$revisions cache-base" || return 1
+	done &&
+	revisions="$revisions cache-format-one cache-format-two \
+		cache-format-three" &&
+	git -C result-cache grep --threads=1 \
+		--heading --break -C1 needle $revisions \
+		-- match shared >expect &&
+	GIT_TRACE2_EVENT="$(pwd)/result-cache-threaded.trace" \
+		git -C result-cache grep --threads=8 \
+		--heading --break -C1 needle $revisions \
+		-- match shared >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-threaded.trace &&
+	# Of 259 shared occurrences, 1-8 may be scanned before caching,
+	# leaving 251-258 cache hits.
+	test_grep -E \
+		"\"key\":\"result_cache/hits\",\"value\":\"25[1-8]\"" \
+		result-cache-threaded.trace
+'
+
+test_expect_success 'grep rescans repeated matching blobs' '
+	cat >expect <<-\EOF &&
+	cache-base:shared:haystack
+	cache-tip:shared:haystack
+	EOF
+	GIT_TRACE2_EVENT="$(pwd)/result-cache-match.trace" \
+		git -C result-cache grep --threads=1 \
+		haystack cache-base cache-tip -- shared >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep result_cache/entries 0 \
+		<result-cache-match.trace &&
+	test_trace2_data grep result_cache/hits 0 \
+		<result-cache-match.trace
+'
+
+test_expect_success 'grep result cache distinguishes binary handling' '
+	cat >expect <<-\EOF &&
+	cache-drivers:text:needle
+	cache-drivers:text:needle
+	EOF
+	GIT_TRACE2_EVENT="$(pwd)/result-cache-binary.trace" \
+		git -C result-cache grep --threads=1 -I \
+		needle cache-drivers cache-drivers -- binary text >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-binary.trace &&
+	test_trace2_data grep result_cache/hits 1 \
+		<result-cache-binary.trace
+'
+
+test_expect_success 'grep cache preserves output formatting state' '
+	git -C result-cache grep --threads=1 --textconv \
+		--heading --break -C1 needle \
+		cache-format-one cache-format-two cache-format-three \
+		-- match shared >expect &&
+	git -C result-cache grep --threads=1 \
+		--heading --break -C1 needle \
+		cache-format-one cache-format-two cache-format-three \
+		-- match shared >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'grep does not cache textconv results' '
+	RESULT_CACHE_TEXTCONV_LOG="$(pwd)/result-cache-textconv.log" &&
+	rm -f "$RESULT_CACHE_TEXTCONV_LOG" &&
+	test_must_fail env \
+		RESULT_CACHE_TEXTCONV_LOG="$RESULT_CACHE_TEXTCONV_LOG" \
+		git -C result-cache grep --threads=1 --textconv \
+		absent cache-drivers cache-format-one -- shared >actual &&
+	test_must_be_empty actual &&
+	test_line_count = 2 result-cache-textconv.log
+'
+
+test_expect_success 'grep does not cache object read failures' '
+	oid=$(git -C result-cache rev-parse cache-base:shared) &&
+	object_path="result-cache/.git/objects/$(test_oid_to_path "$oid")" &&
+	mv "$object_path" "$object_path.missing" &&
+	test_when_finished "mv \"$object_path.missing\" \"$object_path\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-missing.trace" \
+		git -C result-cache grep --threads=1 \
+		needle cache-base cache-tip -- shared >actual 2>err &&
+	test_must_be_empty actual &&
+	test_grep "cache-base:shared.*unable to read $oid" err &&
+	test_grep "cache-tip:shared.*unable to read $oid" err &&
+	test_trace2_data grep result_cache/entries 0 \
+		<result-cache-missing.trace &&
+	test_trace2_data grep result_cache/hits 0 \
+		<result-cache-missing.trace
+'
+
 test_expect_success !PTHREADS,!FAIL_PREREQS \
 	'grep --threads=N or pack.threads=N warns when no pthreads' '
 	git grep --threads=2 Hello hello_world 2>err &&

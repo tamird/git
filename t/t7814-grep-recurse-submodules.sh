@@ -123,6 +123,48 @@ test_expect_success 'basic grep tree' '
 	test_cmp expect actual
 '
 
+test_expect_success 'grep result cache uses stable repository identity' '
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-repositories.trace" \
+		git grep --threads=1 --recurse-submodules \
+		absent HEAD HEAD^ -- a "submodul?/a" >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 2 \
+		<result-cache-repositories.trace &&
+	test_trace2_data grep result_cache/hits 2 \
+		<result-cache-repositories.trace
+'
+
+test_expect_success PTHREADS \
+	'threaded grep result cache uses source repository' '
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-threaded.trace" \
+		git grep --threads=2 --recurse-submodules \
+		absent HEAD HEAD^ -- a "submodul?/a" >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 2 \
+		<result-cache-threaded.trace
+'
+
+test_expect_success 'grep result cache isolates object reads by repository' '
+	oid=$(git rev-parse HEAD:a) &&
+	object_path=$(git -C submodule rev-parse --path-format=absolute \
+		--git-path "objects/$(test_oid_to_path "$oid")") &&
+	mv "$object_path" "$object_path.missing" &&
+	test_when_finished "mv \"$object_path.missing\" \"$object_path\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-missing.trace" \
+		git grep --threads=1 --recurse-submodules \
+		absent HEAD HEAD^ -- a "submodul?/a" >actual 2>err &&
+	test_must_be_empty actual &&
+	test_grep "HEAD:submodule/a.*unable to read $oid" err &&
+	test_grep "HEAD\\^:submodule/a.*unable to read $oid" err &&
+	test_trace2_data grep result_cache/entries 1 \
+		<result-cache-missing.trace &&
+	test_trace2_data grep result_cache/hits 1 \
+		<result-cache-missing.trace
+'
+
 test_expect_success 'grep tree HEAD^' '
 	cat >expect <<-\EOF &&
 	HEAD^:a:(1|2)d(3|4)
@@ -592,6 +634,47 @@ test_expect_success 'grep partially-cloned submodule' '
 		# Verify that we actually fetched data from the promisor remote:
 		grep \"category\":\"promisor\",\"key\":\"fetch_count\",\"value\":\"1\" trace2.log
 	)
+'
+
+test_expect_success 'grep result cache distinguishes linked worktrees' '
+	git init linked &&
+	echo original >linked/file &&
+	git -C linked add file &&
+	git -C linked commit -m "Add original object" &&
+	original=$(git -C linked rev-parse HEAD:file) &&
+	replacement=$(echo replacement | git -C linked hash-object -w --stdin) &&
+	git -C linked replace "$original" "$replacement" &&
+	git -C linked config extensions.worktreeConfig true &&
+
+	git init linked-super &&
+	git -C linked worktree add --detach ../linked-super/one HEAD &&
+	git -C linked worktree add --detach ../linked-super/two HEAD &&
+	commit=$(git -C linked rev-parse HEAD) &&
+	git -C linked-super config -f .gitmodules submodule.one.path one &&
+	git -C linked-super config -f .gitmodules submodule.one.url ../linked &&
+	git -C linked-super config -f .gitmodules submodule.two.path two &&
+	git -C linked-super config -f .gitmodules submodule.two.url ../linked &&
+	git -C linked-super config submodule.one.active true &&
+	git -C linked-super config submodule.two.active true &&
+	git -C linked-super add .gitmodules &&
+	git -C linked-super update-index --add \
+		--cacheinfo 160000,"$commit",one &&
+	git -C linked-super update-index --add \
+		--cacheinfo 160000,"$commit",two &&
+	git -C linked-super commit -m "Add linked submodule worktrees" &&
+	echo unrelated >linked-super/other &&
+	git -C linked-super add other &&
+	git -C linked-super commit -m "Add unrelated file" &&
+
+	git -C linked-super/one config --worktree core.useReplaceRefs false &&
+	git -C linked-super/two config --worktree core.useReplaceRefs true &&
+	cat >expect <<-\EOF &&
+	HEAD:two/file:replacement
+	HEAD^:two/file:replacement
+	EOF
+	git -C linked-super grep --threads=1 --recurse-submodules \
+		replacement HEAD HEAD^ -- one two >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'check scope of core.useReplaceRefs' '
