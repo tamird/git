@@ -206,6 +206,8 @@ struct untracked_cache {
 	int dir_opened;
 	/* fsmonitor invalidation data */
 	unsigned int use_fsmonitor : 1;
+	/* All active directories are valid and have no untracked results. */
+	unsigned int can_skip_empty : 1;
 };
 
 /**
