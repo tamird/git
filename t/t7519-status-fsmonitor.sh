@@ -343,7 +343,7 @@ test_expect_success 'splitting the index results in the same state' '
 	git update-index --fsmonitor  &&
 	git ls-files -f >expect &&
 	test-tool dump-fsmonitor >&2 && echo &&
-	git update-index --fsmonitor --split-index &&
+	git -c index.skipHash=true update-index --fsmonitor --split-index &&
 	test-tool dump-fsmonitor >&2 && echo &&
 	git ls-files -f >actual &&
 	test_cmp expect actual

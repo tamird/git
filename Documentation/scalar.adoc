@@ -292,8 +292,10 @@ gui.GCWarning=false::
 	warning irrelevant.
 
 index.skipHash=true::
-	Disable computing the hash of the index contents as it is being written.
-	This assists with performance, especially for large index files.
+	Disable computing the hash of ordinary index files as they are being
+	written. Shared index files are still hashed because their trailing
+	hash identifies the file. This assists with performance, especially
+	for large index files.
 
 index.threads=true::
 	This tells Git to automatically detect how many threads it should use

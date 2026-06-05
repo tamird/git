@@ -64,6 +64,27 @@ test_expect_success 'enable split index' '
 	test_cmp expect actual
 '
 
+test_expect_success 'shared index is hashed with index.skipHash' '
+	test_create_repo skip-hash &&
+	(
+		cd skip-hash &&
+		test_commit initial &&
+		git -c index.skipHash=true update-index --split-index &&
+		zero=$(test_oid zero) &&
+		test_trailing_hash .git/index >actual &&
+		echo "$zero" >expect &&
+		test_cmp expect actual &&
+		base=$(test-tool dump-split-index .git/index |
+			sed -n "s/^base //p") &&
+		test "$base" != "$zero" &&
+		test_path_is_file ".git/sharedindex.$base" &&
+		test_trailing_hash ".git/sharedindex.$base" >actual &&
+		echo "$base" >expect &&
+		test_cmp expect actual &&
+		git -c index.skipHash=true ls-files --error-unmatch initial.t
+	)
+'
+
 test_expect_success 'add one file' '
 	create_non_racy_file one &&
 	git update-index --add one &&
