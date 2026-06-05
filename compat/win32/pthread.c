@@ -13,6 +13,71 @@
 #include <errno.h>
 #include <limits.h>
 
+int win32_pthread_rwlock_init(pthread_rwlock_t *lock)
+{
+	InitializeCriticalSection(&lock->mutex);
+	InitializeConditionVariable(&lock->cond);
+	lock->readers = 0;
+	lock->waiting_writers = 0;
+	lock->writer = 0;
+	return 0;
+}
+
+int win32_pthread_rwlock_destroy(pthread_rwlock_t *lock)
+{
+	DeleteCriticalSection(&lock->mutex);
+	return 0;
+}
+
+int win32_pthread_rwlock_rdlock(pthread_rwlock_t *lock)
+{
+	EnterCriticalSection(&lock->mutex);
+	while (lock->writer || lock->waiting_writers) {
+		if (!SleepConditionVariableCS(
+			    &lock->cond, &lock->mutex, INFINITE)) {
+			int err = err_win_to_posix(GetLastError());
+
+			LeaveCriticalSection(&lock->mutex);
+			return err;
+		}
+	}
+	lock->readers++;
+	LeaveCriticalSection(&lock->mutex);
+	return 0;
+}
+
+int win32_pthread_rwlock_wrlock(pthread_rwlock_t *lock)
+{
+	EnterCriticalSection(&lock->mutex);
+	lock->waiting_writers++;
+	while (lock->writer || lock->readers) {
+		if (!SleepConditionVariableCS(
+			    &lock->cond, &lock->mutex, INFINITE)) {
+			int err = err_win_to_posix(GetLastError());
+
+			lock->waiting_writers--;
+			LeaveCriticalSection(&lock->mutex);
+			return err;
+		}
+	}
+	lock->waiting_writers--;
+	lock->writer = 1;
+	LeaveCriticalSection(&lock->mutex);
+	return 0;
+}
+
+int win32_pthread_rwlock_unlock(pthread_rwlock_t *lock)
+{
+	EnterCriticalSection(&lock->mutex);
+	if (lock->writer)
+		lock->writer = 0;
+	else
+		lock->readers--;
+	WakeAllConditionVariable(&lock->cond);
+	LeaveCriticalSection(&lock->mutex);
+	return 0;
+}
+
 static unsigned __stdcall win32_start_routine(void *arg)
 {
 	pthread_t *thread = arg;

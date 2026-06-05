@@ -113,10 +113,22 @@ void packet_response_end(int fd)
 
 int packet_flush_gently(int fd)
 {
+	int saved_errno;
+
 	packet_trace("0000", 4, 1);
-	if (write_in_full(fd, "0000", 4) < 0)
-		return error(_("flush packet write failed"));
+	if (write_in_full(fd, "0000", 4) < 0) {
+		saved_errno = errno;
+		error(_("flush packet write failed"));
+		errno = saved_errno;
+		return -1;
+	}
 	return 0;
+}
+
+int packet_flush_gently_quiet(int fd)
+{
+	packet_trace("0000", 4, 1);
+	return write_in_full(fd, "0000", 4) < 0 ? -1 : 0;
 }
 
 void packet_buf_flush(struct strbuf *buf)
@@ -230,15 +242,25 @@ static int do_packet_write(const int fd_out, const char *buf, size_t size,
 	return 0;
 }
 
-static int packet_write_gently(const int fd_out, const char *buf, size_t size)
+static int packet_write_gently_1(const int fd_out, const char *buf,
+				 size_t size, int quiet)
 {
 	struct strbuf err = STRBUF_INIT;
 	if (do_packet_write(fd_out, buf, size, &err)) {
-		error("%s", err.buf);
+		int saved_errno = errno;
+
+		if (!quiet)
+			error("%s", err.buf);
 		strbuf_release(&err);
+		errno = saved_errno;
 		return -1;
 	}
 	return 0;
+}
+
+static int packet_write_gently(const int fd_out, const char *buf, size_t size)
+{
+	return packet_write_gently_1(fd_out, buf, size, 0);
 }
 
 void packet_write(int fd_out, const char *buf, size_t size)
@@ -314,8 +336,9 @@ int write_packetized_from_fd_no_flush(int fd_in, int fd_out)
 	return err;
 }
 
-int write_packetized_from_buf_no_flush_count(const char *src_in, size_t len,
-					     int fd_out, int *packet_counter)
+static int write_packetized_from_buf_no_flush_1(
+	const char *src_in, size_t len, int fd_out,
+	int *packet_counter, int quiet)
 {
 	int err = 0;
 	size_t bytes_written = 0;
@@ -328,12 +351,28 @@ int write_packetized_from_buf_no_flush_count(const char *src_in, size_t len,
 			bytes_to_write = len - bytes_written;
 		if (bytes_to_write == 0)
 			break;
-		err = packet_write_gently(fd_out, src_in + bytes_written, bytes_to_write);
+		err = packet_write_gently_1(
+			fd_out, src_in + bytes_written,
+			bytes_to_write, quiet);
 		bytes_written += bytes_to_write;
 		if (packet_counter)
 			(*packet_counter)++;
 	}
 	return err;
+}
+
+int write_packetized_from_buf_no_flush_count(const char *src_in, size_t len,
+					     int fd_out, int *packet_counter)
+{
+	return write_packetized_from_buf_no_flush_1(
+		src_in, len, fd_out, packet_counter, 0);
+}
+
+int write_packetized_from_buf_no_flush_quiet(
+	const char *src_in, size_t len, int fd_out)
+{
+	return write_packetized_from_buf_no_flush_1(
+		src_in, len, fd_out, NULL, 1);
 }
 
 static int get_packet_data(int fd, char **src_buf, size_t *src_size,
@@ -353,6 +392,8 @@ static int get_packet_data(int fd, char **src_buf, size_t *src_size,
 	} else {
 		ssize_t ret = read_in_full(fd, dst, size);
 		if (ret < 0) {
+			if (options & PACKET_READ_SILENT_ON_ERROR)
+				return -1;
 			if (options & PACKET_READ_GENTLE_ON_READ_ERROR)
 				return error_errno(_("read error"));
 			die_errno(_("read error"));
@@ -366,6 +407,8 @@ static int get_packet_data(int fd, char **src_buf, size_t *src_size,
 		if (options & PACKET_READ_GENTLE_ON_EOF)
 			return -1;
 
+		if (options & PACKET_READ_SILENT_ON_ERROR)
+			return -1;
 		if (options & PACKET_READ_GENTLE_ON_READ_ERROR)
 			return error(_("the remote end hung up unexpectedly"));
 		die(_("the remote end hung up unexpectedly"));
@@ -427,6 +470,8 @@ enum packet_read_status packet_read_with_status(int fd, char **src_buffer,
 	len = packet_length(linelen, sizeof(linelen));
 
 	if (len < 0) {
+		if (options & PACKET_READ_SILENT_ON_ERROR)
+			return PACKET_READ_EOF;
 		if (options & PACKET_READ_GENTLE_ON_READ_ERROR)
 			return error(_("protocol error: bad line length "
 				       "character: %.4s"), linelen);
@@ -444,6 +489,8 @@ enum packet_read_status packet_read_with_status(int fd, char **src_buffer,
 		*pktlen = 0;
 		return PACKET_READ_RESPONSE_END;
 	} else if (len < 4) {
+		if (options & PACKET_READ_SILENT_ON_ERROR)
+			return PACKET_READ_EOF;
 		if (options & PACKET_READ_GENTLE_ON_READ_ERROR)
 			return error(_("protocol error: bad line length %d"),
 				     len);
@@ -452,6 +499,8 @@ enum packet_read_status packet_read_with_status(int fd, char **src_buffer,
 
 	len -= 4;
 	if ((unsigned)len >= size) {
+		if (options & PACKET_READ_SILENT_ON_ERROR)
+			return PACKET_READ_EOF;
 		if (options & PACKET_READ_GENTLE_ON_READ_ERROR)
 			return error(_("protocol error: bad line length %d"),
 				     len);
@@ -571,6 +620,36 @@ ssize_t read_packetized_to_strbuf(int fd_in, struct strbuf *sb_out, int options)
 		else
 			strbuf_setlen(sb_out, orig_len);
 		return packet_len;
+	}
+	return sb_out->len - orig_len;
+}
+
+ssize_t read_packetized_to_strbuf_limit(int fd_in, struct strbuf *sb_out,
+					int options, size_t limit)
+{
+	char packet[LARGE_PACKET_MAX];
+	size_t orig_len = sb_out->len;
+	size_t orig_alloc = sb_out->alloc;
+	int packet_len;
+
+	for (;;) {
+		packet_len = packet_read(fd_in, packet, sizeof(packet), options);
+		if (packet_len <= 0)
+			break;
+		if ((size_t)packet_len > limit - (sb_out->len - orig_len)) {
+			errno = EMSGSIZE;
+			packet_len = -1;
+			break;
+		}
+		strbuf_add(sb_out, packet, packet_len);
+	}
+
+	if (packet_len < 0) {
+		if (orig_alloc == 0)
+			strbuf_release(sb_out);
+		else
+			strbuf_setlen(sb_out, orig_len);
+		return -1;
 	}
 	return sb_out->len - orig_len;
 }

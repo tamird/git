@@ -36,6 +36,7 @@ static struct test_cmd cmds[] = {
 	{ "genrandom", cmd__genrandom },
 	{ "genzeros", cmd__genzeros },
 	{ "getcwd", cmd__getcwd },
+	{ "grep-index-ipc", cmd__grep_index_ipc },
 	{ "hashmap", cmd__hashmap },
 	{ "hash-speed", cmd__hash_speed },
 	{ "hexdump", cmd__hexdump },

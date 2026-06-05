@@ -189,34 +189,82 @@ void ipc_client_close_connection(struct ipc_client_connection *connection)
 	free(connection);
 }
 
-int ipc_client_send_command_to_connection(
+static void thread_block_sigpipe(sigset_t *old_set);
+
+static int ipc_client_send_command_to_connection_1(
 	struct ipc_client_connection *connection,
 	const char *message, size_t message_len,
-	struct strbuf *answer)
+	struct strbuf *answer, int quiet)
 {
+	sigset_t old_set, pending, sigpipe;
+	int received_signal;
+	int sigpipe_was_pending;
+	int saw_epipe = 0;
+	int write_result;
 	int ret = 0;
 
 	strbuf_setlen(answer, 0);
+	sigemptyset(&sigpipe);
+	sigaddset(&sigpipe, SIGPIPE);
+	thread_block_sigpipe(&old_set);
+	sigpending(&pending);
+	sigpipe_was_pending = sigismember(&pending, SIGPIPE);
 
 	trace2_region_enter("ipc-client", "send-command", NULL);
 
-	if (write_packetized_from_buf_no_flush(message, message_len,
-					       connection->fd) < 0 ||
-	    packet_flush_gently(connection->fd) < 0) {
-		ret = error(_("could not send IPC command"));
+	if (quiet)
+		write_result = write_packetized_from_buf_no_flush_quiet(
+			message, message_len, connection->fd);
+	else
+		write_result = write_packetized_from_buf_no_flush(
+			message, message_len, connection->fd);
+	if (!write_result)
+		write_result = quiet ?
+			packet_flush_gently_quiet(connection->fd) :
+			packet_flush_gently(connection->fd);
+	if (write_result < 0) {
+		saw_epipe = errno == EPIPE;
+		ret = quiet ? IPC_CLIENT_COMMAND_ERROR_SEND :
+			      error(_("could not send IPC command"));
 		goto done;
 	}
 
 	if (read_packetized_to_strbuf(
 		    connection->fd, answer,
-		    PACKET_READ_GENTLE_ON_EOF | PACKET_READ_GENTLE_ON_READ_ERROR) < 0) {
-		ret = error(_("could not read IPC response"));
+			    PACKET_READ_GENTLE_ON_EOF |
+				    PACKET_READ_GENTLE_ON_READ_ERROR |
+				    (quiet ? PACKET_READ_SILENT_ON_ERROR : 0)) < 0) {
+		ret = quiet ? IPC_CLIENT_COMMAND_ERROR_READ :
+			      error(_("could not read IPC response"));
 		goto done;
 	}
 
 done:
+	sigpending(&pending);
+	if (saw_epipe && !sigpipe_was_pending &&
+	    sigismember(&pending, SIGPIPE))
+		sigwait(&sigpipe, &received_signal);
+	pthread_sigmask(SIG_SETMASK, &old_set, NULL);
 	trace2_region_leave("ipc-client", "send-command", NULL);
 	return ret;
+}
+
+int ipc_client_send_command_to_connection(
+	struct ipc_client_connection *connection,
+	const char *message, size_t message_len,
+	struct strbuf *answer)
+{
+	return ipc_client_send_command_to_connection_1(
+		connection, message, message_len, answer, 0);
+}
+
+int ipc_client_send_command_to_connection_gently(
+	struct ipc_client_connection *connection,
+	const char *message, size_t message_len,
+	struct strbuf *answer)
+{
+	return ipc_client_send_command_to_connection_1(
+		connection, message, message_len, answer, 1);
 }
 
 int ipc_client_send_command(const char *path,
@@ -311,6 +359,7 @@ struct ipc_server_data {
 	ipc_server_application_cb *application_cb;
 	void *application_data;
 	struct strbuf buf_path;
+	size_t max_request_size;
 
 	struct ipc_accept_thread_data *accept_thread;
 	struct ipc_worker_thread_data *worker_thread_list;
@@ -525,9 +574,17 @@ static int worker_thread__do_io(
 
 	reply_data.fd = fd;
 
-	ret = read_packetized_to_strbuf(
-		reply_data.fd, &buf,
-		PACKET_READ_GENTLE_ON_EOF | PACKET_READ_GENTLE_ON_READ_ERROR);
+	if (worker_thread_data->server_data->max_request_size)
+		ret = read_packetized_to_strbuf_limit(
+			reply_data.fd, &buf,
+			PACKET_READ_GENTLE_ON_EOF |
+				PACKET_READ_GENTLE_ON_READ_ERROR,
+			worker_thread_data->server_data->max_request_size);
+	else
+		ret = read_packetized_to_strbuf(
+			reply_data.fd, &buf,
+			PACKET_READ_GENTLE_ON_EOF |
+				PACKET_READ_GENTLE_ON_READ_ERROR);
 	if (ret >= 0) {
 		ret = worker_thread_data->server_data->application_cb(
 			worker_thread_data->server_data->application_data,
@@ -869,6 +926,7 @@ int ipc_server_init_async(struct ipc_server_data **returned_server_data,
 	server_data->magic = MAGIC_SERVER_DATA;
 	server_data->application_cb = application_cb;
 	server_data->application_data = application_data;
+	server_data->max_request_size = opts->max_request_size;
 	strbuf_init(&server_data->buf_path, 0);
 	strbuf_addstr(&server_data->buf_path, path);
 
