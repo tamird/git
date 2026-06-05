@@ -24,6 +24,7 @@
 #include "replace-object.h"
 #include "revision.h"
 #include "string-list.h"
+#include "strvec.h"
 #include "color.h"
 #include "gpg-interface.h"
 #include "sequencer.h"
@@ -332,8 +333,22 @@ void load_ref_decorations(struct decoration_filter *filter, int flags,
 		}
 		decoration_loaded = 1;
 		decoration_flags = flags;
-		refs_for_each_ref(get_main_ref_store(the_repository),
-				  collect_ref_decoration, &context);
+		if (filter && filter->include_ref_pattern->nr) {
+			struct string_list_item *item;
+			struct strvec prefixes = STRVEC_INIT;
+			struct refs_for_each_ref_options opts = { 0 };
+
+			for_each_string_list_item(item,
+						  filter->include_ref_pattern)
+				strvec_push(&prefixes, item->string);
+			refs_for_each_ref_in_prefixes(
+				get_main_ref_store(the_repository), prefixes.v,
+				&opts, collect_ref_decoration, &context);
+			strvec_clear(&prefixes);
+		} else {
+			refs_for_each_ref(get_main_ref_store(the_repository),
+					  collect_ref_decoration, &context);
+		}
 		refs_head_ref(get_main_ref_store(the_repository),
 			      collect_ref_decoration, &context);
 		for_each_commit_graft(add_graft_decoration, &context);

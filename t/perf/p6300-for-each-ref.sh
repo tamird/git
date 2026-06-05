@@ -15,6 +15,7 @@ test_expect_success "setup" '
 	test_seq $ref_count_per_type |
 		sed "s,.*,update refs/heads/branch_& HEAD~&\nupdate refs/custom/special_& HEAD~&," |
 		git update-ref --stdin &&
+	git update-ref refs/selected/one HEAD &&
 
 	# Create annotated tags
 	for i in $(test_seq $ref_count_per_type)
@@ -77,8 +78,18 @@ run_tests () {
 	"
 }
 
+test_log_decorations () {
+	test_perf "log decorations ($1, selected prefix)" "
+		for i in \$(test_seq $test_iteration_count); do
+			git log -1 --decorate \
+				--decorate-refs=refs/selected/ >/dev/null
+		done
+	"
+}
+
 run_tests "loose"
 test_for_each_ref "loose, direct refs" refs/heads/ refs/custom/
+test_log_decorations "loose"
 
 test_perf "log --decorate with one ref (loose, no graph)" "
 	for i in \$(test_seq $test_iteration_count); do
@@ -124,6 +135,7 @@ test_expect_success 'pack refs' '
 	git pack-refs --all
 '
 run_tests "packed"
+test_log_decorations "packed"
 
 test_perf "log --decorate with one graph commit ref (packed)" "
 	for i in \$(test_seq $test_iteration_count); do
