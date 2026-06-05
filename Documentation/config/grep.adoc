@@ -20,6 +20,13 @@
 	Number of grep worker threads to use. If unset (or set to 0), Git will
 	use as many threads as the number of logical cores available.
 
+`grep.worktreeBlobCache`::
+	If set to `true`, let `git grep` remember worktree files that match their
+	indexed blobs. This requires fsmonitor and defaults to `false`.
+	Observations are stored in a sidecar next to the index; disabling the
+	cache leaves an existing sidecar in place. Reading through the object
+	database may increase memory use.
+
 `grep.fullName`::
 	If set to `true`, enable `--full-name` option by default.
 
