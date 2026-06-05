@@ -11,6 +11,8 @@
 #include "fsmonitor-ll.h"
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
+#include "grep-index-ipc.h"
+#include "path.h"
 #include "compat/fsmonitor/fsm-health.h"
 #include "compat/fsmonitor/fsm-listen.h"
 #include "fsmonitor--daemon.h"
@@ -674,6 +676,21 @@ static int fsmonitor_parse_client_token(const char *buf_token,
 	return 0;
 }
 
+static void fsmonitor_start_grep_index_server(
+	struct fsmonitor_daemon_state *state)
+{
+	pthread_mutex_lock(&state->grep_index_mutex);
+	if (!state->grep_index_server &&
+	    !grep_index_ipc_server_init(
+		    &state->grep_index_server,
+		    state->path_grep_index_gitdir.buf,
+		    state->path_grep_index_ipc.buf,
+		    state->path_grep_workers_ipc.buf,
+		    fsmonitor__ipc_threads))
+		grep_index_ipc_server_start(state->grep_index_server);
+	pthread_mutex_unlock(&state->grep_index_mutex);
+}
+
 static int do_handle_client(struct fsmonitor_daemon_state *state,
 			    const char *command,
 			    ipc_server_reply_cb *reply,
@@ -705,7 +722,10 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	 *            | <V2-opaque-fsmonitor-token> NUL
 	 */
 
-	if (!strcmp(command, "quit")) {
+	if (!strcmp(command, "start-grep-index")) {
+		fsmonitor_start_grep_index_server(state);
+		return reply(reply_data, "ok", 2);
+	} else if (!strcmp(command, "quit")) {
 		/*
 		 * A client has requested over the socket/pipe that the
 		 * daemon shutdown.
@@ -1256,6 +1276,8 @@ static int fsmonitor_run_daemon_1(struct fsmonitor_daemon_state *state)
 	}
 	health_started = 1;
 
+	fsmonitor_start_grep_index_server(state);
+
 	/*
 	 * The daemon is now fully functional in background threads.
 	 * Our primary thread should now just wait while the threads
@@ -1267,6 +1289,12 @@ cleanup:
 	 * request, from filesystem activity, or an error).
 	 */
 	ipc_server_await(state->ipc_server_data);
+	if (state->grep_index_server) {
+		grep_index_ipc_server_stop(state->grep_index_server);
+		grep_index_ipc_server_await(state->grep_index_server);
+	}
+	grep_index_ipc_server_free(state->grep_index_server);
+	state->grep_index_server = NULL;
 
 	/*
 	 * The fsmonitor listener thread may have received a shutdown
@@ -1302,6 +1330,7 @@ static int fsmonitor_run_daemon(void)
 
 	hashmap_init(&state.cookies, cookies_cmp, NULL, 0);
 	pthread_mutex_init(&state.main_lock, NULL);
+	pthread_mutex_init(&state.grep_index_mutex, NULL);
 	pthread_cond_init(&state.cookies_cond, NULL);
 	state.listen_error_code = 0;
 	state.health_error_code = 0;
@@ -1383,6 +1412,25 @@ static int fsmonitor_run_daemon(void)
 	strbuf_init(&state.path_ipc, 0);
 	strbuf_addstr(&state.path_ipc,
 		absolute_path(fsmonitor_ipc__get_path(the_repository)));
+	strbuf_init(&state.path_grep_index_gitdir, 0);
+	strbuf_addstr(&state.path_grep_index_gitdir,
+		      absolute_path(repo_get_common_dir(the_repository)));
+	strbuf_init(&state.path_grep_index_ipc, 0);
+	{
+		char *path = repo_common_path(the_repository, "grep-index.ipc");
+
+		strbuf_addstr(&state.path_grep_index_ipc, absolute_path(path));
+		free(path);
+	}
+	strbuf_init(&state.path_grep_workers_ipc, 0);
+	{
+		char *path = repo_common_path(
+			the_repository, "grep-workers.ipc");
+
+		strbuf_addstr(
+			&state.path_grep_workers_ipc, absolute_path(path));
+		free(path);
+	}
 
 	/*
 	 * Confirm that we can create platform-specific resources for the
@@ -1419,6 +1467,7 @@ static int fsmonitor_run_daemon(void)
 
 done:
 	pthread_cond_destroy(&state.cookies_cond);
+	pthread_mutex_destroy(&state.grep_index_mutex);
 	pthread_mutex_destroy(&state.main_lock);
 	{
 		struct hashmap_iter iter;
@@ -1438,6 +1487,9 @@ done:
 	strbuf_release(&state.path_gitdir_watch);
 	strbuf_release(&state.path_cookie_prefix);
 	strbuf_release(&state.path_ipc);
+	strbuf_release(&state.path_grep_index_gitdir);
+	strbuf_release(&state.path_grep_index_ipc);
+	strbuf_release(&state.path_grep_workers_ipc);
 	strbuf_release(&state.alias.alias);
 	strbuf_release(&state.alias.points_to);
 

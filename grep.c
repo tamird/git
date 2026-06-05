@@ -204,6 +204,9 @@ struct grep_opt *grep_opt_dup(const struct grep_opt *opt)
 
 	ret->pattern_list = NULL;
 	ret->pattern_tail = &ret->pattern_list;
+	ret->header_list = NULL;
+	ret->header_tail = &ret->header_list;
+	ret->pattern_expression = NULL;
 
 	for(pat = opt->pattern_list; pat != NULL; pat = pat->next)
 	{
@@ -214,6 +217,8 @@ struct grep_opt *grep_opt_dup(const struct grep_opt *opt)
 			append_grep_pat(ret, pat->pattern, pat->patternlen,
 					pat->origin, pat->no, pat->token);
 	}
+	for (pat = opt->header_list; pat != NULL; pat = pat->next)
+		append_header_grep_pattern(ret, pat->field, pat->pattern);
 
 	return ret;
 }

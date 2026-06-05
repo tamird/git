@@ -33,6 +33,7 @@ void fsmonitor_batch__add_path(struct fsmonitor_batch *batch, const char *path);
 
 struct fsm_listen_data; /* opaque platform-specific data for listener thread */
 struct fsm_health_data; /* opaque platform-specific data for health thread */
+struct grep_index_ipc_server;
 
 struct fsmonitor_daemon_state {
 	pthread_t listener_thread;
@@ -58,7 +59,11 @@ struct fsmonitor_daemon_state {
 
 	struct ipc_server_data *ipc_server_data;
 	struct strbuf path_ipc;
-
+	struct strbuf path_grep_index_gitdir;
+	struct strbuf path_grep_index_ipc;
+	struct strbuf path_grep_workers_ipc;
+	struct grep_index_ipc_server *grep_index_server;
+	pthread_mutex_t grep_index_mutex;
 };
 
 /*

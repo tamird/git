@@ -357,6 +357,8 @@ libgit_sources = [
   'gpg-interface.c',
   'graph.c',
   'grep-index.c',
+  'grep-index-identity.c',
+  'grep-index-ipc.c',
   'grep.c',
   'grep-worktree.c',
   'hash-lookup.c',
@@ -1346,7 +1348,7 @@ if host_machine.system() == 'windows'
     'compat/simple-ipc/ipc-win32.c',
   ]
   libgit_c_args += '-DSUPPORTS_SIMPLE_IPC'
-else
+elif threads.found()
   compat_sources += [
     'compat/simple-ipc/ipc-shared.c',
     'compat/simple-ipc/ipc-unix-socket.c',

@@ -171,6 +171,7 @@ struct index_state {
 	struct cache_tree *cache_tree;
 	struct split_index *split_index;
 	struct cache_time timestamp;
+	struct stat index_file_stat;
 	/*
 	 * Set retain_index_file_mapping before reading the index to keep the
 	 * exact mapped bytes available for ensure_index_file_identity().
@@ -185,7 +186,8 @@ struct index_state {
 		 updated_skipworktree : 1,
 		 fsmonitor_has_run_once : 1,
 		 retain_index_file_mapping : 1,
-		 index_file_identity_valid : 1;
+		 index_file_identity_valid : 1,
+		 index_file_stat_valid : 1;
 	enum sparse_index_mode sparse_index;
 	struct hashmap name_hash;
 	struct hashmap dir_hash;

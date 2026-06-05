@@ -8,6 +8,48 @@ test_lazy_prereq ENHANCED_BRE '
 	test-tool regex --silent "a\|b" a
 '
 
+test_lazy_prereq MULTI_CPU '
+	test "$(test-tool online-cpus)" -gt 1
+'
+
+wait_for_file_value () {
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+	do
+		test -f "$1" && test "$(cat "$1")" = "$2" && return 0
+		sleep 1
+	done
+	return 1
+}
+
+wait_for_file_sum () {
+	expected=$1
+	shift
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+	do
+		sum=0
+		complete=t
+		for file
+		do
+			if ! test -f "$file"
+			then
+				complete=
+				break
+			fi
+			value=$(cat "$file")
+			case "$value" in
+			""|*[!0-9]*)
+				complete=
+				break
+				;;
+			esac
+			sum=$((sum + value))
+		done
+		test -n "$complete" && test "$sum" = "$expected" && return 0
+		sleep 1
+	done
+	return 1
+}
+
 test_expect_success 'setup' '
 	printf x >short &&
 	printf ab >fixed-pcre &&
@@ -37,12 +79,194 @@ test_expect_success 'setup' '
 	git commit -m initial
 '
 
+test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
+	test_when_finished "
+		if test -n \"\$grep_worker_pids\"
+		then
+			kill \$grep_worker_pids 2>/dev/null || true
+		fi &&
+		touch release-1 release-2 release-3 release-4 release-5 \
+			release-6 release-7 release-8 &&
+		test_might_fail git fsmonitor--daemon stop &&
+		test_might_fail git config --unset core.fsmonitor &&
+		rm -f worker-start acquired-1 acquired-2 acquired-3 \
+			release-1 release-2 release-3 worker-start-over \
+			acquired-4 acquired-5 acquired-6 acquired-7 \
+			acquired-8 release-4 release-5 release-6 release-7 \
+			release-8" &&
+	git config core.fsmonitor true &&
+	GIT_TEST_GREP_WORKER_CAPACITY=4 \
+		git fsmonitor--daemon start &&
+	grep_worker_pids= &&
+	{
+		test-tool grep-index-ipc 4 worker-start acquired-1 release-1 &
+		grep_worker_1=$!
+	} &&
+	grep_worker_pids="$grep_worker_1" &&
+	{
+		test-tool grep-index-ipc 4 worker-start acquired-2 release-2 &
+		grep_worker_2=$!
+	} &&
+	grep_worker_pids="$grep_worker_pids $grep_worker_2" &&
+	touch worker-start &&
+	wait_for_file_value acquired-1 2 &&
+	wait_for_file_value acquired-2 2 &&
+	{
+		test-tool grep-index-ipc 4 worker-start acquired-3 release-3 &
+		grep_worker_3=$!
+	} &&
+	grep_worker_pids="$grep_worker_pids $grep_worker_3" &&
+	wait_for_file_value acquired-3 1 &&
+	wait_for_file_sum 4 acquired-1 acquired-2 acquired-3 &&
+	test "$(cat acquired-1)" -ge 1 &&
+	test "$(cat acquired-2)" -ge 1 &&
+	kill "$grep_worker_1" &&
+	! wait "$grep_worker_1" &&
+	wait_for_file_value acquired-2 2 &&
+	wait_for_file_value acquired-3 2 &&
+	touch release-2 release-3 &&
+	wait "$grep_worker_2" &&
+	wait "$grep_worker_3" &&
+	grep_worker_pids= &&
+	{
+		test-tool grep-index-ipc 4 worker-start-over \
+			acquired-4 release-4 &
+		grep_worker_4=$!
+	} &&
+	{
+		test-tool grep-index-ipc 4 worker-start-over \
+			acquired-5 release-5 &
+		grep_worker_5=$!
+	} &&
+	{
+		test-tool grep-index-ipc 4 worker-start-over \
+			acquired-6 release-6 &
+		grep_worker_6=$!
+	} &&
+	{
+		test-tool grep-index-ipc 4 worker-start-over \
+			acquired-7 release-7 &
+		grep_worker_7=$!
+	} &&
+	{
+		test-tool grep-index-ipc 4 worker-start-over \
+			acquired-8 release-8 &
+		grep_worker_8=$!
+	} &&
+	grep_worker_pids="$grep_worker_4 $grep_worker_5 $grep_worker_6 \
+		$grep_worker_7 $grep_worker_8" &&
+	touch worker-start-over &&
+	wait_for_file_sum 4 acquired-4 acquired-5 acquired-6 \
+		acquired-7 acquired-8 &&
+	touch release-4 release-5 release-6 release-7 release-8 &&
+	wait "$grep_worker_4" &&
+	wait "$grep_worker_5" &&
+	wait "$grep_worker_6" &&
+	wait "$grep_worker_7" &&
+	wait "$grep_worker_8" &&
+	grep_worker_pids=
+'
+
+test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in memory' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_path_is_missing .git/objects/info/grep-index/chain &&
+	test_when_finished "rm -f auto-thread.trace explicit-thread.trace configured-thread.trace" &&
+	GIT_TRACE2_EVENT="$PWD/auto-thread.trace" \
+		git grep --cached --no-content-index --threads=0 \
+			"present needle" >/dev/null &&
+	test_grep "\"key\":\"worker_lease/active\",\"value\":\"1\"" \
+		auto-thread.trace &&
+	test_grep "\"key\":\"worker_lease/released\",\"value\":\"1\"" \
+		auto-thread.trace &&
+	GIT_TRACE2_EVENT="$PWD/explicit-thread.trace" \
+		git grep --cached --no-content-index --threads=3 \
+			"present needle" >/dev/null &&
+	! test_grep "worker_lease/" explicit-thread.trace &&
+	GIT_TRACE2_EVENT="$PWD/configured-thread.trace" \
+		git -c grep.threads=3 grep --cached --no-content-index \
+			"present needle" >/dev/null &&
+	! test_grep "worker_lease/" configured-thread.trace &&
+	test_must_fail git grep --cached "absent daemon pattern" &&
+	echo "present:present needle" >expect &&
+	git grep --cached "present needle" -- present >actual &&
+	test_cmp expect actual &&
+
+	oid=$(git rev-parse :short) &&
+	replacement=$(echo "absent daemon pattern" | git hash-object -w --stdin) &&
+	git replace "$oid" "$replacement" &&
+	echo "short:absent daemon pattern" >expect &&
+	git grep --cached "absent daemon pattern" -- short >actual &&
+	test_cmp expect actual &&
+	git replace -d "$oid" &&
+
+	git worktree add --detach daemon-wt &&
+	test_when_finished "test_might_fail git -C daemon-wt \
+				fsmonitor--daemon stop &&
+			    git worktree remove --force daemon-wt" &&
+	git -C daemon-wt fsmonitor--daemon status &&
+
+	echo "daemon unknown contents" >daemon-unknown &&
+	git add daemon-unknown &&
+	test_when_finished "git reset --hard HEAD" &&
+	unknown_oid=$(git rev-parse :daemon-unknown) &&
+	git grep-index --no-progress &&
+	unknown_object=.git/objects/$(test_oid_to_path "$unknown_oid") &&
+	mv "$unknown_object" "$unknown_object.save" &&
+	test_when_finished "mv \"$unknown_object.save\" \"$unknown_object\"" &&
+	test_must_fail git grep --cached "absent daemon pattern" \
+		-- daemon-unknown 2>err-unknown &&
+	test_must_be_empty err-unknown &&
+
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent daemon pattern" 2>err &&
+	test_must_fail git -C daemon-wt grep --cached \
+		"absent daemon pattern" 2>err-wt &&
+	test_must_be_empty err &&
+	test_must_be_empty err-wt &&
+
+	git fsmonitor--daemon stop &&
+	test_must_fail git -C daemon-wt grep --cached \
+		"absent daemon pattern" 2>err-takeover &&
+	test_must_be_empty err-takeover
+'
+
 test_expect_success 'write shared content index' '
 	git grep-index --no-progress &&
 	test_path_is_file .git/objects/info/grep-index/chain &&
 	test_line_count = 1 .git/objects/info/grep-index/chain &&
 	segment=$(cat .git/objects/info/grep-index/chain) &&
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
+'
+
+test_expect_success 'content index does not skip regex validation' '
+	test_must_fail git -c grep.threads=8 grep --cached \
+		"absent[9-0]" 2>err &&
+	test_grep "Invalid range" err
+'
+
+test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
+	test_when_finished "git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+
+	mv .git/objects/info/grep-index/chain \
+		.git/objects/info/grep-index/chain.save &&
+	test_when_finished "mv .git/objects/info/grep-index/chain.save \
+				.git/objects/info/grep-index/chain" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "absent pattern" 2>err &&
+	test_must_be_empty err
 '
 
 test_expect_success 'content index prunes impossible blobs' '
@@ -712,10 +936,18 @@ test_expect_success 'unknown blobs use normal blob reads' '
 test_expect_success 'structurally invalid segment is ignored' '
 	segment=$(cat .git/objects/info/grep-index/chain) &&
 	index=.git/objects/info/grep-index/grep-$segment.idx &&
+	transposed=$(awk -v segment="$segment" \
+		"\$1 == segment { print \$2 }" \
+		.git/objects/info/grep-index/chain-transposed) &&
+	transposed_index=.git/objects/info/grep-index/grep-$transposed.idx &&
 	cp "$index" "$index.save" &&
-	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	cp "$transposed_index" "$transposed_index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\" &&
+			    mv \"$transposed_index.save\" \"$transposed_index\"" &&
 	chmod +w "$index" &&
+	chmod +w "$transposed_index" &&
 	: >"$index" &&
+	: >"$transposed_index" &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -728,12 +960,23 @@ test_expect_success 'structurally invalid segment is ignored' '
 test_expect_success 'segment with truncated trailer is ignored' '
 	segment=$(cat .git/objects/info/grep-index/chain) &&
 	index=.git/objects/info/grep-index/grep-$segment.idx &&
+	transposed=$(awk -v segment="$segment" \
+		"\$1 == segment { print \$2 }" \
+		.git/objects/info/grep-index/chain-transposed) &&
+	transposed_index=.git/objects/info/grep-index/grep-$transposed.idx &&
 	cp "$index" "$index.save" &&
-	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	cp "$transposed_index" "$transposed_index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\" &&
+			    mv \"$transposed_index.save\" \"$transposed_index\"" &&
 	chmod +w "$index" &&
+	chmod +w "$transposed_index" &&
 	size=$(wc -c <"$index") &&
 	test_copy_bytes $((size - 1)) <"$index" >"$index.truncated" &&
 	mv "$index.truncated" "$index" &&
+	size=$(wc -c <"$transposed_index") &&
+	test_copy_bytes $((size - 1)) <"$transposed_index" \
+		>"$transposed_index.truncated" &&
+	mv "$transposed_index.truncated" "$transposed_index" &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -786,10 +1029,16 @@ test_expect_success 'writer retries unreadable blobs' '
 '
 
 test_expect_success 'write incremental segment' '
+	cp .git/objects/info/grep-index/chain-transposed \
+		chain-transposed.before &&
 	printf z >incremental &&
 	git add incremental &&
 	git grep-index --no-progress &&
 	test_line_count = 4 .git/objects/info/grep-index/chain &&
+	test_line_count = 4 .git/objects/info/grep-index/chain-transposed &&
+	head -n 3 .git/objects/info/grep-index/chain-transposed \
+		>chain-transposed.old &&
+	test_cmp chain-transposed.before chain-transposed.old &&
 	oid=$(git rev-parse :incremental) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&

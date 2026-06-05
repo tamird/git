@@ -11,7 +11,6 @@ struct grep_worktree_cache;
 
 enum grep_worktree_cache_result {
 	GREP_WORKTREE_CACHE_UNKNOWN,
-	GREP_WORKTREE_CACHE_DIFFERENT,
 	GREP_WORKTREE_CACHE_EQUAL,
 };
 

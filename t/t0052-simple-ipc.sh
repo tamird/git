@@ -57,6 +57,12 @@ test_expect_success 'sendbytes' '
 	grep "sent:A00100000 rcvd:A00100000" actual
 '
 
+test_expect_success 'reject oversized request' '
+	test_must_fail test-tool simple-ipc sendbytes \
+		--bytecount=200000 --byte=A 2>err &&
+	grep "could not .* IPC" err
+'
+
 # Start a series of <threads> client threads that each make <batchsize>
 # IPC requests to the server.  Each (<threads> * <batchsize>) request
 # will open a new connection to the server and randomly bind to a server

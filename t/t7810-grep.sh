@@ -2175,7 +2175,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-2 &&
 	test_trace2_data grep worktree_blob/recorded_equal 0 \
 		<grep-worktree-trace-2 &&
-	test_trace2_data grep worktree_blob/recorded_different 0 \
+	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-2 &&
 	env \
 		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
@@ -2256,7 +2256,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-3 &&
 	test_trace2_data grep worktree_blob/recorded_equal 0 \
 		<grep-worktree-trace-3 &&
-	test_trace2_data grep worktree_blob/recorded_different 0 \
+	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-3 &&
 
 	echo "index change" >grep-worktree-index-change &&

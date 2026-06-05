@@ -2214,6 +2214,7 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	istate->timestamp.sec = 0;
 	istate->timestamp.nsec = 0;
 	istate->index_file_identity_valid = 0;
+	istate->index_file_stat_valid = 0;
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
@@ -2226,6 +2227,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 
 	if (fstat(fd, &st))
 		die_errno(_("%s: cannot stat the open index"), path);
+	istate->index_file_stat = st;
+	istate->index_file_stat_valid = 1;
 
 	mmap_size = xsize_t(st.st_size);
 	if (mmap_size < sizeof(struct cache_header) + the_hash_algo->rawsz)
@@ -3179,6 +3182,15 @@ static int do_write_locked_index(struct index_state *istate,
 		ret = commit_locked_index(lock);
 	else
 		ret = close_lock_file_gently(lock);
+	if (!ret && flags & COMMIT_LOCK && !alternate_index_output) {
+		if (!stat(repo_get_index_file(istate->repo),
+			  &istate->index_file_stat))
+			istate->index_file_stat_valid = 1;
+		else
+			istate->index_file_stat_valid = 0;
+	} else if (!ret) {
+		istate->index_file_stat_valid = 0;
+	}
 
 	run_hooks_l(the_repository, "post-index-change",
 		    istate->updated_workdir ? "1" : "0",
