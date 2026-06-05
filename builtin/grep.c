@@ -9,6 +9,8 @@
 
 #include "builtin.h"
 #include "abspath.h"
+#include "environment.h"
+#include "fsmonitor-settings.h"
 #include "gettext.h"
 #include "hex.h"
 #include "config.h"
@@ -19,6 +21,7 @@
 #include "run-command.h"
 #include "grep.h"
 #include "grep-index.h"
+#include "grep-index-ipc.h"
 #include "grep-worktree.h"
 #include "quote.h"
 #include "dir.h"
@@ -37,6 +40,7 @@
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
 #include "trace2.h"
+#include "wrapper.h"
 #include "write-or-die.h"
 
 static const char *grep_prefix;
@@ -48,16 +52,37 @@ static char const * const grep_usage[] = {
 
 static int recurse_submodules;
 
+enum worktree_blob_cache_mode {
+	WORKTREE_BLOB_CACHE_AUTO,
+	WORKTREE_BLOB_CACHE_ALWAYS,
+	WORKTREE_BLOB_CACHE_NEVER,
+};
+
 static int num_threads;
+static int threads_auto;
 static int use_content_index = 1;
 static struct grep_index *content_index;
+static struct grep_index_prepared *content_index_prepared;
 static struct grep_index_query *content_index_query;
-static int worktree_blob_cache;
+static unsigned char *content_index_ipc_result;
+static size_t content_index_ipc_nr;
+static enum worktree_blob_cache_mode worktree_blob_cache_mode =
+	WORKTREE_BLOB_CACHE_AUTO;
 static struct grep_worktree_cache *worktree_cache;
 
 static pthread_t *threads;
+static int threads_started;
+static pthread_t worker_lease_thread;
+static int worker_lease_thread_started;
+static int worker_lease_stop;
+static int worker_thread_count;
+static int worker_target;
+static unsigned char *worker_busy;
+static uint64_t worker_lease_id;
+static struct grep_opt *worker_template;
 
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
+#define GREP_MIN_FILES_FOR_THREADS 32
 
 struct grep_result_cache_entry {
 	struct hashmap_entry ent;
@@ -82,6 +107,11 @@ struct work_item {
 	size_t worktree_blob_pos;
 	char done;
 	struct strbuf out;
+};
+
+struct grep_thread_data {
+	struct grep_opt *opt;
+	int id;
 };
 
 /* In the range [todo_done, todo_start) in 'todo' we have work_items
@@ -122,6 +152,9 @@ static inline void grep_unlock(void)
 /* Signalled when a new work_item is added to todo. */
 static pthread_cond_t cond_add;
 
+/* Signalled when the daemon changes the number of eligible workers. */
+static pthread_cond_t cond_resize;
+
 /* Signalled when the producer can add more work or should stop. */
 static pthread_cond_t cond_write;
 
@@ -148,13 +181,13 @@ static int grep_result_cache_cmp(const void *data UNUSED,
 
 static void grep_result_cache_lock(void)
 {
-	if (num_threads > 1)
+	if (threads_started)
 		grep_lock();
 }
 
 static void grep_result_cache_unlock(void)
 {
-	if (num_threads > 1)
+	if (threads_started)
 		grep_unlock();
 }
 
@@ -247,13 +280,20 @@ static int add_work(struct grep_opt *opt, struct grep_source *gs,
 	return 0;
 }
 
-static struct work_item *get_work(void)
+static struct work_item *get_work(int worker_id)
 {
 	struct work_item *ret;
 
 	grep_lock();
-	while (todo_start == todo_end && !all_work_added) {
-		pthread_cond_wait(&cond_add, &grep_mutex);
+	for (;;) {
+		if (todo_start == todo_end && all_work_added)
+			break;
+		if (worker_id >= worker_target)
+			pthread_cond_wait(&cond_resize, &grep_mutex);
+		else if (todo_start == todo_end)
+			pthread_cond_wait(&cond_add, &grep_mutex);
+		else
+			break;
 	}
 
 	if (todo_start == todo_end && all_work_added) {
@@ -261,16 +301,18 @@ static struct work_item *get_work(void)
 	} else {
 		ret = &todo[todo_start];
 		todo_start = (todo_start + 1) % ARRAY_SIZE(todo);
+		worker_busy[worker_id] = 1;
 	}
 	grep_unlock();
 	return ret;
 }
 
-static void work_done(struct work_item *w)
+static void work_done(struct work_item *w, int worker_id)
 {
 	int old_done;
 
 	grep_lock();
+	worker_busy[worker_id] = 0;
 	w->done = 1;
 	old_done = todo_done;
 	for(; todo[todo_done].done && todo_done != todo_start;
@@ -325,11 +367,13 @@ static void free_repos(void)
 
 static void *run(void *arg)
 {
+	struct grep_thread_data *thread = arg;
 	int hit = 0;
-	struct grep_opt *opt = arg;
+	struct grep_opt *opt = thread->opt;
+	int worker_id = thread->id;
 
 	while (1) {
-		struct work_item *w = get_work();
+		struct work_item *w = get_work(worker_id);
 		int source_hit = 0;
 
 		if (!w)
@@ -367,10 +411,11 @@ static void *run(void *arg)
 			grep_unlock();
 		}
 		grep_source_clear_data(&w->source);
-		work_done(w);
+		work_done(w, worker_id);
 	}
 	free_grep_patterns(opt);
 	free(opt);
+	free(thread);
 
 	return (void*) (intptr_t) hit;
 }
@@ -381,34 +426,181 @@ static void strbuf_out(struct grep_opt *opt, const void *buf, size_t size)
 	strbuf_add(&w->out, buf, size);
 }
 
+static int start_worker_thread(int id)
+{
+	struct grep_thread_data *thread;
+	struct grep_opt *o = grep_opt_dup(worker_template);
+	int err;
+
+	CALLOC_ARRAY(thread, 1);
+	thread->opt = o;
+	thread->id = id;
+	o->output = strbuf_out;
+	compile_grep_patterns(o);
+	err = pthread_create(&threads[id], NULL, run, thread);
+	if (err) {
+		free_grep_patterns(o);
+		free(o);
+		free(thread);
+	}
+	return err;
+}
+
+static void *renew_worker_lease(void *data UNUSED)
+{
+	trace2_thread_start("grep-lease");
+	for (;;) {
+		uint64_t lease_id;
+		int held;
+		int target;
+		int err;
+
+		for (int i = 0; i < 5; i++) {
+			sleep_millisec(10);
+			grep_lock();
+			if (!worker_lease_stop) {
+				grep_unlock();
+				continue;
+			}
+			grep_unlock();
+			goto done;
+		}
+		grep_lock();
+		lease_id = worker_lease_id;
+		target = held = worker_target;
+		for (int i = worker_target; i < worker_thread_count; i++)
+			if (worker_busy[i])
+				held++;
+		grep_unlock();
+
+		if (lease_id)
+			err = grep_index_ipc_update_workers(
+				the_repository, lease_id, num_threads,
+				held, &target);
+		else
+			err = grep_index_ipc_acquire_workers(
+				the_repository, num_threads, held,
+				&lease_id, &target);
+		if (err == GREP_INDEX_IPC_WORKER_UPDATE_UNKNOWN) {
+			worker_lease_id = 0;
+			target = num_threads;
+		} else if (err == GREP_INDEX_IPC_WORKER_UPDATE_NOT_SENT) {
+			target = num_threads;
+			grep_index_ipc_workers_are_available(the_repository);
+		} else if (err < 0) {
+			worker_lease_id = 0;
+			target = num_threads;
+		} else {
+			worker_lease_id = lease_id;
+		}
+		if (target > num_threads)
+			target = num_threads;
+		while (worker_thread_count < target) {
+			if (start_worker_thread(worker_thread_count))
+				break;
+			worker_thread_count++;
+		}
+		if (target > worker_thread_count)
+			target = worker_thread_count;
+		grep_lock();
+		if (worker_target != target) {
+			worker_target = target;
+			pthread_cond_broadcast(&cond_add);
+			pthread_cond_broadcast(&cond_resize);
+			trace2_data_intmax(
+				"grep", the_repository,
+				"worker_lease/target", target);
+		}
+		grep_unlock();
+	}
+done:
+	trace2_thread_exit();
+	return NULL;
+}
+
 static void start_threads(struct grep_opt *opt)
 {
+	int initial_threads =
+		!threads_auto || num_threads < 4 ? num_threads : 4;
 	int i;
+
+	worker_thread_count = num_threads;
+	worker_target = num_threads;
+	if (threads_auto && startup_info->have_repository &&
+	    fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_IPC &&
+	    !grep_index_ipc_acquire_workers(
+		    the_repository, initial_threads, 0, &worker_lease_id,
+		    &worker_target)) {
+		worker_thread_count = initial_threads;
+		if (worker_target > worker_thread_count)
+			worker_target = worker_thread_count;
+	}
+	worker_template = opt;
+
+	if (!(opt->name_only || opt->unmatch_name_only || opt->count)
+	    && (opt->pre_context || opt->post_context ||
+		opt->file_break || opt->funcbody))
+		skip_first_line = 1;
+
+	if (recurse_submodules)
+		repo_read_gitmodules(the_repository, 1);
+
+	if (startup_info->have_repository)
+		odb_prepare(the_repository->objects, 0);
 
 	pthread_mutex_init(&grep_mutex, NULL);
 	pthread_mutex_init(&grep_attr_mutex, NULL);
 	pthread_cond_init(&cond_add, NULL);
+	pthread_cond_init(&cond_resize, NULL);
 	pthread_cond_init(&cond_write, NULL);
 	pthread_cond_init(&cond_result, NULL);
 	grep_use_locks = 1;
 	enable_obj_read_lock();
 	status_only_hit = 0;
+	threads_started = 1;
+	worker_lease_stop = 0;
 
 	for (i = 0; i < ARRAY_SIZE(todo); i++) {
 		strbuf_init(&todo[i].out, 0);
 	}
 
 	CALLOC_ARRAY(threads, num_threads);
-	for (i = 0; i < num_threads; i++) {
-		int err;
-		struct grep_opt *o = grep_opt_dup(opt);
-		o->output = strbuf_out;
-		compile_grep_patterns(o);
-		err = pthread_create(&threads[i], NULL, run, o);
+	CALLOC_ARRAY(worker_busy, num_threads);
+	for (i = 0; i < worker_thread_count; i++) {
+		int err = start_worker_thread(i);
 
-		if (err)
+		if (err) {
+			if (worker_lease_id) {
+				grep_index_ipc_release_workers(
+					the_repository, worker_lease_id);
+				worker_lease_id = 0;
+			}
 			die(_("grep: failed to create thread: %s"),
 			    strerror(err));
+		}
+	}
+	if (worker_lease_id) {
+		int err = pthread_create(
+			&worker_lease_thread, NULL, renew_worker_lease, NULL);
+
+		if (err) {
+			grep_index_ipc_release_workers(
+				the_repository, worker_lease_id);
+			worker_lease_id = 0;
+			while (worker_thread_count < num_threads) {
+				err = start_worker_thread(worker_thread_count);
+				if (err)
+					die(_("grep: failed to create thread: %s"),
+					    strerror(err));
+				worker_thread_count++;
+			}
+			grep_lock();
+			worker_target = worker_thread_count;
+			pthread_cond_broadcast(&cond_resize);
+			grep_unlock();
+		} else {
+			worker_lease_thread_started = 1;
+		}
 	}
 }
 
@@ -426,28 +618,44 @@ static int wait_all(void)
 	/* Wait until all work is done. */
 	while (todo_done != todo_end)
 		pthread_cond_wait(&cond_result, &grep_mutex);
+	worker_lease_stop = 1;
 
 	/* Wake up all the consumer threads so they can see that there
 	 * is no more work to do.
 	 */
 	pthread_cond_broadcast(&cond_add);
+	pthread_cond_broadcast(&cond_resize);
 	grep_unlock();
 
-	for (i = 0; i < num_threads; i++) {
+	if (worker_lease_thread_started) {
+		pthread_join(worker_lease_thread, NULL);
+		worker_lease_thread_started = 0;
+	}
+	for (i = 0; i < worker_thread_count; i++) {
 		void *h;
 		pthread_join(threads[i], &h);
 		hit |= (int) (intptr_t) h;
 	}
+	if (worker_lease_id) {
+		grep_index_ipc_release_workers(
+			the_repository, worker_lease_id);
+		worker_lease_id = 0;
+	}
 
 	free(threads);
+	FREE_AND_NULL(worker_busy);
 
+	threads_started = 0;
 	pthread_mutex_destroy(&grep_mutex);
 	pthread_mutex_destroy(&grep_attr_mutex);
 	pthread_cond_destroy(&cond_add);
+	pthread_cond_destroy(&cond_resize);
 	pthread_cond_destroy(&cond_write);
 	pthread_cond_destroy(&cond_result);
 	grep_use_locks = 0;
 	disable_obj_read_lock();
+	worker_thread_count = 0;
+	worker_template = NULL;
 
 	return hit;
 }
@@ -478,8 +686,20 @@ static int grep_cmd_config(const char *var, const char *value,
 		}
 	}
 
-	if (!strcmp(var, "grep.worktreeblobcache"))
-		worktree_blob_cache = git_config_bool(var, value);
+	if (!strcmp(var, "grep.worktreeblobcache")) {
+		int value_bool;
+
+		if (value && !strcasecmp(value, "auto")) {
+			worktree_blob_cache_mode = WORKTREE_BLOB_CACHE_AUTO;
+		} else if ((value_bool = git_parse_maybe_bool(value)) >= 0) {
+			worktree_blob_cache_mode = value_bool ?
+				WORKTREE_BLOB_CACHE_ALWAYS :
+				WORKTREE_BLOB_CACHE_NEVER;
+		} else {
+			return error(_("invalid value for '%s': '%s'"),
+				     var, value);
+		}
+	}
 
 	if (!strcmp(var, "grep.usecontentindex"))
 		use_content_index = git_config_bool(var, value);
@@ -524,22 +744,33 @@ static void grep_source_name(struct grep_opt *opt, const char *filename,
 
 static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		    const char *filename, int tree_name_len,
-		    const char *path, int fallback_to_file, size_t pos)
+		    const char *path, int fallback_to_file, size_t pos,
+		    int content_index_checked)
 {
 	struct strbuf pathbuf = STRBUF_INIT;
 	struct grep_source gs;
 
-	if (!content_index && content_index_query &&
-	    opt->repo == the_repository) {
-		content_index = grep_index_load(the_repository);
-		if (!content_index) {
-			grep_index_query_free(content_index_query);
-			content_index_query = NULL;
+	if (!content_index_checked) {
+		if (!content_index && content_index_query &&
+		    opt->repo == the_repository) {
+			content_index = grep_index_load(the_repository);
+			if (!content_index) {
+				grep_index_query_free(content_index_query);
+				content_index_query = NULL;
+			} else
+				content_index_prepared = grep_index_prepare(
+					content_index, content_index_query);
 		}
+		if (!(content_index_prepared ?
+			      grep_index_prepared_maybe_contains(
+				      content_index_prepared, opt->repo, oid) :
+			      grep_index_maybe_contains(
+				      content_index, opt->repo, oid,
+				      content_index_query)))
+			return 0;
 	}
-	if (!grep_index_maybe_contains(content_index, opt->repo, oid,
-				       content_index_query))
-		return 0;
+	if (num_threads > 1 && !threads_started)
+		start_threads(opt);
 
 	grep_source_name(opt, filename, tree_name_len, &pathbuf);
 	grep_source_init_oid(&gs, pathbuf.buf, path, oid, opt->repo);
@@ -562,10 +793,10 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		int hit;
 
 		hit = grep_source(opt, &gs);
-		if (gs.worktree_blob_used)
-			grep_worktree_cache_hit(worktree_cache);
 		if (!hit && gs.buf && !gs.match_error)
 			grep_result_cache_add(opt, &gs);
+		if (gs.worktree_blob_used)
+			grep_worktree_cache_hit(worktree_cache);
 
 		grep_source_clear(&gs);
 		return hit;
@@ -578,6 +809,8 @@ static int grep_file(struct grep_opt *opt, const char *filename,
 	struct strbuf buf = STRBUF_INIT;
 	struct grep_source gs;
 
+	if (num_threads > 1 && !threads_started)
+		start_threads(opt);
 	grep_source_name(opt, filename, 0, &buf);
 	grep_source_init_file(&gs, buf.buf, filename);
 	if (ce) {
@@ -714,7 +947,7 @@ static int grep_submodule(struct grep_opt *opt,
 		enum object_type object_type;
 		struct tree_desc tree;
 		void *data;
-		size_t size;
+		unsigned long size;
 		struct strbuf base = STRBUF_INIT;
 
 		obj_read_lock();
@@ -752,6 +985,12 @@ static int grep_cache(struct grep_opt *opt,
 	struct repository *repo = opt->repo;
 	int hit = 0;
 	int nr;
+	int *selected = NULL;
+	size_t selected_nr = 0;
+	size_t selected_alloc = 0;
+	size_t selected_pos = 0;
+	int use_selected = 0;
+	int used_index_ipc = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	if (repo->submodule_prefix) {
@@ -763,13 +1002,252 @@ static int grep_cache(struct grep_opt *opt,
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
 	if (repo == the_repository && !cached && !opt->allow_textconv &&
-	    worktree_blob_cache)
-		worktree_cache = grep_worktree_cache_load(repo, repo->index);
+	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
+	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
+	     !opt->status_only)) {
+		uint64_t min_bytes = worktree_blob_cache_mode ==
+					     WORKTREE_BLOB_CACHE_ALWAYS ?
+					     0 :
+						     git_env_ulong(
+							     "GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
+							     GREP_WORKTREE_CACHE_MIN_BYTES);
+		uint64_t worktree_bytes = 0;
 
-	for (nr = 0; nr < repo->index->cache_nr; nr++) {
-		const struct cache_entry *ce = repo->index->cache[nr];
+		use_selected = min_bytes && !recurse_submodules;
+		for (nr = 0; min_bytes && nr < repo->index->cache_nr; nr++) {
+			const struct cache_entry *ce = repo->index->cache[nr];
 
-		if (!cached && ce_skip_worktree(ce))
+			if (ce_skip_worktree(ce) || !S_ISREG(ce->ce_mode) ||
+			    !match_pathspec(repo->index, pathspec, ce->name,
+					    ce_namelen(ce), 0, NULL, 0))
+				continue;
+			if (use_selected) {
+				ALLOC_GROW(selected, selected_nr + 1,
+					   selected_alloc);
+				selected[selected_nr++] = nr;
+			}
+			if (can_cache_worktree_blob(ce)) {
+				if (UINT64_MAX - worktree_bytes <
+				    ce->ce_stat_data.sd_size)
+					worktree_bytes = UINT64_MAX;
+				else
+					worktree_bytes +=
+						ce->ce_stat_data.sd_size;
+			}
+			if (ce_stage(ce)) {
+				while (nr + 1 < repo->index->cache_nr &&
+				       !strcmp(ce->name,
+					       repo->index->cache[nr + 1]->name))
+					nr++;
+			}
+		}
+		if (worktree_bytes >= min_bytes)
+			worktree_cache = grep_worktree_cache_load(repo,
+								  repo->index);
+	}
+	if (repo == the_repository && content_index_query &&
+	    !recurse_submodules &&
+	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
+	    grep_index_ipc_is_available(repo)) {
+		size_t bitmap_size =
+			repo->index->cache_nr / 8 +
+			!!(repo->index->cache_nr % 8);
+		unsigned char *maybe;
+
+		CALLOC_ARRAY(maybe, bitmap_size);
+		if (!grep_index_ipc_query_index(
+			    repo, content_index_query, maybe,
+			    repo->index->cache_nr)) {
+			used_index_ipc = 1;
+			if (cached &&
+			    repo->index->sparse_index == INDEX_EXPANDED) {
+				for (size_t i = 0;
+				     i < repo->index->cache_nr; i++) {
+					const struct cache_entry *ce =
+						repo->index->cache[i];
+
+					if (!(maybe[i / 8] &
+					      (1u << (i & 7))) ||
+					    !S_ISREG(ce->ce_mode) ||
+					    ce_stage(ce) ||
+					    ce_intent_to_add(ce) ||
+					    !match_pathspec(
+						    repo->index,
+						    pathspec, ce->name,
+						    ce_namelen(ce), 0,
+						    NULL, 0))
+						continue;
+					ALLOC_GROW(
+						selected,
+						selected_nr + 1,
+						selected_alloc);
+					selected[selected_nr++] = i;
+				}
+				use_selected = 1;
+				trace2_data_intmax(
+					"grep", repo,
+					"content_index_ipc_candidates",
+					selected_nr);
+				if (selected_nr &&
+				    selected_nr <
+					    GREP_MIN_FILES_FOR_THREADS &&
+				    num_threads > 1 && threads_auto)
+					num_threads = 1;
+			} else {
+				content_index_ipc_nr =
+					repo->index->cache_nr;
+				ALLOC_ARRAY(content_index_ipc_result,
+					    content_index_ipc_nr);
+				for (size_t i = 0;
+				     i < content_index_ipc_nr; i++)
+					content_index_ipc_result[i] =
+						maybe[i / 8] &
+								(1u <<
+								 (i & 7)) ?
+							GREP_INDEX_IPC_MAYBE :
+							GREP_INDEX_IPC_IMPOSSIBLE;
+			}
+		}
+		free(maybe);
+	}
+	if (repo == the_repository && content_index_query &&
+	    !used_index_ipc && !content_index) {
+		trace2_region_enter("grep", "load_content_index", repo);
+		content_index = grep_index_load(repo);
+		trace2_region_leave("grep", "load_content_index", repo);
+		trace2_region_enter("grep", "prepare_content_index", repo);
+		if (content_index)
+			content_index_prepared = grep_index_prepare(
+				content_index, content_index_query);
+		trace2_region_leave("grep", "prepare_content_index", repo);
+	}
+	if (cached && !recurse_submodules && content_index_prepared &&
+	    repo->index->sparse_index == INDEX_EXPANDED) {
+		trace2_region_enter("grep", "select_content_index", repo);
+		for (size_t i = 0; i < repo->index->cache_nr; i++) {
+			const struct cache_entry *ce = repo->index->cache[i];
+
+			if (!S_ISREG(ce->ce_mode) || ce_stage(ce) ||
+			    ce_intent_to_add(ce) ||
+			    !match_pathspec(repo->index, pathspec, ce->name,
+					    ce_namelen(ce), 0, NULL, 0))
+				continue;
+			if (!grep_index_prepared_maybe_contains(
+				    content_index_prepared, repo, &ce->oid))
+				continue;
+			ALLOC_GROW(selected, selected_nr + 1,
+				   selected_alloc);
+			selected[selected_nr++] = i;
+		}
+		use_selected = 1;
+		trace2_data_intmax("grep", repo,
+				   "content_index_candidates", selected_nr);
+		if (selected_nr &&
+		    selected_nr < GREP_MIN_FILES_FOR_THREADS &&
+		    num_threads > 1 && threads_auto)
+			num_threads = 1;
+		trace2_region_leave("grep", "select_content_index", repo);
+	}
+	if (repo == the_repository && content_index_query &&
+	    !used_index_ipc && !content_index_prepared &&
+	    !recurse_submodules &&
+	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
+	    grep_index_ipc_is_available(repo)) {
+		struct object_id *oids = NULL;
+		size_t *positions = NULL;
+		unsigned char *maybe = NULL;
+		size_t nr_oids = 0;
+		size_t oids_alloc = 0;
+		size_t positions_alloc = 0;
+
+		for (size_t i = 0; i < repo->index->cache_nr; i++) {
+			const struct cache_entry *ce = repo->index->cache[i];
+			int use_oid = cached || (ce->ce_flags & CE_VALID);
+
+			if ((!cached && ce_skip_worktree(ce)) ||
+			    !S_ISREG(ce->ce_mode) || ce_stage(ce) ||
+			    ce_intent_to_add(ce) ||
+			    !match_pathspec(repo->index, pathspec, ce->name,
+					    ce_namelen(ce), 0, NULL, 0))
+				continue;
+			if (!use_oid && worktree_cache &&
+			    can_cache_worktree_blob(ce)) {
+				if (threads_started)
+					grep_lock();
+				use_oid = grep_worktree_cache_lookup(
+						  worktree_cache, i) ==
+					  GREP_WORKTREE_CACHE_EQUAL;
+				if (threads_started)
+					grep_unlock();
+			}
+			if (!use_oid)
+				continue;
+			ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
+			ALLOC_GROW(positions, nr_oids + 1,
+				   positions_alloc);
+			oidcpy(&oids[nr_oids], &ce->oid);
+			positions[nr_oids++] = i;
+		}
+		if (nr_oids) {
+			ALLOC_ARRAY(maybe, nr_oids);
+			content_index_ipc_nr = repo->index->cache_nr;
+			CALLOC_ARRAY(content_index_ipc_result,
+				     content_index_ipc_nr);
+			if (!grep_index_ipc_query(
+				    repo, content_index_query, oids,
+				    nr_oids, maybe)) {
+				for (size_t i = 0; i < nr_oids; i++) {
+					content_index_ipc_result[positions[i]] =
+						maybe[i];
+					if (cached &&
+					    repo->index->sparse_index ==
+						    INDEX_EXPANDED &&
+					    maybe[i] !=
+						    GREP_INDEX_IPC_IMPOSSIBLE) {
+						ALLOC_GROW(
+							selected,
+							selected_nr + 1,
+							selected_alloc);
+						selected[selected_nr++] =
+							positions[i];
+					}
+				}
+				if (cached &&
+				    repo->index->sparse_index ==
+					    INDEX_EXPANDED) {
+					use_selected = 1;
+					trace2_data_intmax(
+						"grep", repo,
+						"content_index_ipc_candidates",
+						selected_nr);
+					if (selected_nr &&
+					    selected_nr <
+						    GREP_MIN_FILES_FOR_THREADS &&
+					    num_threads > 1 &&
+					    threads_auto)
+						num_threads = 1;
+				}
+			} else {
+				FREE_AND_NULL(content_index_ipc_result);
+				content_index_ipc_nr = 0;
+			}
+		}
+		free(maybe);
+		free(positions);
+		free(oids);
+	}
+
+	for (nr = 0;
+	     use_selected ? selected_pos < selected_nr :
+			    nr < repo->index->cache_nr;
+	     use_selected ? selected_pos++ : nr++) {
+		const struct cache_entry *ce;
+
+		if (use_selected)
+			nr = selected[selected_pos];
+		ce = repo->index->cache[nr];
+
+		if (!use_selected && !cached && ce_skip_worktree(ce))
 			continue;
 
 		strbuf_setlen(&name, name_base_len);
@@ -778,7 +1256,7 @@ static int grep_cache(struct grep_opt *opt,
 			enum object_type type;
 			struct tree_desc tree;
 			void *data;
-			size_t size;
+			unsigned long size;
 
 			data = odb_read_object(the_repository->objects, &ce->oid,
 					       &type, &size);
@@ -804,12 +1282,12 @@ static int grep_cache(struct grep_opt *opt,
 				worktree_cache;
 			int use_worktree_blob;
 
-			if (can_cache && num_threads > 1)
+			if (can_cache && threads_started)
 				grep_lock();
 			if (can_cache)
 				cache_result = grep_worktree_cache_lookup(
 					worktree_cache, nr);
-			if (can_cache && num_threads > 1)
+			if (can_cache && threads_started)
 				grep_unlock();
 			use_worktree_blob =
 				cache_result == GREP_WORKTREE_CACHE_EQUAL;
@@ -828,8 +1306,18 @@ static int grep_cache(struct grep_opt *opt,
 			    use_worktree_blob) {
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
+				if (content_index_ipc_result &&
+				    nr < content_index_ipc_nr &&
+				    content_index_ipc_result[nr] == 1)
+					continue;
 				hit |= grep_oid(opt, &ce->oid, name.buf,
-						0, name.buf, use_worktree_blob, nr);
+						0, name.buf, use_worktree_blob, nr,
+						used_index_ipc ||
+							(content_index_ipc_result &&
+							 nr <
+								 content_index_ipc_nr &&
+							 content_index_ipc_result
+								 [nr]));
 			} else {
 				hit |= grep_file(opt, name.buf,
 						 can_cache ? cache_candidate : NULL,
@@ -843,7 +1331,7 @@ static int grep_cache(struct grep_opt *opt,
 			continue;
 		}
 
-		if (ce_stage(ce)) {
+		if (!use_selected && ce_stage(ce)) {
 			do {
 				nr++;
 			} while (nr < repo->index->cache_nr &&
@@ -854,6 +1342,7 @@ static int grep_cache(struct grep_opt *opt,
 			break;
 	}
 
+	free(selected);
 	strbuf_release(&name);
 	return hit;
 }
@@ -895,12 +1384,12 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		if (S_ISREG(entry.mode)) {
 			hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
 					check_attr ? base->buf + tn_len : NULL,
-					0, 0);
+					0, 0, 0);
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
 			struct tree_desc sub;
 			void *data;
-			size_t size;
+			unsigned long size;
 
 			data = odb_read_object(the_repository->objects,
 					       &entry.oid, &type, &size);
@@ -964,7 +1453,7 @@ static void collect_blob_oids_for_tree(struct repository *repo,
 			enum object_type type;
 			struct tree_desc sub_tree;
 			void *data;
-			size_t size;
+			unsigned long size;
 
 			data = odb_read_object(repo->objects, &entry.oid,
 					       &type, &size);
@@ -998,7 +1487,7 @@ static void collect_blob_oids_for_treeish(struct grep_opt *opt,
 {
 	struct tree_desc tree;
 	void *data;
-	size_t size;
+	unsigned long size;
 	struct strbuf base = STRBUF_INIT;
 	int len;
 
@@ -1071,11 +1560,11 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct object *obj, const char *name, const char *path)
 {
 	if (obj->type == OBJ_BLOB)
-		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0);
+		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0, 0);
 	if (obj->type == OBJ_COMMIT || obj->type == OBJ_TREE) {
 		struct tree_desc tree;
 		void *data;
-		size_t size;
+		unsigned long size;
 		struct strbuf base;
 		int hit, len;
 
@@ -1552,7 +2041,6 @@ int cmd_grep(int argc,
 	pathspec.max_depth = opt.max_depth;
 	pathspec.recursive = 1;
 	pathspec.recurse_submodules = !!recurse_submodules;
-
 	if (recurse_submodules && untracked)
 		die(_("--untracked not supported with --recurse-submodules"));
 
@@ -1568,6 +2056,7 @@ int cmd_grep(int argc,
 		goto out;
 	}
 
+	threads_auto = num_threads == 0;
 	if (show_in_pager) {
 		if (num_threads > 1)
 			warning(_("invalid option combination, ignoring --threads"));
@@ -1589,32 +2078,10 @@ int cmd_grep(int argc,
 	if (num_threads > 1) {
 		if (!HAVE_THREADS)
 			BUG("Somebody got num_threads calculation wrong!");
-		if (!(opt.name_only || opt.unmatch_name_only || opt.count)
-		    && (opt.pre_context || opt.post_context ||
-			opt.file_break || opt.funcbody))
-			skip_first_line = 1;
-
-		/*
-		 * Pre-read gitmodules (if not read already) and force eager
-		 * initialization of packed_git to prevent racy lazy
-		 * reading/initialization once worker threads are started.
-		 */
-		if (recurse_submodules)
-			repo_read_gitmodules(the_repository, 1);
-
-		if (startup_info->have_repository)
-			odb_prepare(the_repository->objects, 0);
-
-		start_threads(&opt);
-	} else {
-		/*
-		 * The compiled patterns on the main path are only
-		 * used when not using threading. Otherwise
-		 * start_threads() above calls compile_grep_patterns()
-		 * for each thread.
-		 */
-		compile_grep_patterns(&opt);
 	}
+	compile_grep_patterns(&opt);
+	if (num_threads > 1 && recurse_submodules)
+		start_threads(&opt);
 
 	if (show_in_pager && (cached || list.nr))
 		die(_("--open-files-in-pager only works on the worktree"));
@@ -1663,7 +2130,7 @@ int cmd_grep(int argc,
 		hit = grep_objects(&opt, &pathspec, &list);
 	}
 
-	if (num_threads > 1)
+	if (threads_started)
 		hit |= wait_all();
 	if (hit && show_in_pager)
 		run_pager(&opt, prefix);
@@ -1671,6 +2138,11 @@ int cmd_grep(int argc,
 	ret = !hit;
 
 out:
+	if (worker_lease_id) {
+		grep_index_ipc_release_workers(
+			the_repository, worker_lease_id);
+		worker_lease_id = 0;
+	}
 	grep_worktree_cache_write(worktree_cache);
 	grep_worktree_cache_free(worktree_cache);
 	worktree_cache = NULL;
@@ -1691,7 +2163,10 @@ out:
 		grep_result_cache.initialized = 0;
 	}
 	grep_index_query_free(content_index_query);
+	grep_index_prepared_free(content_index_prepared);
 	grep_index_free(content_index);
+	FREE_AND_NULL(content_index_ipc_result);
+	content_index_ipc_nr = 0;
 	free_repos();
 	return ret;
 }
