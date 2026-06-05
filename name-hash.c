@@ -691,6 +691,178 @@ static int same_name(const struct cache_entry *ce, const char *name, int namelen
 	return slow_same_name(name, namelen, ce->name, len);
 }
 
+static int index_icase_find_component(struct index_state *istate,
+				      size_t range_start, size_t range_end,
+				      size_t parent_len,
+				      const char *component_name,
+				      size_t component_len, int require_dir,
+				      size_t *scans, size_t scan_limit,
+				      size_t *matched_dir_start)
+{
+	int matches = 0;
+
+	for (size_t i = range_start; i < range_end;) {
+		const struct cache_entry *ce = istate->cache[i];
+		const char *component = ce->name + parent_len;
+		size_t remaining = ce_namelen(ce) - parent_len;
+		const char *slash = memchr(component, '/', remaining);
+		size_t candidate_len = slash ?
+			(size_t)(slash - component) : remaining;
+		size_t j;
+		size_t dir_start = SIZE_MAX;
+
+		if (*scans >= scan_limit)
+			return -1;
+		(*scans)++;
+
+		if (slash) {
+			size_t lo = i + 1;
+			size_t hi = range_end;
+
+			dir_start = i;
+			while (lo < hi) {
+				size_t mid = lo + (hi - lo) / 2;
+				const struct cache_entry *next =
+					istate->cache[mid];
+				const char *next_component =
+					next->name + parent_len;
+				size_t next_remaining =
+					ce_namelen(next) - parent_len;
+
+				if (next_remaining > candidate_len &&
+				    next_component[candidate_len] == '/' &&
+				    !memcmp(component, next_component,
+					    candidate_len))
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			j = lo;
+		} else {
+			j = i + 1;
+			while (j < range_end) {
+				const struct cache_entry *next =
+					istate->cache[j];
+				const char *next_component =
+					next->name + parent_len;
+				size_t next_remaining =
+					ce_namelen(next) - parent_len;
+
+				if (next_remaining != candidate_len ||
+				    memcmp(component, next_component,
+					   candidate_len))
+					break;
+				j++;
+			}
+		}
+
+		if ((!require_dir || dir_start != SIZE_MAX) &&
+		    component_len == candidate_len &&
+		    slow_same_name(component_name, component_len,
+				   component, candidate_len)) {
+			if (++matches > 1)
+				return matches;
+			*matched_dir_start = dir_start;
+		}
+		i = j;
+	}
+
+	return matches;
+}
+
+enum index_file_icase_probe_result
+index_file_exists_icase_probe(struct index_state *istate,
+			      const char *name, size_t namelen,
+			      size_t *scans, size_t scan_limit)
+{
+	struct strbuf path = STRBUF_INIT;
+	size_t name_pos = 0;
+	size_t range_start = 0;
+	size_t range_end = istate->cache_nr;
+	enum index_file_icase_probe_result result =
+		INDEX_FILE_ICASE_PROBE_UNKNOWN;
+
+	if (!namelen || name[namelen - 1] == '/' ||
+	    istate->sparse_index || istate->name_hash_initialized)
+		return INDEX_FILE_ICASE_PROBE_UNKNOWN;
+
+	while (name_pos < namelen) {
+		size_t component_end = name_pos;
+		size_t component_len;
+		size_t parent_len = path.len;
+		size_t matched_dir_start = SIZE_MAX;
+		size_t exact_start;
+		size_t exact_end;
+		int is_last;
+		int matches;
+		int pos;
+
+		while (component_end < namelen && name[component_end] != '/')
+			component_end++;
+		component_len = component_end - name_pos;
+		is_last = component_end == namelen;
+		if (!component_len)
+			goto cleanup;
+
+		if (is_last) {
+			matches = index_icase_find_component(
+				istate, range_start, range_end, parent_len,
+				name + name_pos, component_len, 0,
+				scans, scan_limit, &matched_dir_start);
+			if (matches < 0 || matches > 1)
+				goto cleanup;
+			if (!matches || matched_dir_start != SIZE_MAX)
+				result = INDEX_FILE_ICASE_PROBE_ABSENT;
+			else
+				result = INDEX_FILE_ICASE_PROBE_PRESENT;
+			goto cleanup;
+		}
+
+		strbuf_add(&path, name + name_pos, component_len);
+		strbuf_addch(&path, '/');
+		pos = index_name_pos(istate, path.buf, path.len);
+		exact_start = pos < 0 ? -pos - 1 : pos;
+		if (exact_start < range_start ||
+		    exact_start >= range_end ||
+		    !starts_with(istate->cache[exact_start]->name, path.buf))
+			goto cleanup;
+
+		{
+			size_t lo = exact_start + 1;
+			size_t hi = range_end;
+
+			while (lo < hi) {
+				size_t mid = lo + (hi - lo) / 2;
+
+				if (starts_with(istate->cache[mid]->name,
+						path.buf))
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			exact_end = lo;
+		}
+
+		strbuf_setlen(&path, parent_len);
+		matches = index_icase_find_component(
+			istate, range_start, range_end, parent_len,
+			name + name_pos, component_len, 1,
+			scans, scan_limit, &matched_dir_start);
+		if (matches != 1)
+			goto cleanup;
+
+		strbuf_add(&path, name + name_pos, component_len);
+		strbuf_addch(&path, '/');
+		range_start = exact_start;
+		range_end = exact_end;
+		name_pos = component_end + 1;
+	}
+
+cleanup:
+	strbuf_release(&path);
+	return result;
+}
+
 int index_dir_find(struct index_state *istate, const char *name, int namelen,
 		   struct strbuf *canonical_path)
 {
