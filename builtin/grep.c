@@ -68,7 +68,7 @@ static struct grep_index_query *content_index_query;
 static unsigned char *content_index_ipc_result;
 static size_t content_index_ipc_nr;
 static enum worktree_blob_cache_mode worktree_blob_cache_mode =
-	WORKTREE_BLOB_CACHE_NEVER;
+	WORKTREE_BLOB_CACHE_AUTO;
 static struct grep_worktree_cache *worktree_cache;
 
 static pthread_t *threads;
