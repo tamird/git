@@ -12,6 +12,7 @@
 #include "repository.h"
 #include "run-command.h"
 #include "strbuf.h"
+#include "strmap.h"
 #include "trace2.h"
 
 #define INDEX_EXTENSION_VERSION1	(1)
@@ -207,6 +208,17 @@ static void invalidate_ce_fsm(struct cache_entry *ce)
 static size_t handle_path_with_trailing_slash(
 	struct index_state *istate, const char *name, int pos);
 
+#define FSMONITOR_ICASE_SCAN_LIMIT 1024
+
+struct fsmonitor_icase_stats {
+	struct strset exact_dirs;
+	struct strset rejected_paths;
+	size_t scans;
+	size_t resolved;
+	size_t rejects;
+	size_t fallbacks;
+};
+
 /*
  * Use the name-hash to do a case-insensitive cache-entry lookup with
  * the pathname and invalidate the cache-entry.
@@ -312,6 +324,269 @@ static size_t handle_using_dir_name_hash_icase(
 		istate, canonical_path.buf, pos);
 	strbuf_release(&canonical_path);
 	return nr_in_cone;
+}
+
+struct fsmonitor_icase_match {
+	const char *component;
+	size_t component_len;
+	size_t start;
+	size_t end;
+	size_t dir_start;
+};
+
+static int find_icase_match(
+	struct index_state *istate,
+	size_t range_start,
+	size_t range_end,
+	size_t parent_len,
+	const char *component_name,
+	size_t component_len,
+	int require_dir,
+	struct fsmonitor_icase_stats *stats,
+	struct fsmonitor_icase_match *match)
+{
+	int matches = 0;
+
+	for (size_t i = range_start; i < range_end;) {
+		const struct cache_entry *ce = istate->cache[i];
+		const char *component = ce->name + parent_len;
+		size_t remaining = ce_namelen(ce) - parent_len;
+		const char *slash = memchr(component, '/', remaining);
+		size_t candidate_len = slash ?
+			(size_t)(slash - component) : remaining;
+		size_t j;
+		size_t dir_start = SIZE_MAX;
+
+		if (stats->scans == FSMONITOR_ICASE_SCAN_LIMIT)
+			return -1;
+		stats->scans++;
+
+		if (slash) {
+			size_t lo = i + 1;
+			size_t hi = range_end;
+
+			dir_start = i;
+			while (lo < hi) {
+				size_t mid = lo + (hi - lo) / 2;
+				const struct cache_entry *next =
+					istate->cache[mid];
+				const char *next_component =
+					next->name + parent_len;
+				size_t next_remaining =
+					ce_namelen(next) - parent_len;
+
+				if (next_remaining > candidate_len &&
+				    next_component[candidate_len] == '/' &&
+				    !memcmp(component, next_component,
+					    candidate_len))
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			j = lo;
+		} else {
+			j = i + 1;
+			while (j < range_end) {
+				const struct cache_entry *next =
+					istate->cache[j];
+				const char *next_component =
+					next->name + parent_len;
+				size_t next_remaining =
+					ce_namelen(next) - parent_len;
+
+				if (next_remaining != candidate_len ||
+				    memcmp(component, next_component,
+					   candidate_len))
+					break;
+				j++;
+			}
+		}
+
+		if ((!require_dir || dir_start != SIZE_MAX) &&
+		    component_len == candidate_len &&
+		    !fspathncmp(component_name, component, component_len)) {
+			if (++matches > 1)
+				return matches;
+			match->component = component;
+			match->component_len = candidate_len;
+			match->start = i;
+			match->end = j;
+			match->dir_start = dir_start;
+		}
+		i = j;
+	}
+
+	return matches;
+}
+
+/*
+ * Avoid constructing the full name hashes when exact parent directories
+ * narrow the search to a small sibling range. If a parent itself needs case
+ * correction, preserve the general name-hash fallback.
+ */
+static size_t handle_using_index_icase(
+	struct index_state *istate,
+	const char *name,
+	struct fsmonitor_icase_stats *stats)
+{
+	struct strbuf canonical_path = STRBUF_INIT;
+	size_t len = strlen(name);
+	size_t name_pos = 0;
+	size_t range_start = 0;
+	size_t range_end = istate->cache_nr;
+	size_t nr_in_cone = 0;
+	int is_dir = len && name[len - 1] == '/';
+
+	if (istate->sparse_index || istate->name_hash_initialized)
+		goto use_name_hash;
+	if (is_dir)
+		len--;
+
+	while (name_pos < len) {
+		struct fsmonitor_icase_match match = {
+			.dir_start = SIZE_MAX,
+		};
+		size_t component_end = name_pos;
+		size_t component_len;
+		size_t parent_len = canonical_path.len;
+		int is_last;
+		int matches;
+
+		while (component_end < len && name[component_end] != '/')
+			component_end++;
+		component_len = component_end - name_pos;
+		is_last = component_end == len;
+
+		if (!is_last) {
+			size_t exact_start;
+			size_t exact_end;
+			int pos;
+
+			strbuf_add(&canonical_path, name + name_pos,
+				   component_len);
+			strbuf_addch(&canonical_path, '/');
+			pos = index_name_pos(istate, canonical_path.buf,
+					     canonical_path.len);
+			exact_start = pos < 0 ? -pos - 1 : pos;
+
+			if (exact_start >= range_start &&
+			    exact_start < range_end &&
+			    starts_with(istate->cache[exact_start]->name,
+					canonical_path.buf)) {
+				size_t lo = exact_start + 1;
+				size_t hi = range_end;
+
+				while (lo < hi) {
+					size_t mid = lo + (hi - lo) / 2;
+
+					if (starts_with(istate->cache[mid]->name,
+							canonical_path.buf))
+						lo = mid + 1;
+					else
+						hi = mid;
+				}
+				exact_end = lo;
+
+				if (!strset_contains(&stats->exact_dirs,
+						     canonical_path.buf)) {
+					strbuf_setlen(&canonical_path,
+						      parent_len);
+					matches = find_icase_match(
+						istate, range_start, range_end,
+						parent_len, name + name_pos,
+						component_len, 1, stats, &match);
+					if (matches > 1)
+						goto invalidate_all;
+					if (matches != 1)
+						goto use_name_hash;
+					strbuf_add(&canonical_path,
+						   name + name_pos,
+						   component_len);
+					strbuf_addch(&canonical_path, '/');
+					strset_add(&stats->exact_dirs,
+						   canonical_path.buf);
+				}
+
+				range_start = exact_start;
+				range_end = exact_end;
+				name_pos = component_end + 1;
+				continue;
+			}
+			strbuf_setlen(&canonical_path, parent_len);
+		}
+
+		strbuf_add(&canonical_path, name + name_pos, component_len);
+		if (!is_last || is_dir)
+			strbuf_addch(&canonical_path, '/');
+		if (strset_contains(&stats->rejected_paths,
+				    canonical_path.buf)) {
+			stats->rejects++;
+			goto cleanup;
+		}
+		strbuf_setlen(&canonical_path, parent_len);
+
+		matches = find_icase_match(
+			istate, range_start, range_end, parent_len,
+			name + name_pos, component_len, is_dir, stats, &match);
+		if (matches > 1)
+			goto invalidate_all;
+		if (matches < 0)
+			goto use_name_hash;
+		if (!matches) {
+			if (range_start < range_end) {
+				strbuf_add(&canonical_path, name + name_pos,
+					   component_len);
+				if (!is_last || is_dir)
+					strbuf_addch(&canonical_path, '/');
+				strset_add(&stats->rejected_paths,
+					   canonical_path.buf);
+			}
+			stats->rejects++;
+			goto cleanup;
+		}
+		if (!is_last)
+			goto use_name_hash;
+
+		strbuf_add(&canonical_path, match.component,
+			   match.component_len);
+		trace_printf_key(&trace_fsmonitor,
+				 "fsmonitor_refresh_callback MAP: '%s' '%s'",
+				 name, canonical_path.buf);
+
+		if (!is_dir && match.dir_start == SIZE_MAX) {
+			untracked_cache_invalidate_trimmed_path(
+				istate, canonical_path.buf, 0);
+			for (size_t i = match.start; i < match.end; i++) {
+				invalidate_ce_fsm(istate->cache[i]);
+				nr_in_cone++;
+			}
+		} else {
+			strbuf_addch(&canonical_path, '/');
+			nr_in_cone = handle_path_with_trailing_slash(
+				istate, canonical_path.buf, match.dir_start);
+		}
+		stats->resolved++;
+		goto cleanup;
+	}
+
+cleanup:
+	strbuf_release(&canonical_path);
+	return nr_in_cone;
+
+use_name_hash:
+	strbuf_release(&canonical_path);
+	stats->fallbacks++;
+	nr_in_cone = handle_using_name_hash_icase(istate, name);
+	if (!nr_in_cone)
+		nr_in_cone = handle_using_dir_name_hash_icase(istate, name);
+	return nr_in_cone;
+
+invalidate_all:
+	for (size_t i = 0; i < istate->cache_nr; i++)
+		invalidate_ce_fsm(istate->cache[i]);
+	strbuf_release(&canonical_path);
+	stats->fallbacks++;
+	return istate->cache_nr;
 }
 
 /*
@@ -432,7 +707,10 @@ static size_t handle_path_with_trailing_slash(
 	return nr_in_cone;
 }
 
-static void fsmonitor_refresh_callback(struct index_state *istate, char *name)
+static void fsmonitor_refresh_callback(
+	struct index_state *istate,
+	char *name,
+	struct fsmonitor_icase_stats *icase_stats)
 {
 	int len = strlen(name);
 	int pos = index_name_pos(istate, name, len);
@@ -450,15 +728,12 @@ static void fsmonitor_refresh_callback(struct index_state *istate, char *name)
 	/*
 	 * If we did not find an exact match for this pathname or any
 	 * cache-entries with this directory prefix and we're on a
-	 * case-insensitive file system, try again using the name-hash
-	 * and dir-name-hash.
+	 * case-insensitive file system, first try the bounded index scan
+	 * and fall back to the name hashes when necessary.
 	 */
-	if (!nr_in_cone && ignore_case) {
-		nr_in_cone = handle_using_name_hash_icase(istate, name);
-		if (!nr_in_cone)
-			nr_in_cone = handle_using_dir_name_hash_icase(
-				istate, name);
-	}
+	if (!nr_in_cone && ignore_case)
+		nr_in_cone = handle_using_index_icase(
+			istate, name, icase_stats);
 
 	if (nr_in_cone)
 		trace_printf_key(&trace_fsmonitor,
@@ -664,19 +939,38 @@ apply_results:
 		 * This updates both the cache-entries and the untracked-cache.
 		 */
 		int count = 0;
+		struct fsmonitor_icase_stats icase_stats = {
+			.exact_dirs = STRSET_INIT,
+			.rejected_paths = STRSET_INIT,
+		};
 
 		buf = query_result.buf;
 		for (i = bol; i < query_result.len; i++) {
 			if (buf[i] != '\0')
 				continue;
-			fsmonitor_refresh_callback(istate, buf + bol);
+			fsmonitor_refresh_callback(
+				istate, buf + bol, &icase_stats);
 			bol = i + 1;
 			count++;
 		}
 		if (bol < query_result.len) {
-			fsmonitor_refresh_callback(istate, buf + bol);
+			fsmonitor_refresh_callback(
+				istate, buf + bol, &icase_stats);
 			count++;
 		}
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/scans", icase_stats.scans);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/resolved",
+				   icase_stats.resolved);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/rejects",
+				   icase_stats.rejects);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/fallbacks",
+				   icase_stats.fallbacks);
+		strset_clear(&icase_stats.exact_dirs);
+		strset_clear(&icase_stats.rejected_paths);
 
 		/* Now mark the untracked cache for fsmonitor usage */
 		if (istate->untracked)
