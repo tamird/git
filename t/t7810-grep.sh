@@ -2253,11 +2253,32 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_expect_code 1 git grep "absent worktree blob" -- \
 		grep-worktree-equal &&
 	test_path_is_missing .git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-auto-create" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_file .git/index.grep-worktree &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-auto-create &&
+	rm .git/index.grep-worktree &&
 	test_config grep.worktreeBlobCache true &&
 	test_must_fail git -c grep.worktreeBlobCache=invalid grep \
 		"absent worktree blob" -- grep-worktree-equal 2>err &&
-	test_grep "bad boolean config value .*invalid.*grep.worktreeblobcache" \
+	test_grep "invalid value for '\''grep.worktreeblobcache'\'': '\''invalid'\''" \
 		err &&
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1073741824 \
+		git -c grep.worktreeBlobCache=auto grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-true-create" \
+		git grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_file .git/index.grep-worktree &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-true-create &&
+	rm .git/index.grep-worktree &&
 	test_expect_code 1 git -c grep.worktreeBlobCache=false grep \
 		"absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_missing .git/index.grep-worktree &&
@@ -2306,7 +2327,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-2 &&
 	test_trace2_data grep worktree_blob/recorded_equal 0 \
 		<grep-worktree-trace-2 &&
-	test_trace2_data grep worktree_blob/recorded_different 0 \
+	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-2 &&
 	GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-quiet" \
 		git grep --quiet \
@@ -2400,7 +2421,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-3 &&
 	test_trace2_data grep worktree_blob/recorded_equal 0 \
 		<grep-worktree-trace-3 &&
-	test_trace2_data grep worktree_blob/recorded_different 0 \
+	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-3 &&
 
 	echo "index change" >grep-worktree-index-change &&
@@ -2464,8 +2485,14 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		echo "grep-worktree-converted -text" &&
 		echo "grep-worktree-equal text"
 	} >.gitattributes &&
+	git add .gitattributes &&
+	test_expect_code 1 git grep "absent worktree blob" -- \
+		grep-worktree-equal &&
+	>.git/fsmonitor-equal &&
 	printf "equal worktree blob\r\n" >grep-worktree-equal &&
-	git add .gitattributes grep-worktree-equal &&
+	git add grep-worktree-equal &&
+	rm .git/fsmonitor-equal &&
+	git status --porcelain >/dev/null &&
 	test "$oid" = "$(git rev-parse :grep-worktree-equal)" &&
 	pattern=$(printf "worktree blob\r") &&
 	printf "grep-worktree-equal:equal worktree blob\r\n" >expected &&

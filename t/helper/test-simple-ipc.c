@@ -259,6 +259,7 @@ static int daemon__run_server(void)
 
 	struct ipc_server_opts opts = {
 		.nr_threads = cl_args.nr_threads,
+		.max_request_size = 128 * 1024,
 	};
 
 	/*

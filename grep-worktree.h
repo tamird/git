@@ -1,6 +1,8 @@
 #ifndef GREP_WORKTREE_H
 #define GREP_WORKTREE_H
 
+#define GREP_WORKTREE_CACHE_MIN_BYTES (1ULL << 30)
+
 struct index_state;
 struct repository;
 
@@ -8,7 +10,6 @@ struct grep_worktree_cache;
 
 enum grep_worktree_cache_result {
 	GREP_WORKTREE_CACHE_UNKNOWN,
-	GREP_WORKTREE_CACHE_DIFFERENT,
 	GREP_WORKTREE_CACHE_EQUAL,
 };
 

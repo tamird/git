@@ -39,6 +39,26 @@ typedef int pthread_mutexattr_t;
 #define pthread_cond_signal WakeConditionVariable
 #define pthread_cond_broadcast WakeAllConditionVariable
 
+typedef struct {
+	CRITICAL_SECTION mutex;
+	CONDITION_VARIABLE cond;
+	unsigned int readers;
+	unsigned int waiting_writers;
+	int writer;
+} pthread_rwlock_t;
+
+int win32_pthread_rwlock_init(pthread_rwlock_t *lock);
+int win32_pthread_rwlock_destroy(pthread_rwlock_t *lock);
+int win32_pthread_rwlock_rdlock(pthread_rwlock_t *lock);
+int win32_pthread_rwlock_wrlock(pthread_rwlock_t *lock);
+int win32_pthread_rwlock_unlock(pthread_rwlock_t *lock);
+
+#define pthread_rwlock_init(a,b) win32_pthread_rwlock_init(a)
+#define pthread_rwlock_destroy win32_pthread_rwlock_destroy
+#define pthread_rwlock_rdlock win32_pthread_rwlock_rdlock
+#define pthread_rwlock_wrlock win32_pthread_rwlock_wrlock
+#define pthread_rwlock_unlock win32_pthread_rwlock_unlock
+
 /*
  * Simple thread creation implementation using pthread API
  */

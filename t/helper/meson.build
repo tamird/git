@@ -25,6 +25,7 @@ test_tool_sources = [
   'test-genrandom.c',
   'test-genzeros.c',
   'test-getcwd.c',
+  'test-grep-index-ipc.c',
   'test-hash-speed.c',
   'test-hash.c',
   'test-hashmap.c',

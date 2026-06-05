@@ -39,6 +39,13 @@ test_expect_success 'grep correctly finds patterns in a submodule' '
 	test_cmp expect actual
 '
 
+test_expect_success 'content index preserves cached submodule recursion' '
+	test_when_finished "rm -rf .git/objects/info/grep-index" &&
+	git grep-index --no-progress &&
+	git grep --cached -e "(3|4)" --recurse-submodules >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success PTHREADS 'worktree cache survives gitmodules pre-read' '
 	test_when_finished "rm -f .git/index.grep-worktree trace &&
 		git update-index --no-fsmonitor" &&

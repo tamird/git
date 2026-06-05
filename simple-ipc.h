@@ -78,6 +78,12 @@ struct ipc_client_connection {
 	int fd;
 };
 
+enum ipc_client_command_result {
+	IPC_CLIENT_COMMAND_SUCCESS = 0,
+	IPC_CLIENT_COMMAND_ERROR_SEND,
+	IPC_CLIENT_COMMAND_ERROR_READ,
+};
+
 /*
  * Try to connect to the daemon on the named pipe or socket.
  *
@@ -102,6 +108,16 @@ void ipc_client_close_connection(struct ipc_client_connection *connection);
  * Calls error() and returns non-zero otherwise.
  */
 int ipc_client_send_command_to_connection(
+	struct ipc_client_connection *connection,
+	const char *message, size_t message_len,
+	struct strbuf *answer);
+
+/*
+ * Like ipc_client_send_command_to_connection(), but silently returns an
+ * ipc_client_command_result describing whether sending the request or reading
+ * the response failed.
+ */
+int ipc_client_send_command_to_connection_gently(
 	struct ipc_client_connection *connection,
 	const char *message, size_t message_len,
 	struct strbuf *answer);
@@ -160,6 +176,12 @@ struct ipc_server_data;
 struct ipc_server_opts
 {
 	int nr_threads;
+
+	/*
+	 * Reject requests larger than this many bytes before invoking the
+	 * application callback. Zero permits requests of any size.
+	 */
+	size_t max_request_size;
 
 	/*
 	 * Disallow chdir() when creating a Unix domain socket.

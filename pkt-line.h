@@ -28,10 +28,13 @@ void set_packet_header(char *buf, int size);
 void packet_write(int fd_out, const char *buf, size_t size);
 void packet_buf_write(struct strbuf *buf, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
 int packet_flush_gently(int fd);
+int packet_flush_gently_quiet(int fd);
 int packet_write_fmt_gently(int fd, const char *fmt, ...) __attribute__((format (printf, 2, 3)));
 int write_packetized_from_fd_no_flush(int fd_in, int fd_out);
 int write_packetized_from_buf_no_flush_count(const char *src_in, size_t len,
 					     int fd_out, int *packet_counter);
+int write_packetized_from_buf_no_flush_quiet(
+	const char *src_in, size_t len, int fd_out);
 static inline int write_packetized_from_buf_no_flush(const char *src_in,
 						     size_t len, int fd_out)
 {
@@ -78,6 +81,8 @@ void packet_fflush(FILE *f);
  * If options contains PACKET_READ_GENTLE_ON_READ_ERROR, we will not die
  * on read errors, but instead return -1.  However, we may still die on an
  * ERR packet (if requested).
+ *
+ * PACKET_READ_SILENT_ON_ERROR also suppresses diagnostics for those errors.
  */
 #define PACKET_READ_GENTLE_ON_EOF        (1u<<0)
 #define PACKET_READ_CHOMP_NEWLINE        (1u<<1)
@@ -85,6 +90,7 @@ void packet_fflush(FILE *f);
 #define PACKET_READ_GENTLE_ON_READ_ERROR (1u<<3)
 #define PACKET_READ_REDACT_URI_PATH      (1u<<4)
 #define PACKET_READ_USE_SIDEBAND         (1u<<5)
+#define PACKET_READ_SILENT_ON_ERROR      (1u<<6)
 int packet_read(int fd, char *buffer, unsigned size, int options);
 
 /*
@@ -146,6 +152,8 @@ int packet_read_line_gently(int fd, int *size, char **dst_line);
  * Reads a stream of variable sized packets until a flush packet is detected.
  */
 ssize_t read_packetized_to_strbuf(int fd_in, struct strbuf *sb_out, int options);
+ssize_t read_packetized_to_strbuf_limit(int fd_in, struct strbuf *sb_out,
+					int options, size_t limit);
 
 /*
  * Receive multiplexed output stream over git native protocol.
