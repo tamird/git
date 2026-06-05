@@ -683,7 +683,6 @@ int cmd_show(int argc,
 	repo_init_revisions(the_repository, &rev, prefix);
 	repo_config(the_repository, grep_config, &rev.grep_filter);
 
-	rev.diff = 1;
 	rev.always_show_header = 1;
 	rev.no_walk = 1;
 	rev.diffopt.stat_width = -1; 	/* Scale to real terminal size */

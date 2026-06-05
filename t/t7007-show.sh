@@ -163,6 +163,24 @@ test_expect_success '--quiet suppresses diff' '
 	test_cmp expect actual
 '
 
+test_expect_success 'no-patch output does not access the tree' '
+	cat >commit <<-EOF &&
+	tree $(test_oid 001)
+	author A U Thor <author@example.com> 1112911993 -0700
+	committer A U Thor <author@example.com> 1112911993 -0700
+
+	broken tree
+	EOF
+	commit=$(git hash-object -t commit -w commit) &&
+	echo "broken tree" >expect &&
+
+	git show -s --format=%s $commit >actual &&
+	test_cmp expect actual &&
+	git show --quiet --format=%s $commit >actual &&
+	test_cmp expect actual &&
+	test_must_fail git show $commit
+'
+
 test_expect_success 'show --graph is forbidden' '
   test_must_fail git show --graph HEAD
 '
