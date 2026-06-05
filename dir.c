@@ -1865,11 +1865,39 @@ static struct dir_entry *dir_entry_new(const char *pathname, int len)
 	return ent;
 }
 
+#define DIR_ICASE_SCAN_LIMIT 1024
+
 static struct dir_entry *dir_add_name(struct dir_struct *dir,
 				      struct index_state *istate,
-				      const char *pathname, int len)
+				      const char *pathname, int len,
+				      int from_untracked_cache)
 {
-	if (index_file_exists(istate, pathname, len, ignore_case))
+	enum index_file_icase_probe_result probe;
+	int exists;
+
+	if (from_untracked_cache && ignore_case &&
+	    !istate->name_hash_initialized) {
+		probe = index_file_exists_icase_probe(
+			istate, pathname, len,
+			&dir->internal.icase_scan_budget_used,
+			DIR_ICASE_SCAN_LIMIT);
+		switch (probe) {
+		case INDEX_FILE_ICASE_PROBE_UNKNOWN:
+			exists = !!index_file_exists(
+				istate, pathname, len, ignore_case);
+			break;
+		case INDEX_FILE_ICASE_PROBE_ABSENT:
+			exists = 0;
+			break;
+		case INDEX_FILE_ICASE_PROBE_PRESENT:
+			exists = 1;
+			break;
+		}
+	} else {
+		exists = !!index_file_exists(
+			istate, pathname, len, ignore_case);
+	}
+	if (exists)
 		return NULL;
 
 	ALLOC_GROW(dir->entries, dir->nr+1, dir->internal.alloc);
@@ -2674,7 +2702,8 @@ static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 	switch (state) {
 	case path_excluded:
 		if (dir->flags & DIR_SHOW_IGNORED)
-			dir_add_name(dir, istate, path->buf, path->len);
+			dir_add_name(dir, istate, path->buf, path->len,
+				     !cdir->fdir);
 		else if ((dir->flags & DIR_SHOW_IGNORED_TOO) ||
 			((dir->flags & DIR_COLLECT_IGNORED) &&
 			exclude_matches_pathspec(path->buf, path->len,
@@ -2685,7 +2714,7 @@ static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 	case path_untracked:
 		if (dir->flags & DIR_SHOW_IGNORED)
 			break;
-		dir_add_name(dir, istate, path->buf, path->len);
+		dir_add_name(dir, istate, path->buf, path->len, !cdir->fdir);
 		if (cdir->fdir)
 			add_untracked(dir->untracked, untracked,
 				      path->buf + baselen);
@@ -3178,6 +3207,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.visited_directories = 0;
 	dir->internal.pruned_subtrees = 0;
 	dir->internal.can_prune_replay = 0;
+	dir->internal.icase_scan_budget_used = 0;
 
 	if (has_symlink_leading_path(path, len)) {
 		trace2_region_leave("dir", "read_directory", istate->repo);

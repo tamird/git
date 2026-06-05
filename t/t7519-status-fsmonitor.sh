@@ -495,14 +495,17 @@ test_expect_success UNTRACKED_CACHE 'prune empty subtrees around cached result' 
 		EOF
 		git config core.fsmonitor .git/hooks/fsmonitor-test &&
 		git config core.untrackedCache true &&
-		git status --porcelain &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-prune-live" \
+			git -c core.ignorecase=true status --porcelain &&
 		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-prune" \
-			git status --porcelain >../actual
+			git -c core.ignorecase=true status --porcelain >../actual
 	) &&
 	echo "?? results/c/untracked" >expect &&
 	test_cmp expect actual &&
+	test_grep "name-hash-init" trace-prune-live &&
 	test_grep "subtrees-pruned:[1-9]" trace-prune &&
-	test_grep "opendir:0" trace-prune
+	test_grep "opendir:0" trace-prune &&
+	test_grep ! "name-hash-init" trace-prune
 '
 
 test_expect_success UNTRACKED_CACHE 'invalidate one prunable subtree' '

@@ -353,6 +353,7 @@ struct dir_struct {
 		struct oid_stat ss_excludes_file;
 		unsigned unmanaged_exclude_files;
 		unsigned can_prune_replay : 1;
+		size_t icase_scan_budget_used;
 
 		/* Stats about the traversal */
 		unsigned visited_paths;
