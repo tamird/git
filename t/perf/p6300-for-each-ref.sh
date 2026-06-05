@@ -78,6 +78,7 @@ run_tests () {
 }
 
 run_tests "loose"
+test_for_each_ref "loose, direct refs" refs/heads/ refs/custom/
 
 test_expect_success 'pack refs' '
 	git pack-refs --all
