@@ -317,16 +317,46 @@ static void add_per_worktree_entries_to_dir(struct ref_dir *dir, const char *dir
 	}
 }
 
+static int read_ref_internal(struct ref_store *ref_store, const char *refname,
+			     struct object_id *oid, struct strbuf *referent,
+			     unsigned int *type, int *failure_errno,
+			     int skip_packed_refs,
+			     const char *known_regular_path);
+
 static void loose_fill_ref_dir_regular_file(struct files_ref_store *refs,
 					    const char *refname,
+					    const char *path,
 					    struct ref_dir *dir)
 {
 	struct object_id oid;
+	const char *referent = NULL;
 	int flag;
-	const char *referent = refs_resolve_ref_unsafe(&refs->base,
-						       refname,
-						       RESOLVE_REF_READING,
-						       &oid, &flag);
+
+	/*
+	 * get_dtype() reported DT_REG for this directory entry. On platforms
+	 * with d_type and O_NOFOLLOW, read the common direct-ref case without
+	 * the resolver's initial lstat(). Retain that resolver for symrefs and
+	 * concurrent file-type changes.
+	 */
+	if (path) {
+		struct strbuf referent_buf = STRBUF_INIT;
+		unsigned int type = 0;
+		int failure_errno;
+
+		if (!read_ref_internal(&refs->base, refname, &oid,
+				       &referent_buf, &type, &failure_errno,
+				       1, path) &&
+		    !(type & REF_ISSYMREF)) {
+			flag = type;
+			referent = refname;
+		}
+		strbuf_release(&referent_buf);
+	}
+
+	if (!referent)
+		referent = refs_resolve_ref_unsafe(&refs->base, refname,
+						   RESOLVE_REF_READING,
+						   &oid, &flag);
 
 	if (!referent) {
 		oidclr(&oid, refs->base.repo->hash_algo);
@@ -399,7 +429,12 @@ static void loose_fill_ref_dir(struct ref_store *ref_store,
 					 create_dir_entry(dir->cache, refname.buf,
 							  refname.len));
 		} else if (dtype == DT_REG) {
-			loose_fill_ref_dir_regular_file(refs, refname.buf, dir);
+			size_t pathlen = path.len;
+
+			strbuf_addstr(&path, de->d_name);
+			loose_fill_ref_dir_regular_file(refs, refname.buf,
+							path.buf, dir);
+			strbuf_setlen(&path, pathlen);
 		}
 		strbuf_setlen(&refname, dirnamelen);
 	}
@@ -463,7 +498,7 @@ struct fill_root_ref_data {
 static int fill_root_ref(const char *refname, void *cb_data)
 {
 	struct fill_root_ref_data *data = cb_data;
-	loose_fill_ref_dir_regular_file(data->refs, refname, data->dir);
+	loose_fill_ref_dir_regular_file(data->refs, refname, NULL, data->dir);
 	return 0;
 }
 
@@ -514,7 +549,9 @@ static struct ref_cache *get_loose_ref_cache(struct files_ref_store *refs,
 
 static int read_ref_internal(struct ref_store *ref_store, const char *refname,
 			     struct object_id *oid, struct strbuf *referent,
-			     unsigned int *type, int *failure_errno, int skip_packed_refs)
+			     unsigned int *type, int *failure_errno,
+			     int skip_packed_refs,
+			     const char *known_regular_path)
 {
 	struct files_ref_store *refs =
 		files_downcast(ref_store, REF_STORE_READ, "read_raw_ref");
@@ -530,6 +567,16 @@ static int read_ref_internal(struct ref_store *ref_store, const char *refname,
 
 	*type = 0;
 	strbuf_reset(&sb_path);
+
+	if (known_regular_path) {
+		path = known_regular_path;
+		fd = open_nofollow(path, O_RDONLY);
+		if (fd < 0) {
+			myerr = errno;
+			goto out;
+		}
+		goto read_ref;
+	}
 
 	files_ref_path(refs, &sb_path, refname);
 
@@ -622,6 +669,8 @@ stat_ref:
 		else
 			goto out;
 	}
+
+read_ref:
 	strbuf_reset(&sb_contents);
 	if (strbuf_read(&sb_contents, fd, 256) < 0) {
 		myerr = errno;
@@ -650,7 +699,8 @@ static int files_read_raw_ref(struct ref_store *ref_store, const char *refname,
 			      struct object_id *oid, struct strbuf *referent,
 			      unsigned int *type, int *failure_errno)
 {
-	return read_ref_internal(ref_store, refname, oid, referent, type, failure_errno, 0);
+	return read_ref_internal(ref_store, refname, oid, referent, type,
+				 failure_errno, 0, NULL);
 }
 
 static int files_read_symbolic_ref(struct ref_store *ref_store, const char *refname,
@@ -660,7 +710,8 @@ static int files_read_symbolic_ref(struct ref_store *ref_store, const char *refn
 	int failure_errno, ret;
 	unsigned int type;
 
-	ret = read_ref_internal(ref_store, refname, &oid, referent, &type, &failure_errno, 1);
+	ret = read_ref_internal(ref_store, refname, &oid, referent, &type,
+				&failure_errno, 1, NULL);
 	if (!ret && !(type & REF_ISSYMREF))
 		return NOT_A_SYMREF;
 	return ret;
