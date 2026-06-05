@@ -398,8 +398,9 @@ test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 	test_create_repo empty-untracked &&
 	(
 		cd empty-untracked &&
-		mkdir -p dir1/dir2 &&
+		mkdir -p dir1/dir2 dir3/dir4 &&
 		: >dir1/dir2/tracked &&
+		: >dir3/dir4/tracked &&
 		echo ignored >.gitignore &&
 		: >ignored &&
 		git add . &&
@@ -414,7 +415,8 @@ test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 			git status --porcelain >../actual &&
 		test_must_be_empty ../actual
 	) &&
-	test_grep "directories-visited:0" trace-empty
+	test_grep "directories-visited:0" trace-empty &&
+	test_grep "subtrees-pruned:1" trace-empty
 '
 
 test_expect_success UNTRACKED_CACHE 'reload partially invalid empty cache' '
@@ -473,6 +475,157 @@ test_expect_success UNTRACKED_CACHE 'replay non-empty untracked cache' '
 	test_cmp expect actual &&
 	test_grep ! "directories-visited:0" trace-replay &&
 	test_grep "opendir:0" trace-replay
+'
+
+test_expect_success UNTRACKED_CACHE 'prune empty subtrees around cached result' '
+	test_create_repo nonempty-untracked &&
+	(
+		cd nonempty-untracked &&
+		mkdir -p ignored-only/sub left/a results/c right/b &&
+		echo ignored-only/ >.gitignore &&
+		: >ignored-only/sub/ignored &&
+		: >left/a/tracked &&
+		: >results/c/tracked &&
+		: >right/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/c/untracked &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-prune" \
+			git status --porcelain >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-prune &&
+	test_grep "opendir:0" trace-prune
+'
+
+test_expect_success UNTRACKED_CACHE 'invalidate one prunable subtree' '
+	(
+		cd nonempty-untracked &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "left/a/tracked\0"
+		EOF
+		touch left/a/tracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-subtree" \
+			git status --porcelain >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-subtree
+'
+
+test_expect_success UNTRACKED_CACHE 're-prune rescanned empty subtree' '
+	(
+		cd nonempty-untracked &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-reprune" \
+			git status --porcelain >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-reprune &&
+	test_grep "opendir:0" trace-reprune
+'
+
+test_expect_success UNTRACKED_CACHE 'retain pruned subtree across index write' '
+	(
+		cd nonempty-untracked &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "right/b/tracked\0"
+		EOF
+		touch right/b/tracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-retained" \
+			git status --porcelain >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-retained
+'
+
+test_expect_success UNTRACKED_CACHE 'reload retained prunable subtree' '
+	(
+		cd nonempty-untracked &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-reloaded" \
+			git status --porcelain >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-reloaded &&
+	test_grep "opendir:0" trace-reloaded
+'
+
+test_expect_success UNTRACKED_CACHE 'set up subtree pruning with -uall' '
+	test_create_repo prune-uall &&
+	(
+		cd prune-uall &&
+		mkdir -p left/a results/c right/b &&
+		: >left/a/tracked &&
+		: >results/c/tracked &&
+		: >right/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/c/one &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git config status.showUntrackedFiles all &&
+		git status --porcelain >../actual
+	) &&
+	echo "?? results/c/one" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success UNTRACKED_CACHE '-uall invalidates summary ancestors' '
+	(
+		cd prune-uall &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "left/a/two\0"
+		EOF
+		: >left/a/two &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-uall-left" \
+			git status --porcelain >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	?? left/a/two
+	?? results/c/one
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-uall-left
+'
+
+test_expect_success UNTRACKED_CACHE '-uall reloads summary invalidation' '
+	(
+		cd prune-uall &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "right/b/three\0"
+		EOF
+		: >right/b/three &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-uall-right" \
+			git status --porcelain >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	?? left/a/two
+	?? results/c/one
+	?? right/b/three
+	EOF
+	test_cmp expect actual
 '
 
 test_expect_success UNTRACKED_CACHE 'failed fsmonitor scans empty cache' '

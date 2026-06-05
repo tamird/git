@@ -182,6 +182,8 @@ struct untracked_cache_dir {
 	/* all data except 'dirs' in this struct are good */
 	unsigned int valid : 1;
 	unsigned int recurse : 1;
+	/* The active subtree is valid and replays no untracked result. */
+	unsigned int can_skip_replay : 1;
 	/* null object ID means this directory does not have .gitignore */
 	struct object_id exclude_oid;
 	char name[FLEX_ARRAY];
@@ -206,7 +208,6 @@ struct untracked_cache {
 	int dir_opened;
 	/* fsmonitor invalidation data */
 	unsigned int use_fsmonitor : 1;
-	/* All active directories are valid and have no untracked results. */
 	unsigned int can_skip_empty : 1;
 };
 
@@ -351,10 +352,12 @@ struct dir_struct {
 		struct oid_stat ss_info_exclude;
 		struct oid_stat ss_excludes_file;
 		unsigned unmanaged_exclude_files;
+		unsigned can_prune_replay : 1;
 
 		/* Stats about the traversal */
 		unsigned visited_paths;
 		unsigned visited_directories;
+		unsigned pruned_subtrees;
 	} internal;
 };
 
