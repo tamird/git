@@ -805,6 +805,86 @@ test_expect_success UNTRACKED_CACHE 'index-backed ignore disables shortcut' '
 	test_grep ! "directories-visited:0" trace-index-ignore
 '
 
+test_expect_success UNTRACKED_CACHE 'prune pathspec status with fsmonitor' '
+	test_create_repo pathspec-untracked &&
+	(
+		cd pathspec-untracked &&
+		mkdir -p left/a results/c right/b &&
+		: >left/a/tracked &&
+		: >results/c/tracked &&
+		: >right/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/c/untracked &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			if test -f .git/fsmonitor-fail
+			then
+				exit 1
+			fi
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec" \
+			git status --porcelain -- "*untracked" >../actual
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-pathspec
+'
+
+test_expect_success UNTRACKED_CACHE 'pathspec invalidation preserves cache' '
+	(
+		cd pathspec-untracked &&
+		: >left/a/matching &&
+		echo left/a/matching >.git/fsmonitor-dirty &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-dirty" \
+			git status --porcelain -- "*matching" >../actual &&
+		git status --porcelain >../actual-full
+	) &&
+	echo "?? left/a/matching" >expect &&
+	test_cmp expect actual &&
+	cat >expect-full <<-\EOF &&
+	?? left/a/matching
+	?? results/c/untracked
+	EOF
+	test_cmp expect-full actual-full &&
+	test_grep "subtrees-pruned:[1-9]" trace-pathspec-dirty
+'
+
+test_expect_success UNTRACKED_CACHE 'pathspec falls back without fsmonitor' '
+	(
+		cd pathspec-untracked &&
+		: >.git/fsmonitor-fail &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-fallback" \
+			git status --porcelain -- "*missing" >../actual
+	) &&
+	test_must_be_empty actual &&
+	test_grep "directories-visited:[1-9]" trace-pathspec-fallback &&
+	test_grep "subtrees-pruned:0" trace-pathspec-fallback
+'
+
+test_expect_success UNTRACKED_CACHE 'pathspec falls back with skip-worktree' '
+	(
+		cd pathspec-untracked &&
+		rm .git/fsmonitor-fail &&
+		git update-index --skip-worktree left/a/tracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-skip" \
+			git status --porcelain -- "*missing" >../actual
+	) &&
+	test_must_be_empty actual &&
+	test_grep "directories-visited:[1-9]" trace-pathspec-skip &&
+	test_grep "subtrees-pruned:0" trace-pathspec-skip
+'
+
 test_expect_success 'discard_index() also discards fsmonitor info' '
 	test_config core.fsmonitor "$TEST_DIRECTORY/t7519/fsmonitor-all" &&
 	test_might_fail git update-index --refresh &&

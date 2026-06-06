@@ -197,6 +197,10 @@ test_fsmonitor_suite () {
 		git status -uall
 	'
 
+	test_perf_w_drop_caches "status -- leading wildcard ($DESC)" '
+		git status -- "*tracked"
+	'
+
 	# Update the mtimes on upto 100k files to make status think
 	# that they are dirty.  For simplicity, omit any files with
 	# LFs (i.e. anything that ls-files thinks it needs to dquote)
