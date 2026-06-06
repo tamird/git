@@ -66,6 +66,7 @@ struct unpack_trees_options {
 		     skip_unmerged,
 		     initial_checkout,
 		     diff_index_cached,
+		     diff_index_skip_valid,
 		     skip_sparse_checkout,
 		     quiet,
 		     exiting_early,

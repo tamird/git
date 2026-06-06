@@ -108,6 +108,125 @@ test_expect_success 'setup' '
 	EOF
 '
 
+test_expect_success 'diff-index honors fsmonitor validity' '
+	test_when_finished "rm -rf diff-index" &&
+	test_create_repo diff-index &&
+	mkdir diff-index/clean diff-index/dirty &&
+	echo clean >diff-index/clean/file &&
+	echo base >diff-index/dirty/file &&
+	git -C diff-index add . &&
+	git -C diff-index commit -m base &&
+	printf "tip \n" >diff-index/dirty/file &&
+	git -C diff-index commit -am tip &&
+	test_hook -C diff-index --setup fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+		if test -f .git/fsmonitor-dirty
+		then
+			while read path
+			do
+				printf "%s\0" "$path"
+			done <.git/fsmonitor-dirty
+		fi
+	EOF
+	git -C diff-index config core.fsmonitor .git/hooks/fsmonitor-test &&
+	git -C diff-index update-index --fsmonitor &&
+	git -C diff-index status --short &&
+	git -C diff-index ls-files -f >actual.fsmonitor &&
+	grep "^h clean/file$" actual.fsmonitor &&
+	grep "^h dirty/file$" actual.fsmonitor &&
+
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff HEAD^ >expect &&
+	git -C diff-index diff HEAD^ >actual &&
+	test_cmp expect actual &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff --name-status HEAD^ >expect &&
+	git -C diff-index diff --name-status HEAD^ >actual &&
+	test_cmp expect actual &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff --stat --numstat HEAD^ >expect &&
+	git -C diff-index diff --stat --numstat HEAD^ >actual &&
+	test_cmp expect actual &&
+	test_must_fail git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff --check HEAD^ >expect &&
+	test_must_fail git -C diff-index diff --check HEAD^ >actual &&
+	test_cmp expect actual &&
+
+	echo staged >diff-index/clean/file &&
+	git -c core.fsmonitor= -C diff-index add clean/file &&
+	git -C diff-index status --short &&
+	git -C diff-index ls-files -f >actual.fsmonitor &&
+	grep "^h clean/file$" actual.fsmonitor &&
+	grep "^h dirty/file$" actual.fsmonitor &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff HEAD^ >expect &&
+	git -C diff-index diff HEAD^ >actual &&
+	test_cmp expect actual &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff-index -c HEAD^ >expect &&
+	git -C diff-index diff-index -c HEAD^ >actual &&
+	test_cmp expect actual &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff-index --cc HEAD^ >expect &&
+	git -C diff-index diff-index --cc HEAD^ >actual &&
+	test_cmp expect actual &&
+
+	echo worktree-after-staged >diff-index/clean/file &&
+	echo clean/file >diff-index/.git/fsmonitor-dirty &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff HEAD^ >expect &&
+	git -C diff-index diff HEAD^ >actual &&
+	test_cmp expect actual &&
+
+	git -C diff-index reset --hard HEAD &&
+	echo worktree >diff-index/dirty/file &&
+	echo dirty/file >diff-index/.git/fsmonitor-dirty &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff HEAD^ >expect &&
+	git -C diff-index diff HEAD^ >actual &&
+	test_cmp expect actual &&
+
+	git -C diff-index reset --hard HEAD &&
+	rm diff-index/clean/file &&
+	echo clean/file >diff-index/.git/fsmonitor-dirty &&
+	git -c core.fsmonitor= -c core.preloadIndex=false \
+		-C diff-index diff HEAD^ >expect &&
+	git -C diff-index diff HEAD^ >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success SYMLINKS 'diff-index handles reported leading symlink' '
+	test_when_finished "rm -rf diff-index-symlink" &&
+	test_create_repo diff-index-symlink &&
+	mkdir diff-index-symlink/clean &&
+	echo clean >diff-index-symlink/clean/file &&
+	git -C diff-index-symlink add . &&
+	git -C diff-index-symlink commit -m base &&
+	test_hook -C diff-index-symlink --setup fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+		if test -f .git/fsmonitor-dirty
+		then
+			while read path
+			do
+				printf "%s\0" "$path"
+			done <.git/fsmonitor-dirty
+		fi
+	EOF
+	git -C diff-index-symlink config core.fsmonitor \
+		.git/hooks/fsmonitor-test &&
+	git -C diff-index-symlink update-index --fsmonitor &&
+	git -C diff-index-symlink status --short &&
+	git -C diff-index-symlink ls-files -f clean/file >actual.fsmonitor &&
+	grep "^h clean/file$" actual.fsmonitor &&
+	mkdir diff-index-symlink/link-target &&
+	cp diff-index-symlink/clean/file diff-index-symlink/link-target/file &&
+	rm -rf diff-index-symlink/clean &&
+	ln -s link-target diff-index-symlink/clean &&
+	echo clean/ >diff-index-symlink/.git/fsmonitor-dirty &&
+	test_must_fail git -C diff-index-symlink diff --exit-code HEAD >actual &&
+	grep "^deleted file mode" actual
+'
+
 # test that the fsmonitor extension is off by default
 test_expect_success 'fsmonitor extension is off by default' '
 	test-tool dump-fsmonitor >actual &&
