@@ -885,6 +885,56 @@ test_expect_success UNTRACKED_CACHE 'pathspec falls back with skip-worktree' '
 	test_grep "subtrees-pruned:0" trace-pathspec-skip
 '
 
+test_expect_success UNTRACKED_CACHE 'set up full untracked pruning' '
+	test_create_repo full-untracked &&
+	(
+		cd full-untracked &&
+		mkdir -p clean/a ignored-only/sub quiet/b results &&
+		echo ignored-only/ >.gitignore &&
+		: >clean/a/tracked &&
+		: >ignored-only/sub/ignored &&
+		: >quiet/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/one &&
+		: >results/two &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			if test -f .git/fsmonitor-fail
+			then
+				exit 1
+			fi
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../actual
+	) &&
+	echo "?? results/" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success UNTRACKED_CACHE 'prune full status from normal cache' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-status-full" \
+			git status --porcelain -uall >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	?? results/one
+	?? results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-status-full &&
+	test_grep "directories-visited:[1-9]" trace-status-full
+'
+
 test_expect_success 'discard_index() also discards fsmonitor info' '
 	test_config core.fsmonitor "$TEST_DIRECTORY/t7519/fsmonitor-all" &&
 	test_might_fail git update-index --refresh &&

@@ -3054,10 +3054,15 @@ void remove_untracked_cache(struct index_state *istate)
 
 static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *dir,
 						      int base_len,
-						      struct index_state *istate)
+						      struct index_state *istate,
+						      int *prune_only)
 {
+	const unsigned int normal_flags =
+		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
 	static int untracked_cache_disabled = -1;
+
+	*prune_only = 0;
 
 	if (!dir->untracked)
 		return NULL;
@@ -3131,29 +3136,28 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		 * "all") was incompatible with untracked cache and *consistently*
 		 * caused surprisingly bad performance (with fscache and fsmonitor
 		 * enabled) on Windows.
-		 *
-		 * IMPROVEMENT OPPORTUNITY: If we reworked the untracked cache storage
-		 * to not be as bound up with the desired output in a given run,
-		 * and instead iterated through and stored enough information to
-		 * correctly serve both "modes", then users could get peak performance
-		 * with or without '-uall' regardless of their
-		 * "status.showuntrackedfiles" config.
 		 */
 		if (dir->untracked->dir_flags != new_untracked_cache_flags(istate)) {
 			free_untracked_cache(istate->untracked);
 			new_untracked_cache(istate, dir->flags);
 			dir->untracked = istate->untracked;
-		}
-		else {
+		} else if (dir->untracked->dir_flags == normal_flags &&
+			   !dir->flags) {
 			/*
-			 * Current untracked cache data is consistent with config, but not
-			 * usable in this request/run; just bypass untracked cache.
+			 * Normal mode may collapse an untracked directory into
+			 * one result, so its entries cannot serve a full scan.
+			 * A subtree with no result, however, contains no visible
+			 * untracked path and remains useful as a negative summary.
 			 */
+			*prune_only = 1;
+		} else {
 			return NULL;
 		}
 	}
 
 	if (!dir->untracked->root) {
+		if (*prune_only)
+			return NULL;
 		/* Untracked cache existed but is not initialized; fix that */
 		FLEX_ALLOC_STR(dir->untracked->root, name, "");
 		istate->cache_changed |= UNTRACKED_CHANGED;
@@ -3221,6 +3225,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	struct untracked_cache_dir *untracked;
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
+	int prune_only;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;
@@ -3234,7 +3239,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		return dir->nr;
 	}
 
-	untracked = validate_untracked_cache(dir, len, istate);
+	untracked = validate_untracked_cache(dir, len, istate, &prune_only);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
@@ -3246,11 +3251,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		unsigned int i;
 
 		/*
-		 * Pathspec scans must not replay or update the untracked
-		 * cache. They may use it read-only after fsmonitor validates
-		 * its empty-subtree summaries.
+		 * Read-only scans must not replay or update the untracked
+		 * cache. They may prune after fsmonitor validates its
+		 * empty-subtree summaries.
 		 */
-		if (has_pathspec) {
+		if (has_pathspec || prune_only) {
 			untracked = NULL;
 			dir->untracked = NULL;
 		}
@@ -3270,7 +3275,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 					goto done;
 				}
 				dir->internal.can_prune_replay = 1;
-				if (has_pathspec)
+				if (has_pathspec || prune_only)
 					untracked_prune = untracked_cache->root;
 			}
 		}

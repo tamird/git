@@ -200,17 +200,18 @@ A  two
 ?? three
 EOF
 
-# Bypassing the untracked cache here is not desirable from an
-# end-user perspective, but is expected in the current design.
-# The untracked cache data stored for a -unormal run cannot be
-# correctly used in a -uall run - it would yield incorrect output.
-test_expect_success 'untracked cache is bypassed with -uall' '
+# Positive results from a -unormal cache cannot serve -uall because they may
+# name a collapsed directory. Without fsmonitor, negative summaries cannot be
+# validated either, so this falls back to a full scan.
+test_expect_success 'untracked cache falls back with -uall without fsmonitor' '
 	: >../trace.output &&
 	GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace.output" \
 	git status -uall --porcelain >../actual &&
 	iuc status -uall --porcelain >../status.iuc &&
 	test_cmp ../status_uall.expect ../status.iuc &&
 	test_cmp ../status_uall.expect ../actual &&
+	test_grep "subtrees-pruned:0" ../trace.output &&
+	test_grep "directories-visited:[1-9]" ../trace.output &&
 	get_relevant_traces ../trace.output ../trace.relevant &&
 	cat >../trace.expect <<EOF &&
  ....path:
@@ -218,7 +219,7 @@ EOF
 	test_cmp ../trace.expect ../trace.relevant
 '
 
-test_expect_success 'untracked cache remains after bypass' '
+test_expect_success 'untracked cache remains after fallback' '
 	test-tool dump-untracked-cache >../actual &&
 	test_cmp ../dump.expect ../actual
 '
