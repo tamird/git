@@ -41,8 +41,6 @@ struct grep_worktree_cache {
 	uint64_t hits;
 	uint64_t recorded_equal;
 	uint64_t recorded_different;
-	struct object_id sidecar_oid;
-	int sidecar_present;
 	int changed;
 };
 
@@ -52,7 +50,7 @@ static void grep_worktree_cache_path(struct repository *repo,
 	strbuf_addf(path, "%s.grep-worktree", repo_get_index_file(repo));
 }
 
-static void *map_file(const char *path, size_t *map_size, int *present)
+static void *map_file(const char *path, size_t *map_size)
 {
 	void *map;
 	struct stat st;
@@ -64,8 +62,6 @@ static void *map_file(const char *path, size_t *map_size, int *present)
 		close(fd);
 		return NULL;
 	}
-	if (present)
-		*present = 1;
 	*map_size = xsize_t(st.st_size);
 	map = xmmap_gently(NULL, *map_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
@@ -84,11 +80,9 @@ static int hash_cache_identity(struct repository *repo,
 }
 
 static int load_cache(struct grep_worktree_cache *cache,
-		      unsigned char *equal,
-		      struct object_id *file_oid, int *file_present)
+		      unsigned char *equal)
 {
 	struct strbuf path = STRBUF_INIT;
-	struct git_hash_ctx ctx;
 	const unsigned char *map;
 	const unsigned char *map_equal;
 	size_t expected;
@@ -97,14 +91,9 @@ static int load_cache(struct grep_worktree_cache *cache,
 	int result = 0;
 
 	grep_worktree_cache_path(cache->repo, &path);
-	map = map_file(path.buf, &map_size, file_present);
+	map = map_file(path.buf, &map_size);
 	if (!map)
 		goto done;
-	if (file_oid) {
-		cache->repo->hash_algo->init_fn(&ctx);
-		git_hash_update(&ctx, map, map_size);
-		git_hash_final_oid(file_oid, &ctx);
-	}
 	expected = GREP_WORKTREE_CACHE_HEADER_SIZE + 2 * rawsz +
 		   cache->bitmap_size;
 	if (map_size != expected ||
@@ -176,8 +165,7 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 		return NULL;
 	}
 	allocate_cache_bitmaps(cache);
-	load_cache(cache, cache->equal,
-		   &cache->sidecar_oid, &cache->sidecar_present);
+	load_cache(cache, cache->equal);
 	return cache;
 }
 
@@ -230,9 +218,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	unsigned char *equal = NULL;
 	struct hashfile *f = NULL;
 	struct lock_file lock = LOCK_INIT;
-	struct object_id sidecar_oid;
 	struct strbuf path = STRBUF_INIT;
-	int sidecar_present = 0;
 	int fd;
 
 	if (!cache || !cache->changed || !use_optional_locks())
@@ -245,20 +231,11 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	if (!current_index_matches(cache))
 		goto done;
 
-	oidclr(&sidecar_oid, cache->repo->hash_algo);
 	CALLOC_ARRAY(equal, cache->bitmap_size);
-	if (load_cache(cache, equal, &sidecar_oid,
-		       &sidecar_present)) {
-		if (sidecar_present != cache->sidecar_present ||
-		    !oideq(&sidecar_oid, &cache->sidecar_oid))
-			goto done;
-	} else {
-		if (sidecar_present != cache->sidecar_present ||
-		    (sidecar_present &&
-		     !oideq(&sidecar_oid, &cache->sidecar_oid)))
-			goto done;
-	}
-	COPY_ARRAY(equal, cache->equal, cache->bitmap_size);
+	load_cache(cache, equal);
+	for (size_t i = 0; i < cache->bitmap_size; i++)
+		equal[i] = (equal[i] & ~cache->updated[i]) |
+			   (cache->equal[i] & cache->updated[i]);
 
 	f = hashfd(cache->repo->hash_algo, fd, get_lock_file_path(&lock));
 	hashwrite_be32(f, GREP_WORKTREE_CACHE_SIGNATURE);

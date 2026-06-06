@@ -2105,18 +2105,18 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_config core.fsmonitor "$fsmonitor_hook" &&
 	git update-index --fsmonitor &&
 	git status --porcelain >/dev/null &&
-	test_expect_code 1 git grep "absent worktree blob" -- \
-		grep-worktree-equal &&
+	test_expect_code 1 git -c grep.worktreeBlobCache=auto grep \
+		"absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_missing .git/index.grep-worktree &&
 	test_expect_code 1 env \
 		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
 		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-auto-create" \
-		git grep "absent worktree blob" -- grep-worktree-equal &&
+		git -c grep.worktreeBlobCache=auto grep \
+			"absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_file .git/index.grep-worktree &&
 	test_trace2_data grep worktree_blob/recorded_equal 1 \
 		<grep-worktree-trace-auto-create &&
 	rm .git/index.grep-worktree &&
-	test_config grep.worktreeBlobCache true &&
 	test_must_fail git -c grep.worktreeBlobCache=invalid grep \
 		"absent worktree blob" -- grep-worktree-equal 2>err &&
 	test_grep "invalid value for '\''grep.worktreeblobcache'\'': '\''invalid'\''" \
@@ -2127,12 +2127,12 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		"absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_missing .git/index.grep-worktree &&
 	test_expect_code 1 env \
-		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-true-create" \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-default-create" \
 		git grep \
 		"absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_file .git/index.grep-worktree &&
 	test_trace2_data grep worktree_blob/recorded_equal 1 \
-		<grep-worktree-trace-true-create &&
+		<grep-worktree-trace-default-create &&
 	rm .git/index.grep-worktree &&
 	test_expect_code 1 git -c grep.worktreeBlobCache=false grep \
 		"absent worktree blob" -- grep-worktree-equal &&

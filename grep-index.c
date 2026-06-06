@@ -27,8 +27,8 @@
 #include "wrapper.h"
 
 #define GREP_INDEX_SIGNATURE 0x47494458
-#define GREP_INDEX_VERSION 2
-#define GREP_INDEX_TRANSPOSED_VERSION 3
+#define GREP_INDEX_VERSION 6
+#define GREP_INDEX_TRANSPOSED_VERSION 7
 #define GREP_INDEX_HEADER_SIZE 16
 #define GREP_INDEX_TRANSPOSED_HEADER_SIZE 32
 #define GREP_INDEX_FANOUT_SIZE (256 * sizeof(uint32_t))
@@ -78,6 +78,7 @@ struct grep_index {
 };
 
 enum grep_index_memory_entry_state {
+	GREP_INDEX_MEMORY_EMPTY,
 	GREP_INDEX_MEMORY_BUILDING,
 	GREP_INDEX_MEMORY_READY,
 	GREP_INDEX_MEMORY_FAILED,
@@ -87,11 +88,10 @@ struct grep_index_memory_entry {
 	struct hashmap_entry ent;
 	struct object_id oid;
 	pthread_cond_t cond;
-	enum grep_index_memory_entry_state state;
-	unsigned char *filter;
-	size_t filter_size;
+	enum grep_index_memory_entry_state state[2];
+	unsigned char *filter[2];
+	size_t filter_size[2];
 	int cond_initialized;
-	int filter_owned;
 };
 
 struct grep_index_memory_filter_class {
@@ -154,6 +154,7 @@ struct grep_index_query {
 	size_t branches_alloc;
 	size_t alternatives_nr;
 	size_t trigrams_nr;
+	int ignore_case;
 };
 
 struct grep_index_prepared_segment {
@@ -274,11 +275,15 @@ static int add_grep_index_segment(struct grep_index *index, const char *hex)
 			segment.offsets + i * sizeof(uint64_t));
 		uint64_t end = get_be64(
 			segment.offsets + (i + 1) * sizeof(uint64_t));
+		uint64_t stored_size;
 		uint64_t filter_size;
 
 		if (start > end || end > segment.data_len)
 			goto unmap;
-		filter_size = end - start;
+		stored_size = end - start;
+		if (stored_size & 1)
+			goto unmap;
+		filter_size = stored_size / 2;
 		if (filter_size < GREP_INDEX_MIN_FILTER_SIZE ||
 		    filter_size > GREP_INDEX_MAX_FILTER_SIZE ||
 		    (filter_size & (filter_size - 1)))
@@ -445,9 +450,11 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 			goto unmap;
 		classes_nr += nr;
 		bytes = st_mult((uint64_t)filter_size * 8, row_bytes);
-		if (length != bytes || bytes > segment.data_len - data_len)
+		if (bytes > UINT64_MAX / 2 ||
+		    length != 2 * bytes ||
+		    length > segment.data_len - data_len)
 			goto unmap;
-		data_len += bytes;
+		data_len += length;
 	}
 	if (classes_nr != segment.nr || data_len != segment.data_len)
 		goto unmap;
@@ -652,6 +659,7 @@ static const unsigned char *segment_filter(struct grep_index_segment *segment,
 					   size_t *filter_size)
 {
 	uint64_t start, end;
+	size_t stored_size;
 	uint32_t pos;
 
 	if (!segment_oid_pos(segment, oid, &pos))
@@ -661,7 +669,10 @@ static const unsigned char *segment_filter(struct grep_index_segment *segment,
 	end = get_be64(segment->offsets + ((size_t)pos + 1) * sizeof(uint64_t));
 	if (start > end || end > segment->data_len)
 		return NULL;
-	*filter_size = end - start;
+	stored_size = end - start;
+	if (stored_size & 1)
+		return NULL;
+	*filter_size = stored_size / 2;
 	if (!*filter_size || *filter_size > SIZE_MAX / 8 ||
 	    (*filter_size & (*filter_size - 1)))
 		return NULL;
@@ -688,11 +699,25 @@ static int grep_index_contains_oid(struct grep_index *index,
 	return 0;
 }
 
-static uint32_t trigram_hash(const unsigned char *data)
+static uint32_t trigram_hash(const unsigned char *data, int ignore_case)
 {
-	uint32_t hash = ((uint32_t)data[0] << 16) |
-			((uint32_t)data[1] << 8) |
-			data[2];
+	uint32_t hash;
+
+	if (ignore_case) {
+		unsigned char folded[3];
+
+		for (size_t i = 0; i < ARRAY_SIZE(folded); i++)
+			folded[i] = data[i] >= 'A' && data[i] <= 'Z' ?
+					    data[i] + ('a' - 'A') :
+					    data[i];
+		hash = ((uint32_t)folded[0] << 16) |
+		       ((uint32_t)folded[1] << 8) |
+		       folded[2];
+	} else {
+		hash = ((uint32_t)data[0] << 16) |
+		       ((uint32_t)data[1] << 8) |
+		       data[2];
+	}
 
 	hash ^= hash >> 16;
 	hash *= 0x7feb352d;
@@ -732,7 +757,7 @@ static int grep_index_query_clause_add_literal(
 		   clause->trigrams_alloc);
 	for (size_t i = 0; i < trigrams_nr; i++)
 		clause->trigrams[clause->trigrams_nr++] =
-			trigram_hash(literal + i);
+			trigram_hash(literal + i, query->ignore_case);
 	query->trigrams_nr += trigrams_nr;
 	return 0;
 }
@@ -774,7 +799,9 @@ void grep_index_query_free(struct grep_index_query *query)
 }
 
 #define GREP_INDEX_QUERY_SIGNATURE 0x47495158
-#define GREP_INDEX_QUERY_VERSION   1
+#define GREP_INDEX_QUERY_VERSION_1 1
+#define GREP_INDEX_QUERY_VERSION_2 2
+#define GREP_INDEX_QUERY_IGNORE_CASE (1u << 0)
 
 static void grep_index_query_put_u32(struct strbuf *buf, uint32_t value)
 {
@@ -803,7 +830,12 @@ int grep_index_query_serialize(const struct grep_index_query *query,
 		return -1;
 
 	grep_index_query_put_u32(buf, GREP_INDEX_QUERY_SIGNATURE);
-	grep_index_query_put_u32(buf, GREP_INDEX_QUERY_VERSION);
+	grep_index_query_put_u32(
+		buf, query->ignore_case ? GREP_INDEX_QUERY_VERSION_2 :
+					 GREP_INDEX_QUERY_VERSION_1);
+	if (query->ignore_case)
+		grep_index_query_put_u32(
+			buf, GREP_INDEX_QUERY_IGNORE_CASE);
 	grep_index_query_put_u32(buf, query->clauses_nr);
 	for (size_t i = 0; i < query->clauses_nr; i++)
 		if (grep_index_query_serialize_clause(&query->clauses[i], buf))
@@ -878,14 +910,23 @@ struct grep_index_query *grep_index_query_deserialize(const char *data,
 		.len = len,
 	};
 	struct grep_index_query *query;
-	uint32_t signature, version, nr;
+	uint32_t signature, version, flags, nr;
 
 	CALLOC_ARRAY(query, 1);
 	if (grep_index_query_get_u32(&reader, &signature) ||
 	    grep_index_query_get_u32(&reader, &version) ||
 	    signature != GREP_INDEX_QUERY_SIGNATURE ||
-	    version != GREP_INDEX_QUERY_VERSION ||
-	    grep_index_query_get_u32(&reader, &nr) ||
+	    (version != GREP_INDEX_QUERY_VERSION_1 &&
+	     version != GREP_INDEX_QUERY_VERSION_2))
+		goto invalid;
+	if (version == GREP_INDEX_QUERY_VERSION_2) {
+		if (grep_index_query_get_u32(&reader, &flags) ||
+		    flags & ~GREP_INDEX_QUERY_IGNORE_CASE)
+			goto invalid;
+		query->ignore_case =
+			!!(flags & GREP_INDEX_QUERY_IGNORE_CASE);
+	}
+	if (grep_index_query_get_u32(&reader, &nr) ||
 	    nr > GREP_INDEX_MAX_QUERY_ALTERNATIVES)
 		goto invalid;
 
@@ -954,14 +995,19 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
 
-	if (opt->ignore_case || opt->invert || opt->unmatch_name_only ||
-	    opt->allow_textconv || !opt->pattern_list)
+	if (opt->invert || opt->unmatch_name_only || opt->allow_textconv ||
+	    !opt->pattern_list)
 		return NULL;
 	if (pattern_type == GREP_PATTERN_TYPE_UNSPECIFIED)
 		pattern_type = opt->extended_regexp_option ?
 			GREP_PATTERN_TYPE_ERE : GREP_PATTERN_TYPE_BRE;
+#ifndef USE_LIBPCRE2
+	if (opt->ignore_case)
+		return NULL;
+#endif
 
 	CALLOC_ARRAY(query, 1);
+	query->ignore_case = opt->ignore_case;
 	for (const struct grep_pat *p = opt->pattern_list; p; p = p->next) {
 		size_t scan_start = 0;
 		size_t scan_end = p->patternlen;
@@ -969,6 +1015,21 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 
 		if (p->token != GREP_PATTERN)
 			goto unsupported;
+		if (opt->ignore_case) {
+			for (size_t i = 0; i < p->patternlen; i++) {
+				if ((unsigned char)p->pattern[i] & 0x80)
+					goto unsupported;
+				/*
+				 * Non-literal BRE and ERE patterns use the
+				 * platform regex engine, whose case folding
+				 * is locale-dependent.
+				 */
+				if (pattern_type != GREP_PATTERN_TYPE_FIXED &&
+				    pattern_type != GREP_PATTERN_TYPE_PCRE &&
+				    is_regex_special(p->pattern[i]))
+					goto unsupported;
+			}
+		}
 #ifdef USE_LIBPCRE2
 		if (pattern_type == GREP_PATTERN_TYPE_FIXED &&
 		    memmem(p->pattern, p->patternlen, "\\E", 2))
@@ -1160,7 +1221,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 										trigram_hash(
 											(const unsigned char *)
 												literal.buf +
-											k);
+											k,
+											query->ignore_case);
 								ALLOC_GROW(
 									group.alternatives,
 									group.alternatives_nr +
@@ -1537,7 +1599,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							trigram_hash(
 								(const unsigned char *)
 									p->pattern +
-								term_start + j);
+								term_start + j,
+								query->ignore_case);
 					query->trigrams_nr += trigrams_nr;
 				}
 				if (escaped_dot && i + 3 < scan_end &&
@@ -1583,7 +1646,9 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							clause.trigrams_alloc);
 						clause.trigrams
 							[clause.trigrams_nr++] =
-							trigram_hash(trigram);
+							trigram_hash(
+								trigram,
+								query->ignore_case);
 						query->trigrams_nr++;
 					}
 				}
@@ -1628,7 +1693,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				clause.trigrams[clause.trigrams_nr++] =
 					trigram_hash((const unsigned char *)
 							     p->pattern +
-						     term_start + j);
+						     term_start + j,
+						     query->ignore_case);
 			query->trigrams_nr += trigrams_nr;
 		}
 		if (!clause.trigrams_nr ||
@@ -1720,10 +1786,11 @@ static int grep_index_query_maybe_contains(
 
 static int grep_index_filter_maybe_contains(
 	const unsigned char *filter, size_t filter_size,
-	const struct grep_index_query *query)
+	const struct grep_index_query *query, int combined)
 {
 	struct grep_index_filter_query data = {
-		.filter = filter,
+		.filter = filter +
+			  (combined && query->ignore_case ? filter_size : 0),
 		.filter_size = filter_size,
 	};
 
@@ -1842,6 +1909,9 @@ static int grep_index_transposed_maybe_contains(
 	filter_class.nr = nr;
 	filter_class.filters_nr = nr;
 	filter_class.row_bytes = DIV_ROUND_UP(nr, 8);
+	if (query->ignore_case)
+		offset += (uint64_t)filter_class.filter_size * 8 *
+			  filter_class.row_bytes;
 	filter_class.rows = (unsigned char *)segment->data + offset;
 	filter_class.filters = NULL;
 	transposed.filter_class = &filter_class;
@@ -1924,6 +1994,8 @@ static unsigned char *grep_index_prepare_class(
 
 	if (!nr)
 		return NULL;
+	if (query->ignore_case)
+		rows_offset += (uint64_t)filter_size * 8 * bytes;
 	CALLOC_ARRAY(result, bytes);
 	ALLOC_ARRAY(branch, bytes);
 	ALLOC_ARRAY(group, bytes);
@@ -2129,7 +2201,7 @@ int grep_index_maybe_contains(struct grep_index *index,
 	}
 	filter = grep_index_find_filter(index, repo, oid, &filter_size);
 	return !filter || grep_index_filter_maybe_contains(
-				  filter, filter_size, query);
+				  filter, filter_size, query, 1);
 }
 
 static uint32_t filter_size_for_blob(unsigned long blob_size)
@@ -2142,16 +2214,92 @@ static uint32_t filter_size_for_blob(unsigned long blob_size)
 	return size;
 }
 
-static void fill_filter(unsigned char *filter, uint32_t filter_size,
+static void fill_filter(unsigned char *exact_filter,
+			unsigned char *folded_filter,
+			uint32_t filter_size,
 			const void *content, unsigned long size)
 {
-	memset(filter, 0, filter_size);
+	const unsigned char *data = content;
+	unsigned char folded[3];
+	unsigned char special[3];
+	size_t folded_nr = 0;
+	int non_ascii = 0;
+
+	if (exact_filter)
+		memset(exact_filter, 0, filter_size);
+	if (folded_filter)
+		memset(folded_filter, 0, filter_size);
 	for (size_t i = 0; i + 2 < size; i++) {
-		uint32_t bit = trigram_hash(
-				       (const unsigned char *)content + i) &
+		uint32_t bit = trigram_hash(data + i, 0) &
 			       (filter_size * 8 - 1);
 
-		filter[bit / 8] |= 1u << (bit & 7);
+		if (exact_filter)
+			exact_filter[bit / 8] |= 1u << (bit & 7);
+		if (folded_filter) {
+			if ((data[i] >= 'A' && data[i] <= 'Z') ||
+			    (data[i + 1] >= 'A' && data[i + 1] <= 'Z') ||
+			    (data[i + 2] >= 'A' && data[i + 2] <= 'Z'))
+				bit = trigram_hash(data + i, 1) &
+				      (filter_size * 8 - 1);
+			folded_filter[bit / 8] |= 1u << (bit & 7);
+			non_ascii |=
+				(data[i] | data[i + 1] | data[i + 2]) &
+				0x80;
+		}
+	}
+	if (!folded_filter || !non_ascii)
+		return;
+
+	/*
+	 * Under PCRE2's Unicode caseless matching, K and S also match the
+	 * Kelvin sign and long S. Add the trigrams that become possible when
+	 * those UTF-8 sequences are folded to their ASCII equivalents.
+	 */
+	for (size_t i = 0; i < size;) {
+		unsigned char ch;
+		int is_special = 0;
+
+		if (data[i] < 0x80) {
+			ch = data[i++];
+		} else if (i + 2 < size &&
+			   data[i] == 0xe2 &&
+			   data[i + 1] == 0x84 &&
+			   data[i + 2] == 0xaa) {
+			ch = 'k';
+			is_special = 1;
+			i += 3;
+		} else if (i + 1 < size &&
+			   data[i] == 0xc5 &&
+			   data[i + 1] == 0xbf) {
+			ch = 's';
+			is_special = 1;
+			i += 2;
+		} else {
+			folded_nr = 0;
+			i++;
+			continue;
+		}
+
+		if (ch >= 'A' && ch <= 'Z')
+			ch += 'a' - 'A';
+		if (folded_nr < ARRAY_SIZE(folded)) {
+			folded[folded_nr] = ch;
+			special[folded_nr++] = is_special;
+		} else {
+			folded[0] = folded[1];
+			folded[1] = folded[2];
+			folded[2] = ch;
+			special[0] = special[1];
+			special[1] = special[2];
+			special[2] = is_special;
+		}
+		if (folded_nr == ARRAY_SIZE(folded) &&
+		    (special[0] || special[1] || special[2])) {
+			uint32_t bit = trigram_hash(folded, 1) &
+				       (filter_size * 8 - 1);
+
+			folded_filter[bit / 8] |= 1u << (bit & 7);
+		}
 	}
 }
 
@@ -2179,8 +2327,8 @@ void grep_index_memory_free(struct grep_index_memory *index)
 	hashmap_for_each_entry(&index->entries, &iter, entry, ent) {
 		if (entry->cond_initialized)
 			pthread_cond_destroy(&entry->cond);
-		if (entry->filter_owned)
-			free(entry->filter);
+		free(entry->filter[0]);
+		free(entry->filter[1]);
 		free(entry);
 	}
 	hashmap_clear(&index->entries);
@@ -2211,6 +2359,8 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	unsigned char *filter = NULL;
 	void *content = NULL;
 	uint32_t filter_size;
+	int mode;
+	int reserved = 0;
 	int result;
 
 	if (!index || !query)
@@ -2220,54 +2370,40 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 		return grep_index_maybe_contains(
 			index->persistent, index->repo, oid, query);
 
+	mode = query->ignore_case;
 	hashmap_entry_init(&key.ent, oidhash(oid));
 	oidcpy(&key.oid, oid);
 	pthread_mutex_lock(&index->mutex);
 	entry = hashmap_get_entry(&index->entries, &key, ent, NULL);
 	if (entry) {
-		while (entry->state == GREP_INDEX_MEMORY_BUILDING)
+		while (entry->state[mode] == GREP_INDEX_MEMORY_BUILDING)
 			pthread_cond_wait(&entry->cond, &index->mutex);
-		if (entry->state == GREP_INDEX_MEMORY_FAILED) {
+		if (entry->state[mode] == GREP_INDEX_MEMORY_READY) {
+			filter = entry->filter[mode];
+			filter_size = entry->filter_size[mode];
+			pthread_mutex_unlock(&index->mutex);
+			return grep_index_filter_maybe_contains(
+				filter, filter_size, query, 0);
+		}
+		if (entry->state[mode] == GREP_INDEX_MEMORY_FAILED) {
 			pthread_mutex_unlock(&index->mutex);
 			return -1;
 		}
-		filter = entry->filter;
-		filter_size = entry->filter_size;
-		pthread_mutex_unlock(&index->mutex);
-		return grep_index_filter_maybe_contains(
-			filter, filter_size, query);
-	}
-	pthread_mutex_unlock(&index->mutex);
-
-	pthread_mutex_lock(&index->mutex);
-	entry = hashmap_get_entry(&index->entries, &key, ent, NULL);
-	if (entry) {
-		while (entry->state == GREP_INDEX_MEMORY_BUILDING)
-			pthread_cond_wait(&entry->cond, &index->mutex);
-		if (entry->state == GREP_INDEX_MEMORY_FAILED) {
+	} else {
+		if (index->entries_nr >= GREP_INDEX_MEMORY_MAX_ENTRIES ||
+		    index->filter_bytes >= GREP_INDEX_MEMORY_MAX_BYTES) {
 			pthread_mutex_unlock(&index->mutex);
 			return -1;
 		}
-		filter = entry->filter;
-		filter_size = entry->filter_size;
-		pthread_mutex_unlock(&index->mutex);
-		return grep_index_filter_maybe_contains(
-			filter, filter_size, query);
+		CALLOC_ARRAY(entry, 1);
+		hashmap_entry_init(&entry->ent, key.ent.hash);
+		oidcpy(&entry->oid, oid);
+		pthread_cond_init(&entry->cond, NULL);
+		entry->cond_initialized = 1;
+		hashmap_add(&index->entries, &entry->ent);
+		index->entries_nr++;
 	}
-	if (index->entries_nr >= GREP_INDEX_MEMORY_MAX_ENTRIES ||
-	    index->filter_bytes >= GREP_INDEX_MEMORY_MAX_BYTES) {
-		pthread_mutex_unlock(&index->mutex);
-		return -1;
-	}
-
-	CALLOC_ARRAY(entry, 1);
-	hashmap_entry_init(&entry->ent, key.ent.hash);
-	oidcpy(&entry->oid, oid);
-	pthread_cond_init(&entry->cond, NULL);
-	entry->cond_initialized = 1;
-	entry->state = GREP_INDEX_MEMORY_BUILDING;
-	hashmap_add(&index->entries, &entry->ent);
-	index->entries_nr++;
+	entry->state[mode] = GREP_INDEX_MEMORY_BUILDING;
 	pthread_mutex_unlock(&index->mutex);
 
 	oi.typep = &type;
@@ -2277,35 +2413,43 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 		OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK);
 	if (!result && type == OBJ_BLOB &&
 	    size <= GREP_INDEX_MEMORY_MAX_BLOB_SIZE) {
-		oi.contentp = &content;
-		result = odb_read_object_info_extended(
-			index->repo->objects, oid, &oi,
-			OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK);
+		filter_size = filter_size_for_blob(size);
+		pthread_mutex_lock(&index->mutex);
+		if (filter_size <= GREP_INDEX_MEMORY_MAX_BYTES -
+					   index->filter_bytes) {
+			index->filter_bytes += filter_size;
+			reserved = 1;
+		}
+		pthread_mutex_unlock(&index->mutex);
+		if (reserved) {
+			oi.contentp = &content;
+			result = odb_read_object_info_extended(
+				index->repo->objects, oid, &oi,
+				OBJECT_INFO_SKIP_FETCH_OBJECT |
+					OBJECT_INFO_QUICK);
+		}
 	}
 	if (!result && content) {
-		filter_size = filter_size_for_blob(size);
 		CALLOC_ARRAY(filter, filter_size);
-		fill_filter(filter, filter_size, content, size);
+		fill_filter(mode ? NULL : filter, mode ? filter : NULL,
+			    filter_size, content, size);
 	}
 	free(content);
 
 	pthread_mutex_lock(&index->mutex);
-	if (filter &&
-	    filter_size <= GREP_INDEX_MEMORY_MAX_BYTES -
-				   index->filter_bytes) {
-		entry->filter = filter;
-		entry->filter_size = filter_size;
-		entry->filter_owned = 1;
-		entry->state = GREP_INDEX_MEMORY_READY;
-		index->filter_bytes += filter_size;
+	if (filter) {
+		entry->filter[mode] = filter;
+		entry->filter_size[mode] = filter_size;
+		entry->state[mode] = GREP_INDEX_MEMORY_READY;
 	} else {
-		FREE_AND_NULL(filter);
-		entry->state = GREP_INDEX_MEMORY_FAILED;
+		if (reserved)
+			index->filter_bytes -= filter_size;
+		entry->state[mode] = GREP_INDEX_MEMORY_FAILED;
 	}
 	pthread_cond_broadcast(&entry->cond);
 	pthread_mutex_unlock(&index->mutex);
 	return filter ? grep_index_filter_maybe_contains(
-				filter, filter_size, query) :
+				filter, filter_size, query, 0) :
 			-1;
 }
 
@@ -2497,7 +2641,7 @@ int write_transposed_grep_index(struct repository *repo)
 			uint64_t end = get_be64(
 				segment->offsets +
 				(i + 1) * sizeof(uint64_t));
-			size_t filter_size = end - start;
+			size_t filter_size = (end - start) / 2;
 			size_t class_nr;
 
 			for (class_nr = 0;
@@ -2520,9 +2664,11 @@ int write_transposed_grep_index(struct repository *repo)
 			pos += class_counts[i];
 			class_offsets[i] = data_len;
 			class_lengths[i] = st_mult(
-				(uint64_t)GREP_INDEX_MIN_FILTER_SIZE *
-					(1ULL << i) * 8,
-				row_bytes);
+				st_mult(
+					(uint64_t)GREP_INDEX_MIN_FILTER_SIZE *
+						(1ULL << i) * 8,
+					row_bytes),
+				2);
 			if (class_lengths[i] > UINT64_MAX - data_len)
 				die(_("grep index is too large"));
 			data_len += class_lengths[i];
@@ -2566,73 +2712,84 @@ int write_transposed_grep_index(struct repository *repo)
 				(8 * 1024 * 1024) / (8 * row_bytes);
 			if (!block_bytes)
 				block_bytes = 1;
-			for (size_t byte_start = 0;
-			     byte_start < filter_size;
-			     byte_start += block_bytes) {
-				size_t byte_end = byte_start + block_bytes;
-				size_t output_size;
+			for (size_t representation = 0;
+			     representation < 2; representation++) {
+				for (size_t byte_start = 0;
+				     byte_start < filter_size;
+				     byte_start += block_bytes) {
+					size_t byte_end =
+						byte_start + block_bytes;
+					size_t output_size;
 
-				if (byte_end > filter_size)
-					byte_end = filter_size;
-				output_size = st_mult(
-					st_mult(byte_end - byte_start, 8),
-					row_bytes);
-				if (output_size > output_alloc) {
-					REALLOC_ARRAY(output, output_size);
-					output_alloc = output_size;
-				}
-				memset(output, 0, output_size);
-				for (size_t group = 0; group < count;
-				     group += 8) {
-					for (size_t byte = byte_start;
-					     byte < byte_end; byte++) {
-						uint64_t transposed = 0;
-						unsigned char *bytes =
-							(unsigned char *)
-								&transposed;
-
-						for (size_t lane = 0;
-						     lane < 8 &&
-						     group + lane < count;
-						     lane++) {
-							size_t pos =
-								members
-									[class_base
-										 [class_nr] +
-									 group +
-									 lane];
-							uint64_t start =
-								get_be64(
-									segment
-										->offsets +
-									pos *
-										sizeof(
-											uint64_t));
-
-							transposed |=
-								transpose_byte
-									[lane]
-									[segment
-										 ->data
-										 [start +
-										  byte]];
-						}
-						for (size_t bit = 0;
-						     bit < 8; bit++)
-							output
-								[((byte -
-								   byte_start) *
-									  8 +
-								  bit) *
-									 row_bytes +
-								 group / 8] =
-								bytes[bit];
+					if (byte_end > filter_size)
+						byte_end = filter_size;
+					output_size = st_mult(
+						st_mult(
+							byte_end - byte_start,
+							8),
+						row_bytes);
+					if (output_size > output_alloc) {
+						REALLOC_ARRAY(
+							output, output_size);
+						output_alloc = output_size;
 					}
+					memset(output, 0, output_size);
+					for (size_t group = 0;
+					     group < count; group += 8) {
+						for (size_t byte = byte_start;
+						     byte < byte_end; byte++) {
+							uint64_t transposed = 0;
+							unsigned char *bytes =
+								(unsigned char *)
+									&transposed;
+
+							for (size_t lane = 0;
+							     lane < 8 &&
+							     group + lane <
+								     count;
+							     lane++) {
+								size_t pos =
+									members
+										[class_base
+											 [class_nr] +
+										 group +
+										 lane];
+								uint64_t start =
+									get_be64(
+										segment
+											->offsets +
+										pos *
+											sizeof(
+												uint64_t));
+
+								transposed |=
+									transpose_byte
+										[lane]
+										[segment
+											 ->data
+											 [start +
+											  representation *
+												  filter_size +
+											  byte]];
+							}
+							for (size_t bit = 0;
+							     bit < 8; bit++)
+								output
+									[((byte -
+									   byte_start) *
+										  8 +
+									  bit) *
+										 row_bytes +
+									 group / 8] =
+									bytes[bit];
+						}
+					}
+					if (write_in_full(
+						    data_fd, output,
+						    output_size) < 0)
+						die_errno(
+							_("unable to write temporary grep data"));
 				}
-				if (write_in_full(data_fd, output,
-						  output_size) < 0)
-					die_errno(
-						_("unable to write temporary grep data"));
 			}
 		}
 		if ((uint64_t)lseek(data_fd, 0, SEEK_CUR) != data_len)
@@ -2812,7 +2969,7 @@ int write_grep_index(struct repository *repo, int show_progress)
 	oid_array_sort(&oids);
 	CALLOC_ARRAY(filter_sizes, oids.nr);
 	CALLOC_ARRAY(blob_sizes, oids.nr);
-	ALLOC_ARRAY(filter, GREP_INDEX_MAX_FILTER_SIZE);
+	ALLOC_ARRAY(filter, 2 * GREP_INDEX_MAX_FILTER_SIZE);
 
 	grep_index_path(repo, &filter_temp_path,
 			"tmp_grep_filters_XXXXXX");
@@ -2846,14 +3003,15 @@ int write_grep_index(struct repository *repo, int show_progress)
 			continue;
 		}
 		filter_size = filter_size_for_blob(size);
-		fill_filter(filter, filter_size, content, size);
+		fill_filter(filter, filter + filter_size,
+			    filter_size, content, size);
 		free(content);
 		if (write_in_full(get_tempfile_fd(filter_temp), filter,
-				  filter_size) < 0)
+				  2 * filter_size) < 0)
 			die_errno(_("unable to write temporary grep filters"));
 		oidcpy(&oids.oid[dst], &oids.oid[i]);
 		blob_sizes[dst] = size;
-		filter_sizes[dst] = filter_size;
+		filter_sizes[dst] = 2 * filter_size;
 		dst++;
 	}
 	stop_progress(&progress);
@@ -2899,7 +3057,7 @@ int write_grep_index(struct repository *repo, int show_progress)
 		die_errno(_("unable to rewind temporary grep filters"));
 	for (;;) {
 		ssize_t bytes = xread(get_tempfile_fd(filter_temp), filter,
-				      GREP_INDEX_MAX_FILTER_SIZE);
+				      2 * GREP_INDEX_MAX_FILTER_SIZE);
 
 		if (bytes < 0)
 			die_errno(_("unable to read temporary grep filters"));

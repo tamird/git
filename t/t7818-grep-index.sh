@@ -12,6 +12,13 @@ test_lazy_prereq MULTI_CPU '
 	test "$(test-tool online-cpus)" -gt 1
 '
 
+test_lazy_prereq PCRE2_UTF8_LOCALE '
+	test_have_prereq LIBPCRE2 &&
+	LC_ALL=en_US.UTF-8 git -C "$TRASH_DIRECTORY" grep --cached \
+		--no-content-index --quiet -i \
+		"non-ascii k contents" -- non-ascii
+'
+
 wait_for_file_value () {
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
 	do
@@ -59,6 +66,8 @@ test_expect_success 'setup' '
 	echo "import sample_ext.__private" >escaped-dot &&
 	echo "present.needle" >escaped-dot-ere &&
 	echo ".a" >escaped-dot-quantified &&
+	printf "non-ascii \342\204\252 contents\n" >non-ascii &&
+	printf "long \305\277 value\n" >long-s &&
 	echo "from _private" >outer-from &&
 	echo "import _private" >outer-import &&
 	echo "from _p)" >outer-boundary &&
@@ -72,11 +81,16 @@ test_expect_success 'setup' '
 	echo "frm present" >structured-optional &&
 	printf "%s\n" "literal|()[]\\suffix" >escaped-ere &&
 	git add short fixed-pcre present agent-regex ordinary escaped-dot \
-		escaped-dot-ere escaped-dot-quantified outer-from outer-import \
-		outer-boundary mixed-unicorn mixed-gunicorn escaped-ere-atom \
-		structured-from structured-import structured-middle-from \
-		structured-middle-import structured-optional escaped-ere &&
+		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
+		long-s outer-import outer-boundary mixed-unicorn mixed-gunicorn \
+		escaped-ere-atom structured-from structured-import \
+		structured-middle-from structured-middle-import \
+		structured-optional escaped-ere &&
 	git commit -m initial
+'
+
+test_expect_success 'content index query wire versions' '
+	test-tool grep-index-ipc query-wire
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
@@ -193,8 +207,35 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	echo "present:present needle" >expect &&
 	git grep --cached "present needle" -- present >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	if test_have_prereq LIBPCRE2
+	then
+		test_must_fail git grep --cached -i \
+			"absent daemon pattern" &&
+		mv "$object" "$object.memory-save" &&
+		test_when_finished "test ! -e \"$object.memory-save\" ||
+				    mv \"$object.memory-save\" \"$object\"" &&
+		test_must_fail git grep --cached -i \
+			"ABSENT DAEMON PATTERN" -- short 2>err-memory &&
+		test_must_be_empty err-memory &&
+		mv "$object.memory-save" "$object" &&
+
+		non_ascii_oid=$(git rev-parse :non-ascii) &&
+		non_ascii_object=.git/objects/$(test_oid_to_path \
+			"$non_ascii_oid") &&
+		mv "$non_ascii_object" "$non_ascii_object.memory-save" &&
+		test_when_finished "test ! -e \
+			\"$non_ascii_object.memory-save\" ||
+			mv \"$non_ascii_object.memory-save\" \
+				\"$non_ascii_object\"" &&
+		test_must_fail git grep --cached -i \
+			"absent daemon pattern" \
+			-- non-ascii 2>err-memory-non-ascii &&
+		test_must_be_empty err-memory-non-ascii &&
+		mv "$non_ascii_object.memory-save" "$non_ascii_object"
+	fi &&
+
 	replacement=$(echo "absent daemon pattern" | git hash-object -w --stdin) &&
 	git replace "$oid" "$replacement" &&
 	echo "short:absent daemon pattern" >expect &&
@@ -281,11 +322,109 @@ test_expect_success 'content index prunes impossible blobs' '
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -F "absent pattern" 2>err &&
 	test_must_be_empty err &&
+	if test_have_prereq LIBPCRE2
+	then
+		mv .git/objects/info/grep-index/chain-transposed \
+			.git/objects/info/grep-index/chain-transposed.save &&
+		test_when_finished "test ! -e \
+			.git/objects/info/grep-index/chain-transposed.save ||
+			mv .git/objects/info/grep-index/chain-transposed.save \
+				.git/objects/info/grep-index/chain-transposed" &&
+		test_must_fail git grep --cached -i "ABSENT PATTERN" \
+			-- short 2>err &&
+		test_must_be_empty err &&
+		mv .git/objects/info/grep-index/chain-transposed.save \
+			.git/objects/info/grep-index/chain-transposed
+	fi &&
 	test_must_fail git grep --cached --no-content-index \
 		"absent pattern" 2>err &&
 	test_grep "unable to read" err &&
 	test_must_fail git -c grep.useContentIndex=false grep --cached \
 		"absent pattern" 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 \
+	'content index prunes case-insensitive ASCII queries' '
+	echo "present:present needle" >expect &&
+	git grep --cached -i "PRESENT NEEDLE" -- present >actual &&
+	test_cmp expect actual &&
+
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i "ABSENT PATTERN" -- short 2>err &&
+	test_must_fail git grep --cached -i -E \
+		"ABSENT PATTERN" -- short 2>err-ere &&
+	test_must_be_empty err-ere &&
+	test_must_be_empty err
+'
+
+test_expect_success LIBPCRE2 \
+	'content index keeps exact and folded filters' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "PRESENT NEEDLE" \
+		-- present 2>err-exact &&
+	test_must_be_empty err-exact &&
+	test_must_fail git grep --cached -i "PRESENT NEEDLE" \
+		-- present 2>err-folded &&
+	test_grep "unable to read" err-folded
+'
+
+test_expect_success PCRE2_UTF8_LOCALE \
+	'case-insensitive index preserves Unicode aliases' '
+	LC_ALL=en_US.UTF-8 git grep --cached --quiet -i \
+		"non-ascii k contents" -- non-ascii &&
+	LC_ALL=en_US.UTF-8 git grep --cached --quiet -i \
+		"long s value" -- long-s &&
+
+	oid=$(git rev-parse :non-ascii) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	LC_ALL=en_US.UTF-8 test_must_fail git grep --cached -i \
+		"non-ascii k contents" -- non-ascii 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 \
+	'content index prunes case-insensitive PCRE queries' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i -P \
+		"ABSENT PATTERN" -- short 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success LIBPCRE2 \
+	'case-insensitive index prunes non-ASCII blobs' '
+	oid=$(git rev-parse :non-ascii) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i "absent pattern" \
+		-- non-ascii 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'case-insensitive index rejects non-ASCII patterns' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	pattern=$(printf "\342\204\252") &&
+
+	test_must_fail git grep --cached -i "$pattern" -- short 2>err &&
 	test_grep "unable to read" err
 '
 
@@ -596,7 +735,8 @@ test_expect_success 'unsupported searches use normal blob reads' '
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 
-	test_must_fail git grep --cached -i "absent pattern" 2>err &&
+	test_must_fail git grep --cached -i -E \
+		"ABSENT[ ]PATTERN" -- short 2>err &&
 	test_grep "unable to read" err &&
 	test_must_fail git grep --cached -E "^|absent needle" -- short 2>err &&
 	test_grep "unable to read" err &&
@@ -1032,7 +1172,8 @@ test_expect_success 'write incremental segment' '
 	cp .git/objects/info/grep-index/chain-transposed \
 		chain-transposed.before &&
 	printf z >incremental &&
-	git add incremental &&
+	printf "incremental \342\204\252\n" >incremental-non-ascii &&
+	git add incremental incremental-non-ascii &&
 	git grep-index --no-progress &&
 	test_line_count = 4 .git/objects/info/grep-index/chain &&
 	test_line_count = 4 .git/objects/info/grep-index/chain-transposed &&
@@ -1042,10 +1183,25 @@ test_expect_success 'write incremental segment' '
 	oid=$(git rev-parse :incremental) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
-	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
 
 	test_must_fail git grep --cached "absent pattern" 2>err &&
-	test_must_be_empty err
+	test_must_be_empty err &&
+	mv "$object.save" "$object" &&
+
+	if test_have_prereq LIBPCRE2
+	then
+		non_ascii_oid=$(git rev-parse :incremental-non-ascii) &&
+		non_ascii_object=.git/objects/$(test_oid_to_path \
+			"$non_ascii_oid") &&
+		mv "$non_ascii_object" "$non_ascii_object.save" &&
+		test_when_finished "mv \"$non_ascii_object.save\" \
+					\"$non_ascii_object\"" &&
+		test_must_fail git grep --cached -i "absent pattern" \
+			-- incremental-non-ascii 2>err-non-ascii &&
+		test_must_be_empty err-non-ascii
+	fi
 '
 
 test_expect_success 'writer includes linked worktree indexes' '
