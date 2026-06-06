@@ -2080,10 +2080,11 @@ test_expect_success 'grep can find things only in the work tree' '
 	test_must_fail git grep --quiet "find in work tree" HEAD
 '
 
-test_expect_success 'grep selects small literal pathsets directly' '
+test_expect_success 'grep selects literal pathsets directly' '
 	test_when_finished "rm -f grep-literal-trace-* &&
 		git rm -rf grep-literal-a grep-literal-z \
-			grep-literal-dir grep-literal-dir.sibling" &&
+			grep-literal-dir grep-literal-dir.sibling \
+			grep-literal-many-*" &&
 	echo "literal needle a" >grep-literal-a &&
 	echo "literal needle z" >grep-literal-z &&
 	mkdir -p grep-literal-dir/nested &&
@@ -2129,6 +2130,25 @@ test_expect_success 'grep selects small literal pathsets directly' '
 	test_cmp expected actual &&
 	test_trace2_data grep literal_path_candidates 2 \
 		<grep-literal-trace-overlap &&
+	for i in $(test_seq 1 40)
+	do
+		echo "many literal paths" >grep-literal-many-$i || return 1
+	done &&
+	git add grep-literal-many-* &&
+	git ls-files "grep-literal-many-*" >many-paths &&
+	sed "s/$/:many literal paths/" many-paths >many-expected &&
+	set -- &&
+	while read path
+	do
+		set -- "$path" "$@" || return 1
+	done <many-paths &&
+	set -- "$@" grep-literal-many-1 &&
+	env \
+		GIT_TRACE2_EVENT="$PWD/grep-literal-trace-many" \
+		git grep "many literal paths" -- "$@" >actual &&
+	test_cmp many-expected actual &&
+	test_trace2_data grep literal_path_candidates 40 \
+		<grep-literal-trace-many &&
 	git update-index --assume-unchanged \
 		grep-literal-dir/nested/file &&
 	rm grep-literal-dir/nested/file &&

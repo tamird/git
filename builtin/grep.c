@@ -977,6 +977,8 @@ static int grep_cache(struct grep_opt *opt,
 	size_t selected_alloc = 0;
 	size_t selected_pos = 0;
 	int use_selected = 0;
+	int literal_selected = 0;
+	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
@@ -989,18 +991,20 @@ static int grep_cache(struct grep_opt *opt,
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
 	/*
-	 * Whole-index caches cost more than reading a few small, explicitly
-	 * named worktree files. Resolve those pathspecs directly.
+	 * Whole-index pathspec walks cost more than resolving explicitly named
+	 * worktree files directly.
 	 */
 	if (git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
 	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
-	    pathspec->nr < GREP_MIN_FILES_FOR_THREADS &&
 	    !pathspec->has_wildcard &&
 	    !(pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))) {
 		struct strbuf dir = STRBUF_INIT;
-		uint64_t selected_bytes = 0;
+		size_t selected_map_size =
+			DIV_ROUND_UP(repo->index->cache_nr, 8);
+		unsigned char *selected_map;
 		int can_select = 1;
 
+		CALLOC_ARRAY(selected_map, selected_map_size);
 		for (size_t i = 0; i < pathspec->nr; i++) {
 			const struct pathspec_item *item = &pathspec->items[i];
 			const struct cache_entry *previous;
@@ -1078,8 +1082,7 @@ static int grep_cache(struct grep_opt *opt,
 			for (; nr < end; nr++) {
 				const struct cache_entry *ce =
 					repo->index->cache[nr];
-				struct stat st;
-				size_t insert;
+				unsigned char bit = 1u << (nr & 7);
 
 				if (ce_stage(ce)) {
 					can_select = 0;
@@ -1095,52 +1098,60 @@ static int grep_cache(struct grep_opt *opt,
 				if (!S_ISREG(ce->ce_mode))
 					continue;
 
-				insert = selected_nr;
-				while (insert && selected[insert - 1] > nr)
-					insert--;
-				if (insert && selected[insert - 1] == nr)
+				if (selected_map[nr / 8] & bit)
 					continue;
-				if (selected_nr ==
-				    GREP_MIN_FILES_FOR_THREADS - 1) {
-					can_select = 0;
-					break;
-				}
-				if (!lstat(ce->name, &st) &&
-				    S_ISREG(st.st_mode)) {
-					if ((uintmax_t)st.st_size >
-					    GREP_LITERAL_PATH_MAX_BYTES -
-						    selected_bytes) {
-						can_select = 0;
-						break;
-					}
-					selected_bytes += st.st_size;
-				}
-				ALLOC_GROW(selected, selected_nr + 1,
-					   selected_alloc);
-				MOVE_ARRAY(selected + insert + 1,
-					   selected + insert,
-					   selected_nr - insert);
-				selected[insert] = nr;
+				selected_map[nr / 8] |= bit;
 				selected_nr++;
 			}
 			if (!can_select)
 				break;
 		}
 		if (can_select) {
+			selected_alloc = selected_nr;
+			ALLOC_ARRAY(selected, selected_alloc);
+			selected_nr = 0;
+			for (nr = 0; nr < repo->index->cache_nr; nr++)
+				if (selected_map[nr / 8] &
+				    (1u << (nr & 7)))
+					selected[selected_nr++] = nr;
 			use_selected = 1;
+			literal_selected = 1;
 			trace2_data_intmax("grep", repo,
 					   "literal_path_candidates",
 					   selected_nr);
-			if (num_threads > 1 && threads_auto)
-				num_threads = 1;
+			if (selected_nr < GREP_MIN_FILES_FOR_THREADS) {
+				uint64_t selected_bytes = 0;
+
+				skip_cache_setup = 1;
+				for (size_t i = 0; i < selected_nr; i++) {
+					const struct cache_entry *ce =
+						repo->index
+							->cache[selected[i]];
+					struct stat st;
+
+					if (lstat(ce->name, &st) ||
+					    !S_ISREG(st.st_mode) ||
+					    (uintmax_t)st.st_size >
+						    GREP_LITERAL_PATH_MAX_BYTES -
+							    selected_bytes) {
+						skip_cache_setup = 0;
+						break;
+					}
+					selected_bytes += st.st_size;
+				}
+				if (skip_cache_setup && num_threads > 1 &&
+				    threads_auto)
+					num_threads = 1;
+			}
 		} else {
 			FREE_AND_NULL(selected);
 			selected_nr = 0;
 			selected_alloc = 0;
 		}
+		free(selected_map);
 		strbuf_release(&dir);
 	}
-	if (!use_selected && repo == the_repository && !cached &&
+	if (!skip_cache_setup && repo == the_repository && !cached &&
 	    !opt->allow_textconv &&
 	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
 	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
@@ -1152,16 +1163,26 @@ static int grep_cache(struct grep_opt *opt,
 							     "GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
 							     GREP_WORKTREE_CACHE_MIN_BYTES);
 		uint64_t worktree_bytes = 0;
+		size_t pos;
 
-		use_selected = min_bytes && !recurse_submodules;
-		for (nr = 0; min_bytes && nr < repo->index->cache_nr; nr++) {
-			const struct cache_entry *ce = repo->index->cache[nr];
+		if (!literal_selected)
+			use_selected = min_bytes && !recurse_submodules;
+		for (pos = 0;
+		     min_bytes &&
+		     pos < (literal_selected ? selected_nr :
+					       repo->index->cache_nr);
+		     pos++) {
+			const struct cache_entry *ce;
 
-			if (ce_skip_worktree(ce) || !S_ISREG(ce->ce_mode) ||
-			    !match_pathspec(repo->index, pathspec, ce->name,
-					    ce_namelen(ce), 0, NULL, 0))
+			nr = literal_selected ? selected[pos] : pos;
+			ce = repo->index->cache[nr];
+			if (!literal_selected &&
+			    (ce_skip_worktree(ce) ||
+			     !S_ISREG(ce->ce_mode) ||
+			     !match_pathspec(repo->index, pathspec, ce->name,
+					     ce_namelen(ce), 0, NULL, 0)))
 				continue;
-			if (use_selected) {
+			if (!literal_selected && use_selected) {
 				ALLOC_GROW(selected, selected_nr + 1,
 					   selected_alloc);
 				selected[selected_nr++] = nr;
@@ -1174,18 +1195,19 @@ static int grep_cache(struct grep_opt *opt,
 					worktree_bytes +=
 						ce->ce_stat_data.sd_size;
 			}
-			if (ce_stage(ce)) {
+			if (!literal_selected && ce_stage(ce))
 				while (nr + 1 < repo->index->cache_nr &&
 				       !strcmp(ce->name,
 					       repo->index->cache[nr + 1]->name))
 					nr++;
-			}
 		}
 		if (worktree_bytes >= min_bytes)
 			worktree_cache = grep_worktree_cache_load(repo,
 								  repo->index);
 	}
-	if (!use_selected && repo == the_repository && content_index_query &&
+	if (!skip_cache_setup && (!use_selected || literal_selected) &&
+	    repo == the_repository &&
+	    content_index_query &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
 	    grep_index_ipc_is_available(repo)) {
@@ -1250,7 +1272,9 @@ static int grep_cache(struct grep_opt *opt,
 		}
 		free(maybe);
 	}
-	if (!use_selected && repo == the_repository && content_index_query &&
+	if (!skip_cache_setup && (!use_selected || literal_selected) &&
+	    repo == the_repository &&
+	    content_index_query &&
 	    !used_index_ipc && !content_index) {
 		trace2_region_enter("grep", "load_content_index", repo);
 		content_index = grep_index_load(repo);
@@ -1289,7 +1313,8 @@ static int grep_cache(struct grep_opt *opt,
 			num_threads = 1;
 		trace2_region_leave("grep", "select_content_index", repo);
 	}
-	if (!use_selected && repo == the_repository && content_index_query &&
+	if (!skip_cache_setup && (!use_selected || literal_selected) &&
+	    repo == the_repository && content_index_query &&
 	    !used_index_ipc && !content_index_prepared &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
@@ -1301,15 +1326,20 @@ static int grep_cache(struct grep_opt *opt,
 		size_t oids_alloc = 0;
 		size_t positions_alloc = 0;
 
-		for (size_t i = 0; i < repo->index->cache_nr; i++) {
+		size_t limit = literal_selected ? selected_nr :
+						  repo->index->cache_nr;
+
+		for (size_t pos = 0; pos < limit; pos++) {
+			size_t i = literal_selected ? selected[pos] : pos;
 			const struct cache_entry *ce = repo->index->cache[i];
 			int use_oid = cached || (ce->ce_flags & CE_VALID);
 
 			if ((!cached && ce_skip_worktree(ce)) ||
 			    !S_ISREG(ce->ce_mode) || ce_stage(ce) ||
 			    ce_intent_to_add(ce) ||
-			    !match_pathspec(repo->index, pathspec, ce->name,
-					    ce_namelen(ce), 0, NULL, 0))
+			    (!literal_selected &&
+			     !match_pathspec(repo->index, pathspec, ce->name,
+					     ce_namelen(ce), 0, NULL, 0)))
 				continue;
 			if (!use_oid && worktree_cache &&
 			    can_cache_worktree_blob(ce)) {
@@ -1409,10 +1439,17 @@ static int grep_cache(struct grep_opt *opt,
 			strbuf_setlen(&name, name_base_len);
 			strbuf_addstr(&name, ce->name);
 			free(data);
+			/*
+			 * Every producer of selected[] applies the pathspec while
+			 * constructing it.
+			 */
 		} else if (S_ISREG(ce->ce_mode) &&
-		    match_pathspec(repo->index, pathspec, name.buf, name.len, 0, NULL,
-				   S_ISDIR(ce->ce_mode) ||
-				   S_ISGITLINK(ce->ce_mode))) {
+			   (use_selected ||
+			    match_pathspec(repo->index, pathspec, name.buf,
+					   name.len, 0, NULL,
+					   S_ISDIR(ce->ce_mode) ||
+						   S_ISGITLINK(
+							   ce->ce_mode)))) {
 			enum grep_worktree_cache_result cache_result =
 				GREP_WORKTREE_CACHE_UNKNOWN;
 			const struct cache_entry *cache_candidate = NULL;
