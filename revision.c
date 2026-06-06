@@ -1953,6 +1953,7 @@ void repo_init_revisions(struct repository *r,
 	revs->grep_filter.status_only = 1;
 
 	repo_diff_setup(revs->repo, &revs->diffopt);
+	revs->diffopt.pickaxe_index_state = &revs->pickaxe_index;
 	if (prefix && !revs->diffopt.prefix) {
 		revs->diffopt.prefix = prefix;
 		revs->diffopt.prefix_length = strlen(prefix);
@@ -3278,6 +3279,7 @@ void release_revisions(struct rev_info *revs)
 	release_revisions_mailmap(revs->mailmap);
 	free_grep_patterns(&revs->grep_filter);
 	graph_clear(revs->graph);
+	diff_pickaxe_index_clear(&revs->pickaxe_index);
 	diff_free(&revs->diffopt);
 	diff_free(&revs->pruning);
 	reflog_walk_info_release(revs->reflog_info);

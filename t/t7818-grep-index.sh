@@ -281,12 +281,153 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_must_be_empty err-takeover
 '
 
+test_expect_success 'setup indexed pickaxe history' '
+	echo "pickaxe needle old" >pickaxe-old &&
+	echo "pickaxe replacement" >pickaxe-new &&
+	cp pickaxe-old pickaxe-history &&
+	git add pickaxe-old pickaxe-new pickaxe-history &&
+	git commit -m "pickaxe old" &&
+	cp pickaxe-new pickaxe-history &&
+	git add pickaxe-history &&
+	git commit -m "pickaxe new"
+'
+
 test_expect_success 'write shared content index' '
 	git grep-index --no-progress &&
 	test_path_is_file .git/objects/info/grep-index/chain &&
 	test_line_count = 1 .git/objects/info/grep-index/chain &&
 	segment=$(cat .git/objects/info/grep-index/chain) &&
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
+'
+
+test_expect_success 'content index prunes pickaxe blob reads' '
+	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
+	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
+	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
+	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
+	mv "$old_object" "$old_object.save" &&
+	mv "$new_object" "$new_object.save" &&
+	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
+			    mv \"$new_object.save\" \"$new_object\"" &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err &&
+	mv .git/objects/info/grep-index/chain-transposed \
+		.git/objects/info/grep-index/chain-transposed.save &&
+	test_when_finished "test ! -e \
+		.git/objects/info/grep-index/chain-transposed.save ||
+		mv .git/objects/info/grep-index/chain-transposed.save \
+			.git/objects/info/grep-index/chain-transposed" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual-legacy 2>err-legacy &&
+	test_must_be_empty actual-legacy &&
+	test_must_be_empty err-legacy &&
+	mv .git/objects/info/grep-index/chain-transposed.save \
+		.git/objects/info/grep-index/chain-transposed &&
+	if test_have_prereq LIBPCRE2
+	then
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+			git log --format=%s -i -SABSENT HEAD^..HEAD \
+			-- pickaxe-history >actual-icase 2>err-icase &&
+		test_must_be_empty actual-icase &&
+		test_must_be_empty err-icase
+	fi &&
+
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history 2>err-no-index &&
+	test_grep "unable to read" err-no-index
+'
+
+test_expect_success 'pickaxe index threshold spans commits' '
+	test_when_finished "rm -f pickaxe-threshold.trace" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=2 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-threshold.trace" \
+		git log --format=%s -Sabsent HEAD~2..HEAD \
+		-- pickaxe-history >actual &&
+	test_must_be_empty actual &&
+	test_grep "\"key\":\"content_index/query\",\"value\":\"1\"" \
+		pickaxe-threshold.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-threshold.trace
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'daemon content index prunes pickaxe blob reads' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_when_finished "rm -f pickaxe-ipc.trace" &&
+	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
+	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
+	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
+	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
+	mv "$old_object" "$old_object.save" &&
+	mv "$new_object" "$new_object.save" &&
+	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
+			    mv \"$new_object.save\" \"$new_object\"" &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-ipc.trace" \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err &&
+	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
+		pickaxe-ipc.trace
+'
+
+test_expect_success 'possible pickaxe blobs use normal reads' '
+	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
+	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
+	mv "$new_object" "$new_object.save" &&
+	test_when_finished "mv \"$new_object.save\" \"$new_object\"" &&
+
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sneedle HEAD^..HEAD \
+		-- pickaxe-history 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'pickaxe content index preserves textconv' '
+	write_script pickaxe-textconv <<-\EOF &&
+	if grep -q "needle old" "$1"
+	then
+		echo "converted pickaxe marker"
+	fi
+	EOF
+	echo "pickaxe-history diff=pickaxe" >.gitattributes &&
+	git add .gitattributes &&
+	test_when_finished "git reset -- .gitattributes &&
+			    rm -f .gitattributes pickaxe-textconv" &&
+	test_config diff.pickaxe.textconv ./pickaxe-textconv &&
+
+	echo "pickaxe new" >expect &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --textconv --format=%s \
+		-S"converted pickaxe marker" HEAD^..HEAD \
+		-- pickaxe-history >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'pickaxe content index honors replacements' '
+	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
+	replacement=$(echo "replacement-only-marker" |
+		git hash-object -w --stdin) &&
+	git replace "$old_oid" "$replacement" &&
+	test_when_finished "git replace -d \"$old_oid\"" &&
+
+	echo "pickaxe new" >expect &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sreplacement-only-marker \
+		HEAD^..HEAD -- pickaxe-history >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'content index does not skip regex validation' '

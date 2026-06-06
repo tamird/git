@@ -322,6 +322,7 @@ struct rev_info {
 	/* diff info for patches and for paths limiting */
 	struct diff_options diffopt;
 	struct diff_options pruning;
+	struct diff_pickaxe_index *pickaxe_index;
 
 	struct reflog_walk_info *reflog_info;
 	struct decoration children;
