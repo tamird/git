@@ -22,6 +22,7 @@
 
 #define PICKAXE_INDEX_MAX_ENTRIES (1U << 20)
 #define PICKAXE_INDEX_MIN_PAIRS	  4096
+#define PICKAXE_INDEX_DIRECT_MAX_OIDS 64
 
 struct diff_pickaxe_index_entry {
 	struct oidmap_entry entry;
@@ -44,6 +45,9 @@ struct diff_pickaxe_index {
 	uint64_t cache_hits;
 	uint64_t tested;
 	uint64_t impossible_pairs;
+	uint64_t direct_batches;
+	uint64_t ipc_batches;
+	uint64_t ipc_failures;
 };
 
 typedef int (*pickaxe_fn)(mmfile_t *one, mmfile_t *two,
@@ -316,6 +320,9 @@ void diffcore_pickaxe(struct diff_options *o)
 	size_t min_index_pairs = git_env_ulong(
 		"GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS",
 		PICKAXE_INDEX_MIN_PAIRS);
+	size_t max_direct_oids = git_env_ulong(
+		"GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS",
+		PICKAXE_INDEX_DIRECT_MAX_OIDS);
 	struct diff_pickaxe_index *index =
 		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
 	regex_t regex, *regexp = NULL;
@@ -422,12 +429,14 @@ void diffcore_pickaxe(struct diff_options *o)
 	if (index && index->ipc &&
 	    index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
 		struct oidset pending = OIDSET_INIT;
+		struct grep_index_location *locations = NULL;
 		struct object_id *oids = NULL;
 		unsigned char *maybe = NULL;
 		size_t oids_nr = 0;
 		size_t oids_alloc = 0;
 		size_t remaining = PICKAXE_INDEX_MAX_ENTRIES -
 				   index->results_nr;
+		int queried = 0;
 
 		for (int i = 0; i < diff_queued_diff.nr; i++) {
 			struct diff_filepair *p =
@@ -460,30 +469,81 @@ void diffcore_pickaxe(struct diff_options *o)
 		}
 
 	query:
-		if (oids_nr) {
-			ALLOC_ARRAY(maybe, oids_nr);
+		if (oids_nr && oids_nr <= max_direct_oids) {
+			/*
+			 * Small history diffs would otherwise pay for one
+			 * IPC connection and client thread per commit. Prepare
+			 * the local transposed index once when it covers every
+			 * object in this batch. The daemon remains responsible
+			 * for historical objects missing from the persistent
+			 * index and for larger batches.
+			 */
+			if (!index->direct_tried) {
+				index->direct_tried = 1;
+				index->index = grep_index_load(o->repo);
+			}
+			if (index->index) {
+				int covered = 1;
+
+				ALLOC_ARRAY(locations, oids_nr);
+				for (size_t i = 0; i < oids_nr; i++)
+					if (grep_index_resolve_location(
+						    index->index, &oids[i],
+						    &locations[i])) {
+						covered = 0;
+						break;
+					}
+				if (covered && !index->prepared)
+					index->prepared =
+						grep_index_prepare(
+							index->index,
+							index->query);
+				if (covered && index->prepared) {
+					ALLOC_ARRAY(maybe, oids_nr);
+					for (size_t i = 0; i < oids_nr; i++) {
+						int contains =
+							grep_index_prepared_location_maybe_contains(
+								index->prepared,
+								&locations[i]);
+
+						maybe[i] = contains ?
+							GREP_INDEX_IPC_MAYBE :
+							GREP_INDEX_IPC_IMPOSSIBLE;
+					}
+					index->direct_batches++;
+					queried = 1;
+				}
+			}
+		}
+		if (oids_nr && !queried) {
+			if (!maybe)
+				ALLOC_ARRAY(maybe, oids_nr);
 			if (!grep_index_ipc_query(
 				    o->repo,
 				    index->query,
 				    oids, oids_nr, maybe)) {
-				for (size_t i = 0; i < oids_nr; i++) {
-					struct diff_pickaxe_index_entry
-						*entry;
-
-					CALLOC_ARRAY(entry, 1);
-					oidcpy(&entry->entry.oid,
-					       &oids[i]);
-					entry->maybe =
-						maybe[i] !=
-						GREP_INDEX_IPC_IMPOSSIBLE;
-					oidmap_put(&index->results, entry);
-					index->results_nr++;
-				}
-				index->tested += oids_nr;
+				index->ipc_batches++;
+				queried = 1;
 			} else {
 				index->ipc = 0;
+				index->ipc_failures++;
 			}
 		}
+		if (queried) {
+			for (size_t i = 0; i < oids_nr; i++) {
+				struct diff_pickaxe_index_entry *entry;
+
+				CALLOC_ARRAY(entry, 1);
+				oidcpy(&entry->entry.oid, &oids[i]);
+				entry->maybe =
+					maybe[i] !=
+					GREP_INDEX_IPC_IMPOSSIBLE;
+				oidmap_put(&index->results, entry);
+				index->results_nr++;
+			}
+			index->tested += oids_nr;
+		}
+		free(locations);
 		free(maybe);
 		free(oids);
 		oidset_clear(&pending);
@@ -522,6 +582,14 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 			   !!index->index);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc",
 			   index->ipc);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/direct_batches",
+			   index->direct_batches);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc_batches",
+			   index->ipc_batches);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/ipc_failures",
+			   index->ipc_failures);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/cache_hits",
 			   index->cache_hits);
 	trace2_data_intmax("pickaxe", index->repo,
