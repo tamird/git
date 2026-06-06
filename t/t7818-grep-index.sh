@@ -292,12 +292,15 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 
 test_expect_success 'setup indexed pickaxe history' '
 	echo "pickaxe needle old" >pickaxe-old &&
+	echo "pickaxe daemon old" >pickaxe-daemon-history &&
 	echo "pickaxe replacement" >pickaxe-new &&
 	cp pickaxe-old pickaxe-history &&
-	git add pickaxe-old pickaxe-new pickaxe-history &&
+	git add pickaxe-old pickaxe-new pickaxe-history \
+		pickaxe-daemon-history &&
 	git commit -m "pickaxe old" &&
 	cp pickaxe-new pickaxe-history &&
-	git add pickaxe-history &&
+	cp pickaxe-new pickaxe-daemon-history &&
+	git add pickaxe-history pickaxe-daemon-history &&
 	git commit -m "pickaxe new"
 '
 
@@ -367,12 +370,13 @@ test_expect_success 'pickaxe index threshold spans commits' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'daemon content index prunes pickaxe blob reads' '
+	'pickaxe selects content index backend' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git config --unset core.fsmonitor" &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
-	test_when_finished "rm -f pickaxe-ipc.trace" &&
+	test_when_finished "rm -f pickaxe-direct.trace pickaxe-ipc.trace \
+			    pickaxe-fallback.trace pickaxe-missing.trace" &&
 	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
 	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
 	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
@@ -383,13 +387,90 @@ test_expect_success FSMONITOR_DAEMON \
 			    mv \"$new_object.save\" \"$new_object\"" &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
-		GIT_TRACE2_EVENT="$PWD/pickaxe-ipc.trace" \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-direct.trace" \
 		git log --format=%s -Sabsent HEAD^..HEAD \
 		-- pickaxe-history >actual 2>err &&
 	test_must_be_empty actual &&
 	test_must_be_empty err &&
+	test_grep "\"key\":\"content_index/prepared\",\"value\":\"1\"" \
+		pickaxe-direct.trace &&
 	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
-		pickaxe-ipc.trace
+		pickaxe-direct.trace &&
+	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"1\"" \
+		pickaxe-direct.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"0\"" \
+		pickaxe-direct.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-direct.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-ipc.trace" \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual-ipc 2>err-ipc &&
+	test_must_be_empty actual-ipc &&
+	test_must_be_empty err-ipc &&
+	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
+		pickaxe-ipc.trace &&
+	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"0\"" \
+		pickaxe-ipc.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"1\"" \
+		pickaxe-ipc.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-ipc.trace &&
+
+	daemon_old_oid=$(git rev-parse HEAD^:pickaxe-daemon-history) &&
+	daemon_old_object=.git/objects/$(test_oid_to_path \
+		"$daemon_old_oid") &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-daemon-history >actual-prewarm &&
+	test_must_be_empty actual-prewarm &&
+	mv "$daemon_old_object" "$daemon_old_object.save" &&
+	test_when_finished "mv \"$daemon_old_object.save\" \
+			    \"$daemon_old_object\"" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-missing.trace" \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-daemon-history >actual-missing 2>err-missing &&
+	test_must_be_empty actual-missing &&
+	test_must_be_empty err-missing &&
+	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"0\"" \
+		pickaxe-missing.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"1\"" \
+		pickaxe-missing.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-missing.trace &&
+
+	mv .git/objects/info/grep-index/chain-transposed \
+		.git/objects/info/grep-index/chain-transposed.save &&
+	test_when_finished "test ! -e \
+		.git/objects/info/grep-index/chain-transposed.save ||
+		mv .git/objects/info/grep-index/chain-transposed.save \
+			.git/objects/info/grep-index/chain-transposed" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-fallback.trace" \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual-fallback 2>err-fallback &&
+	test_must_be_empty actual-fallback &&
+	test_must_be_empty err-fallback &&
+	test_grep "\"key\":\"content_index/prepared\",\"value\":\"0\"" \
+		pickaxe-fallback.trace &&
+	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
+		pickaxe-fallback.trace &&
+	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"0\"" \
+		pickaxe-fallback.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"1\"" \
+		pickaxe-fallback.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-fallback.trace &&
+	mv .git/objects/info/grep-index/chain-transposed.save \
+		.git/objects/info/grep-index/chain-transposed
 '
 
 test_expect_success 'possible pickaxe blobs use normal reads' '
