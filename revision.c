@@ -705,6 +705,32 @@ cleanup:
 	return res;
 }
 
+static int set_revisions_bloom_keyvecs(struct rev_info *revs,
+				       const struct pathspec *pathspec)
+{
+	release_revisions_bloom_keyvecs(revs);
+
+	revs->bloom_keyvecs_nr = pathspec->nr;
+	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
+
+	for (int i = 0; i < pathspec->nr; i++) {
+		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[i],
+						     &pathspec->items[i],
+						     revs->bloom_filter_settings)) {
+			release_revisions_bloom_keyvecs(revs);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static void disable_revision_bloom_filter(struct rev_info *revs)
+{
+	revs->bloom_filter_settings = NULL;
+	release_revisions_bloom_keyvecs(revs);
+}
+
 static void prepare_to_use_bloom_filter(struct rev_info *revs)
 {
 	if (!revs->commits)
@@ -722,15 +748,8 @@ static void prepare_to_use_bloom_filter(struct rev_info *revs)
 	if (!revs->pruning.pathspec.nr)
 		return;
 
-	revs->bloom_keyvecs_nr = revs->pruning.pathspec.nr;
-	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
-
-	for (int i = 0; i < revs->pruning.pathspec.nr; i++) {
-		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[i],
-						     &revs->pruning.pathspec.items[i],
-						     revs->bloom_filter_settings))
-			goto fail;
-	}
+	if (set_revisions_bloom_keyvecs(revs, &revs->pruning.pathspec))
+		goto fail;
 
 	if (trace2_is_enabled() && !bloom_filter_atexit_registered) {
 		atexit(trace2_bloom_filter_statistics_atexit);
@@ -740,24 +759,27 @@ static void prepare_to_use_bloom_filter(struct rev_info *revs)
 	return;
 
 fail:
-	revs->bloom_filter_settings = NULL;
-	release_revisions_bloom_keyvecs(revs);
+	disable_revision_bloom_filter(revs);
 }
 
-static int check_maybe_different_in_bloom_filter(struct rev_info *revs,
-						 struct commit *commit)
+static enum revision_bloom_filter_result
+check_maybe_different_in_bloom_filter(struct rev_info *revs,
+				      struct commit *commit)
 {
 	struct bloom_filter *filter;
 	int result = 0;
 
+	if (!revs->bloom_keyvecs_nr)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
 	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY)
-		return -1;
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	filter = get_bloom_filter(revs->repo, commit);
 
 	if (!filter) {
 		count_bloom_filter_not_present++;
-		return -1;
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 	}
 
 	for (size_t nr = 0; !result && nr < revs->bloom_keyvecs_nr; nr++) {
@@ -771,7 +793,39 @@ static int check_maybe_different_in_bloom_filter(struct rev_info *revs,
 	else
 		count_bloom_filter_definitely_not++;
 
-	return result;
+	if (result)
+		return REVISION_BLOOM_FILTER_MAYBE;
+	return REVISION_BLOOM_FILTER_DEFINITELY_NOT;
+}
+
+enum revision_bloom_filter_result
+revision_bloom_filter_query_diff(struct rev_info *revs,
+				 struct commit *commit,
+				 struct commit *parent)
+{
+	if (!revs->diffopt.flags.follow_renames || revs->prune)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
+	if (!commit->parents || commit->parents->next ||
+	    commit->parents->item != parent)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
+	return check_maybe_different_in_bloom_filter(revs, commit);
+}
+
+void revision_bloom_filter_finish_diff(struct rev_info *revs,
+				       enum revision_bloom_filter_result result,
+				       int diff_is_empty)
+{
+	if (result == REVISION_BLOOM_FILTER_MAYBE && diff_is_empty)
+		count_bloom_filter_false_positive++;
+
+	if (!revs->diffopt.flags.follow_renames || revs->prune ||
+	    !revs->diffopt.found_follow || !revs->bloom_filter_settings)
+		return;
+
+	if (set_revisions_bloom_keyvecs(revs, &revs->diffopt.pathspec))
+		disable_revision_bloom_filter(revs);
 }
 
 static int rev_compare_tree(struct rev_info *revs,
@@ -779,7 +833,8 @@ static int rev_compare_tree(struct rev_info *revs,
 {
 	struct tree *t1 = repo_get_commit_tree(the_repository, parent);
 	struct tree *t2 = repo_get_commit_tree(the_repository, commit);
-	int bloom_ret = 1;
+	enum revision_bloom_filter_result bloom_ret =
+		REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	if (!t1)
 		return REV_TREE_NEW;
@@ -807,7 +862,7 @@ static int rev_compare_tree(struct rev_info *revs,
 	if (revs->bloom_keyvecs_nr && !nth_parent) {
 		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
 
-		if (bloom_ret == 0)
+		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
 			return REV_TREE_SAME;
 	}
 
@@ -816,7 +871,8 @@ static int rev_compare_tree(struct rev_info *revs,
 	diff_tree_oid(&t1->object.oid, &t2->object.oid, "", &revs->pruning);
 
 	if (!nth_parent)
-		if (bloom_ret == 1 && tree_difference == REV_TREE_SAME)
+		if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
+		    tree_difference == REV_TREE_SAME)
 			count_bloom_filter_false_positive++;
 
 	return tree_difference;
@@ -826,14 +882,15 @@ static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit,
 				  int nth_parent)
 {
 	struct tree *t1 = repo_get_commit_tree(the_repository, commit);
-	int bloom_ret = -1;
+	enum revision_bloom_filter_result bloom_ret =
+		REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	if (!t1)
 		return 0;
 
 	if (!nth_parent && revs->bloom_keyvecs_nr) {
 		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
-		if (!bloom_ret)
+		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
 			return 1;
 	}
 
@@ -841,7 +898,8 @@ static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit,
 	revs->pruning.flags.has_changes = 0;
 	diff_tree_oid(NULL, &t1->object.oid, "", &revs->pruning);
 
-	if (bloom_ret == 1 && tree_difference == REV_TREE_SAME)
+	if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
+	    tree_difference == REV_TREE_SAME)
 		count_bloom_filter_false_positive++;
 
 	return tree_difference == REV_TREE_SAME;

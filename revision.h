@@ -71,6 +71,12 @@ struct option;
 struct parse_opt_ctx_t;
 define_shared_commit_slab(revision_sources, char *);
 
+enum revision_bloom_filter_result {
+	REVISION_BLOOM_FILTER_UNAVAILABLE = -1,
+	REVISION_BLOOM_FILTER_DEFINITELY_NOT,
+	REVISION_BLOOM_FILTER_MAYBE,
+};
+
 struct rev_cmdline_info {
 	unsigned int nr;
 	unsigned int alloc;
@@ -479,6 +485,25 @@ void reset_revision_walk(void);
  * get_revision() to do the iteration.
  */
 int prepare_revision_walk(struct rev_info *revs);
+
+/*
+ * Query whether a diff against the current --follow path may be non-empty.
+ * The comparison must be against the commit's original sole parent. Missing
+ * or unsafe filters are inconclusive, not negative answers.
+ */
+enum revision_bloom_filter_result
+revision_bloom_filter_query_diff(struct rev_info *revs,
+				 struct commit *commit,
+				 struct commit *parent);
+
+/*
+ * Complete every query, including an unavailable result, after the diff or
+ * skip decision. This records statistics and refreshes the key after rename
+ * following. Call before diff flushing clears diffopt.found_follow.
+ */
+void revision_bloom_filter_finish_diff(struct rev_info *revs,
+				       enum revision_bloom_filter_result result,
+				       int diff_is_empty);
 
 /**
  * Takes a pointer to a `rev_info` structure and iterates over it, returning a

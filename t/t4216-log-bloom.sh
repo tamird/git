@@ -135,6 +135,72 @@ test_expect_success 'git log for path that does not exist. ' '
 	test_bloom_filters_used "-- path_does_not_exist"
 '
 
+test_expect_success '--follow skips commits using Bloom filters' '
+	# Only two commits follow the rename, so a larger count proves that
+	# the refreshed key was used for commits under the old name.
+	setup "--follow -- file5_renamed" &&
+	definitely_not=$(sed -n \
+		"s/.*\"definitely_not\":\\([0-9]*\\).*/\\1/p" \
+		"$TRASH_DIRECTORY/trace.perf") &&
+	test "$definitely_not" -gt 2 &&
+	test_cmp log_wo_bloom log_w_bloom &&
+	printf "rename\nc11" >expect &&
+	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow Bloom skips preserve diff output' '
+	setup "--name-status --follow -- file5_renamed" &&
+	grep -q "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test_cmp log_wo_bloom log_w_bloom
+'
+
+test_expect_success '--follow falls back for a rewritten parent' '
+	git init follow-rewritten &&
+	(
+		cd follow-rewritten &&
+
+		echo root >base &&
+		git add base &&
+		git commit -m Z &&
+
+		echo A >old &&
+		git add old &&
+		git commit -m A &&
+		git tag boundary-A &&
+
+		echo B >old &&
+		git commit -am P &&
+
+		echo unrelated >q &&
+		git add q &&
+		git commit -m C &&
+		git tag boundary-C &&
+
+		git mv old new &&
+		git commit -m R &&
+		git commit-graph write --reachable --changed-paths &&
+
+		git -c core.commitGraph=false log \
+			--simplify-by-decoration --parents --follow \
+			--format=%s -- new >expect &&
+		git -c core.commitGraph=true log \
+			--simplify-by-decoration --parents --follow \
+			--format=%s -- new >actual &&
+
+		printf "R\nC\nA\n" >wanted &&
+		test_cmp wanted expect &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success '--follow Bloom skips preserve max-count' '
+	setup "--max-count=1 --follow -- file5_renamed" &&
+	grep -q "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test_cmp log_wo_bloom log_w_bloom &&
+	printf rename >expect &&
+	test_cmp expect log_w_bloom
+'
+
 test_expect_success 'git log with --walk-reflogs does not use Bloom filters' '
 	test_bloom_filters_not_used "--walk-reflogs -- A"
 '

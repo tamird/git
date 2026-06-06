@@ -1243,10 +1243,19 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 	showed_log = 0;
 	for (;;) {
 		struct commit *parent = parents->item;
+		enum revision_bloom_filter_result bloom_ret =
+			REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 		parse_commit_or_die(parent);
-		diff_tree_oid(get_commit_tree_oid(parent),
-			      oid, "", &opt->diffopt);
+		bloom_ret =
+			revision_bloom_filter_query_diff(opt, commit, parent);
+
+		if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT)
+			diff_tree_oid(get_commit_tree_oid(parent),
+				      oid, "", &opt->diffopt);
+
+		revision_bloom_filter_finish_diff(
+			opt, bloom_ret, diff_queue_is_empty(&opt->diffopt));
 		log_tree_diff_flush(opt);
 
 		showed_log |= !opt->loginfo;
