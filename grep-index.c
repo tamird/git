@@ -164,6 +164,12 @@ struct grep_index_query_boundary {
 	size_t alternative_nr;
 };
 
+struct grep_index_query_enrichment {
+	uint32_t trigrams[3];
+	size_t trigrams_nr;
+	size_t clause_nr;
+};
+
 struct grep_index_prepared_segment {
 	struct grep_index_segment *segment;
 	unsigned char
@@ -1022,12 +1028,63 @@ invalid:
 	return NULL;
 }
 
+static void grep_index_query_clause_add_enrichments(
+	struct grep_index_query *query,
+	struct grep_index_query_clause *clause,
+	const struct grep_index_query_enrichment *enrichments,
+	size_t enrichments_nr)
+{
+	for (size_t i = 0;
+	     i < enrichments_nr &&
+	     query->trigrams_nr < GREP_INDEX_MAX_QUERY_TRIGRAMS;
+	     i++) {
+		size_t trigrams_nr =
+			enrichments[i].trigrams_nr <
+					GREP_INDEX_MAX_QUERY_TRIGRAMS -
+						query->trigrams_nr ?
+				enrichments[i].trigrams_nr :
+				GREP_INDEX_MAX_QUERY_TRIGRAMS -
+					query->trigrams_nr;
+
+		ALLOC_GROW(clause->trigrams,
+			   clause->trigrams_nr + trigrams_nr,
+			   clause->trigrams_alloc);
+		COPY_ARRAY(clause->trigrams + clause->trigrams_nr,
+			   enrichments[i].trigrams, trigrams_nr);
+		clause->trigrams_nr += trigrams_nr;
+		query->trigrams_nr += trigrams_nr;
+	}
+}
+
+static void grep_index_query_clause_add_required_enrichments(
+	struct grep_index_query *query,
+	struct grep_index_query_clause *clause,
+	struct grep_index_query_enrichment *enrichments,
+	size_t *enrichments_nr,
+	size_t enrichment_clause_start,
+	size_t *enrichment_trigrams_nr)
+{
+	if (clause->trigrams_nr ||
+	    enrichment_clause_start == *enrichments_nr)
+		return;
+	grep_index_query_clause_add_enrichments(
+		query, clause, enrichments + enrichment_clause_start,
+		*enrichments_nr - enrichment_clause_start);
+	for (size_t i = enrichment_clause_start; i < *enrichments_nr; i++)
+		*enrichment_trigrams_nr -= enrichments[i].trigrams_nr;
+	*enrichments_nr = enrichment_clause_start;
+}
+
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
 	struct grep_index_query_boundary *boundaries = NULL;
 	size_t boundaries_nr = 0;
 	size_t boundaries_alloc = 0;
+	struct grep_index_query_enrichment *enrichments = NULL;
+	size_t enrichments_nr = 0;
+	size_t enrichments_alloc = 0;
+	size_t enrichment_trigrams_nr = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
 
@@ -1047,6 +1104,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	for (const struct grep_pat *p = opt->pattern_list; p; p = p->next) {
 		size_t scan_start = 0;
 		size_t scan_end = p->patternlen;
+		size_t enrichment_clause_start = enrichments_nr;
 		size_t term_start;
 
 		if (p->token != GREP_PATTERN)
@@ -1581,9 +1639,10 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		term_start = scan_start;
 		for (size_t i = scan_start; i < scan_end;) {
 			unsigned char ch = p->pattern[i];
+			unsigned char escaped_literal = 0;
 			size_t separator_len = 0;
 			int alternation = 0;
-			int escaped_dot = 0;
+			int escaped_literal_quantified = 0;
 
 			if (pattern_type == GREP_PATTERN_TYPE_FIXED) {
 				i++;
@@ -1709,15 +1768,36 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				     (is_regex_special(p->pattern[i + 1]) ||
 				      p->pattern[i + 1] == '}')))) {
+				unsigned char next = p->pattern[i + 1];
+
 				separator_len = 2;
 				if (pattern_type == GREP_PATTERN_TYPE_ERE &&
 				    i + 2 < scan_end &&
 				    strchr("*+?", p->pattern[i + 2]))
 					separator_len++;
-				escaped_dot =
-					(pattern_type == GREP_PATTERN_TYPE_BRE ||
-					 pattern_type == GREP_PATTERN_TYPE_ERE) &&
-					p->pattern[i + 1] == '.';
+				if ((pattern_type == GREP_PATTERN_TYPE_BRE &&
+				     strchr(".[\\*^$", next)) ||
+				    (pattern_type == GREP_PATTERN_TYPE_ERE &&
+				     is_regex_special(next)))
+					escaped_literal = next;
+				if (escaped_literal && i + 2 < scan_end) {
+					unsigned char after =
+						p->pattern[i + 2];
+
+					if (pattern_type ==
+					    GREP_PATTERN_TYPE_ERE)
+						escaped_literal_quantified =
+							!!strchr("*+?{",
+								 after);
+					else
+						escaped_literal_quantified =
+							after == '*' ||
+							(after == '\\' &&
+							 i + 3 < scan_end &&
+							 strchr("+?{",
+								p->pattern
+									[i + 3]));
+				}
 			} else if (ch == '.' && i + 1 < scan_end &&
 				   (p->pattern[i + 1] == '*' ||
 				    (pattern_type != GREP_PATTERN_TYPE_BRE &&
@@ -1755,56 +1835,138 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 								query->ignore_case);
 					query->trigrams_nr += trigrams_nr;
 				}
-				if (escaped_dot && i + 3 < scan_end &&
-				    (isalnum(p->pattern[i + 2]) ||
-				     p->pattern[i + 2] == '_') &&
-				    (isalnum(p->pattern[i + 3]) ||
-				     p->pattern[i + 3] == '_')) {
-					unsigned char trigram[3] = {
-						'.',
-						p->pattern[i + 2],
-						p->pattern[i + 3]
-					};
-					size_t after = i + 4;
-					int quantified = 0;
+				if (escaped_literal &&
+				    !escaped_literal_quantified) {
+					struct grep_index_query_enrichment
+						enrichment = { 0 };
+					unsigned char text[5];
+					size_t left_nr = termlen < 2 ?
+								 termlen :
+								 2;
+					size_t escaped_pos = left_nr;
+					size_t text_nr = 0;
 
-					if (after < scan_end) {
-						unsigned char next =
-							p->pattern[after];
+					memcpy(text,
+					       p->pattern + i - left_nr,
+					       left_nr);
+					text_nr += left_nr;
+					text[text_nr++] = escaped_literal;
+					for (size_t j = i + 2;
+					     j < scan_end &&
+					     text_nr - escaped_pos - 1 < 2;
+					     j++) {
+						unsigned char right =
+							p->pattern[j];
+						size_t after = j + 1;
+						int ordinary;
+						int quantified;
 
 						if (pattern_type ==
-						    GREP_PATTERN_TYPE_BRE) {
+						    GREP_PATTERN_TYPE_ERE)
+							ordinary =
+								!is_regex_special(
+									right) &&
+								right != '}';
+						else
+							ordinary =
+								!strchr(
+									".[\\*^$",
+									right);
+						if (!ordinary)
+							break;
+						if (pattern_type ==
+						    GREP_PATTERN_TYPE_ERE)
 							quantified =
-								next == '*' ||
-								(next == '\\' &&
-								 after + 1 <
+								after <
+									scan_end &&
+								!!strchr(
+									"*+?{",
+									p->pattern
+										[after]);
+						else
+							quantified =
+								(after <
 									 scan_end &&
+								 p->pattern
+										 [after] ==
+									 '*') ||
+								(after + 1 <
+									 scan_end &&
+								 p->pattern
+										 [after] ==
+									 '\\' &&
 								 strchr(
 									 "+?{",
 									 p->pattern
-										 [after + 1]));
-						} else {
-							quantified = !!strchr(
-								"*+?{", next);
-						}
+										 [after +
+										  1]));
+						if (quantified)
+							break;
+						text[text_nr++] = right;
 					}
-					if (!quantified) {
-						if (query->trigrams_nr ==
-						    GREP_INDEX_MAX_QUERY_TRIGRAMS)
-							goto unsupported;
-						ALLOC_GROW(
-							clause.trigrams,
-							clause.trigrams_nr + 1,
-							clause.trigrams_alloc);
-						clause.trigrams
-							[clause.trigrams_nr++] =
+					for (size_t j =
+						     escaped_pos > 1 ?
+							     escaped_pos - 2 :
+							     0;
+					     j <= escaped_pos &&
+					     j + 2 < text_nr;
+					     j++)
+						enrichment.trigrams
+							[enrichment
+								 .trigrams_nr++] =
 							trigram_hash(
-								trigram,
+								text + j,
 								query->ignore_case);
-						query->trigrams_nr++;
+					/*
+					 * A bridge-only clause is unusable
+					 * without one of its enrichments.
+					 * Prefer it to older optional ones.
+					 */
+					if (enrichment.trigrams_nr >
+						    GREP_INDEX_MAX_QUERY_TRIGRAMS -
+							    enrichment_trigrams_nr &&
+					    !clause.trigrams_nr &&
+					    enrichment_clause_start ==
+						    enrichments_nr) {
+						while (enrichments_nr &&
+						       enrichment.trigrams_nr >
+							       GREP_INDEX_MAX_QUERY_TRIGRAMS -
+								       enrichment_trigrams_nr)
+							enrichment_trigrams_nr -=
+								enrichments
+									[--enrichments_nr]
+										.trigrams_nr;
+						enrichment_clause_start =
+							enrichments_nr;
+					}
+					if (enrichment.trigrams_nr >
+					    GREP_INDEX_MAX_QUERY_TRIGRAMS -
+						    enrichment_trigrams_nr)
+						enrichment.trigrams_nr =
+							GREP_INDEX_MAX_QUERY_TRIGRAMS -
+							enrichment_trigrams_nr;
+					if (enrichment.trigrams_nr) {
+						ALLOC_GROW(
+							enrichments,
+							enrichments_nr + 1,
+							enrichments_alloc);
+						enrichments
+							[enrichments_nr++] =
+								enrichment;
+						enrichment_trigrams_nr +=
+							enrichment
+								.trigrams_nr;
 					}
 				}
 				if (alternation) {
+					size_t clause_nr =
+						query->clauses_nr;
+
+					grep_index_query_clause_add_required_enrichments(
+						query, &clause, enrichments,
+						&enrichments_nr,
+						enrichment_clause_start,
+						&enrichment_trigrams_nr);
 					if (!clause.trigrams_nr ||
 					    query->clauses_nr +
 							    query->alternatives_nr >=
@@ -1815,6 +1977,13 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						   query->clauses_alloc);
 					query->clauses[query->clauses_nr++] =
 						clause;
+					for (size_t j =
+						     enrichment_clause_start;
+					     j < enrichments_nr; j++)
+						enrichments[j].clause_nr =
+							clause_nr;
+					enrichment_clause_start =
+						enrichments_nr;
 					clause =
 						(struct grep_index_query_clause){
 							0
@@ -1849,10 +2018,16 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						     query->ignore_case);
 			query->trigrams_nr += trigrams_nr;
 		}
+		grep_index_query_clause_add_required_enrichments(
+			query, &clause, enrichments, &enrichments_nr,
+			enrichment_clause_start, &enrichment_trigrams_nr);
 		if (!clause.trigrams_nr ||
 		    query->clauses_nr + query->alternatives_nr >=
 			    GREP_INDEX_MAX_QUERY_ALTERNATIVES)
 			goto unsupported;
+		for (size_t i = enrichment_clause_start;
+		     i < enrichments_nr; i++)
+			enrichments[i].clause_nr = query->clauses_nr;
 		ALLOC_GROW(query->clauses, query->clauses_nr + 1,
 			   query->clauses_alloc);
 		query->clauses[query->clauses_nr++] = clause;
@@ -1887,10 +2062,26 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			query->trigrams_nr += boundary_trigrams_nr;
 		}
 	}
+	/*
+	 * Top-level clauses can move while they are collected, so bridge
+	 * trigrams record a clause index rather than a pointer. Each trigram
+	 * is independently necessary, and a partial set remains useful when
+	 * the query limit leaves no room for all optional additions.
+	 */
+	for (size_t i = 0; i < enrichments_nr; i++) {
+		struct grep_index_query_enrichment *enrichment =
+			&enrichments[i];
+
+		grep_index_query_clause_add_enrichments(
+			query, &query->clauses[enrichment->clause_nr],
+			enrichment, 1);
+	}
+	free(enrichments);
 	free(boundaries);
 	return query;
 
 unsupported:
+	free(enrichments);
 	free(boundaries);
 	free(clause.trigrams);
 	grep_index_query_free(query);

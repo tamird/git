@@ -70,6 +70,29 @@ test_expect_success 'setup' '
 	echo "import sample_ext.__private" >escaped-dot &&
 	echo "present.needle" >escaped-dot-ere &&
 	echo ".a" >escaped-dot-quantified &&
+	echo "resolve_reference xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (" \
+		>escaped-call-negative &&
+	echo "resolve_reference(" >escaped-call-positive &&
+	echo "foobar" >escaped-call-optional &&
+	echo "foo(ar" >escaped-call-right-quantified &&
+	echo "other_call[" >escaped-call-alternative &&
+	echo ".ab" >escaped-bridge-positive &&
+	echo "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx .zz" \
+		>escaped-bridge-negative &&
+	cat >escaped-literal-positive <<-\EOF &&
+	star_left*star_right
+	question_left?question_right
+	bracket_left[bracket_right
+	slash_left\slash_right
+	dollar_left$dollar_right
+	open_left(open_right
+	close_left)close_right
+	plus_left+plus_right
+	dot_left.dot_right
+	caret_left^caret_right
+	brace_left{brace_right
+	pipe_left|pipe_right
+	EOF
 	printf "non-ascii \342\204\252 contents\n" >non-ascii &&
 	printf "long \305\277 value\n" >long-s &&
 	echo "from _private" >outer-from &&
@@ -106,6 +129,10 @@ test_expect_success 'setup' '
 	echo "literal mixed candidate needle" >literal-candidate-z-40 &&
 	git add short fixed-pcre present agent-regex ordinary escaped-dot \
 		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
+		escaped-call-negative escaped-call-positive \
+		escaped-call-optional escaped-call-right-quantified \
+		escaped-call-alternative escaped-literal-positive \
+		escaped-bridge-positive escaped-bridge-negative \
 		long-s outer-import outer-boundary mixed-unicorn mixed-gunicorn \
 		escaped-ere-atom structured-from structured-import \
 		structured-middle-from structured-middle-import \
@@ -919,6 +946,28 @@ test_expect_success 'content index bridges escaped ERE dot literal' '
 	test_must_be_empty err
 '
 
+test_expect_success 'content index bridges escaped ERE punctuation' '
+	oid=$(git rev-parse :escaped-call-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\(" -- escaped-call-negative 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index uses an escaped literal bridge alone' '
+	oid=$(git rev-parse :escaped-bridge-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"\\.ab" -- escaped-bridge-negative 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success 'content index prunes anchored escaped regexes' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -1099,6 +1148,42 @@ test_expect_success 'ERE boundaries preserve the query limit' '
 
 	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
 	test_must_be_empty err
+'
+
+test_expect_success 'escaped literal boundaries preserve the query limit' '
+	prefix=$(printf "%04096d" 0 | tr 0 a) &&
+	pattern="${prefix}\\(abc" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'required bridges replace optional enrichments' '
+	pattern=baseline &&
+	for i in $(test_seq 1 1400)
+	do
+		pattern="${pattern}\\(ab" || return 1
+	done &&
+	oid=$(git rev-parse :escaped-bridge-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		-e "$pattern" -e "\\.ab" -- escaped-bridge-negative 2>err &&
+	test_must_be_empty err &&
+
+	oid=$(git rev-parse :escaped-bridge-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E \
+		-e "$pattern" -e "\\.ab" -- escaped-bridge-positive 2>err &&
+	test_grep "unable to read" err
 '
 
 test_expect_success 'content index combines middle ERE literals and groups' '
@@ -1338,6 +1423,153 @@ test_expect_success 'possible anchored escaped regex uses normal blob reads' '
 
 	test_must_fail git grep --cached -E \
 		"^present\\.needle$" -- escaped-dot-ere 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible escaped ERE punctuation reads blob' '
+	oid=$(git rev-parse :escaped-call-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\(" -- escaped-call-positive 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'possible escaped literal bridge alone reads blob' '
+	oid=$(git rev-parse :escaped-bridge-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"\\.ab" -- escaped-bridge-positive 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'escaped ERE literals preserve positive results' '
+	cat >patterns <<-\EOF &&
+	star_left\*star_right
+	question_left\?question_right
+	bracket_left\[bracket_right
+	slash_left\\slash_right
+	dollar_left\$dollar_right
+	open_left\(open_right
+	close_left\)close_right
+	plus_left\+plus_right
+	dot_left\.dot_right
+	caret_left\^caret_right
+	brace_left\{brace_right
+	pipe_left\|pipe_right
+	EOF
+	oid=$(git rev-parse :escaped-literal-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	while IFS= read -r pattern
+	do
+		test_must_fail git grep --cached -E "$pattern" \
+			-- escaped-literal-positive 2>err &&
+		test_grep "unable to read" err || return 1
+	done <patterns
+'
+
+test_expect_success 'escaped BRE literals preserve positive results' '
+	cat >patterns <<-\EOF &&
+	dot_left\.dot_right
+	bracket_left\[bracket_right
+	slash_left\\slash_right
+	star_left\*star_right
+	caret_left\^caret_right
+	dollar_left\$dollar_right
+	EOF
+	oid=$(git rev-parse :escaped-literal-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	while IFS= read -r pattern
+	do
+		test_must_fail git grep --cached "$pattern" \
+			-- escaped-literal-positive 2>err &&
+		test_grep "unable to read" err || return 1
+	done <patterns
+'
+
+test_expect_success 'escaped literal alternatives preserve their clauses' '
+	oid_left=$(git rev-parse :escaped-call-positive) &&
+	object_left=.git/objects/$(test_oid_to_path "$oid_left") &&
+	mv "$object_left" "$object_left.save" &&
+	test_when_finished "mv \"$object_left.save\" \"$object_left\"" &&
+	oid_right=$(git rev-parse :escaped-call-alternative) &&
+	object_right=.git/objects/$(test_oid_to_path "$oid_right") &&
+	mv "$object_right" "$object_right.save" &&
+	test_when_finished "mv \"$object_right.save\" \"$object_right\"" &&
+
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\(|other_call\\[" \
+		-- escaped-call-positive 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\(|other_call\\[" \
+		-- escaped-call-alternative 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified escaped ERE punctuation reads blob' '
+	oid=$(git rev-parse :escaped-call-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"foo\\(?bar" -- escaped-call-optional 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'exact-zero escaped ERE punctuation reads blob' '
+	oid=$(git rev-parse :escaped-call-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"foo\\({0}bar" -- escaped-call-optional 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'exact-zero escaped BRE punctuation reads blob' '
+	oid=$(git rev-parse :escaped-call-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"foo\\.\\{0\\}bar" -- escaped-call-optional 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified ERE punctuation neighbor reads blob' '
+	oid=$(git rev-parse :escaped-call-right-quantified) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"foo\\(b*ar" -- escaped-call-right-quantified 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'escaped BRE operators remain variable' '
+	oid=$(git rev-parse :escaped-call-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"foo\\(bar\\)" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err
 '
 
