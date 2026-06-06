@@ -175,6 +175,7 @@ struct rev_info {
 	/* Traversal flags */
 	unsigned int	dense:1,
 			prune:1,
+			follow_prune:1,
 			no_walk:1,
 			unsorted_input:1,
 			remove_empty_trees:1,
@@ -497,13 +498,13 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 				 struct commit *parent);
 
 /*
- * Complete every query, including an unavailable result, after the diff or
- * skip decision. This records statistics and refreshes the key after rename
- * following. Call before diff flushing clears diffopt.found_follow.
+ * Complete a --follow diff or skip decision. This records Bloom statistics,
+ * updates traversal state after a rename, and refreshes the Bloom key. Call
+ * before diff flushing clears diffopt.found_follow.
  */
-void revision_bloom_filter_finish_diff(struct rev_info *revs,
-				       enum revision_bloom_filter_result result,
-				       int diff_is_empty);
+void revision_follow_finish_diff(struct rev_info *revs,
+				 enum revision_bloom_filter_result result,
+				 int diff_is_empty);
 
 /**
  * Takes a pointer to a `rev_info` structure and iterates over it, returning a

@@ -1254,7 +1254,7 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 			diff_tree_oid(get_commit_tree_oid(parent),
 				      oid, "", &opt->diffopt);
 
-		revision_bloom_filter_finish_diff(
+		revision_follow_finish_diff(
 			opt, bloom_ret, diff_queue_is_empty(&opt->diffopt));
 		log_tree_diff_flush(opt);
 

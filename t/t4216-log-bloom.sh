@@ -103,6 +103,10 @@ test_bloom_filters_not_used () {
 	test_cmp log_wo_bloom log_w_bloom
 }
 
+test_follow_prune_stat () {
+	grep -q "\"$2\":$3\\([,}]\\)" "$1"
+}
+
 for path in A A/B A/B/C A/file1 A/B/file2 A/B/C/file3 file4 file5 file5_renamed file_to_be_deleted
 do
 	for option in "" \
@@ -199,6 +203,305 @@ test_expect_success '--follow Bloom skips preserve max-count' '
 	test_cmp log_wo_bloom log_w_bloom &&
 	printf rename >expect &&
 	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow prunes a first-parent-treesame side branch' '
+	git init follow-prune &&
+	(
+		cd follow-prune &&
+
+		echo base >old &&
+		git add old &&
+		git commit -m base &&
+		git tag follow-base &&
+		git branch side &&
+
+		echo main >main &&
+		git add main &&
+		git commit -m main &&
+		main=$(git rev-parse HEAD) &&
+
+		git checkout side &&
+		echo side >old &&
+		git commit -am side-change &&
+		echo side-new >new &&
+		git add new &&
+		git commit -m side-new &&
+		side=$(git rev-parse HEAD) &&
+
+		git checkout main &&
+		git read-tree "$main" &&
+		git checkout "$side" -- new &&
+		tree=$(git write-tree) &&
+		merge=$(echo merge |
+			git commit-tree "$tree" -p "$main" -p "$side") &&
+		git tag prunable-merge "$merge" &&
+		git reset --hard "$merge" &&
+
+		git rm new &&
+		git commit -m delete-side-new &&
+		git mv old new &&
+		git commit -m rename &&
+		git commit-graph write --reachable --changed-paths &&
+
+		printf "rename\nbase\n" >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune.perf" \
+			git -c core.commitGraph=true log \
+			--format=%s --follow -- new >actual &&
+		test_cmp expect actual &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" \
+			merge_compares 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" \
+			bloom_definitely_not 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" tree_diffs 0 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" \
+			parent_edges_pruned 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" path_updates 1 &&
+
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-no-graph.perf" \
+			git -c core.commitGraph=false log \
+			--format=%s --follow -- new >actual-no-graph &&
+		test_cmp expect actual-no-graph &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-no-graph.perf" \
+			bloom_definitely_not 0 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-no-graph.perf" \
+			tree_diffs 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-no-graph.perf" \
+			parent_edges_pruned 1 &&
+
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-status.perf" \
+			git -c core.commitGraph=true log \
+			--format=%s --name-status --follow -- new >with-graph &&
+		git -c core.commitGraph=false log \
+			--format=%s --name-status --follow -- new >without-graph &&
+		test_cmp without-graph with-graph &&
+		sed "/^$/d" with-graph >actual-status &&
+		printf "rename\nR100\told\tnew\nbase\nA\told\n" \
+			>expect-status &&
+		test_cmp expect-status actual-status &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-status.perf" \
+			parent_edges_pruned 1 &&
+
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-max.perf" \
+			git log --max-count=2 --format=%s \
+			--follow -- new >actual-max &&
+		test_cmp expect actual-max &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-max.perf" \
+			parent_edges_pruned 1
+	)
+'
+
+test_expect_success '--follow checks Bloom maybes exactly' '
+	git init follow-prune-maybe &&
+	(
+		cd follow-prune-maybe &&
+
+		echo base >file &&
+		git add file &&
+		git commit -m base &&
+		git branch side &&
+
+		echo main >main &&
+		git add main &&
+		git commit -m main &&
+		main=$(git rev-parse HEAD) &&
+
+		git checkout side &&
+		echo side >file &&
+		git commit -am side-change &&
+		echo one >one &&
+		echo two >two &&
+		git add one two &&
+		git commit -m side-files &&
+		side=$(git rev-parse HEAD) &&
+
+		git checkout main &&
+		git read-tree "$main" &&
+		git checkout "$side" -- one two &&
+		tree=$(git write-tree) &&
+		merge=$(echo merge |
+			git commit-tree "$tree" -p "$main" -p "$side") &&
+		git reset --hard "$merge" &&
+		GIT_TEST_BLOOM_SETTINGS_MAX_CHANGED_PATHS=1 \
+			git commit-graph write --reachable --changed-paths &&
+
+		printf "base\n" >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			git log --format=%s --follow -- file >actual &&
+		test_cmp expect actual &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			merge_compares 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			bloom_maybe 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			tree_diffs 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			first_parent_same 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-maybe.perf" \
+			parent_edges_pruned 1
+	)
+'
+
+test_expect_success '--follow prunes directory side branches' '
+	git init follow-prune-directory &&
+	(
+		cd follow-prune-directory &&
+
+		mkdir dir &&
+		echo base >dir/file &&
+		git add dir/file &&
+		git commit -m base &&
+		git branch side &&
+
+		echo main >main &&
+		git add main &&
+		git commit -m main &&
+
+		git checkout side &&
+		echo side >dir/file &&
+		git commit -am side-change &&
+		git checkout main &&
+		git merge -s ours --no-ff -m merge side &&
+		git commit-graph write --reachable --changed-paths &&
+
+		printf "base\n" >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-directory.perf" \
+			git log --format=%s --follow -- dir >actual &&
+		test_cmp expect actual &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-directory.perf" \
+			parent_edges_pruned 1
+	)
+'
+
+test_expect_success '--follow stops pruning after a differing merge' '
+	git init follow-prune-disabled &&
+	(
+		cd follow-prune-disabled &&
+
+		echo base >file &&
+		git add file &&
+		git commit -m base &&
+		git branch old-side &&
+
+		echo main >main &&
+		git add main &&
+		git commit -m old-main &&
+		main=$(git rev-parse HEAD) &&
+
+		git checkout old-side &&
+		echo old-side >file &&
+		git commit -am old-side-change &&
+		side=$(git rev-parse HEAD) &&
+
+		git checkout main &&
+		tree=$(git rev-parse "$main^{tree}") &&
+		merge=$(echo old-merge |
+			git commit-tree "$tree" -p "$main" -p "$side") &&
+		git reset --hard "$merge" &&
+		git branch new-side &&
+
+		echo newer-main >newer-main &&
+		git add newer-main &&
+		git commit -m newer-main &&
+		git checkout new-side &&
+		echo new-side >file &&
+		git commit -am new-side-change &&
+		git checkout main &&
+		git merge --no-ff -m new-merge new-side &&
+		git commit-graph write --reachable --changed-paths &&
+
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			git log --format=%s --follow -- file >actual &&
+		printf "new-side-change\nold-side-change\nbase\n" >expect &&
+		test_cmp expect actual &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			merge_compares 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			bloom_maybe 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			tree_diffs 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			parent_edges_pruned 0 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune-disabled.perf" \
+			disabled_different 1
+	)
+'
+
+test_expect_success '--full-history keeps --follow side branches' '
+	(
+		cd follow-prune &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-full.perf" \
+			git log --full-history --format=%s --follow -- new >actual &&
+		grep -q side-change actual &&
+		test_path_is_file "$TRASH_DIRECTORY/follow-prune-full.perf" &&
+		! grep -q "follow_prune.*statistics" \
+			"$TRASH_DIRECTORY/follow-prune-full.perf"
+	)
+'
+
+test_expect_success '--follow keeps side branches for a range' '
+	(
+		cd follow-prune &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-range.perf" \
+			git log --format=%s --follow \
+			follow-base..prunable-merge -- old >actual &&
+		grep -q side-change actual &&
+		test_path_is_file "$TRASH_DIRECTORY/follow-prune-range.perf" &&
+		! grep -q "follow_prune.*statistics" \
+			"$TRASH_DIRECTORY/follow-prune-range.perf"
+	)
+'
+
+test_expect_success '--follow keeps side branches for merge diffs' '
+	(
+		cd follow-prune &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/follow-prune-merge.perf" \
+			git log -m -p --format=%s --follow \
+			prunable-merge -- old >actual &&
+		grep -q "^merge$" actual &&
+		grep -q side-change actual &&
+		test_path_is_file "$TRASH_DIRECTORY/follow-prune-merge.perf" &&
+		! grep -q "follow_prune.*statistics" \
+			"$TRASH_DIRECTORY/follow-prune-merge.perf"
+	)
+'
+
+test_expect_success '--follow keeps side branches for structural walks' '
+	(
+		cd follow-prune &&
+		for option in --parents --topo-order --reverse
+		do
+			trace="$TRASH_DIRECTORY/follow-prune-$option.perf" &&
+			GIT_TRACE2_PERF="$trace" \
+				git log "$option" --format=%s --follow \
+				prunable-merge -- old >actual &&
+			grep -q side-change actual &&
+			test_path_is_file "$trace" &&
+			! grep -q "follow_prune.*statistics" "$trace" ||
+			return 1
+		done
+	)
 '
 
 test_expect_success 'git log with --walk-reflogs does not use Bloom filters' '

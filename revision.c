@@ -628,6 +628,15 @@ static unsigned int count_bloom_filter_maybe;
 static unsigned int count_bloom_filter_definitely_not;
 static unsigned int count_bloom_filter_false_positive;
 static unsigned int count_bloom_filter_not_present;
+static int follow_prune_atexit_registered;
+static unsigned int count_follow_prune_merge_compares;
+static unsigned int count_follow_prune_bloom_definitely_not;
+static unsigned int count_follow_prune_bloom_maybe;
+static unsigned int count_follow_prune_tree_diffs;
+static unsigned int count_follow_prune_first_parent_same;
+static unsigned int count_follow_prune_parent_edges;
+static unsigned int count_follow_prune_path_updates;
+static unsigned int count_follow_prune_disabled_different;
 
 static void trace2_bloom_filter_statistics_atexit(void)
 {
@@ -641,6 +650,34 @@ static void trace2_bloom_filter_statistics_atexit(void)
 	jw_end(&jw);
 
 	trace2_data_json("bloom", the_repository, "statistics", &jw);
+
+	jw_release(&jw);
+}
+
+static void trace2_follow_prune_statistics_atexit(void)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "merge_compares",
+			 count_follow_prune_merge_compares);
+	jw_object_intmax(&jw, "bloom_definitely_not",
+			 count_follow_prune_bloom_definitely_not);
+	jw_object_intmax(&jw, "bloom_maybe",
+			 count_follow_prune_bloom_maybe);
+	jw_object_intmax(&jw, "tree_diffs",
+			 count_follow_prune_tree_diffs);
+	jw_object_intmax(&jw, "first_parent_same",
+			 count_follow_prune_first_parent_same);
+	jw_object_intmax(&jw, "parent_edges_pruned",
+			 count_follow_prune_parent_edges);
+	jw_object_intmax(&jw, "path_updates",
+			 count_follow_prune_path_updates);
+	jw_object_intmax(&jw, "disabled_different",
+			 count_follow_prune_disabled_different);
+	jw_end(&jw);
+
+	trace2_data_json("follow_prune", the_repository, "statistics", &jw);
 
 	jw_release(&jw);
 }
@@ -813,15 +850,24 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 	return check_maybe_different_in_bloom_filter(revs, commit);
 }
 
-void revision_bloom_filter_finish_diff(struct rev_info *revs,
-				       enum revision_bloom_filter_result result,
-				       int diff_is_empty)
+void revision_follow_finish_diff(struct rev_info *revs,
+				 enum revision_bloom_filter_result result,
+				 int diff_is_empty)
 {
 	if (result == REVISION_BLOOM_FILTER_MAYBE && diff_is_empty)
 		count_bloom_filter_false_positive++;
 
 	if (!revs->diffopt.flags.follow_renames || revs->prune ||
-	    !revs->diffopt.found_follow || !revs->bloom_filter_settings)
+	    !revs->diffopt.found_follow)
+		return;
+
+	if (revs->follow_prune) {
+		clear_pathspec(&revs->pruning.pathspec);
+		copy_pathspec(&revs->pruning.pathspec, &revs->diffopt.pathspec);
+		count_follow_prune_path_updates++;
+	}
+
+	if (!revs->bloom_filter_settings)
 		return;
 
 	if (set_revisions_bloom_keyvecs(revs, &revs->diffopt.pathspec))
@@ -862,9 +908,18 @@ static int rev_compare_tree(struct rev_info *revs,
 	if (revs->bloom_keyvecs_nr && !nth_parent) {
 		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
 
-		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
+		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT) {
+			if (revs->follow_prune)
+				count_follow_prune_bloom_definitely_not++;
 			return REV_TREE_SAME;
+		}
+		if (revs->follow_prune &&
+		    bloom_ret == REVISION_BLOOM_FILTER_MAYBE)
+			count_follow_prune_bloom_maybe++;
 	}
+
+	if (revs->follow_prune)
+		count_follow_prune_tree_diffs++;
 
 	tree_difference = REV_TREE_SAME;
 	revs->pruning.flags.has_changes = 0;
@@ -1177,6 +1232,7 @@ static int process_parents(struct rev_info *revs, struct commit *commit,
 			   struct commit_list **list, struct prio_queue *queue)
 {
 	struct commit_list *parent = commit->parents;
+	struct commit_list *parent_limit = NULL;
 	unsigned pass_flags;
 
 	if (commit->object.flags & ADDED)
@@ -1236,9 +1292,36 @@ static int process_parents(struct rev_info *revs, struct commit *commit,
 	if (revs->no_walk)
 		return 0;
 
+	/*
+	 * Eligible walks do not follow renames at merges. A mode that does
+	 * must disable follow_prune before traversal, since it can select a
+	 * different parent and path after this decision.
+	 */
+	if (revs->follow_prune) {
+		if (!list || queue || *list) {
+			revs->follow_prune = 0;
+		} else if (parent && parent->next) {
+			if (repo_parse_commit(revs->repo, parent->item) < 0)
+				return -1;
+
+			count_follow_prune_merge_compares++;
+			if (rev_compare_tree(revs, parent->item, commit, 0) ==
+			    REV_TREE_SAME) {
+				count_follow_prune_first_parent_same++;
+				count_follow_prune_parent_edges +=
+					commit_list_count(parent->next);
+				parent_limit = parent->next;
+			} else {
+				revs->follow_prune = 0;
+				count_follow_prune_disabled_different++;
+			}
+		}
+	}
+
 	pass_flags = (commit->object.flags & (SYMMETRIC_LEFT | ANCESTRY_PATH));
 
-	for (parent = commit->parents; parent; parent = parent->next) {
+	for (parent = commit->parents; parent != parent_limit;
+	     parent = parent->next) {
 		struct commit *p = parent->item;
 		int gently = revs->ignore_missing_links ||
 			     revs->exclude_promisor_objects ||
@@ -4043,6 +4126,88 @@ int prepare_revision_walk(struct rev_info *revs)
 		prepare_to_use_bloom_filter(revs);
 	if (!revs->unsorted_input)
 		commit_list_sort_by_date(&revs->commits);
+
+	/*
+	 * Rename following has one global path. It can describe traversal
+	 * only while output and parent expansion are interleaved on one
+	 * ancestry line.
+	 */
+	if (!revs->diffopt.flags.follow_renames ||
+	    revs->prune ||
+	    !revs->dense ||
+	    !revs->simplify_history ||
+	    revs->limited ||
+	    revs->topo_order ||
+	    revs->reverse ||
+	    revs->reflog_info ||
+	    revs->no_walk ||
+	    revs->line_level_traverse ||
+	    revs->track_linear ||
+	    revs->first_parent_only)
+		revs->follow_prune = 0;
+
+	/*
+	 * Keep every parent when later code exposes, rewrites, or diffs
+	 * parent edges that the streaming walk would otherwise omit.
+	 */
+	if (revs->boundary ||
+	    revs->rewrite_parents ||
+	    revs->separate_merges ||
+	    revs->combine_merges ||
+	    revs->remerge_diff ||
+	    revs->merges_need_diff ||
+	    revs->full_diff)
+		revs->follow_prune = 0;
+
+	/*
+	 * Skipping a rename-bearing commit without diffing it would leave
+	 * the global followed path stale.
+	 */
+	if (revs->maximal_only ||
+	    revs->unpacked ||
+	    revs->no_kept_objects ||
+	    revs->skip_count > 0 ||
+	    revs->min_age != -1 ||
+	    revs->max_age_as_filter != -1 ||
+	    revs->min_parents ||
+	    revs->max_parents != -1 ||
+	    revs->grep_filter.pattern_list ||
+	    revs->grep_filter.header_list)
+		revs->follow_prune = 0;
+
+	if (revs->include_check ||
+	    revs->ignore_missing ||
+	    revs->ignore_missing_links ||
+	    revs->exclude_promisor_objects ||
+	    revs->do_not_die_on_missing_objects ||
+	    revs->tag_objects ||
+	    revs->tree_objects ||
+	    revs->blob_objects ||
+	    revs->verify_objects ||
+	    revs->edge_hint ||
+	    revs->edge_hint_aggressive ||
+	    revs->count ||
+	    revs->left_right ||
+	    revs->left_only ||
+	    revs->right_only ||
+	    revs->cherry_pick ||
+	    revs->cherry_mark ||
+	    revs->bisect ||
+	    revs->read_from_stdin)
+		revs->follow_prune = 0;
+
+	if (!revs->commits ||
+	    revs->commits->next ||
+	    (revs->commits->item->object.flags &
+	     (UNINTERESTING | BOTTOM | SYMMETRIC_LEFT)))
+		revs->follow_prune = 0;
+
+	if (revs->follow_prune && trace2_is_enabled() &&
+	    !follow_prune_atexit_registered) {
+		atexit(trace2_follow_prune_statistics_atexit);
+		follow_prune_atexit_registered = 1;
+	}
+
 	if (revs->no_walk)
 		return 0;
 	if (revs->limited) {
