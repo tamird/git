@@ -91,6 +91,19 @@ test_expect_success 'setup' '
 	echo "prebarsuf" >ere-concat-bar &&
 	echo "xfoobary" >ere-concat-repeat &&
 	printf "%s\n" "literal|()[]\\suffix" >escaped-ere &&
+	for i in $(test_seq 1 40)
+	do
+		if test "$i" -le 20
+		then
+			prefix=a
+		else
+			prefix=z
+		fi &&
+		path=$(printf "literal-candidate-%s-%02d" "$prefix" "$i") &&
+		echo "literal candidate contents $i" >"$path" ||
+		return 1
+	done &&
+	echo "literal mixed candidate needle" >literal-candidate-z-40 &&
 	git add short fixed-pcre present agent-regex ordinary escaped-dot \
 		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
 		long-s outer-import outer-boundary mixed-unicorn mixed-gunicorn \
@@ -98,7 +111,7 @@ test_expect_success 'setup' '
 		structured-middle-from structured-middle-import \
 		structured-optional ere-concat ere-concat-test ere-concat-dev \
 		ere-mixed-plain ere-concat-foo ere-concat-bar \
-		ere-concat-repeat escaped-ere &&
+		ere-concat-repeat escaped-ere literal-candidate-* &&
 	git commit -m initial
 '
 
@@ -755,6 +768,59 @@ test_expect_success FSMONITOR_DAEMON \
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 0 \
 		<candidate-excluded.trace
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'content index prunes literal path candidates' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git checkout -- literal-candidate-a-01 &&
+			    rm -f .git/index.grep-worktree \
+				candidate-literal-*.trace \
+				literal-candidate-paths" &&
+	test_config grep.worktreeBlobCache true &&
+	test_config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	git status --porcelain >/dev/null &&
+
+	git ls-files "literal-candidate-*" >literal-candidate-paths &&
+	set -- &&
+	while read path
+	do
+		set -- "$path" "$@" || return 1
+	done <literal-candidate-paths &&
+	set -- "$@" literal-candidate-a-01 &&
+	test_path_is_missing .git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/candidate-literal-unknown.trace" \
+		git --no-optional-locks grep \
+			"absent literal candidate needle" -- "$@" 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep literal_path_candidates 40 \
+		<candidate-literal-unknown.trace &&
+	! test_grep "content_index_literal_path_" \
+		candidate-literal-unknown.trace &&
+	test_expect_code 1 git grep --no-content-index \
+		"absent literal candidate warmup" -- \
+		"literal-candidate-*" \
+		":(exclude)literal-candidate-a-02" &&
+	test_path_is_file .git/index.grep-worktree &&
+
+	echo "literal mixed candidate needle" >literal-candidate-a-01 &&
+	git status --porcelain >/dev/null &&
+	cat >expected <<-\EOF &&
+	literal-candidate-a-01:literal mixed candidate needle
+	literal-candidate-z-40:literal mixed candidate needle
+	EOF
+	GIT_TRACE2_EVENT="$PWD/candidate-literal-mixed.trace" \
+		git grep "literal mixed candidate needle" \
+			-- "$@" >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep literal_path_candidates 40 \
+		<candidate-literal-mixed.trace &&
+	test_trace2_data grep content_index_literal_path_candidates 3 \
+		<candidate-literal-mixed.trace &&
+	test_trace2_data grep content_index_literal_path_rejected 37 \
+		<candidate-literal-mixed.trace
 '
 
 test_expect_success 'content index prunes impossible multiple patterns' '

@@ -980,6 +980,7 @@ static int grep_cache(struct grep_opt *opt,
 	int literal_selected = 0;
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
+	int worktree_sidecar_loaded = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	if (repo->submodule_prefix) {
@@ -1202,8 +1203,8 @@ static int grep_cache(struct grep_opt *opt,
 					nr++;
 		}
 		if (worktree_bytes >= min_bytes)
-			worktree_cache = grep_worktree_cache_load(repo,
-								  repo->index);
+			worktree_cache = grep_worktree_cache_load(
+				repo, repo->index, &worktree_sidecar_loaded);
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
@@ -1255,14 +1256,32 @@ static int grep_cache(struct grep_opt *opt,
 					    GREP_MIN_FILES_FOR_THREADS &&
 				    num_threads > 1 && threads_auto)
 					num_threads = 1;
-			} else if (!cached && !literal_selected &&
-				   worktree_cache &&
-				   repo->index->sparse_index ==
-					   INDEX_EXPANDED) {
+			} else if (!cached && worktree_cache &&
+				   (!literal_selected ||
+				    worktree_sidecar_loaded) &&
+				   (literal_selected ||
+				    repo->index->sparse_index ==
+					    INDEX_EXPANDED)) {
+				size_t positions_nr =
+					literal_selected ?
+						selected_nr :
+						repo->index->cache_nr;
 				uint64_t rejected = 0;
 
-				for (size_t i = 0;
-				     i < repo->index->cache_nr; i++) {
+				if (literal_selected) {
+					/*
+					 * Literal positions are already ordered
+					 * and pathspec-filtered. Compacting in
+					 * place is safe because the write
+					 * position cannot overtake the read
+					 * position.
+					 */
+					selected_nr = 0;
+				}
+				for (size_t pos = 0; pos < positions_nr; pos++) {
+					size_t i = literal_selected ?
+							   selected[pos] :
+							   pos;
 					const struct cache_entry *ce =
 						repo->index->cache[i];
 					unsigned char bit =
@@ -1272,8 +1291,9 @@ static int grep_cache(struct grep_opt *opt,
 						!ce_intent_to_add(ce) &&
 						(ce->ce_flags & CE_VALID);
 
-					if (ce_skip_worktree(ce) ||
-					    !S_ISREG(ce->ce_mode))
+					if (!literal_selected &&
+					    (ce_skip_worktree(ce) ||
+					     !S_ISREG(ce->ce_mode)))
 						continue;
 					if (!known_equal &&
 					    can_cache_worktree_blob(ce))
@@ -1292,7 +1312,8 @@ static int grep_cache(struct grep_opt *opt,
 						rejected++;
 						continue;
 					}
-					if (!match_pathspec(
+					if (!literal_selected &&
+					    !match_pathspec(
 						    repo->index, pathspec,
 						    ce->name,
 						    ce_namelen(ce), 0,
@@ -1305,14 +1326,25 @@ static int grep_cache(struct grep_opt *opt,
 					selected[selected_nr++] = i;
 				}
 				use_selected = 1;
-				trace2_data_intmax(
-					"grep", repo,
-					"content_index_worktree_candidates",
-					selected_nr);
-				trace2_data_intmax(
-					"grep", repo,
-					"content_index_worktree_rejected_before_pathspec",
-					rejected);
+				if (literal_selected) {
+					trace2_data_intmax(
+						"grep", repo,
+						"content_index_literal_path_candidates",
+						selected_nr);
+					trace2_data_intmax(
+						"grep", repo,
+						"content_index_literal_path_rejected",
+						rejected);
+				} else {
+					trace2_data_intmax(
+						"grep", repo,
+						"content_index_worktree_candidates",
+						selected_nr);
+					trace2_data_intmax(
+						"grep", repo,
+						"content_index_worktree_rejected_before_pathspec",
+						rejected);
+				}
 				if (selected_nr &&
 				    selected_nr <
 					    GREP_MIN_FILES_FOR_THREADS &&

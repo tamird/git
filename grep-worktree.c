@@ -149,10 +149,12 @@ static int current_index_matches(struct grep_worktree_cache *cache)
 }
 
 struct grep_worktree_cache *grep_worktree_cache_load(
-	struct repository *repo, struct index_state *istate)
+	struct repository *repo, struct index_state *istate,
+	int *sidecar_loaded)
 {
 	struct grep_worktree_cache *cache;
 
+	*sidecar_loaded = 0;
 	if (!istate->fsmonitor_last_update || !istate->cache_nr)
 		return NULL;
 
@@ -165,7 +167,7 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 		return NULL;
 	}
 	allocate_cache_bitmaps(cache);
-	load_cache(cache, cache->equal);
+	*sidecar_loaded = load_cache(cache, cache->equal);
 	return cache;
 }
 

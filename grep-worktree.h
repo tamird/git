@@ -15,7 +15,8 @@ enum grep_worktree_cache_result {
 };
 
 struct grep_worktree_cache *grep_worktree_cache_load(
-	struct repository *repo, struct index_state *istate);
+	struct repository *repo, struct index_state *istate,
+	int *sidecar_loaded);
 enum grep_worktree_cache_result grep_worktree_cache_lookup(
 	struct grep_worktree_cache *cache, size_t pos);
 void grep_worktree_cache_record(struct grep_worktree_cache *cache, size_t pos,
