@@ -1022,13 +1022,34 @@ test_expect_success 'log --committer does not search in timestamp' '
 '
 
 test_expect_success 'grep with CE_VALID file' '
+	test_when_finished "rm -f grep-literal-trace-valid" &&
 	git update-index --assume-unchanged t/t &&
 	rm t/t &&
 	echo "t/t:test" >expect &&
-	git grep test >actual &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-valid" \
+		git grep test -- t/t >actual &&
 	test_cmp expect actual &&
+	test_grep ! "literal_path_candidates" grep-literal-trace-valid &&
 	git update-index --no-assume-unchanged t/t &&
 	git checkout t/t
+'
+
+test_expect_success 'literal path selection falls back for unmerged paths' '
+	test_when_finished "rm -f grep-literal-trace-unmerged index-info &&
+		git rm -f grep-literal-unmerged" &&
+	stage1=$(git rev-parse :t/t) &&
+	stage2=$(echo ours | git hash-object -w --stdin) &&
+	stage3=$(echo theirs | git hash-object -w --stdin) &&
+	printf "100644 %s 1\tgrep-literal-unmerged\n" "$stage1" >index-info &&
+	printf "100644 %s 2\tgrep-literal-unmerged\n" "$stage2" >>index-info &&
+	printf "100644 %s 3\tgrep-literal-unmerged\n" "$stage3" >>index-info &&
+	git update-index --index-info <index-info &&
+	echo "unmerged worktree needle" >grep-literal-unmerged &&
+	echo "grep-literal-unmerged:unmerged worktree needle" >expect &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-unmerged" \
+		git grep "unmerged worktree" -- grep-literal-unmerged >actual &&
+	test_cmp expect actual &&
+	test_grep ! "literal_path_candidates" grep-literal-trace-unmerged
 '
 
 cat >expected <<EOF
@@ -2059,7 +2080,83 @@ test_expect_success 'grep can find things only in the work tree' '
 	test_must_fail git grep --quiet "find in work tree" HEAD
 '
 
+test_expect_success 'grep selects small literal pathsets directly' '
+	test_when_finished "rm -f grep-literal-trace-* &&
+		git rm -rf grep-literal-a grep-literal-z \
+			grep-literal-dir grep-literal-dir.sibling" &&
+	echo "literal needle a" >grep-literal-a &&
+	echo "literal needle z" >grep-literal-z &&
+	mkdir -p grep-literal-dir/nested &&
+	echo "literal needle directory" >grep-literal-dir/file &&
+	echo "literal needle nested" >grep-literal-dir/nested/file &&
+	echo "prefix sibling" >grep-literal-dir.sibling &&
+	git add grep-literal-a grep-literal-z grep-literal-dir \
+		grep-literal-dir.sibling &&
+	cat >expected <<-\EOF &&
+	grep-literal-a:1:literal needle a
+	grep-literal-z:1:literal needle z
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-paths" \
+		git grep -n "literal needle" -- \
+			grep-literal-z grep-literal-a >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep literal_path_candidates 2 \
+		<grep-literal-trace-paths &&
+	echo "modified literal needle z" >grep-literal-z &&
+	echo "grep-literal-z:modified literal needle z" >expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-modified" \
+		git grep "modified literal needle" -- grep-literal-z >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep literal_path_candidates 1 \
+		<grep-literal-trace-modified &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-literal-trace-missing" \
+		git grep "literal needle" -- grep-literal-missing &&
+	test_trace2_data grep literal_path_candidates 0 \
+		<grep-literal-trace-missing &&
+	cat >expected <<-\EOF &&
+	grep-literal-dir/file:literal needle directory
+	grep-literal-dir/nested/file:literal needle nested
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-directory" \
+		git grep "literal needle" -- grep-literal-dir >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep literal_path_candidates 2 \
+		<grep-literal-trace-directory &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-overlap" \
+		git grep "literal needle" -- \
+			grep-literal-dir grep-literal-dir/file >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep literal_path_candidates 2 \
+		<grep-literal-trace-overlap &&
+	git update-index --assume-unchanged \
+		grep-literal-dir/nested/file &&
+	rm grep-literal-dir/nested/file &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-valid-directory" \
+		git grep "literal needle" -- grep-literal-dir >actual &&
+	test_cmp expected actual &&
+	test_grep ! "literal_path_candidates" \
+		grep-literal-trace-valid-directory &&
+	git update-index --no-assume-unchanged \
+		grep-literal-dir/nested/file &&
+	git checkout -- grep-literal-dir/nested/file &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-max-depth" \
+		git grep --max-depth 1 "literal needle" -- \
+			grep-literal-dir >actual &&
+	test_cmp expected actual &&
+	test_grep ! "literal_path_candidates" \
+		grep-literal-trace-max-depth &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-directory-slash" \
+		git grep "literal needle" -- grep-literal-dir/ >actual &&
+	test_cmp expected actual &&
+	test_grep ! "literal_path_candidates" \
+		grep-literal-trace-directory-slash
+'
+
 test_expect_success 'grep reuses observed worktree blob bytes' '
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
 	test_when_finished "rm -f .git/fsmonitor-attributes \
 		.git/fsmonitor-equal .git/index.grep-worktree \
 		.git/index.grep-worktree.lock \
@@ -2357,6 +2454,9 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 '
 
 test_expect_success 'grep rejects cache after index replacement' '
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
 	test_config grep.worktreeBlobCache true &&
 	test_when_finished "rm -f .git/fsmonitor-replace-index \
 		.git/index.original .git/index.replace \
@@ -2428,6 +2528,9 @@ test_lazy_prereq NO_FORCED_SPLIT_INDEX '
 
 test_expect_success NO_FORCED_SPLIT_INDEX \
 	'worktree cache follows sparse-index identity' '
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
 	test_when_finished "rm -rf grep-worktree-sparse \
 		grep-worktree-trace-sparse-*" &&
 	git init grep-worktree-sparse &&
@@ -2472,7 +2575,14 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		git -C grep-worktree-sparse grep \
 		"absent sparse index" -- inside/file &&
 	test_trace2_data grep worktree_blob/hits 0 \
-		<grep-worktree-trace-sparse-collapsed
+		<grep-worktree-trace-sparse-collapsed &&
+	unset GIT_TEST_GREP_LITERAL_PATHS &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-sparse-outside" \
+		git -C grep-worktree-sparse grep \
+		"outside sparse index" -- outside/file &&
+	test_grep ! "literal_path_candidates" \
+		grep-worktree-trace-sparse-outside
 '
 
 test_expect_success 'grep can find things only in the work tree (i-t-a)' '

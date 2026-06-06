@@ -84,6 +84,7 @@ static struct grep_opt *worker_template;
 
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 16)
 #define GREP_MIN_FILES_FOR_THREADS 32
+#define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
 
 struct grep_result_cache_entry {
 	struct hashmap_entry ent;
@@ -987,7 +988,160 @@ static int grep_cache(struct grep_opt *opt,
 	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
-	if (repo == the_repository && !cached && !opt->allow_textconv &&
+	/*
+	 * Whole-index caches cost more than reading a few small, explicitly
+	 * named worktree files. Resolve those pathspecs directly.
+	 */
+	if (git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
+	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
+	    pathspec->nr < GREP_MIN_FILES_FOR_THREADS &&
+	    !pathspec->has_wildcard &&
+	    !(pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))) {
+		struct strbuf dir = STRBUF_INIT;
+		uint64_t selected_bytes = 0;
+		int can_select = 1;
+
+		for (size_t i = 0; i < pathspec->nr; i++) {
+			const struct pathspec_item *item = &pathspec->items[i];
+			const struct cache_entry *previous;
+			int end;
+			int dir_pos;
+
+			if (!item->len || item->match[item->len - 1] == '/' ||
+			    item->nowildcard_len != item->len ||
+			    item->magic &
+				    ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL)) {
+				can_select = 0;
+				break;
+			}
+
+			nr = index_name_pos_sparse(repo->index, item->match,
+						   item->len);
+			if (nr < 0) {
+				nr = -nr - 1;
+				if (nr < repo->index->cache_nr &&
+				    !strcmp(repo->index->cache[nr]->name,
+					    item->match)) {
+					can_select = 0;
+					break;
+				}
+				strbuf_reset(&dir);
+				strbuf_add(&dir, item->match, item->len);
+				strbuf_addch(&dir, '/');
+				dir_pos = index_name_pos_sparse(
+					repo->index, dir.buf, dir.len);
+				if (dir_pos < 0)
+					dir_pos = -dir_pos - 1;
+				if (dir_pos < repo->index->cache_nr &&
+				    starts_with(repo->index->cache[dir_pos]
+							->name,
+						dir.buf)) {
+					int low = dir_pos;
+
+					end = repo->index->cache_nr;
+					while (low < end) {
+						int mid = low + (end - low) / 2;
+
+						if (starts_with(repo->index
+									->cache[mid]
+									->name,
+								dir.buf))
+							low = mid + 1;
+						else
+							end = mid;
+					}
+					nr = dir_pos;
+					end = low;
+				} else {
+					previous =
+						nr ? repo->index
+								->cache[nr - 1] :
+						     NULL;
+					if (previous &&
+					    S_ISSPARSEDIR(
+						    previous->ce_mode) &&
+					    ce_namelen(previous) <
+						    item->len &&
+					    !strncmp(previous->name,
+						     item->match,
+						     ce_namelen(
+							     previous))) {
+						can_select = 0;
+						break;
+					}
+					continue;
+				}
+			} else {
+				end = nr + 1;
+			}
+
+			for (; nr < end; nr++) {
+				const struct cache_entry *ce =
+					repo->index->cache[nr];
+				struct stat st;
+				size_t insert;
+
+				if (ce_stage(ce)) {
+					can_select = 0;
+					break;
+				}
+				if (ce_skip_worktree(ce))
+					continue;
+				if (S_ISSPARSEDIR(ce->ce_mode) ||
+				    (ce->ce_flags & CE_VALID)) {
+					can_select = 0;
+					break;
+				}
+				if (!S_ISREG(ce->ce_mode))
+					continue;
+
+				insert = selected_nr;
+				while (insert && selected[insert - 1] > nr)
+					insert--;
+				if (insert && selected[insert - 1] == nr)
+					continue;
+				if (selected_nr ==
+				    GREP_MIN_FILES_FOR_THREADS - 1) {
+					can_select = 0;
+					break;
+				}
+				if (!lstat(ce->name, &st) &&
+				    S_ISREG(st.st_mode)) {
+					if ((uintmax_t)st.st_size >
+					    GREP_LITERAL_PATH_MAX_BYTES -
+						    selected_bytes) {
+						can_select = 0;
+						break;
+					}
+					selected_bytes += st.st_size;
+				}
+				ALLOC_GROW(selected, selected_nr + 1,
+					   selected_alloc);
+				MOVE_ARRAY(selected + insert + 1,
+					   selected + insert,
+					   selected_nr - insert);
+				selected[insert] = nr;
+				selected_nr++;
+			}
+			if (!can_select)
+				break;
+		}
+		if (can_select) {
+			use_selected = 1;
+			trace2_data_intmax("grep", repo,
+					   "literal_path_candidates",
+					   selected_nr);
+			if (num_threads > 1 && threads_auto)
+				num_threads = 1;
+		} else {
+			FREE_AND_NULL(selected);
+			selected_nr = 0;
+			selected_alloc = 0;
+		}
+		strbuf_release(&dir);
+	}
+	if (!use_selected && repo == the_repository && !cached &&
+	    !opt->allow_textconv &&
 	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
 	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
 	     !opt->status_only)) {
@@ -1031,7 +1185,7 @@ static int grep_cache(struct grep_opt *opt,
 			worktree_cache = grep_worktree_cache_load(repo,
 								  repo->index);
 	}
-	if (repo == the_repository && content_index_query &&
+	if (!use_selected && repo == the_repository && content_index_query &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
 	    grep_index_ipc_is_available(repo)) {
@@ -1096,7 +1250,7 @@ static int grep_cache(struct grep_opt *opt,
 		}
 		free(maybe);
 	}
-	if (repo == the_repository && content_index_query &&
+	if (!use_selected && repo == the_repository && content_index_query &&
 	    !used_index_ipc && !content_index) {
 		trace2_region_enter("grep", "load_content_index", repo);
 		content_index = grep_index_load(repo);
@@ -1107,7 +1261,8 @@ static int grep_cache(struct grep_opt *opt,
 				content_index, content_index_query);
 		trace2_region_leave("grep", "prepare_content_index", repo);
 	}
-	if (cached && !recurse_submodules && content_index_prepared &&
+	if (!use_selected && cached && !recurse_submodules &&
+	    content_index_prepared &&
 	    repo->index->sparse_index == INDEX_EXPANDED) {
 		trace2_region_enter("grep", "select_content_index", repo);
 		for (size_t i = 0; i < repo->index->cache_nr; i++) {
@@ -1134,7 +1289,7 @@ static int grep_cache(struct grep_opt *opt,
 			num_threads = 1;
 		trace2_region_leave("grep", "select_content_index", repo);
 	}
-	if (repo == the_repository && content_index_query &&
+	if (!use_selected && repo == the_repository && content_index_query &&
 	    !used_index_ipc && !content_index_prepared &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
