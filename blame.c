@@ -1270,7 +1270,7 @@ struct blame_bloom_data {
 static int bloom_count_queries = 0;
 static int bloom_count_no = 0;
 static int maybe_changed_path(struct repository *r,
-			      struct blame_origin *origin,
+			      struct commit *commit,
 			      struct blame_bloom_data *bd)
 {
 	int i;
@@ -1279,10 +1279,10 @@ static int maybe_changed_path(struct repository *r,
 	if (!bd)
 		return 1;
 
-	if (commit_graph_generation(origin->commit) == GENERATION_NUMBER_INFINITY)
+	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY)
 		return 1;
 
-	filter = get_bloom_filter(r, origin->commit);
+	filter = get_bloom_filter(r, commit);
 
 	if (!filter)
 		return 1;
@@ -1361,7 +1361,7 @@ static struct blame_origin *find_origin(struct repository *r,
 		if (origin->commit->parents &&
 		    oideq(&parent->object.oid,
 			  &origin->commit->parents->item->object.oid))
-			compute_diff = maybe_changed_path(r, origin, bd);
+			compute_diff = maybe_changed_path(r, origin->commit, bd);
 
 		if (compute_diff)
 			diff_tree_oid(get_commit_tree_oid(parent),
@@ -2424,10 +2424,42 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 	num_sg = num_scapegoats(revs, commit, sb->reverse);
 	if (!num_sg)
 		goto finish;
-	else if (num_sg < ARRAY_SIZE(sg_buf))
+	if (num_sg < ARRAY_SIZE(sg_buf))
 		memset(sg_buf, 0, sizeof(sg_buf));
 	else
 		CALLOC_ARRAY(sg_origin, num_sg);
+
+	if (!sb->reverse && sb->bloom_data) {
+		struct commit *unchanged = commit;
+
+		/*
+		 * A negative filter proves that the blob is unchanged from
+		 * the first parent. The normal path would pass all suspects
+		 * there and return, so collapse consecutive negatives into
+		 * one queue operation.
+		 */
+		while (unchanged->parents &&
+		       !maybe_changed_path(sb->repo, unchanged,
+					   sb->bloom_data)) {
+			struct commit *parent = unchanged->parents->item;
+
+			if (repo_parse_commit(sb->repo, parent))
+				break;
+			unchanged = parent;
+			if ((unchanged->object.flags & UNINTERESTING) ||
+			    (revs->max_age != -1 &&
+			     unchanged->date < revs->max_age))
+				break;
+		}
+		if (unchanged != commit) {
+			porigin = get_origin(unchanged, origin->path);
+			oidcpy(&porigin->blob_oid, &origin->blob_oid);
+			porigin->mode = origin->mode;
+			pass_whole_blame(sb, origin, porigin);
+			blame_origin_decref(porigin);
+			goto finish;
+		}
+	}
 
 	/*
 	 * The first pass looks for unrenamed path to optimize for
