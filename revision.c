@@ -1821,7 +1821,7 @@ static void do_add_index_objects_to_pending(struct rev_info *revs,
 					     ce->ce_mode, ce->name);
 	}
 
-	if (istate->cache_tree) {
+	if (cache_tree_get(istate)) {
 		struct strbuf path = STRBUF_INIT;
 		add_cache_tree(istate->cache_tree, revs, &path, flags);
 		strbuf_release(&path);

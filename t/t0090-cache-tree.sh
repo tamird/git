@@ -60,6 +60,14 @@ test_expect_success 'initial commit has cache-tree' '
 	test_cache_tree
 '
 
+test_expect_success 'ls-files and grep defer cache-tree parsing' '
+	GIT_TRACE2_PERF="$(pwd)/.git/ls-files.trace" git ls-files >/dev/null &&
+	test_grep ! "cache_tree.*label:read" .git/ls-files.trace &&
+
+	GIT_TRACE2_PERF="$(pwd)/.git/grep.trace" git grep --cached --quiet foo &&
+	test_grep ! "cache_tree.*label:read" .git/grep.trace
+'
+
 test_expect_success 'read-tree HEAD establishes cache-tree' '
 	git read-tree HEAD &&
 	test_cache_tree

@@ -40,14 +40,14 @@ int cmd__cache_tree(int argc, const char **argv)
 	if (repo_read_index(the_repository) < 0)
 		die(_("unable to read index file"));
 
-	oidcpy(&oid, &the_repository->index->cache_tree->oid);
+	oidcpy(&oid, &cache_tree_get(the_repository->index)->oid);
 	tree = repo_parse_tree_indirect(the_repository, &oid);
 	if (!tree)
 		die(_("not a tree object: %s"), oid_to_hex(&oid));
 
 	if (empty) {
 		/* clear the cache tree & allocate a new one */
-		cache_tree_free(&the_repository->index->cache_tree);
+		cache_tree_discard(the_repository->index);
 		the_repository->index->cache_tree = cache_tree();
 	} else if (invalidate_qty) {
 		/* invalidate the specified number of unique paths */

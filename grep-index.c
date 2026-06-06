@@ -2318,6 +2318,7 @@ static void collect_worktree_oids(struct repository *repo,
 		struct index_state istate = INDEX_STATE_INIT(repo);
 		char *gitdir = get_worktree_git_dir(*p);
 
+		istate.lazy_cache_tree = 1;
 		if (read_index_from(&istate, worktree_git_path(*p, "index"),
 				    gitdir) > 0) {
 			ensure_full_index(&istate);

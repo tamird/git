@@ -984,6 +984,7 @@ static int grep_cache(struct grep_opt *opt,
 		strbuf_addstr(&name, repo->submodule_prefix);
 	}
 
+	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
 	if (repo == the_repository && !cached && !opt->allow_textconv &&

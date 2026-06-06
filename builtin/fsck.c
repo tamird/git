@@ -903,7 +903,7 @@ static void fsck_index(struct index_state *istate, const char *index_path,
 				     istate->cache[i]->name);
 		mark_object_reachable(obj);
 	}
-	if (istate->cache_tree)
+	if (cache_tree_get(istate))
 		fsck_cache_tree(istate->repo, istate->cache_tree, index_path);
 	fsck_resolve_undo(istate, index_path);
 }

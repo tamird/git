@@ -169,12 +169,16 @@ struct index_state {
 	unsigned int cache_nr, cache_alloc, cache_changed;
 	struct string_list *resolve_undo;
 	struct cache_tree *cache_tree;
+	/* Points into retained_index_file_map until materialized. */
+	const char *cache_tree_extension;
+	size_t cache_tree_extension_size;
 	struct split_index *split_index;
 	struct cache_time timestamp;
 	struct stat index_file_stat;
 	/*
 	 * Set retain_index_file_mapping before reading the index to keep the
-	 * exact mapped bytes available for ensure_index_file_identity().
+	 * exact mapped bytes available for ensure_index_file_identity(). A
+	 * deferred cache-tree also retains the mapping.
 	 */
 	struct object_id index_file_identity;
 	const char *retained_index_file_map;
@@ -185,6 +189,7 @@ struct index_state {
 		 updated_workdir : 1,
 		 updated_skipworktree : 1,
 		 fsmonitor_has_run_once : 1,
+		 lazy_cache_tree : 1,
 		 retain_index_file_mapping : 1,
 		 index_file_identity_valid : 1,
 		 index_file_stat_valid : 1;

@@ -484,7 +484,7 @@ static const char *prepare_index(const char **argv, const char *prefix,
 				       LOCK_DIE_ON_ERROR);
 		refresh_cache_or_die(refresh_flags);
 		if (the_repository->index->cache_changed
-		    || !cache_tree_fully_valid(the_repository->index->cache_tree))
+		    || !cache_tree_fully_valid(cache_tree_get(the_repository->index)))
 			cache_tree_update(the_repository->index, WRITE_TREE_SILENT);
 		if (write_locked_index(the_repository->index, &index_lock,
 				       COMMIT_LOCK | SKIP_IF_UNCHANGED))
@@ -1935,7 +1935,8 @@ int cmd_commit(int argc,
 		append_merge_tag_headers(parents, &tail);
 	}
 
-	if (commit_tree_extended(sb.buf, sb.len, &the_repository->index->cache_tree->oid,
+	if (commit_tree_extended(sb.buf, sb.len,
+				 &cache_tree_get(the_repository->index)->oid,
 				 parents, &oid, author_ident.buf, NULL,
 				 sign_commit, extra)) {
 		rollback_index_files();

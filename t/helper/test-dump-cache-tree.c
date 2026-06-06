@@ -69,8 +69,13 @@ int cmd__dump_cache_tree(int ac UNUSED, const char **av UNUSED)
 	setup_git_directory(the_repository);
 	if (repo_read_index(the_repository) < 0)
 		die("unable to read index file");
+	cache_tree_get(the_repository->index);
 	istate = *the_repository->index;
 	istate.cache_tree = another;
+	istate.cache_tree_extension = NULL;
+	istate.cache_tree_extension_size = 0;
+	istate.retained_index_file_map = NULL;
+	istate.retained_index_file_map_size = 0;
 	cache_tree_update(&istate, WRITE_TREE_DRY_RUN);
 	ret = dump_cache_tree(the_repository->index->cache_tree, another, "");
 	cache_tree_free(&another);

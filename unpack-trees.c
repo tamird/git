@@ -1911,6 +1911,8 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		if (o->dst_index)
 			ensure_full_index(o->dst_index);
 	}
+	if (o->merge || o->diff_index_cached)
+		cache_tree_get(o->src_index);
 
 	if (o->reset == UNPACK_RESET_OVERWRITE_UNTRACKED &&
 	    o->preserve_ignored)
@@ -2084,7 +2086,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 			}
 
 			if (!o->skip_cache_tree_update &&
-			    !cache_tree_fully_valid(o->internal.result.cache_tree))
+			    !cache_tree_fully_valid(cache_tree_get(&o->internal.result)))
 				cache_tree_update(&o->internal.result,
 						  WRITE_TREE_SILENT |
 						  WRITE_TREE_REPAIR);

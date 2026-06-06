@@ -221,9 +221,9 @@ int convert_to_sparse(struct index_state *istate, int flags)
 	if (index_has_unmerged_entries(istate))
 		return 0;
 
-	if (!cache_tree_fully_valid(istate->cache_tree)) {
+	if (!cache_tree_fully_valid(cache_tree_get(istate))) {
 		/* Clear and recompute the cache-tree */
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 
 		/*
 		 * Silently return if there is a problem with the cache tree update,
@@ -244,7 +244,7 @@ int convert_to_sparse(struct index_state *istate, int flags)
 						 "", 0, istate->cache_tree);
 
 	/* Clear and recompute the cache-tree */
-	cache_tree_free(&istate->cache_tree);
+	cache_tree_discard(istate);
 	cache_tree_update(istate, 0);
 
 	istate->fsmonitor_has_run_once = 0;
@@ -349,7 +349,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 		 * entries, and for that we will need the cache tree to
 		 * be recomputed.
 		 */
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 
 		/*
 		 * If there is a problem creating the cache tree, then we
@@ -453,7 +453,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 	free(full);
 
 	/* Clear and recompute the cache-tree */
-	cache_tree_free(&istate->cache_tree);
+	cache_tree_discard(istate);
 	cache_tree_update(istate, 0);
 
 	trace2_region_leave("index", tr_region, istate->repo);

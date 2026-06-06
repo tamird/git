@@ -149,6 +149,7 @@ static int current_index_matches(struct grep_worktree_cache *cache)
 	struct object_id oid;
 	int result = 0;
 
+	istate.lazy_cache_tree = 1;
 	if (read_index_from(&istate, repo_get_index_file(cache->repo),
 			    repo_get_git_dir(cache->repo)) < 0)
 		return 0;

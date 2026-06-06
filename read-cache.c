@@ -1734,7 +1734,12 @@ static int read_index_extension(struct index_state *istate,
 {
 	switch (CACHE_EXT(ext)) {
 	case CACHE_EXT_TREE:
-		istate->cache_tree = cache_tree_read(data, sz);
+		if (istate->lazy_cache_tree) {
+			istate->cache_tree_extension = data;
+			istate->cache_tree_extension_size = sz;
+		} else {
+			istate->cache_tree = cache_tree_read(data, sz);
+		}
 		break;
 	case CACHE_EXT_RESOLVE_UNDO:
 		istate->resolve_undo = resolve_undo_read(data, sz, the_hash_algo);
@@ -2312,7 +2317,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 		p.src_offset = src_offset;
 		load_index_extensions(&p);
 	}
-	if (istate->retain_index_file_mapping) {
+	if (istate->retain_index_file_mapping ||
+	    istate->cache_tree_extension) {
 		istate->retained_index_file_map = mmap;
 		istate->retained_index_file_map_size = mmap_size;
 	} else {
@@ -2357,6 +2363,8 @@ int ensure_index_file_identity(struct index_state *istate)
 			istate->repo->hash_algo->rawsz);
 	git_hash_final_oid(&istate->index_file_identity, &ctx);
 	istate->index_file_identity_valid = 1;
+	if (istate->cache_tree_extension)
+		return 0;
 	munmap((void *)istate->retained_index_file_map,
 	       istate->retained_index_file_map_size);
 	istate->retained_index_file_map = NULL;
@@ -2467,7 +2475,7 @@ void release_index(struct index_state *istate)
 
 	resolve_undo_clear_index(istate);
 	free_name_hash(istate);
-	cache_tree_free(&(istate->cache_tree));
+	cache_tree_discard(istate);
 	free(istate->fsmonitor_last_update);
 	free(istate->cache);
 	if (istate->retained_index_file_map)
@@ -3030,7 +3038,7 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 		}
 	}
 	if (write_extensions & WRITE_CACHE_TREE_EXTENSION &&
-	    !drop_cache_tree && istate->cache_tree) {
+	    !drop_cache_tree && cache_tree_get(istate)) {
 		strbuf_reset(&sb);
 
 		cache_tree_write(&sb, istate->cache_tree);
@@ -3545,6 +3553,17 @@ void move_index_extensions(struct index_state *dst, struct index_state *src)
 	src->untracked = NULL;
 	dst->cache_tree = src->cache_tree;
 	src->cache_tree = NULL;
+	dst->cache_tree_extension = src->cache_tree_extension;
+	dst->cache_tree_extension_size = src->cache_tree_extension_size;
+	src->cache_tree_extension = NULL;
+	src->cache_tree_extension_size = 0;
+	if (dst->cache_tree_extension) {
+		dst->retained_index_file_map = src->retained_index_file_map;
+		dst->retained_index_file_map_size =
+			src->retained_index_file_map_size;
+		src->retained_index_file_map = NULL;
+		src->retained_index_file_map_size = 0;
+	}
 }
 
 struct cache_entry *dup_cache_entry(const struct cache_entry *ce,
@@ -3895,7 +3914,7 @@ void overlay_tree_on_index(struct index_state *istate,
 	 * Sort the cache entry -- we need to nuke the cache tree, though.
 	 */
 	if (fn == read_one_entry_quick) {
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 		QSORT(istate->cache, istate->cache_nr, cmp_cache_name_compare);
 	}
 
