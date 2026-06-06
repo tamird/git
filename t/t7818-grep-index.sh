@@ -8,6 +8,10 @@ test_lazy_prereq ENHANCED_BRE '
 	test-tool regex --silent "a\|b" a
 '
 
+test_lazy_prereq BRE_WORD_BOUNDARY '
+	test-tool regex --silent "\\bfoo\\b" foo
+'
+
 test_lazy_prereq MULTI_CPU '
 	test "$(test-tool online-cpus)" -gt 1
 '
@@ -429,6 +433,9 @@ test_expect_success 'case-insensitive index rejects non-ASCII patterns' '
 '
 
 test_expect_success 'content index prunes cached worktree blobs' '
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
 	test_when_finished "rm -f .git/fsmonitor-ordinary \
 			    .git/index.grep-worktree &&
 			    git update-index --no-fsmonitor &&
@@ -675,12 +682,18 @@ test_expect_success 'content index prefers stronger ERE literals' '
 	test_must_be_empty err
 '
 
-test_expect_success 'content index skips escaped ERE atoms' '
+test_expect_success 'content index skips escaped regex atoms' '
 	oid=$(git rev-parse :ordinary) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 
+	if test_have_prereq BRE_WORD_BOUNDARY
+	then
+		test_must_fail git grep --cached \
+			"\\bclass Image\\b" -- ordinary 2>err &&
+		test_must_be_empty err
+	fi &&
 	test_must_fail git grep --cached -E \
 		"class Image\\b" -- ordinary 2>err &&
 	test_must_be_empty err &&
@@ -946,12 +959,18 @@ test_expect_success 'stronger ERE literals preserve possible matches' '
 	test_grep "unable to read" err
 '
 
-test_expect_success 'escaped ERE atoms preserve possible matches' '
+test_expect_success 'escaped regex atoms preserve possible matches' '
 	oid=$(git rev-parse :escaped-ere-atom) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 
+	if test_have_prereq BRE_WORD_BOUNDARY
+	then
+		test_must_fail git grep --cached \
+			"\\bclass Image\\b" -- escaped-ere-atom 2>err &&
+		test_grep "unable to read" err
+	fi &&
 	test_must_fail git grep --cached -E \
 		"class Image\\b" -- escaped-ere-atom 2>err &&
 	test_grep "unable to read" err &&
