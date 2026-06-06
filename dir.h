@@ -297,8 +297,12 @@ struct dir_struct {
 	 */
 	struct dir_entry **ignored; /* output only */
 
-	/* Enable/update untracked file cache if set */
+	/*
+	 * Enable/update the untracked file cache if set. prune_only restricts
+	 * an attached cache to negative summaries; unsupported scans fall back.
+	 */
 	struct untracked_cache *untracked;
+	unsigned int untracked_cache_prune_only : 1;
 
 	/**
 	 * Deprecated: ls-files is the only allowed caller; all other callers

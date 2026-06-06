@@ -689,8 +689,19 @@ int cmd_ls_files(int argc,
 	if (repo_read_index(repo) < 0)
 		die("index file corrupt");
 
+	/*
+	 * Attach before parsing so --exclude-standard records the ignore
+	 * identities needed to validate read-only untracked cache pruning.
+	 */
+	dir.untracked = repo->index->untracked;
+	dir.untracked_cache_prune_only = 1;
+
 	argc = parse_options(argc, argv, prefix, builtin_ls_files_options,
 			ls_files_usage, 0);
+	if (!show_others || !dir.exclude_per_dir) {
+		dir.untracked = NULL;
+		dir.untracked_cache_prune_only = 0;
+	}
 	pl = add_pattern_list(&dir, EXC_CMDL, "--exclude option");
 	for (i = 0; i < exclude_list.nr; i++) {
 		add_pattern(exclude_list.items[i].string, "", 0, pl, --exclude_args);

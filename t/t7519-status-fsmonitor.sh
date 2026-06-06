@@ -794,6 +794,8 @@ test_expect_success UNTRACKED_CACHE 'index-backed ignore disables shortcut' '
 		empty=$(git hash-object -w --stdin </dev/null) &&
 		git update-index --cacheinfo 100644,$empty,dir/.gitignore &&
 		git update-index --skip-worktree dir/.gitignore &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-index-ignore-ls-files" \
+			git ls-files --others --exclude-standard >../actual-ls-files &&
 		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-index-ignore" \
 			git status --porcelain >../actual
 	) &&
@@ -802,7 +804,11 @@ test_expect_success UNTRACKED_CACHE 'index-backed ignore disables shortcut' '
 	?? dir/ignored
 	EOF
 	test_cmp expect actual &&
-	test_grep ! "directories-visited:0" trace-index-ignore
+	echo dir/ignored >expect-ls-files &&
+	test_cmp expect-ls-files actual-ls-files &&
+	test_grep ! "directories-visited:0" trace-index-ignore &&
+	test_grep "subtrees-pruned:0" trace-index-ignore-ls-files &&
+	test_grep "directories-visited:[1-9]" trace-index-ignore-ls-files
 '
 
 test_expect_success UNTRACKED_CACHE 'prune pathspec status with fsmonitor' '
@@ -933,6 +939,154 @@ test_expect_success UNTRACKED_CACHE 'prune full status from normal cache' '
 	test_cmp expect actual &&
 	test_grep "subtrees-pruned:[1-9]" trace-status-full &&
 	test_grep "directories-visited:[1-9]" trace-status-full
+'
+
+test_expect_success UNTRACKED_CACHE 'prune ls-files from normal cache' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-full" \
+			git ls-files --others --exclude-standard >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-ls-files-full &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-full
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files without excludes scans all' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-no-exclude" \
+			git ls-files --others >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	ignored-only/sub/ignored
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:0" trace-ls-files-no-exclude &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-no-exclude
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files with excludes scans all' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-exclude" \
+			git ls-files --others --exclude-standard \
+				--exclude="results/*" \
+				--exclude="!results/two" >../actual
+	) &&
+	echo results/two >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:0" trace-ls-files-exclude &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-exclude
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files honors fsmonitor invalidation' '
+	(
+		cd full-untracked &&
+		: >clean/a/new &&
+		echo clean/a/new >.git/fsmonitor-dirty &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-dirty" \
+			git ls-files --others --exclude-standard >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	clean/a/new
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-ls-files-dirty &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-dirty
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files falls back after fsmonitor failure' '
+	(
+		cd full-untracked &&
+		: >fallback &&
+		: >.git/fsmonitor-fail &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-fallback" \
+			git ls-files --others --exclude-standard >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	clean/a/new
+	fallback
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:0" trace-ls-files-fallback &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-fallback
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files validates standard excludes' '
+	test_create_repo info-exclude-prune &&
+	(
+		cd info-exclude-prune &&
+		mkdir -p clean hidden-core hidden-info &&
+		: >clean/tracked &&
+		git add clean/tracked &&
+		git commit -m initial &&
+		echo hidden-info/ >.git/info/exclude &&
+		echo hidden-core/ >.git/core-exclude &&
+		git config core.excludesFile "$PWD/.git/core-exclude" &&
+		: >hidden-core/untracked &&
+		: >hidden-info/untracked &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../actual &&
+		test_must_be_empty ../actual &&
+		: >.git/info/exclude &&
+		: >.git/core-exclude &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-info-exclude" \
+			git ls-files --others --exclude-standard >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	hidden-core/untracked
+	hidden-info/untracked
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:0" trace-info-exclude &&
+	test_grep "directories-visited:[1-9]" trace-info-exclude
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files prunes all-mode cache' '
+	test_create_repo ls-files-uall-cache &&
+	(
+		cd ls-files-uall-cache &&
+		mkdir -p clean/a quiet/b results &&
+		: >clean/a/tracked &&
+		: >quiet/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/one &&
+		: >results/two &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git config status.showUntrackedFiles all &&
+		git status --porcelain >../actual &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-uall-cache" \
+			git ls-files --others --exclude-standard >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-ls-files-uall-cache &&
+	test_grep "directories-visited:[1-9]" trace-ls-files-uall-cache &&
+	# Prune-only detaches the cache, so replay statistics are absent.
+	test_grep ! "opendir:" trace-ls-files-uall-cache
 '
 
 test_expect_success 'discard_index() also discards fsmonitor info' '

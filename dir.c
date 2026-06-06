@@ -3060,6 +3060,7 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	const unsigned int normal_flags =
 		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
+	int i;
 	static int untracked_cache_disabled = -1;
 
 	*prune_only = 0;
@@ -3103,24 +3104,24 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 
 	/*
-	 * EXC_CMDL is not considered in the cache. If people set it,
-	 * skip the cache.
+	 * Command-line exclude patterns are not considered in the cache.
 	 */
-	if (dir->internal.exclude_list_group[EXC_CMDL].nr)
-		return NULL;
+	for (i = 0; i < dir->internal.exclude_list_group[EXC_CMDL].nr; i++)
+		if (dir->internal.exclude_list_group[EXC_CMDL].pl[i].nr)
+			return NULL;
 
 	if (!ident_in_untracked(dir->untracked)) {
 		warning(_("untracked cache is disabled on this system or location"));
 		return NULL;
 	}
 
-	/*
-	 * If the untracked structure we received does not have the same flags
-	 * as requested in this run, we're going to need to either discard the
-	 * existing structure (and potentially later recreate), or bypass the
-	 * untracked cache mechanism for this run.
-	 */
-	if (dir->flags != dir->untracked->dir_flags) {
+	if (dir->untracked_cache_prune_only) {
+		if (dir->flags ||
+		    (dir->untracked->dir_flags &&
+		     dir->untracked->dir_flags != normal_flags))
+			return NULL;
+		*prune_only = 1;
+	} else if (dir->flags != dir->untracked->dir_flags) {
 		/*
 		 * If the untracked structure we received does not have the same flags
 		 * as configured, then we need to reset / create a new "untracked"
