@@ -699,6 +699,64 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_must_be_empty err
 '
 
+test_expect_success FSMONITOR_DAEMON \
+	'content index selects worktree candidates first' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git checkout -- ordinary &&
+			    rm -f .git/index.grep-worktree candidate-*.trace" &&
+	test_config grep.worktreeBlobCache true &&
+	test_config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	git status --porcelain >/dev/null &&
+
+	echo "uncached worktree candidate needle" >ordinary &&
+	git status --porcelain >/dev/null &&
+	echo "ordinary:uncached worktree candidate needle" >expected &&
+	GIT_TRACE2_EVENT="$PWD/candidate-unknown.trace" \
+		git grep "uncached worktree candidate needle" \
+		-- "ord*" >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep content_index_worktree_candidates 1 \
+		<candidate-unknown.trace &&
+	git checkout -- ordinary &&
+	git status --porcelain >/dev/null &&
+
+	test_expect_code 1 git grep --no-content-index \
+		"absent candidate warmup" -- "ord*" &&
+	test_path_is_file .git/index.grep-worktree &&
+
+	echo "ordinary:ordinary contents" >expected &&
+	GIT_TRACE2_EVENT="$PWD/candidate-clean.trace" \
+		git grep "ordinary contents" -- "ord*" >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep content_index_worktree_candidates 1 \
+		<candidate-clean.trace &&
+
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/candidate-negative.trace" git grep \
+		"absent candidate-only needle" -- "ord*" 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_worktree_candidates 0 \
+		<candidate-negative.trace &&
+
+	echo "worktree candidate-only needle" >ordinary &&
+	git status --porcelain >/dev/null &&
+	echo "ordinary:worktree candidate-only needle" >expected &&
+	GIT_TRACE2_EVENT="$PWD/candidate-dirty.trace" \
+		git grep "worktree candidate-only needle" -- "ord*" >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep content_index_worktree_candidates 1 \
+		<candidate-dirty.trace &&
+
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/candidate-excluded.trace" git grep \
+		"worktree candidate-only needle" \
+		-- "ord*" ":(exclude)ordinary" 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_worktree_candidates 0 \
+		<candidate-excluded.trace
+'
+
 test_expect_success 'content index prunes impossible multiple patterns' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&

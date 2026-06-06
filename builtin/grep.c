@@ -1255,6 +1255,69 @@ static int grep_cache(struct grep_opt *opt,
 					    GREP_MIN_FILES_FOR_THREADS &&
 				    num_threads > 1 && threads_auto)
 					num_threads = 1;
+			} else if (!cached && !literal_selected &&
+				   worktree_cache &&
+				   repo->index->sparse_index ==
+					   INDEX_EXPANDED) {
+				uint64_t rejected = 0;
+
+				for (size_t i = 0;
+				     i < repo->index->cache_nr; i++) {
+					const struct cache_entry *ce =
+						repo->index->cache[i];
+					unsigned char bit =
+						1u << (i & 7);
+					int known_equal =
+						!ce_stage(ce) &&
+						!ce_intent_to_add(ce) &&
+						(ce->ce_flags & CE_VALID);
+
+					if (ce_skip_worktree(ce) ||
+					    !S_ISREG(ce->ce_mode))
+						continue;
+					if (!known_equal &&
+					    can_cache_worktree_blob(ce))
+						known_equal =
+							grep_worktree_cache_lookup(
+								worktree_cache,
+								i) ==
+							GREP_WORKTREE_CACHE_EQUAL;
+					/*
+					 * A negative blob result excludes a
+					 * worktree path only when its bytes
+					 * match the indexed blob.
+					 */
+					if (known_equal &&
+					    !(maybe[i / 8] & bit)) {
+						rejected++;
+						continue;
+					}
+					if (!match_pathspec(
+						    repo->index, pathspec,
+						    ce->name,
+						    ce_namelen(ce), 0,
+						    NULL, 0))
+						continue;
+					ALLOC_GROW(
+						selected,
+						selected_nr + 1,
+						selected_alloc);
+					selected[selected_nr++] = i;
+				}
+				use_selected = 1;
+				trace2_data_intmax(
+					"grep", repo,
+					"content_index_worktree_candidates",
+					selected_nr);
+				trace2_data_intmax(
+					"grep", repo,
+					"content_index_worktree_rejected_before_pathspec",
+					rejected);
+				if (selected_nr &&
+				    selected_nr <
+					    GREP_MIN_FILES_FOR_THREADS &&
+				    num_threads > 1 && threads_auto)
+					num_threads = 1;
 			} else {
 				content_index_ipc_nr =
 					repo->index->cache_nr;
