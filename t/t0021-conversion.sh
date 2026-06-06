@@ -361,6 +361,51 @@ test_expect_success 'diff does not reuse worktree files that need cleaning' '
 	test_line_count = 0 count
 '
 
+test_expect_success 'diffstat and check clean worktree files once' '
+	test_config filter.counter.clean "echo . >>count; sed s/^/clean:/" &&
+	printf "file filter=counter\nlink filter=counter\n" >.gitattributes &&
+	echo three >file &&
+	for option in --stat --check
+	do
+		>count &&
+		git diff "$option" -- file >/dev/null &&
+		test_line_count = 1 count || return 1
+	done &&
+
+	oid=$(git rev-parse HEAD) &&
+	git update-index --add --cacheinfo 160000,$oid,link &&
+	test_when_finished "git update-index --force-remove link; rm -f link" &&
+	echo three >link &&
+	for option in --stat --check
+	do
+		>count &&
+		git diff "$option" -- link >/dev/null &&
+		test_line_count = 1 count || return 1
+	done
+'
+
+test_expect_success 'diffstat runs required filter for large files' '
+	test_config filter.counter.clean false &&
+	test_config filter.counter.required true &&
+	echo "file filter=counter" >.gitattributes &&
+	echo three >file &&
+	test_must_fail git -c core.bigFileThreshold=1 diff --stat -- file 2>err &&
+	test_grep "clean filter .counter. failed" err
+'
+
+test_expect_success 'diffstat and check clean empty worktree files' '
+	test_config filter.counter.clean false &&
+	test_config filter.counter.required true &&
+	echo "file filter=counter" >.gitattributes &&
+	>file &&
+	for option in --stat --check
+	do
+		test_must_fail git diff "$option" -- file 2>err &&
+		test_grep "clean filter .counter. failed" err ||
+		return 1
+	done
+'
+
 test_expect_success 'required process filter should filter data' '
 	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&

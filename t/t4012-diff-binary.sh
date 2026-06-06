@@ -130,4 +130,47 @@ test_expect_success 'diff --stat with binary files and big change count' '
 	test_cmp expect actual
 '
 
+test_expect_success 'diffstat honors core.bigFileThreshold' '
+	echo text >large-text &&
+	printf "%s\t%s\t%s\n" - - "/dev/null => large-text" >expect &&
+	test_must_fail git -c core.bigFileThreshold=1 diff \
+		--no-index --numstat /dev/null large-text >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success POSIXPERM,SANITY 'diff rejects unreadable worktree files' '
+	echo base >unreadable &&
+	git add unreadable &&
+	git commit -m unreadable &&
+	echo dirt >unreadable &&
+	chmod -r unreadable &&
+	test_when_finished "chmod +r unreadable" &&
+	for option in --stat --check
+	do
+		test_must_fail git diff "$option" -- unreadable ||
+		return 1
+	done
+'
+
+test_expect_success POSIXPERM,SANITY 'diff falls back after worktree read failure' '
+	echo oldx >reuse-unreadable &&
+	git add reuse-unreadable &&
+	git commit -m reuse-old &&
+	printf "new \n" >reuse-unreadable &&
+	git add reuse-unreadable &&
+	git commit -m reuse-new &&
+	git diff -B --stat HEAD^ HEAD -- reuse-unreadable >expect.stat &&
+	test_must_fail git diff -B --check \
+		HEAD^ HEAD -- reuse-unreadable >expect.check &&
+	chmod -r reuse-unreadable &&
+	test_when_finished "chmod +r reuse-unreadable" &&
+	git -c core.filemode=false -c core.trustctime=false diff -B --stat \
+		HEAD^ HEAD -- reuse-unreadable >actual.stat &&
+	test_must_fail git -c core.filemode=false -c core.trustctime=false \
+		diff -B --check \
+		HEAD^ HEAD -- reuse-unreadable >actual.check &&
+	test_cmp expect.stat actual.stat &&
+	test_cmp expect.check actual.check
+'
+
 test_done

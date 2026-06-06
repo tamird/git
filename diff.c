@@ -4499,6 +4499,7 @@ int diff_populate_filespec(struct repository *r,
 {
 	int size_only = options ? options->check_size_only : 0;
 	int check_binary = options ? options->check_binary : 0;
+	int force_object = options ? options->force_object : 0;
 	int err = 0;
 	int conv_flags = global_conv_flags_eol;
 	/*
@@ -4510,8 +4511,10 @@ int diff_populate_filespec(struct repository *r,
 
 	if (!DIFF_FILE_VALID(s))
 		die("internal error: asking to populate invalid file.");
-	if (S_ISDIR(s->mode))
+	if (S_ISDIR(s->mode)) {
+		s->populate_failed = 1;
 		return -1;
+	}
 
 	if (s->data)
 		return 0;
@@ -4522,8 +4525,10 @@ int diff_populate_filespec(struct repository *r,
 	if (S_ISGITLINK(s->mode))
 		return diff_populate_gitlink(s, size_only);
 
+	s->populate_failed = 0;
 	if (!s->oid_valid ||
-	    reuse_worktree_file(r->index, s->path, &s->oid, 0)) {
+	    (!force_object &&
+	     reuse_worktree_file(r->index, s->path, &s->oid, 0))) {
 		struct strbuf buf = STRBUF_INIT;
 		struct stat st;
 		int fd;
@@ -4531,6 +4536,7 @@ int diff_populate_filespec(struct repository *r,
 		if (lstat(s->path, &st) < 0) {
 		err_empty:
 			err = -1;
+			s->populate_failed = 1;
 		empty:
 			s->data = (char *)"";
 			s->size = 0;
@@ -5002,6 +5008,27 @@ static void diff_fill_oid_info(struct diff_filespec *one, struct index_state *is
 		oidclr(&one->oid, the_repository->hash_algo);
 }
 
+static int recover_failed_filespec(struct repository *r,
+				   struct diff_filespec *spec)
+{
+	struct diff_populate_filespec_options options = {
+		.force_object = 1,
+	};
+
+	if (!spec->populate_failed)
+		return 0;
+
+	spec->data = NULL;
+	spec->size = 0;
+	spec->is_binary = -1;
+	spec->populate_failed = 0;
+
+	if (spec->oid_valid && diff_populate_filespec(r, spec, &options))
+		die("unable to read files to diff");
+
+	return 1;
+}
+
 static void strip_prefix(int prefix_length, const char **namep, const char **otherp)
 {
 	/* Strip the prefix but do not molest /dev/null and absolute paths */
@@ -5074,8 +5101,10 @@ static void run_diff(struct diff_filepair *p, struct diff_options *o)
 static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 			 struct diffstat_t *diffstat)
 {
+	struct diff_filespec *files[] = { p->one, p->two };
 	const char *name;
 	const char *other;
+	size_t i;
 
 	if (!o->ignore_driver_algorithm) {
 		struct userdiff_driver *drv = userdiff_find_by_path(o->repo->index,
@@ -5098,8 +5127,28 @@ static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 	if (o->prefix_length)
 		strip_prefix(o->prefix_length, &name, &other);
 
-	diff_fill_oid_info(p->one, o->repo->index);
-	diff_fill_oid_info(p->two, o->repo->index);
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		struct diff_filespec *spec = files[i];
+
+		recover_failed_filespec(o->repo, spec);
+		if (S_ISGITLINK(spec->mode))
+			diff_fill_oid_info(spec, o->repo->index);
+		else if (DIFF_FILE_VALID(spec) && !spec->oid_valid) {
+			int empty;
+
+			diff_filespec_is_binary(o->repo, spec);
+			empty = spec->data && !spec->size &&
+				!spec->should_free && !spec->should_munmap &&
+				!spec->is_stdin;
+			if (empty) {
+				spec->data = NULL;
+				spec->size = 0;
+				spec->is_binary = -1;
+			}
+			if (!spec->data)
+				diff_fill_oid_info(spec, o->repo->index);
+		}
+	}
 
 	builtin_diffstat(name, other, p->one, p->two,
 			 diffstat, o, p);
@@ -5107,9 +5156,11 @@ static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 
 static void run_checkdiff(struct diff_filepair *p, struct diff_options *o)
 {
+	struct diff_filespec *files[] = { p->one, p->two };
 	const char *name;
 	const char *other;
 	const char *attr_path;
+	size_t i;
 
 	if (DIFF_PAIR_UNMERGED(p)) {
 		/* unmerged */
@@ -5123,8 +5174,23 @@ static void run_checkdiff(struct diff_filepair *p, struct diff_options *o)
 	if (o->prefix_length)
 		strip_prefix(o->prefix_length, &name, &other);
 
-	diff_fill_oid_info(p->one, o->repo->index);
-	diff_fill_oid_info(p->two, o->repo->index);
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		struct diff_filespec *spec = files[i];
+		int failed = recover_failed_filespec(o->repo, spec);
+		int empty = spec->data && !spec->size &&
+			!spec->should_free && !spec->should_munmap &&
+			!spec->is_stdin;
+
+		if (DIFF_FILE_VALID(spec) && !spec->oid_valid &&
+		    (failed || empty)) {
+			spec->data = NULL;
+			spec->size = 0;
+			spec->is_binary = -1;
+			diff_fill_oid_info(spec, o->repo->index);
+		} else if (S_ISGITLINK(spec->mode)) {
+			diff_fill_oid_info(spec, o->repo->index);
+		}
+	}
 
 	builtin_checkdiff(name, other, attr_path, p->one, p->two, o);
 }

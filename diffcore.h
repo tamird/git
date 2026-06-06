@@ -65,6 +65,7 @@ struct diff_filespec {
 #define DIFF_FILE_VALID(spec) (((spec)->mode) != 0)
 	unsigned should_free : 1; /* data should be free()'ed */
 	unsigned should_munmap : 1; /* data should be munmap()'ed */
+	unsigned populate_failed : 1; /* the last population attempt failed */
 	unsigned dirty_submodule : 2;  /* For submodules: its work tree is dirty */
 #define DIRTY_SUBMODULE_UNTRACKED 1
 #define DIRTY_SUBMODULE_MODIFIED  2
@@ -89,6 +90,8 @@ void diff_queued_diff_prefetch(void *repository);
 struct diff_populate_filespec_options {
 	unsigned check_size_only : 1;
 	unsigned check_binary : 1;
+	/* Do not reuse a matching worktree file for an oid-valid filespec. */
+	unsigned force_object : 1;
 
 	/*
 	 * If an object is missing, diff_populate_filespec() will invoke this
