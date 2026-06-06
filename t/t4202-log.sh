@@ -2365,11 +2365,39 @@ test_expect_success 'log --decorate includes all levels of tag annotated tags' '
 	git tag -m annotated annotated HEAD &&
 	git tag -m double-0 double-0 HEAD &&
 	git tag -m double-1 double-1 double-0 &&
+	git commit-graph write --reachable &&
 	cat >expect <<-\EOF &&
 	HEAD -> branch, tag: lightweight, tag: double-1, tag: double-0, tag: annotated
 	EOF
 	git log -1 --format="%D" >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'log decoration handles stale commit graph entries' '
+	test_when_finished "rm -rf stale-decoration" &&
+	git init stale-decoration &&
+	(
+		cd stale-decoration &&
+		test_commit --no-tag A &&
+		test_commit --no-tag B &&
+		test_commit --no-tag C &&
+		git branch broken HEAD^ &&
+		git tag -m kept kept HEAD^ &&
+		git commit-graph write --reachable &&
+
+		a=$(git rev-parse HEAD^^) &&
+		b=$(git rev-parse HEAD^) &&
+		c=$(git rev-parse HEAD) &&
+		rm .git/objects/"$(test_oid_to_path "$b")" &&
+
+		{
+			echo "$c HEAD -> main" &&
+			echo "$b tag: kept" &&
+			echo "$a "
+		} >expect &&
+		git log --simplify-by-decoration --format="%H %D" >actual &&
+		test_cmp expect actual
+	)
 '
 
 test_expect_success 'log --decorate does not include things outside filter' '

@@ -1020,6 +1020,15 @@ struct commit_graph *repo_find_commit_pos_in_graph(struct repository *r,
 	return g;
 }
 
+int repo_commit_graph_contains_oid(struct repository *r,
+				   const struct object_id *oid)
+{
+	struct commit_graph *g = prepare_commit_graph(r);
+	uint32_t pos;
+
+	return g && search_commit_pos_in_graph(oid, g, &pos);
+}
+
 struct commit *lookup_commit_in_graph(struct repository *repo, const struct object_id *id)
 {
 	static int commit_graph_paranoia = -1;

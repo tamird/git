@@ -2,6 +2,7 @@
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "commit-graph.h"
 #include "commit-reach.h"
 #include "config.h"
 #include "diff.h"
@@ -36,6 +37,11 @@
 #include "pager.h"
 
 static struct decoration name_decoration = { "object names" };
+static struct decoration pending_decoration = { "pending object names" };
+struct pending_decoration {
+	struct name_decoration *head;
+	struct name_decoration **tail;
+};
 static int decoration_loaded;
 static int decoration_flags;
 
@@ -84,9 +90,44 @@ int parse_decorate_color_config(const char *var, const char *slot_name, const ch
 #define decorate_get_color_opt(o, ix) \
 	decorate_get_color((o)->use_color, ix)
 
+static void materialize_pending_decorations(const struct object *obj)
+{
+	struct pending_decoration *pending;
+	struct name_decoration *decoration;
+
+	pending = lookup_decoration(&pending_decoration, obj);
+	if (!pending)
+		return;
+	add_decoration(&pending_decoration, obj, NULL);
+
+	/*
+	 * These names skipped the object lookup performed by the eager
+	 * loader. Ignore them if the ref target has since disappeared.
+	 */
+	if (odb_read_object_info(the_repository->objects, &obj->oid, NULL) < 0) {
+		while ((decoration = pending->head)) {
+			pending->head = decoration->next;
+			free(decoration);
+		}
+		free(pending);
+		return;
+	}
+
+	while ((decoration = pending->head)) {
+		pending->head = decoration->next;
+		decoration->next =
+			add_decoration(&name_decoration, obj, decoration);
+	}
+	free(pending);
+}
+
 void add_name_decoration(enum decoration_type type, const char *name, struct object *obj)
 {
 	struct name_decoration *res;
+
+	/* Preserve ref iteration order before prepending this name. */
+	if (decoration_loaded)
+		materialize_pending_decorations(obj);
 	FLEX_ALLOC_STR(res, name, name);
 	res->type = type;
 	res->next = add_decoration(&name_decoration, obj, res);
@@ -95,6 +136,7 @@ void add_name_decoration(enum decoration_type type, const char *name, struct obj
 const struct name_decoration *get_name_decoration(const struct object *obj)
 {
 	load_ref_decorations(NULL, DECORATE_SHORT_REFS);
+	materialize_pending_decorations(obj);
 	return lookup_decoration(&name_decoration, obj);
 }
 
@@ -148,11 +190,32 @@ static int ref_filter_match(const char *refname,
 	return 1;
 }
 
-static int add_ref_decoration(const struct reference *ref, void *cb_data)
+static void add_pending_decoration(enum decoration_type type,
+				   const char *name,
+				   struct object *obj)
+{
+	struct pending_decoration *pending;
+	struct name_decoration *decoration;
+
+	pending = lookup_decoration(&pending_decoration, obj);
+	if (!pending) {
+		CALLOC_ARRAY(pending, 1);
+		pending->tail = &pending->head;
+		add_decoration(&pending_decoration, obj, pending);
+	}
+
+	FLEX_ALLOC_STR(decoration, name, name);
+	decoration->type = type;
+	decoration->next = NULL;
+	*pending->tail = decoration;
+	pending->tail = &decoration->next;
+}
+
+static int collect_ref_decoration(const struct reference *ref, void *cb_data)
 {
 	int i;
-	struct object *obj;
 	enum object_type objtype;
+	struct object *obj;
 	enum decoration_type deco_type = DECORATION_NONE;
 	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
 	const char *git_replace_ref_base = ref_namespace[NAMESPACE_REPLACE].ref;
@@ -175,11 +238,6 @@ static int add_ref_decoration(const struct reference *ref, void *cb_data)
 		return 0;
 	}
 
-	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
-	if (objtype < 0)
-		return 0;
-	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
-
 	for (i = 0; i < ARRAY_SIZE(ref_namespace); i++) {
 		struct ref_namespace_info *info = &ref_namespace[i];
 
@@ -196,6 +254,21 @@ static int add_ref_decoration(const struct reference *ref, void *cb_data)
 		}
 	}
 
+	if (!ref->peeled_oid &&
+	    repo_commit_graph_contains_oid(the_repository, ref->oid)) {
+		struct commit *commit = lookup_commit(the_repository, ref->oid);
+
+		if (!commit)
+			return 0;
+		add_pending_decoration(deco_type, ref->name, &commit->object);
+		return 0;
+	}
+
+	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
+	if (objtype < 0)
+		return 0;
+
+	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
 	add_name_decoration(deco_type, ref->name, obj);
 	while (obj->type == OBJ_TAG) {
 		if (!obj->parsed)
@@ -250,14 +323,14 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 				strvec_push(&prefixes, item->string);
 			refs_for_each_ref_in_prefixes(
 				get_main_ref_store(the_repository), prefixes.v,
-				&opts, add_ref_decoration, filter);
+				&opts, collect_ref_decoration, filter);
 			strvec_clear(&prefixes);
 		} else {
 			refs_for_each_ref(get_main_ref_store(the_repository),
-					  add_ref_decoration, filter);
+					  collect_ref_decoration, filter);
 		}
 		refs_head_ref(get_main_ref_store(the_repository),
-			      add_ref_decoration, filter);
+			      collect_ref_decoration, filter);
 		for_each_commit_graft(add_graft_decoration, filter);
 	}
 }
