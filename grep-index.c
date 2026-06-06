@@ -157,6 +157,13 @@ struct grep_index_query {
 	int ignore_case;
 };
 
+struct grep_index_query_boundary {
+	struct grep_index_query_clause *clause;
+	uint32_t trigrams[4];
+	size_t trigrams_nr;
+	size_t alternative_nr;
+};
+
 struct grep_index_prepared_segment {
 	struct grep_index_segment *segment;
 	unsigned char
@@ -992,6 +999,9 @@ invalid:
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
+	struct grep_index_query_boundary *boundaries = NULL;
+	size_t boundaries_nr = 0;
+	size_t boundaries_alloc = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
 
@@ -1040,7 +1050,10 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			struct grep_index_query_branch branch = { 0 };
 			struct grep_index_query_clause top_clause = { 0 };
 			struct grep_index_query *group_query;
+			unsigned char candidate_left[2];
+			size_t candidate_left_nr = 0;
 			size_t candidate_start = 0;
+			size_t boundaries_start = boundaries_nr;
 			size_t top_literal_run = 0;
 			size_t top_literal_start = 0;
 			int branch_has_group = 0;
@@ -1063,6 +1076,18 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					     (ch == '*' || ch == '?'))) {
 						valid = 0;
 						break;
+					}
+					if (ch == '(') {
+						candidate_left_nr =
+							top_literal_run < 2 ?
+								top_literal_run :
+								2;
+						memcpy(candidate_left,
+						       p->pattern +
+							       top_literal_start +
+							       top_literal_run -
+							       candidate_left_nr,
+						       candidate_left_nr);
 					}
 					if (grep_index_query_clause_add_literal(
 						    &top_clause, group_query,
@@ -1165,15 +1190,48 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						size_t alternatives_left =
 							GREP_INDEX_MAX_QUERY_ALTERNATIVES -
 							group_query->alternatives_nr;
+						size_t group_boundaries_start =
+							boundaries_nr;
 						size_t trigrams_left =
 							GREP_INDEX_MAX_QUERY_TRIGRAMS -
 							group_query->trigrams_nr;
+						unsigned char candidate_right[2];
+						size_t candidate_right_nr = 0;
 						size_t trigrams_nr = 0;
+						/*
+						 * A repeated group is still required,
+						 * but its first and last alternatives
+						 * may differ. Keep it in the baseline
+						 * query without correlating either
+						 * boundary with one alternative.
+						 */
+						int enrich_boundaries =
+							i + 1 == p->patternlen ||
+							!strchr("*+?{",
+								p->pattern[i + 1]);
 
 						if (candidate_simple &&
 						    (i + 1 == p->patternlen ||
 						     !strchr("*?{",
 							     p->pattern[i + 1]))) {
+							if (enrich_boundaries)
+								for (size_t j = i + 1;
+								     j < p->patternlen &&
+								     candidate_right_nr <
+									     ARRAY_SIZE(
+										     candidate_right);
+								     j++) {
+									unsigned char right =
+										p->pattern[j];
+
+									if (is_regex_special(
+										    right) ||
+									    right == '}')
+										break;
+									candidate_right
+										[candidate_right_nr++] =
+											right;
+								}
 							for (size_t j = candidate_start;
 							     j <= i; j++) {
 								struct grep_index_query_clause
@@ -1206,6 +1264,65 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 										    trigrams_nr) {
 									candidate_simple = 0;
 									break;
+								}
+								if (enrich_boundaries) {
+									struct grep_index_query_boundary
+										boundary = {
+											.alternative_nr =
+												group.alternatives_nr
+										};
+									unsigned char text[4];
+									size_t text_nr = 0;
+
+									memcpy(text,
+									       candidate_left,
+									       candidate_left_nr);
+									text_nr +=
+										candidate_left_nr;
+									memcpy(text + text_nr,
+									       literal.buf, 2);
+									text_nr += 2;
+									for (size_t k = 0;
+									     k + 2 < text_nr;
+									     k++)
+										boundary.trigrams
+											[boundary
+												 .trigrams_nr++] =
+											trigram_hash(
+												text + k,
+												query->ignore_case);
+
+									text_nr = 0;
+									memcpy(text,
+									       literal.buf +
+										       literal.len -
+										       2,
+									       2);
+									text_nr += 2;
+									memcpy(text + text_nr,
+									       candidate_right,
+									       candidate_right_nr);
+									text_nr +=
+										candidate_right_nr;
+									for (size_t k = 0;
+									     k + 2 < text_nr;
+									     k++)
+										boundary.trigrams
+											[boundary
+												 .trigrams_nr++] =
+											trigram_hash(
+												text + k,
+												query->ignore_case);
+									if (boundary.trigrams_nr) {
+										ALLOC_GROW(
+											boundaries,
+											boundaries_nr +
+												1,
+											boundaries_alloc);
+										boundaries
+											[boundaries_nr++] =
+												boundary;
+									}
 								}
 								alternative.trigrams_nr =
 									literal.len - 2;
@@ -1240,6 +1357,14 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						}
 						strbuf_release(&literal);
 						if (candidate_simple) {
+							for (size_t j =
+								     group_boundaries_start;
+							     j < boundaries_nr; j++)
+								boundaries[j]
+									.clause =
+									&group.alternatives
+										 [boundaries[j]
+											  .alternative_nr];
 							ALLOC_GROW(branch.groups,
 								   branch.groups_nr + 1,
 								   branch.groups_alloc);
@@ -1251,6 +1376,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 								trigrams_nr;
 							branch_has_group = 1;
 						} else {
+							boundaries_nr =
+								group_boundaries_start;
 							grep_index_query_group_clear(
 								&group);
 						}
@@ -1332,6 +1459,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				free(group_query);
 				continue;
 			} else {
+				boundaries_nr = boundaries_start;
 				grep_index_query_branch_clear(&branch);
 				grep_index_query_free(group_query);
 			}
@@ -1707,9 +1835,40 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		query->clauses[query->clauses_nr++] = clause;
 		clause = (struct grep_index_query_clause){ 0 };
 	}
+	{
+		size_t boundary_trigrams_nr = 0;
+
+		for (size_t i = 0; i < boundaries_nr; i++)
+			boundary_trigrams_nr += boundaries[i].trigrams_nr;
+		/*
+		 * Boundary trigrams only strengthen the baseline query. Keep the
+		 * baseline when the optional additions would exceed its bound.
+		 */
+		if (boundary_trigrams_nr <=
+		    GREP_INDEX_MAX_QUERY_TRIGRAMS - query->trigrams_nr) {
+			for (size_t i = 0; i < boundaries_nr; i++) {
+				struct grep_index_query_boundary *boundary =
+					&boundaries[i];
+
+				ALLOC_GROW(boundary->clause->trigrams,
+					   boundary->clause->trigrams_nr +
+						   boundary->trigrams_nr,
+					   boundary->clause->trigrams_alloc);
+				COPY_ARRAY(boundary->clause->trigrams +
+						   boundary->clause->trigrams_nr,
+					   boundary->trigrams,
+					   boundary->trigrams_nr);
+				boundary->clause->trigrams_nr +=
+					boundary->trigrams_nr;
+			}
+			query->trigrams_nr += boundary_trigrams_nr;
+		}
+	}
+	free(boundaries);
 	return query;
 
 unsupported:
+	free(boundaries);
 	free(clause.trigrams);
 	grep_index_query_free(query);
 	return NULL;
