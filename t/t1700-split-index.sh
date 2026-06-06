@@ -240,6 +240,69 @@ test_expect_success 'add new file' '
 	test_cmp expect actual
 '
 
+test_expect_success 'merge interleaved split-index additions' '
+	test_create_repo interleaved &&
+	(
+		cd interleaved &&
+		modified=$(printf modified | git hash-object -w --stdin) &&
+		q_to_tab >base <<-EOF &&
+		100644 $EMPTY_BLOB 0Qb
+		100644 $EMPTY_BLOB 0Qd
+		100644 $EMPTY_BLOB 0Qf
+		EOF
+		git update-index --index-info <base &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		q_to_tab >additions <<-EOF &&
+		100644 $EMPTY_BLOB 0Qa
+		100644 $EMPTY_BLOB 0Qc
+		100644 $modified 0Qd
+		100644 $EMPTY_BLOB 0Qe
+		0 $ZERO_OID 0Qf
+		100644 $EMPTY_BLOB 0Qg
+		EOF
+		git update-index --index-info <additions &&
+		git ls-files --stage >actual &&
+		q_to_tab >expect <<-EOF &&
+		100644 $EMPTY_BLOB 0Qa
+		100644 $EMPTY_BLOB 0Qb
+		100644 $EMPTY_BLOB 0Qc
+		100644 $modified 0Qd
+		100644 $EMPTY_BLOB 0Qe
+		100644 $EMPTY_BLOB 0Qg
+		EOF
+		test_cmp expect actual &&
+		test_write_lines h >h &&
+		git update-index --add h &&
+		git ls-files >actual &&
+		test_write_lines a b c d e g h >expect &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'fall back for unmerged split-index additions' '
+	test_create_repo unmerged &&
+	(
+		cd unmerged &&
+		test_write_lines base >base &&
+		git update-index --add base &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		q_to_tab >unmerged <<-EOF &&
+		100644 $EMPTY_BLOB 1Qconflict
+		100644 $EMPTY_BLOB 2Qconflict
+		EOF
+		git update-index --index-info <unmerged &&
+		git ls-files --stage >actual &&
+		q_to_tab >expect <<-EOF &&
+		100644 $(git hash-object base) 0Qbase
+		100644 $EMPTY_BLOB 1Qconflict
+		100644 $EMPTY_BLOB 2Qconflict
+		EOF
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'unify index, two files remain' '
 	git update-index --no-split-index &&
 	git ls-files --stage >ls-files.actual &&

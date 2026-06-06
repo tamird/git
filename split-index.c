@@ -164,6 +164,8 @@ static void replace_entry(size_t pos, void *data)
 void merge_base_index(struct index_state *istate)
 {
 	struct split_index *si = istate->split_index;
+	unsigned int base_pos, new_pos, merged_pos;
+	unsigned int new_nr;
 	unsigned int i;
 
 	mark_base_index_entries(si->base);
@@ -183,6 +185,72 @@ void merge_base_index(struct index_state *istate)
 	if (si->nr_deletions)
 		remove_marked_cache_entries(istate, 0);
 
+	new_nr = si->saved_cache_nr - si->nr_replacements;
+	if (!new_nr)
+		goto entries_merged;
+	if (new_nr > UINT_MAX - istate->cache_nr)
+		die("corrupt link extension, too many entries");
+	/*
+	 * Normal split-index additions have unique, sorted names. Keep the
+	 * insertion path for entries that need full validation or same-name
+	 * stage handling.
+	 */
+	for (i = si->nr_replacements; i < si->saved_cache_nr; i++) {
+		struct cache_entry *new = si->saved_cache[i];
+
+		if (!ce_namelen(new))
+			die("corrupt link extension, entry %d should "
+			    "have non-zero length name", i);
+		if (!verify_path(new->name, new->ce_mode) ||
+		    (i > si->nr_replacements &&
+		     (ce_same_name(si->saved_cache[i - 1], new) ||
+		      cmp_cache_name_compare(&si->saved_cache[i - 1],
+					     &new) >= 0)))
+			goto insert_entries;
+	}
+
+	base_pos = 0;
+	new_pos = si->nr_replacements;
+	while (base_pos < istate->cache_nr &&
+	       new_pos < si->saved_cache_nr) {
+		struct cache_entry *base = istate->cache[base_pos];
+		struct cache_entry *new = si->saved_cache[new_pos];
+		int cmp;
+
+		if (ce_same_name(base, new))
+			goto insert_entries;
+		cmp = cmp_cache_name_compare(&base, &new);
+		if (cmp < 0)
+			base_pos++;
+		else
+			new_pos++;
+	}
+
+	merged_pos = istate->cache_nr + new_nr;
+	ALLOC_GROW(istate->cache, merged_pos, istate->cache_alloc);
+	base_pos = istate->cache_nr;
+	new_pos = si->saved_cache_nr;
+	while (base_pos && new_pos > si->nr_replacements) {
+		struct cache_entry *base = istate->cache[base_pos - 1];
+		struct cache_entry *new = si->saved_cache[new_pos - 1];
+		int cmp = cmp_cache_name_compare(&base, &new);
+
+		if (cmp > 0)
+			istate->cache[--merged_pos] =
+				istate->cache[--base_pos];
+		else
+			istate->cache[--merged_pos] =
+				si->saved_cache[--new_pos];
+	}
+	while (new_pos > si->nr_replacements)
+		istate->cache[--merged_pos] = si->saved_cache[--new_pos];
+	istate->cache_nr += new_nr;
+	for (i = si->nr_replacements; i < si->saved_cache_nr; i++)
+		si->saved_cache[i] = NULL;
+	istate->cache_changed |= CE_ENTRY_ADDED;
+	goto entries_merged;
+
+insert_entries:
 	for (i = si->nr_replacements; i < si->saved_cache_nr; i++) {
 		if (!ce_namelen(si->saved_cache[i]))
 			die("corrupt link extension, entry %d should "
@@ -199,6 +267,7 @@ void merge_base_index(struct index_state *istate)
 		si->saved_cache[i] = NULL;
 	}
 
+entries_merged:
 	ewah_free(si->delete_bitmap);
 	ewah_free(si->replace_bitmap);
 	FREE_AND_NULL(si->saved_cache);
