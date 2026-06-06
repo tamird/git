@@ -86,6 +86,7 @@ test_expect_success 'setup' '
 	echo "global_ test dev _requirements" >ere-concat &&
 	echo "global_test_requirements" >ere-concat-test &&
 	echo "global_dev_requirements" >ere-concat-dev &&
+	echo "standalone_present" >ere-mixed-plain &&
 	echo "prefoo.suf" >ere-concat-foo &&
 	echo "prebarsuf" >ere-concat-bar &&
 	echo "xfoobary" >ere-concat-repeat &&
@@ -96,7 +97,8 @@ test_expect_success 'setup' '
 		escaped-ere-atom structured-from structured-import \
 		structured-middle-from structured-middle-import \
 		structured-optional ere-concat ere-concat-test ere-concat-dev \
-		ere-concat-foo ere-concat-bar ere-concat-repeat escaped-ere &&
+		ere-mixed-plain ere-concat-foo ere-concat-bar \
+		ere-concat-repeat escaped-ere &&
 	git commit -m initial
 '
 
@@ -799,7 +801,7 @@ test_expect_success 'content index prunes ERE group concatenations' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'daemon preserves ERE boundary trigrams' '
+	'daemon preserves mixed ERE queries' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git config --unset core.fsmonitor" &&
 	git config core.fsmonitor true &&
@@ -812,12 +814,56 @@ test_expect_success FSMONITOR_DAEMON \
 
 	test_must_fail env \
 		GIT_TRACE2_EVENT="$PWD/ere-boundary-ipc.trace" \
-		git grep --cached -E "global_(test|dev)_requirements" \
+		git grep --cached -E \
+		"global_(test|dev)_requirements|standalone_absent" \
 		-- ere-concat 2>err &&
 	test_must_be_empty err &&
 	test_grep \
 		"\"key\":\"content_index_ipc_candidates\",\"value\":\"0\"" \
 		ere-boundary-ipc.trace
+'
+
+test_expect_success 'content index combines mixed ERE branches' '
+	oid=$(git rev-parse :ere-concat) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"global_(test|dev)_requirements|standalone_absent" \
+		-- ere-concat 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"standalone_absent|global_(test|dev)_requirements" \
+		-- ere-concat 2>err &&
+	test_must_be_empty err &&
+
+	cat >expect <<-\EOF &&
+	ere-concat-dev:global_dev_requirements
+	ere-concat-test:global_test_requirements
+	ere-mixed-plain:standalone_present
+	EOF
+	git grep --cached -E \
+		"standalone_present|global_(test|dev)_requirements" \
+		-- ere-concat-test ere-concat-dev ere-mixed-plain >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'mixed ERE branches preserve the alternative limit' '
+	pattern= &&
+	for i in $(test_seq 0 61)
+	do
+		term=$(printf "absent%02d" "$i") &&
+		pattern="${pattern}${pattern:+|}${term}" || return 1
+	done &&
+	pattern="${pattern}|(foo|bar)" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
+	test_must_be_empty err
 '
 
 test_expect_success 'ERE boundaries use decoded alternatives' '
