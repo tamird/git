@@ -778,7 +778,8 @@ static int grep_index_query_branch_add_clause(
 
 	if (!clause->trigrams_nr)
 		return 0;
-	if (query->alternatives_nr == GREP_INDEX_MAX_QUERY_ALTERNATIVES)
+	if (query->clauses_nr + query->alternatives_nr ==
+	    GREP_INDEX_MAX_QUERY_ALTERNATIVES)
 		return -1;
 	ALLOC_ARRAY(group.alternatives, 1);
 	group.alternatives[0] = *clause;
@@ -789,6 +790,31 @@ static int grep_index_query_branch_add_clause(
 	branch->groups[branch->groups_nr++] = group;
 	query->alternatives_nr++;
 	*clause = (struct grep_index_query_clause){ 0 };
+	return 0;
+}
+
+static int grep_index_query_add_ere_alternative(
+	struct grep_index_query_branch *branch,
+	struct grep_index_query *query,
+	struct grep_index_query_clause *clause)
+{
+	if (!branch->groups_nr) {
+		if (!clause->trigrams_nr ||
+		    query->clauses_nr + query->alternatives_nr ==
+			    GREP_INDEX_MAX_QUERY_ALTERNATIVES)
+			return -1;
+		ALLOC_GROW(query->clauses, query->clauses_nr + 1,
+			   query->clauses_alloc);
+		query->clauses[query->clauses_nr++] = *clause;
+		*clause = (struct grep_index_query_clause){ 0 };
+		return 0;
+	}
+	if (grep_index_query_branch_add_clause(branch, query, clause))
+		return -1;
+	ALLOC_GROW(query->branches, query->branches_nr + 1,
+		   query->branches_alloc);
+	query->branches[query->branches_nr++] = *branch;
+	*branch = (struct grep_index_query_branch){ 0 };
 	return 0;
 }
 
@@ -1056,10 +1082,10 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			size_t boundaries_start = boundaries_nr;
 			size_t top_literal_run = 0;
 			size_t top_literal_start = 0;
-			int branch_has_group = 0;
 			int candidate = 0;
 			int candidate_simple = 0;
 			int depth = 0;
+			int pattern_has_group = 0;
 			int valid = 1;
 
 			CALLOC_ARRAY(group_query, 1);
@@ -1189,6 +1215,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						struct strbuf literal = STRBUF_INIT;
 						size_t alternatives_left =
 							GREP_INDEX_MAX_QUERY_ALTERNATIVES -
+							group_query->clauses_nr -
 							group_query->alternatives_nr;
 						size_t group_boundaries_start =
 							boundaries_nr;
@@ -1374,7 +1401,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 								group.alternatives_nr;
 							group_query->trigrams_nr +=
 								trigrams_nr;
-							branch_has_group = 1;
+							pattern_has_group = 1;
 						} else {
 							boundaries_nr =
 								group_boundaries_start;
@@ -1386,24 +1413,12 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					continue;
 				}
 				if (ch == '|' && !depth) {
-					if (!branch_has_group) {
-						valid = 0;
-						break;
-					}
-					if (grep_index_query_branch_add_clause(
+					if (grep_index_query_add_ere_alternative(
 						    &branch, group_query,
 						    &top_clause)) {
 						valid = 0;
 						break;
 					}
-					ALLOC_GROW(group_query->branches,
-						   group_query->branches_nr + 1,
-						   group_query->branches_alloc);
-					group_query->branches
-						[group_query->branches_nr++] = branch;
-					branch =
-						(struct grep_index_query_branch){ 0 };
-					branch_has_group = 0;
 					continue;
 				}
 				if (candidate && depth == 1 && ch != '|' &&
@@ -1417,30 +1432,37 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					    top_literal_start,
 				    top_literal_run))
 				valid = 0;
-			if (depth || !branch_has_group)
+			if (depth || !pattern_has_group)
 				valid = 0;
 			if (valid &&
-			    grep_index_query_branch_add_clause(
+			    grep_index_query_add_ere_alternative(
 				    &branch, group_query, &top_clause))
 				valid = 0;
 			free(top_clause.trigrams);
 			if (valid) {
-				ALLOC_GROW(group_query->branches,
-					   group_query->branches_nr + 1,
-					   group_query->branches_alloc);
-				group_query->branches[group_query->branches_nr++] =
-					branch;
-				branch =
-					(struct grep_index_query_branch){ 0 };
 				if (query->clauses_nr +
 						    query->alternatives_nr >
 					    GREP_INDEX_MAX_QUERY_ALTERNATIVES -
+						    group_query->clauses_nr -
 						    group_query->alternatives_nr ||
 				    group_query->trigrams_nr >
 					    GREP_INDEX_MAX_QUERY_TRIGRAMS -
 						    query->trigrams_nr) {
 					grep_index_query_free(group_query);
 					goto unsupported;
+				}
+				if (group_query->clauses_nr) {
+					ALLOC_GROW(query->clauses,
+						   query->clauses_nr +
+							   group_query->clauses_nr,
+						   query->clauses_alloc);
+					COPY_ARRAY(
+						query->clauses +
+							query->clauses_nr,
+						group_query->clauses,
+						group_query->clauses_nr);
+					query->clauses_nr +=
+						group_query->clauses_nr;
 				}
 				ALLOC_GROW(query->branches,
 					   query->branches_nr +
@@ -1455,6 +1477,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				query->alternatives_nr +=
 					group_query->alternatives_nr;
 				query->trigrams_nr += group_query->trigrams_nr;
+				free(group_query->clauses);
 				free(group_query->branches);
 				free(group_query);
 				continue;
