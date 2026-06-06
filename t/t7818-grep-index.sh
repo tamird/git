@@ -83,13 +83,20 @@ test_expect_success 'setup' '
 	echo "from libdemo_cpp.internal" >structured-middle-from &&
 	echo "import libdemo_cpp_ext.private" >structured-middle-import &&
 	echo "frm present" >structured-optional &&
+	echo "global_ test dev _requirements" >ere-concat &&
+	echo "global_test_requirements" >ere-concat-test &&
+	echo "global_dev_requirements" >ere-concat-dev &&
+	echo "prefoo.suf" >ere-concat-foo &&
+	echo "prebarsuf" >ere-concat-bar &&
+	echo "xfoobary" >ere-concat-repeat &&
 	printf "%s\n" "literal|()[]\\suffix" >escaped-ere &&
 	git add short fixed-pcre present agent-regex ordinary escaped-dot \
 		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
 		long-s outer-import outer-boundary mixed-unicorn mixed-gunicorn \
 		escaped-ere-atom structured-from structured-import \
 		structured-middle-from structured-middle-import \
-		structured-optional escaped-ere &&
+		structured-optional ere-concat ere-concat-test ere-concat-dev \
+		ere-concat-foo ere-concat-bar ere-concat-repeat escaped-ere &&
 	git commit -m initial
 '
 
@@ -769,6 +776,78 @@ test_expect_success 'content index combines ERE literals and groups' '
 	structured-import:import ordinary.internal
 	EOF
 	test_cmp expect actual
+'
+
+test_expect_success 'content index prunes ERE group concatenations' '
+	oid=$(git rev-parse :ere-concat) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E \
+		"global_(test|dev)_requirements" \
+		-- ere-concat 2>err &&
+	test_must_be_empty err &&
+
+	cat >expect <<-\EOF &&
+	ere-concat-dev:global_dev_requirements
+	ere-concat-test:global_test_requirements
+	EOF
+	git grep --cached -E "global_(test|dev)_requirements" \
+		-- ere-concat-test ere-concat-dev >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'daemon preserves ERE boundary trigrams' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_when_finished "rm -f ere-boundary-ipc.trace" &&
+	oid=$(git rev-parse :ere-concat) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/ere-boundary-ipc.trace" \
+		git grep --cached -E "global_(test|dev)_requirements" \
+		-- ere-concat 2>err &&
+	test_must_be_empty err &&
+	test_grep \
+		"\"key\":\"content_index_ipc_candidates\",\"value\":\"0\"" \
+		ere-boundary-ipc.trace
+'
+
+test_expect_success 'ERE boundaries use decoded alternatives' '
+	cat >expect <<-\EOF &&
+	ere-concat-bar:prebarsuf
+	ere-concat-foo:prefoo.suf
+	EOF
+	git grep --cached -E "pre(foo\\.|b[a]r)suf" \
+		-- ere-concat-foo ere-concat-bar >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'repeated ERE groups do not correlate alternatives' '
+	echo "ere-concat-repeat:xfoobary" >expect &&
+
+	git grep --cached -E "x(foo|bar)+y" \
+		-- ere-concat-repeat >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'ERE boundaries preserve the query limit' '
+	prefix=$(printf "%04096d" 0 | tr 0 a) &&
+	pattern="${prefix}(foo|bar)z" &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
+	test_must_be_empty err
 '
 
 test_expect_success 'content index combines middle ERE literals and groups' '
