@@ -321,7 +321,13 @@ static int get_stat_data(const struct cache_entry *ce,
 	const struct object_id *oid = &ce->oid;
 	unsigned int mode = ce->ce_mode;
 
-	if (!cached && !ce_uptodate(ce)) {
+	/*
+	 * Like run_diff_files(), trust fsmonitor for regular entries.
+	 * Gitlinks still need to be inspected for changes within submodules.
+	 */
+	if (!cached && !ce_uptodate(ce) &&
+	    (!(ce->ce_flags & CE_FSMONITOR_VALID) ||
+	     S_ISGITLINK(ce->ce_mode))) {
 		int changed;
 		struct stat st;
 		changed = check_removed(ce, &st);
@@ -561,6 +567,11 @@ static int diff_cache(struct rev_info *revs,
 	opts.index_only = cached;
 	opts.diff_index_cached = (cached &&
 				  !revs->diffopt.flags.find_copies_harder);
+	opts.diff_index_skip_valid = (!cached &&
+				      !revs->diffopt.pathspec.nr &&
+				      !revs->prune_data.nr &&
+				      !revs->diffopt.flags.quick &&
+				      !revs->diffopt.flags.find_copies_harder);
 	opts.merge = 1;
 	opts.fn = oneway_diff;
 	opts.unpack_data = revs;

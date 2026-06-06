@@ -120,6 +120,19 @@ test_expect_success 'git diff HEAD with dirty submodule (work tree, refs match)'
 	test_must_be_empty actual4
 '
 
+test_expect_success 'git diff inspects fsmonitor-valid submodule' '
+	test_hook --setup fsmonitor-test <<-\EOF &&
+		printf "last_update_token\0"
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-test &&
+	git update-index --fsmonitor &&
+	git update-index --fsmonitor-valid sub &&
+	git diff HEAD >actual &&
+	sed -e "1,/^@@/d" actual >actual.body &&
+	expect_from_to >expect.body $subprev $subprev-dirty &&
+	test_cmp expect.body actual.body
+'
+
 test_expect_success 'git diff HEAD with dirty submodule (work tree, refs match) [.gitmodules]' '
 	git config diff.ignoreSubmodules dirty &&
 	git diff HEAD >actual &&

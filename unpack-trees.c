@@ -794,6 +794,17 @@ static int index_pos_by_traverse_info(struct name_entry *names,
 	return pos;
 }
 
+static int is_valid_diff_index_entry(const struct cache_entry *ce)
+{
+	if (ce_stage(ce) || ce_intent_to_add(ce))
+		return 0;
+	if (S_ISGITLINK(ce->ce_mode))
+		return (ce->ce_flags & CE_VALID) || ce_skip_worktree(ce);
+	return ce_uptodate(ce) ||
+		(ce->ce_flags & (CE_VALID | CE_FSMONITOR_VALID)) ||
+		ce_skip_worktree(ce);
+}
+
 /*
  * Fast path if we detect that all trees are the same as cache-tree at this
  * path. We'll walk these trees in an iterative loop using cache-tree/index
@@ -812,6 +823,18 @@ static int traverse_by_cache_tree(int pos, int nr_entries, int nr_names,
 		BUG("We need cache-tree to do this optimization");
 	if (nr_entries + pos > o->src_index->cache_nr)
 		return error(_("corrupted cache-tree has entries not present in index"));
+
+	if (o->diff_index_skip_valid) {
+		for (i = 0; i < nr_entries; i++)
+			if (!is_valid_diff_index_entry(
+				    o->src_index->cache[pos + i]))
+				break;
+		if (i == nr_entries) {
+			for (i = 0; i < nr_entries; i++)
+				mark_ce_used(o->src_index->cache[pos + i], o);
+			return 0;
+		}
+	}
 
 	/*
 	 * Do what unpack_callback() and unpack_single_entry() normally
@@ -1913,6 +1936,18 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	}
 	if (o->merge || o->diff_index_cached)
 		cache_tree_get(o->src_index);
+	if (o->diff_index_skip_valid) {
+		/*
+		 * When every entry can stand in for the worktree, cached
+		 * traversal can skip matching cache-tree subtrees without
+		 * changing index_only semantics.
+		 */
+		for (i = 0; i < o->src_index->cache_nr; i++)
+			if (!is_valid_diff_index_entry(o->src_index->cache[i]))
+				break;
+		if (i == o->src_index->cache_nr)
+			o->diff_index_cached = 1;
+	}
 
 	if (o->reset == UNPACK_RESET_OVERWRITE_UNTRACKED &&
 	    o->preserve_ignored)
