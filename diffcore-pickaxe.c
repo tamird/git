@@ -8,11 +8,43 @@
 #include "git-compat-util.h"
 #include "diff.h"
 #include "diffcore.h"
+#include "grep.h"
+#include "grep-index.h"
+#include "grep-index-ipc.h"
 #include "xdiff-interface.h"
 #include "kwset.h"
+#include "oidmap.h"
 #include "oidset.h"
+#include "parse.h"
 #include "pretty.h"
 #include "quote.h"
+#include "trace2.h"
+
+#define PICKAXE_INDEX_MAX_ENTRIES (1U << 20)
+#define PICKAXE_INDEX_MIN_PAIRS	  4096
+
+struct diff_pickaxe_index_entry {
+	struct oidmap_entry entry;
+	int maybe;
+};
+
+struct diff_pickaxe_index {
+	struct repository *repo;
+	struct grep_index *index;
+	struct grep_index_query *query;
+	struct grep_index_prepared *prepared;
+	struct oidmap results;
+	char *needle;
+	size_t pairs;
+	size_t results_nr;
+	unsigned pickaxe_opts;
+	int direct_tried;
+	int ipc;
+	int tried;
+	uint64_t cache_hits;
+	uint64_t tested;
+	uint64_t impossible_pairs;
+};
 
 typedef int (*pickaxe_fn)(mmfile_t *one, mmfile_t *two,
 			  struct diff_options *o,
@@ -126,11 +158,48 @@ static int has_changes(mmfile_t *one, mmfile_t *two,
 	return c1 != c2;
 }
 
+static int pickaxe_index_maybe_contains(
+	struct diff_pickaxe_index *index,
+	struct repository *repo,
+	const struct diff_filespec *spec)
+{
+	struct diff_pickaxe_index_entry *entry;
+	int maybe;
+
+	if (!DIFF_FILE_VALID(spec))
+		return 0;
+	if (!index || !spec->oid_valid || !S_ISREG(spec->mode))
+		return 1;
+	entry = oidmap_get(&index->results, &spec->oid);
+	if (entry) {
+		index->cache_hits++;
+		return entry->maybe;
+	}
+	if (!index->index)
+		return 1;
+	maybe = index->prepared ?
+			grep_index_prepared_maybe_contains(
+				index->prepared, repo, &spec->oid) :
+			grep_index_maybe_contains(
+				index->index, repo, &spec->oid, index->query);
+	index->tested++;
+	if (index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
+		CALLOC_ARRAY(entry, 1);
+		oidcpy(&entry->entry.oid, &spec->oid);
+		entry->maybe = maybe;
+		oidmap_put(&index->results, entry);
+		index->results_nr++;
+	}
+	return maybe;
+}
+
 static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			 regex_t *regexp, kwset_t kws, pickaxe_fn fn)
 {
 	struct userdiff_driver *textconv_one = NULL;
 	struct userdiff_driver *textconv_two = NULL;
+	struct diff_pickaxe_index *index =
+		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
 	mmfile_t mf1, mf2;
 	int ret;
 
@@ -165,6 +234,18 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	    ((!textconv_one && diff_filespec_is_binary(o->repo, p->one)) ||
 	     (!textconv_two && diff_filespec_is_binary(o->repo, p->two))))
 		return 0;
+
+	if (index &&
+	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
+	    !(o->pickaxe_opts & DIFF_PICKAXE_REGEX) &&
+	    !textconv_one && !textconv_two &&
+	    !pickaxe_index_maybe_contains(
+		    index, o->repo, p->one) &&
+	    !pickaxe_index_maybe_contains(
+		    index, o->repo, p->two)) {
+		index->impossible_pairs++;
+		return 0;
+	}
 
 	mf1.size = fill_textconv(o->repo, textconv_one, p->one, &mf1.ptr);
 	mf2.size = fill_textconv(o->repo, textconv_two, p->two, &mf2.ptr);
@@ -232,6 +313,11 @@ void diffcore_pickaxe(struct diff_options *o)
 {
 	const char *needle = o->pickaxe;
 	int opts = o->pickaxe_opts;
+	size_t min_index_pairs = git_env_ulong(
+		"GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS",
+		PICKAXE_INDEX_MIN_PAIRS);
+	struct diff_pickaxe_index *index =
+		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
 	regex_t regex, *regexp = NULL;
 	kwset_t kws = NULL;
 	pickaxe_fn fn;
@@ -282,6 +368,135 @@ void diffcore_pickaxe(struct diff_options *o)
 		BUG("unknown pickaxe_opts flag");
 	}
 
+	if ((opts & DIFF_PICKAXE_KIND_S) &&
+	    !(opts & DIFF_PICKAXE_REGEX) &&
+	    o->pickaxe_index_state) {
+		if (index &&
+		    (strcmp(index->needle, needle) ||
+		     index->pickaxe_opts !=
+			     (opts & DIFF_PICKAXE_IGNORE_CASE))) {
+			diff_pickaxe_index_clear(o->pickaxe_index_state);
+			index = NULL;
+		}
+		if (!index) {
+			CALLOC_ARRAY(index, 1);
+			index->repo = o->repo;
+			index->needle = xstrdup(needle);
+			index->pickaxe_opts =
+				opts & DIFF_PICKAXE_IGNORE_CASE;
+			oidmap_init(&index->results, 0);
+			*o->pickaxe_index_state = index;
+		}
+		if (index->pairs < min_index_pairs) {
+			size_t remaining = min_index_pairs - index->pairs;
+
+			index->pairs +=
+				MIN((size_t)diff_queued_diff.nr, remaining);
+		}
+		if (!index->tried && index->pairs == min_index_pairs) {
+			struct grep_opt opt;
+
+			index->tried = 1;
+			if (git_env_bool(
+				    "GIT_TEST_PICKAXE_CONTENT_INDEX", 1)) {
+				grep_init(&opt, o->repo);
+				opt.pattern_type_option =
+					GREP_PATTERN_TYPE_FIXED;
+				opt.ignore_case =
+					!!(opts & DIFF_PICKAXE_IGNORE_CASE);
+				append_grep_pattern(
+					&opt, needle, "pickaxe", 0,
+					GREP_PATTERN);
+				compile_grep_patterns(&opt);
+				index->query =
+					grep_index_query_create(&opt);
+				free_grep_patterns(&opt);
+				if (index->query)
+					index->ipc =
+						grep_index_ipc_is_available(
+							o->repo);
+			}
+		}
+	}
+
+	if (index && index->ipc &&
+	    index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
+		struct oidset pending = OIDSET_INIT;
+		struct object_id *oids = NULL;
+		unsigned char *maybe = NULL;
+		size_t oids_nr = 0;
+		size_t oids_alloc = 0;
+		size_t remaining = PICKAXE_INDEX_MAX_ENTRIES -
+				   index->results_nr;
+
+		for (int i = 0; i < diff_queued_diff.nr; i++) {
+			struct diff_filepair *p =
+				diff_queued_diff.queue[i];
+			struct diff_filespec *specs[] = {
+				p->one, p->two
+			};
+
+			if (o->flags.allow_textconv &&
+			    (get_textconv(o->repo, p->one) ||
+			     get_textconv(o->repo, p->two)))
+				continue;
+			for (size_t j = 0; j < ARRAY_SIZE(specs); j++) {
+				struct diff_filespec *spec = specs[j];
+
+				if (!DIFF_FILE_VALID(spec) ||
+				    !spec->oid_valid ||
+				    !S_ISREG(spec->mode) ||
+				    oidmap_get(
+					    &index->results,
+					    &spec->oid) ||
+				    oidset_insert(&pending, &spec->oid))
+					continue;
+				ALLOC_GROW(oids, oids_nr + 1,
+					   oids_alloc);
+				oidcpy(&oids[oids_nr++], &spec->oid);
+				if (oids_nr == remaining)
+					goto query;
+			}
+		}
+
+	query:
+		if (oids_nr) {
+			ALLOC_ARRAY(maybe, oids_nr);
+			if (!grep_index_ipc_query(
+				    o->repo,
+				    index->query,
+				    oids, oids_nr, maybe)) {
+				for (size_t i = 0; i < oids_nr; i++) {
+					struct diff_pickaxe_index_entry
+						*entry;
+
+					CALLOC_ARRAY(entry, 1);
+					oidcpy(&entry->entry.oid,
+					       &oids[i]);
+					entry->maybe =
+						maybe[i] !=
+						GREP_INDEX_IPC_IMPOSSIBLE;
+					oidmap_put(&index->results, entry);
+					index->results_nr++;
+				}
+				index->tested += oids_nr;
+			} else {
+				index->ipc = 0;
+			}
+		}
+		free(maybe);
+		free(oids);
+		oidset_clear(&pending);
+	}
+	if (index && index->query && !index->ipc &&
+	    !index->direct_tried) {
+		index->direct_tried = 1;
+		index->index = grep_index_load(o->repo);
+		if (index->index)
+			index->prepared =
+				grep_index_prepare(index->index, index->query);
+	}
+
 	pickaxe(&diff_queued_diff, o, regexp, kws, fn);
 
 	if (regexp)
@@ -289,4 +504,34 @@ void diffcore_pickaxe(struct diff_options *o)
 	if (kws)
 		kwsfree(kws);
 	return;
+}
+
+void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
+{
+	struct diff_pickaxe_index *index = *state;
+
+	if (!index)
+		return;
+	trace2_data_intmax("pickaxe", index->repo, "content_index/tested",
+			   index->tested);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/prepared",
+			   !!index->prepared);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/query",
+			   !!index->query);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/index",
+			   !!index->index);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc",
+			   index->ipc);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/cache_hits",
+			   index->cache_hits);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/impossible_pairs",
+			   index->impossible_pairs);
+	oidmap_clear(&index->results, 1);
+	grep_index_prepared_free(index->prepared);
+	grep_index_query_free(index->query);
+	grep_index_free(index->index);
+	free(index->needle);
+	free(index);
+	*state = NULL;
 }

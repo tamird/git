@@ -67,6 +67,7 @@ struct oidset;
 struct combine_diff_path;
 struct commit;
 struct diff_filespec;
+struct diff_pickaxe_index;
 struct diff_options;
 struct diff_queue_struct;
 struct oid_array;
@@ -273,6 +274,12 @@ struct diff_options {
 	 */
 	const char *pickaxe;
 	unsigned pickaxe_opts;
+	/*
+	 * State owned by the enclosing revision walk. Shallow copies may
+	 * borrow this slot, but must not outlive its owner or use another
+	 * repository.
+	 */
+	struct diff_pickaxe_index **pickaxe_index_state;
 
 	/* -I<regex> */
 	regex_t **ignore_regex;
@@ -668,6 +675,7 @@ void diffcore_fix_diff_index(void);
 int diff_queue_is_empty(struct diff_options *o);
 void diff_flush(struct diff_options*);
 void diff_free(struct diff_options*);
+void diff_pickaxe_index_clear(struct diff_pickaxe_index **);
 void diff_warn_rename_limit(const char *varname, int needed, int degraded_cc);
 
 /* diff-raw status letters */
