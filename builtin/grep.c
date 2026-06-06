@@ -82,7 +82,7 @@ static unsigned char *worker_busy;
 static uint64_t worker_lease_id;
 static struct grep_opt *worker_template;
 
-#define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 16)
+#define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_MIN_FILES_FOR_THREADS 32
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
 
