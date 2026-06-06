@@ -1552,7 +1552,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				separator_len = 1;
 			} else if (ch == '\\' && i + 1 < scan_end &&
 				   ((pattern_type == GREP_PATTERN_TYPE_BRE &&
-				     strchr(".[\\*^$", p->pattern[i + 1])) ||
+				     strchr(".[\\*^$b",
+					    p->pattern[i + 1])) ||
 				    pattern_type == GREP_PATTERN_TYPE_ERE ||
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				     (is_regex_special(p->pattern[i + 1]) ||
