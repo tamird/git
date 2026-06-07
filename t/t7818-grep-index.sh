@@ -414,9 +414,12 @@ test_expect_success FSMONITOR_DAEMON \
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git config --unset core.fsmonitor" &&
 	git config core.fsmonitor true &&
-	git fsmonitor--daemon start &&
+	GIT_TEST_GREP_INDEX_IPC_PREPARED_MIN_OIDS=1 \
+		GIT_TRACE2_EVENT="$PWD/daemon-prepared.trace" \
+		git fsmonitor--daemon start &&
 	test_when_finished "rm -f pickaxe-direct.trace pickaxe-ipc.trace \
-			    pickaxe-fallback.trace pickaxe-missing.trace" &&
+			    pickaxe-fallback.trace pickaxe-missing.trace \
+			    daemon-prepared.trace" &&
 	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
 	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
 	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
@@ -460,6 +463,8 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-ipc.trace &&
+	test_grep "\"key\":\"ipc_query/prepared\",\"value\":\"1\"" \
+		daemon-prepared.trace &&
 
 	daemon_old_oid=$(git rev-parse HEAD^:pickaxe-daemon-history) &&
 	daemon_old_object=.git/objects/$(test_oid_to_path \

@@ -117,6 +117,7 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server UNUSED)
 # define GREP_INDEX_IPC_MAX_CLIENT_THREADS   8
 # define GREP_INDEX_IPC_MAX_SERVER_THREADS   8
 # define GREP_INDEX_IPC_MIN_OIDS_PER_THREAD  4096
+# define GREP_INDEX_IPC_PREPARED_MIN_OIDS    4096
 # define GREP_INDEX_IPC_MAX_REQUEST_SIZE     (64 * 1024 * 1024)
 # define GREP_INDEX_IPC_MAX_CACHED_INDEX_BYTES (256 * 1024 * 1024)
 # define GREP_INDEX_IPC_WORKER_ACQUIRE_SIZE \
@@ -883,11 +884,16 @@ static int grep_index_ipc_handle_request(
 {
 	struct grep_index_ipc_server *server = data;
 	struct grep_index_query *query = NULL;
+	struct grep_index_prepared *prepared = NULL;
 	struct strbuf response = STRBUF_INIT;
 	const unsigned char *raw = (const unsigned char *)request;
 	const unsigned char *oid_data;
 	uint32_t signature, version, format_id, query_len, nr;
 	size_t rawsz = server->repo.hash_algo->rawsz;
+	size_t prepared_min_oids = git_env_ulong(
+		"GIT_TEST_GREP_INDEX_IPC_PREPARED_MIN_OIDS",
+		GREP_INDEX_IPC_PREPARED_MIN_OIDS);
+	int use_prepared;
 	int result = 0;
 
 	if (request_len >= sizeof(uint32_t) &&
@@ -930,6 +936,9 @@ static int grep_index_ipc_handle_request(
 	pthread_mutex_lock(&server->request_mutex);
 	server->active_requests++;
 	pthread_mutex_unlock(&server->request_mutex);
+	use_prepared =
+		nr >= prepared_min_oids &&
+		grep_index_is_transposed(server->persistent);
 
 	grep_index_ipc_put_u32(&response,
 			       GREP_INDEX_IPC_RESPONSE_SIGNATURE);
@@ -937,22 +946,36 @@ static int grep_index_ipc_handle_request(
 	grep_index_ipc_put_u32(&response, nr);
 	strbuf_grow(&response, nr);
 	for (size_t i = 0; i < nr; i++) {
+		struct grep_index_location location;
 		struct object_id oid;
 		int maybe;
 
 		oidread(&oid, oid_data + i * rawsz, server->repo.hash_algo);
-		maybe = grep_index_memory_maybe_contains(
-			server->index, &oid, query);
+		if (use_prepared &&
+		    !grep_index_resolve_location(
+			    server->persistent, &oid, &location)) {
+			if (!prepared)
+				prepared = grep_index_prepare(
+					server->persistent, query);
+			maybe = grep_index_prepared_location_maybe_contains(
+				prepared, &location);
+		} else {
+			maybe = grep_index_memory_maybe_contains(
+				server->index, &oid, query);
+		}
 		strbuf_addch(&response,
 			     maybe < 0 ? GREP_INDEX_IPC_UNKNOWN :
 			     maybe     ? GREP_INDEX_IPC_MAYBE :
 					 GREP_INDEX_IPC_IMPOSSIBLE);
 	}
+	trace2_data_intmax("grep-index", &server->repo,
+			   "ipc_query/prepared", !!prepared);
 	result = reply(reply_data, response.buf, response.len);
 	pthread_mutex_lock(&server->request_mutex);
 	if (!--server->active_requests)
 		grep_index_memory_release_object_store(server->index);
 	pthread_mutex_unlock(&server->request_mutex);
+	grep_index_prepared_free(prepared);
 	pthread_rwlock_unlock(&server->generation_lock);
 	grep_index_query_free(query);
 	strbuf_release(&response);
