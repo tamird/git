@@ -48,6 +48,71 @@ static void hash_scope(struct repository *repo, struct object_id *oid)
 	git_hash_final_oid(oid, &ctx);
 }
 
+struct worktree_entry_data {
+	unsigned char header[2 * sizeof(uint32_t)];
+	unsigned char stat[9 * sizeof(uint32_t)];
+	size_t name_len;
+};
+
+static int serialize_worktree_entry(struct worktree_entry_data *data,
+				    const struct cache_entry *ce)
+{
+	size_t name_len = ce_namelen(ce);
+	unsigned char *stat = data->stat;
+
+	if (ce_stage(ce) || ce_intent_to_add(ce) ||
+	    ce->ce_flags & CE_REMOVE || name_len > UINT32_MAX)
+		return -1;
+	put_be32(data->header, ce->ce_mode);
+	put_be32(data->header + sizeof(uint32_t), name_len);
+	data->name_len = name_len;
+	/*
+	 * Stat data does not prove byte equality, but distinguishes index
+	 * entry generations which retain a blob ID while their converted
+	 * worktree bytes change.
+	 */
+	put_be32(stat, ce->ce_stat_data.sd_ctime.sec);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_ctime.nsec);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_mtime.sec);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_mtime.nsec);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_dev);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_ino);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_uid);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_gid);
+	put_be32(stat += sizeof(uint32_t), ce->ce_stat_data.sd_size);
+	return 0;
+}
+
+void grep_worktree_entry_identity_init(
+	struct repository *repo,
+	struct grep_worktree_entry_identity *identity)
+{
+	identity->object_format_id = repo->hash_algo->format_id;
+	identity->object_rawsz = repo->hash_algo->rawsz;
+}
+
+int grep_worktree_entry_identity_hash(
+	const struct grep_worktree_entry_identity *identity,
+	const struct cache_entry *ce,
+	struct object_id *oid)
+{
+	struct worktree_entry_data data;
+	struct git_hash_ctx ctx;
+	const struct git_hash_algo *algo = &hash_algos[GIT_HASH_SHA256];
+
+	if (serialize_worktree_entry(&data, ce))
+		return -1;
+	algo->init_fn(&ctx);
+	git_hash_update(&ctx, "grep-worktree-entry-v1", 22);
+	hash_uint32(&ctx, identity->object_format_id);
+	git_hash_update(&ctx, data.header, sizeof(data.header));
+	git_hash_update(&ctx, ce->name, data.name_len);
+	git_hash_update(&ctx, ce->oid.hash, identity->object_rawsz);
+	git_hash_update(&ctx, data.stat, sizeof(data.stat));
+	git_hash_final_oid(oid, &ctx);
+	return 0;
+}
+
 static int compute_identity(struct repository *repo,
 			    struct index_state *istate,
 			    struct grep_index_identity *identity)
@@ -56,7 +121,6 @@ static int compute_identity(struct repository *repo,
 	struct strbuf oids = STRBUF_INIT;
 	struct git_hash_ctx entries_ctx;
 	struct git_hash_ctx oids_ctx;
-	char data[sizeof(uint32_t)];
 	int result = -1;
 
 	grep_index_identity_oid_sequence_init(
@@ -71,45 +135,20 @@ static int compute_identity(struct repository *repo,
 	strbuf_grow(&entries, 1024 * 1024);
 	for (size_t i = 0; i < istate->cache_nr; i++) {
 		const struct cache_entry *ce = istate->cache[i];
-		size_t name_len = ce_namelen(ce);
+		struct worktree_entry_data data;
 
-		if (ce_stage(ce) || ce_intent_to_add(ce) ||
-		    ce->ce_flags & CE_REMOVE || name_len > UINT32_MAX)
+		if (serialize_worktree_entry(&data, ce))
 			goto cleanup;
+		strbuf_add(&entries, data.header, sizeof(data.header));
+		strbuf_add(&entries, ce->name, data.name_len);
+		strbuf_add(&entries, ce->oid.hash,
+			   repo->hash_algo->rawsz);
+		strbuf_add(&entries, data.stat, sizeof(data.stat));
 		strbuf_add(&oids, ce->oid.hash, repo->hash_algo->rawsz);
 		if (oids.len >= 1024 * 1024) {
 			git_hash_update(&oids_ctx, oids.buf, oids.len);
 			strbuf_reset(&oids);
 		}
-		put_be32(data, ce->ce_mode);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, name_len);
-		strbuf_add(&entries, data, sizeof(data));
-		strbuf_add(&entries, ce->name, name_len);
-		strbuf_add(&entries, ce->oid.hash, repo->hash_algo->rawsz);
-		/*
-		 * Stat data does not prove byte equality, but distinguishes
-		 * index entry generations which retain a blob ID while their
-		 * converted worktree bytes change.
-		 */
-		put_be32(data, ce->ce_stat_data.sd_ctime.sec);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_ctime.nsec);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_mtime.sec);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_mtime.nsec);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_dev);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_ino);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_uid);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_gid);
-		strbuf_add(&entries, data, sizeof(data));
-		put_be32(data, ce->ce_stat_data.sd_size);
-		strbuf_add(&entries, data, sizeof(data));
 		if (entries.len >= 1024 * 1024) {
 			git_hash_update(&entries_ctx, entries.buf, entries.len);
 			strbuf_reset(&entries);
@@ -257,6 +296,7 @@ int grep_index_identity_get(struct repository *repo,
 	struct object_id scope_oid;
 
 	hash_scope(repo, &scope_oid);
+	oidcpy(&identity->worktree_scope, &scope_oid);
 	oidclr(&identity->worktree_split_base_identity, repo->hash_algo);
 	if (istate->split_index && istate->split_index->base &&
 	    istate->split_index->base->cache_nr) {
