@@ -959,13 +959,6 @@ static int grep_submodule(struct grep_opt *opt,
 	return hit;
 }
 
-static int can_cache_worktree_blob(const struct cache_entry *ce)
-{
-	return !ce_stage(ce) && !ce_intent_to_add(ce) &&
-	       !(ce->ce_flags & CE_VALID) &&
-	       (ce->ce_flags & CE_FSMONITOR_VALID);
-}
-
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached)
 {
@@ -1188,7 +1181,7 @@ static int grep_cache(struct grep_opt *opt,
 					   selected_alloc);
 				selected[selected_nr++] = nr;
 			}
-			if (can_cache_worktree_blob(ce)) {
+			if (grep_worktree_cache_entry_eligible(ce)) {
 				if (UINT64_MAX - worktree_bytes <
 				    ce->ce_stat_data.sd_size)
 					worktree_bytes = UINT64_MAX;
@@ -1296,7 +1289,7 @@ static int grep_cache(struct grep_opt *opt,
 					     !S_ISREG(ce->ce_mode)))
 						continue;
 					if (!known_equal &&
-					    can_cache_worktree_blob(ce))
+					    grep_worktree_cache_entry_eligible(ce))
 						known_equal =
 							grep_worktree_cache_lookup(
 								worktree_cache,
@@ -1437,7 +1430,7 @@ static int grep_cache(struct grep_opt *opt,
 					     ce_namelen(ce), 0, NULL, 0)))
 				continue;
 			if (!use_oid && worktree_cache &&
-			    can_cache_worktree_blob(ce)) {
+			    grep_worktree_cache_entry_eligible(ce)) {
 				if (threads_started)
 					grep_lock();
 				use_oid = grep_worktree_cache_lookup(
@@ -1551,7 +1544,7 @@ static int grep_cache(struct grep_opt *opt,
 			int can_cache =
 				repo == the_repository && !cached &&
 				!opt->allow_textconv &&
-				can_cache_worktree_blob(ce) &&
+				grep_worktree_cache_entry_eligible(ce) &&
 				worktree_cache;
 			int use_worktree_blob;
 

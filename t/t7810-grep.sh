@@ -2175,23 +2175,31 @@ test_expect_success 'grep selects literal pathsets directly' '
 
 test_expect_success 'grep reuses observed worktree blob bytes' '
 	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 &&
 	export GIT_TEST_GREP_LITERAL_PATHS &&
-	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
+	export GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS \
+		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES" &&
 	test_when_finished "rm -f .git/fsmonitor-attributes \
 		.git/fsmonitor-equal .git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery \
 		.git/index.grep-worktree.lock \
 		.git/index.grep-worktree.save \
 		grep-worktree-trace-* &&
 		rm -rf grep-worktree-other &&
 		git update-index --no-fsmonitor &&
 		git rm -f --ignore-unmatch .gitattributes grep-worktree-equal \
-			grep-worktree-converted grep-worktree-index-change" &&
+			grep-worktree-converted grep-worktree-index-change \
+			grep-worktree-rewrite" &&
 	{
 		echo "grep-worktree-converted text" &&
 		echo "grep-worktree-equal diff=worktree"
 	} >.gitattributes &&
 	echo "equal worktree blob" >grep-worktree-equal &&
 	printf "converted worktree blob\r\n" >grep-worktree-converted &&
+	test-tool chmtime =-5 .gitattributes grep-worktree-equal \
+		grep-worktree-converted &&
 	git add .gitattributes grep-worktree-equal grep-worktree-converted &&
 	test_config diff.worktree.textconv cat &&
 	if test -z "$GIT_TEST_SPLIT_INDEX"
@@ -2301,6 +2309,83 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-2 &&
 	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-2 &&
+	cp .git/index.grep-worktree \
+		.git/index.grep-worktree.no-optional-locks-save &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-no-optional-locks" \
+		git --no-optional-locks grep \
+			"absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-no-optional-locks &&
+	test_cmp .git/index.grep-worktree.no-optional-locks-save \
+		.git/index.grep-worktree &&
+	rm .git/index.grep-worktree.no-optional-locks-save &&
+	cp .git/index.grep-worktree \
+		.git/index.grep-worktree.generation-save &&
+	cp .git/index.grep-worktree-generation \
+		.git/index.grep-worktree-generation.save &&
+	rm .git/index.grep-worktree-generation &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-generation-missing" \
+		git --no-optional-locks grep \
+			"absent worktree blob" -- grep-worktree-equal &&
+	test_path_is_missing .git/index.grep-worktree-generation &&
+	test_cmp .git/index.grep-worktree.generation-save \
+		.git/index.grep-worktree &&
+	test_grep ! "worktree_blob/" \
+		grep-worktree-trace-generation-missing &&
+	printf "malformed generation" \
+		>.git/index.grep-worktree-generation &&
+	cp .git/index.grep-worktree-generation \
+		.git/index.grep-worktree-generation.malformed &&
+	test_expect_code 1 git --no-optional-locks grep \
+		"absent worktree blob" -- grep-worktree-equal &&
+	test_cmp .git/index.grep-worktree-generation.malformed \
+		.git/index.grep-worktree-generation &&
+	test_cmp .git/index.grep-worktree.generation-save \
+		.git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-generation-repair" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	! test_cmp .git/index.grep-worktree-generation.malformed \
+		.git/index.grep-worktree-generation &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-generation-repair &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-generation-repair &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-generation-reused" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-generation-reused &&
+	cp .git/index.grep-worktree-generation \
+		.git/index.grep-worktree-generation.current &&
+	cp .git/index.grep-worktree-generation.save \
+		.git/index.grep-worktree-generation.replace &&
+	mv .git/index.grep-worktree-generation.replace \
+		.git/index.grep-worktree-generation &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-generation-mismatch" \
+		git --no-optional-locks grep \
+			"absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-generation-mismatch &&
+	mv .git/index.grep-worktree-generation.current \
+		.git/index.grep-worktree-generation &&
+	rm .git/index.grep-worktree.generation-save \
+		.git/index.grep-worktree-generation.save \
+		.git/index.grep-worktree-generation.malformed &&
+	if test -z "$(git rev-parse --shared-index-path)"
+	then
+		rm .git/index.grep-worktree-recovery &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-no-recovery" \
+			git grep "absent worktree blob" -- \
+				grep-worktree-equal &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<grep-worktree-trace-no-recovery &&
+		test_path_is_missing .git/index.grep-worktree-recovery
+	fi &&
 	env \
 		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
 		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-quiet" \
@@ -2362,7 +2447,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		test-tool genzeros $((rawsz - 1)) &&
 		dd if=.git/index.grep-worktree bs=1 \
 			skip=$((20 + 2 * rawsz)) \
-			count="$bitmap_size" 2>/dev/null
+			count=$((2 * rawsz + 2 * bitmap_size)) 2>/dev/null
 	} >.git/index.grep-worktree.malformed &&
 	test-tool $(test_oid algo) -b \
 		<.git/index.grep-worktree.malformed \
@@ -2378,18 +2463,74 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-malformed-base &&
 	test_trace2_data grep worktree_blob/recorded_equal 1 \
 		<grep-worktree-trace-malformed-base &&
+	sidecar_size=$(wc -c <.git/index.grep-worktree) &&
+	equal_offset=$((20 + 4 * rawsz)) &&
+	different_offset=$((equal_offset + bitmap_size)) &&
+	{
+		test_copy_bytes "$different_offset" \
+			<.git/index.grep-worktree &&
+		dd if=.git/index.grep-worktree bs=1 \
+			skip="$equal_offset" count="$bitmap_size" \
+			2>/dev/null &&
+		dd if=.git/index.grep-worktree bs=1 \
+			skip=$((different_offset + bitmap_size)) \
+			count=$((sidecar_size - rawsz -
+				 different_offset - bitmap_size)) \
+			2>/dev/null
+	} >.git/index.grep-worktree.malformed &&
+	test-tool $(test_oid algo) -b \
+		<.git/index.grep-worktree.malformed \
+		>.git/index.grep-worktree.checksum &&
+	cat .git/index.grep-worktree.checksum \
+		>>.git/index.grep-worktree.malformed &&
+	mv .git/index.grep-worktree.malformed \
+		.git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-malformed-overlap" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-malformed-overlap &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-malformed-overlap &&
 	rm .git/index.grep-worktree.checksum &&
 	rm .git/index.grep-worktree &&
 	mv .git/index.grep-worktree.save .git/index.grep-worktree &&
+	if test -z "$(git rev-parse --shared-index-path)"
+	then
+		rm .git/index.grep-worktree-recovery
+	fi &&
 
-	git update-index --force-write-index &&
+	echo "rewrite index" >grep-worktree-rewrite &&
+	test-tool chmtime =-5 grep-worktree-rewrite &&
+	git add grep-worktree-rewrite &&
+	git status --porcelain >/dev/null &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-rewrite" \
 		git grep "absent worktree blob" -- grep-worktree-equal &&
-	test_trace2_data grep worktree_blob/hits 1 \
-		<grep-worktree-trace-rewrite &&
-	test_trace2_data grep worktree_blob/recorded_equal 0 \
-		<grep-worktree-trace-rewrite &&
+	if test -n "$(git rev-parse --shared-index-path)"
+	then
+		test_trace2_data grep worktree_blob/hits 1 \
+			<grep-worktree-trace-rewrite &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<grep-worktree-trace-rewrite
+	else
+		test_trace2_data grep worktree_blob/hits 0 \
+			<grep-worktree-trace-rewrite &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<grep-worktree-trace-rewrite &&
+		test_trace2_data grep worktree_blob/recovery_invalid 1 \
+			<grep-worktree-trace-rewrite &&
+		test_trace2_data grep worktree_blob/recovery_revoked 1 \
+			<grep-worktree-trace-rewrite &&
+		test_path_is_missing .git/index.grep-worktree-recovery &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-bootstrap" \
+			git grep "absent worktree blob" -- \
+				grep-worktree-equal &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<grep-worktree-trace-bootstrap &&
+		test_path_is_file .git/index.grep-worktree-recovery
+	fi &&
 
 	echo "changed worktree blob" >grep-worktree-equal &&
 	>.git/fsmonitor-equal &&
@@ -2421,10 +2562,20 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-4" \
 		git grep "absent worktree blob" -- grep-worktree-equal &&
-	test_trace2_data grep worktree_blob/hits 0 \
-		<grep-worktree-trace-4 &&
-	test_trace2_data grep worktree_blob/recorded_equal 1 \
-		<grep-worktree-trace-4 &&
+	if test -n "$(git rev-parse --shared-index-path)"
+	then
+		test_trace2_data grep worktree_blob/hits 0 \
+			<grep-worktree-trace-4 &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<grep-worktree-trace-4
+	else
+		test_trace2_data grep worktree_blob/hits 1 \
+			<grep-worktree-trace-4 &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<grep-worktree-trace-4 &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<grep-worktree-trace-4
+	fi &&
 
 	oid=$(git rev-parse :grep-worktree-equal) &&
 	echo "replacement blob" >replacement &&
@@ -2514,7 +2665,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-other
 '
 
-test_expect_success 'grep rejects cache after index replacement' '
+test_expect_success 'grep handles cache after index replacement' '
 	GIT_TEST_GREP_LITERAL_PATHS=0 &&
 	export GIT_TEST_GREP_LITERAL_PATHS &&
 	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
@@ -2522,13 +2673,18 @@ test_expect_success 'grep rejects cache after index replacement' '
 	test_when_finished "rm -f .git/fsmonitor-replace-index \
 		.git/index.original .git/index.replace \
 		.git/index.replace.stale \
-		.git/index.grep-worktree grep-worktree-trace-race \
+		.git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery \
+		grep-worktree-trace-race \
 		grep-worktree-trace-race-newer &&
 		git update-index --no-fsmonitor &&
 		git rm -f --ignore-unmatch grep-worktree-race-before \
 			grep-worktree-race-equal grep-worktree-race-zafter" &&
 	echo "equal before index replacement" >grep-worktree-race-equal &&
 	echo "after cached entry" >grep-worktree-race-zafter &&
+	test-tool chmtime =-5 grep-worktree-race-equal \
+		grep-worktree-race-zafter &&
 	git add grep-worktree-race-equal grep-worktree-race-zafter &&
 	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
 		printf "last_update_token\0"
@@ -2536,7 +2692,7 @@ test_expect_success 'grep rejects cache after index replacement' '
 		then
 			mv .git/index.replace .git/index
 			rm .git/fsmonitor-replace-index
-			git grep "absent newer sidecar" -- \
+			GIT_TRACE2_EVENT= git grep "absent newer sidecar" -- \
 				grep-worktree-race-equal >/dev/null 2>&1
 			test $? = 1 || exit 1
 		fi
@@ -2571,11 +2727,17 @@ test_expect_success 'grep rejects cache after index replacement' '
 		grep-worktree-race-equal grep-worktree-race-zafter &&
 	test_trace2_data grep worktree_blob/hits 0 \
 		<grep-worktree-trace-race &&
+	test_trace2_data grep worktree_blob/recovered_identity 0 \
+		<grep-worktree-trace-race &&
+	test_trace2_data grep worktree_blob/recorded_equal 2 \
+		<grep-worktree-trace-race &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-race-newer" \
 		git grep "absent newer sidecar" -- \
 			grep-worktree-race-equal &&
 	test_trace2_data grep worktree_blob/hits 1 \
+		<grep-worktree-trace-race-newer &&
+	test_trace2_data grep worktree_blob/recovered_identity 0 \
 		<grep-worktree-trace-race-newer &&
 	echo "grep-worktree-race-before:worktree after replacement" >expected &&
 	git grep "worktree after replacement" -- \
@@ -2585,6 +2747,1104 @@ test_expect_success 'grep rejects cache after index replacement' '
 
 test_lazy_prereq NO_FORCED_SPLIT_INDEX '
 	! test_bool_env GIT_TEST_SPLIT_INDEX false
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache recovers non-split index entries' '
+	test_when_finished "rm -rf grep-worktree-recovery" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-recovery &&
+		cd grep-worktree-recovery &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		export GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+		echo "recovery target" >target &&
+		echo "recovery other" >other &&
+		echo "recovery sentinel" >sentinel &&
+		test-tool chmtime =-5 target other sentinel &&
+		git add target other sentinel &&
+		test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-target
+			then
+				printf "target\0"
+			fi
+			if test -f .git/fsmonitor-other
+			then
+				printf "other\0"
+			fi
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep "absent recovery" -- \
+			target other sentinel &&
+		test_path_is_file .git/index.grep-worktree &&
+		test_path_is_file .git/index.grep-worktree-recovery &&
+		cp .git/index.grep-worktree .git/index.grep-worktree.save &&
+
+		test-tool chmtime =-10 other &&
+		>.git/fsmonitor-other &&
+		git status --porcelain >/dev/null &&
+		rm .git/fsmonitor-other &&
+		git update-index --fsmonitor-valid other &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=2 \
+			GIT_TRACE2_EVENT="$PWD/trace-stat" \
+			git grep "absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<trace-stat &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<trace-stat &&
+		test_cmp .git/index.grep-worktree.save \
+			.git/index.grep-worktree &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=2 \
+			GIT_TRACE2_EVENT="$PWD/trace-stat-repeat" \
+			git grep "absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<trace-stat-repeat &&
+		test_cmp .git/index.grep-worktree.save \
+			.git/index.grep-worktree &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-stat-promote" \
+			git grep "absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<trace-stat-promote &&
+		! test_cmp .git/index.grep-worktree.save \
+			.git/index.grep-worktree &&
+		rm .git/index.grep-worktree.save &&
+		cp .git/index.grep-worktree .git/index.grep-worktree.save &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-stat-exact" \
+			git grep "absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-stat-exact &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<trace-stat-exact &&
+		test_cmp .git/index.grep-worktree.save \
+			.git/index.grep-worktree &&
+		rm .git/index.grep-worktree.save &&
+
+		echo "recovery added" >aaa &&
+		test-tool chmtime =-5 aaa &&
+		git add aaa &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-shift" \
+			git grep "absent recovery" -- target aaa &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<trace-shift &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-shift &&
+
+		cp .git/index.grep-worktree-recovery \
+			.git/index.grep-worktree-recovery.save &&
+		echo "recovery generation" >bbb &&
+		test-tool chmtime =-5 bbb &&
+		git add bbb &&
+		git status --porcelain >/dev/null &&
+		rawsz=$(test_oid rawsz) &&
+		recovery_size=$(wc -c \
+			<.git/index.grep-worktree-recovery) &&
+		{
+			test_copy_bytes $((recovery_size - 2 * rawsz)) \
+				<.git/index.grep-worktree-recovery &&
+			dd if=.git/index.grep-worktree-recovery bs=1 \
+				skip=$((recovery_size - 3 * rawsz)) \
+				count="$rawsz" 2>/dev/null &&
+			dd if=.git/index.grep-worktree-recovery bs=1 \
+				skip=$((recovery_size - rawsz)) \
+				count="$rawsz" 2>/dev/null
+		} >.git/index.grep-worktree-recovery.corrupt &&
+		mv .git/index.grep-worktree-recovery.corrupt \
+			.git/index.grep-worktree-recovery &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-corrupt-recovery" \
+			git grep --no-content-index \
+				"absent recovery" -- target sentinel &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<trace-corrupt-recovery &&
+		test_trace2_data grep worktree_blob/recorded_equal 2 \
+			<trace-corrupt-recovery &&
+		test_trace2_data grep worktree_blob/recovery_invalid 1 \
+			<trace-corrupt-recovery &&
+		test_trace2_data grep worktree_blob/recovery_revoked 1 \
+			<trace-corrupt-recovery &&
+		mv .git/index.grep-worktree-recovery.save \
+			.git/index.grep-worktree-recovery &&
+		echo "recovery after corruption" >ccc &&
+		test-tool chmtime =-5 ccc &&
+		git add ccc &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-after-corruption" \
+			git grep --no-content-index \
+				"absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<trace-after-corruption &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-after-corruption &&
+
+		echo "worktree-only recovery" >target &&
+		test-tool chmtime =-15 other target &&
+		>.git/fsmonitor-other &&
+		>.git/fsmonitor-target &&
+		git status --porcelain >/dev/null &&
+		rm .git/fsmonitor-other .git/fsmonitor-target &&
+		echo "target:worktree-only recovery" >expected &&
+		GIT_TRACE2_EVENT="$PWD/trace-dirty" \
+		git grep "worktree-only recovery" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 <trace-dirty &&
+
+		git checkout -- target &&
+		test-tool chmtime =-20 target &&
+		>.git/fsmonitor-target &&
+		git status --porcelain >/dev/null &&
+		rm .git/fsmonitor-target &&
+		test_expect_code 1 git grep "absent recovery" -- target &&
+		test-tool chmtime =-20 other &&
+		>.git/fsmonitor-other &&
+		git status --porcelain >/dev/null &&
+		rm .git/fsmonitor-other &&
+		rm .git/index.grep-worktree-recovery &&
+		printf "malformed recovery" \
+			>.git/index.grep-worktree-recovery &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-malformed" \
+			git grep --no-content-index \
+				"absent recovery" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<trace-malformed &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-malformed
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree recovery compares full SHA-256 identities' '
+	test_when_finished "rm -rf grep-worktree-recovery-identity" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-recovery-identity &&
+		cd grep-worktree-recovery-identity &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		export GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+		echo "recovery identity target" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent recovery identity" -- target &&
+
+		rawsz=$(test_oid rawsz) &&
+		recovery=.git/index.grep-worktree-recovery &&
+		recovery_size=$(wc -c <"$recovery") &&
+		recovery_body_size=$((recovery_size - rawsz)) &&
+		identity_byte=$((16 + rawsz + 65536 * 4 + 31)) &&
+		byte=$(dd if="$recovery" bs=1 skip="$identity_byte" \
+			count=1 2>/dev/null | test-tool hexdump) &&
+		if test "$byte" = "00 "
+		then
+			printf "\001" >replacement
+		else
+			test-tool genzeros 1 >replacement
+		fi &&
+		{
+			test_copy_bytes "$identity_byte" <"$recovery" &&
+			cat replacement &&
+			dd if="$recovery" bs=1 \
+				skip=$((identity_byte + 1)) \
+				count=$((recovery_body_size -
+					 identity_byte - 1)) 2>/dev/null
+		} >recovery.body &&
+		test-tool $(test_oid algo) -b \
+			<recovery.body >recovery.checksum &&
+		cat recovery.body recovery.checksum >recovery.new &&
+		mv recovery.new "$recovery" &&
+
+		compact=.git/index.grep-worktree &&
+		compact_size=$(wc -c <"$compact") &&
+		compact_body_size=$((compact_size - rawsz)) &&
+		recovery_checksum_offset=$((20 + 2 * rawsz)) &&
+		{
+			test_copy_bytes "$recovery_checksum_offset" \
+				<"$compact" &&
+			cat recovery.checksum &&
+			dd if="$compact" bs=1 \
+				skip=$((recovery_checksum_offset + rawsz)) \
+				count=$((compact_body_size -
+					 recovery_checksum_offset -
+					 rawsz)) 2>/dev/null
+		} >compact.body &&
+		test-tool $(test_oid algo) -b \
+			<compact.body >compact.checksum &&
+		cat compact.body compact.checksum >compact.new &&
+		mv compact.new "$compact" &&
+
+		echo "recovery identity shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/identity.trace" \
+			git grep "absent recovery identity" -- target &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<identity.trace &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<identity.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache handles concurrent recovery updates' '
+	test_when_finished "rm -rf grep-worktree-recovery-race" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-recovery-race &&
+		cd grep-worktree-recovery-race &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "recovery race" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-mutate-target
+			then
+				echo "changed during cache write" >target
+				rm .git/fsmonitor-mutate-target
+			fi
+			if test -f .git/fsmonitor-target
+			then
+				printf "target\0"
+			fi
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		cp .git/index .git/index.old &&
+		echo "recovery race other" >other &&
+		test-tool chmtime =-5 other &&
+		git add other &&
+		git status --porcelain >/dev/null &&
+		cp .git/index .git/index.new &&
+		test_expect_code 1 git grep "absent recovery race" -- target &&
+		test_path_is_file .git/index.grep-worktree &&
+		test_path_is_missing .git/index.grep-worktree-recovery &&
+		publisher_hold="$PWD/.git/grep-worktree-publisher-hold" &&
+		publisher_ready="$PWD/.git/grep-worktree-publisher-ready" &&
+		>"$publisher_hold" &&
+
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$publisher_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=locked \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$publisher_ready" \
+				git grep "absent recovery race" -- target \
+				>publisher.out 2>publisher.err &
+		} &&
+		publisher_pid=$! &&
+		trap "kill $publisher_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$publisher_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$publisher_ready" &&
+		test_path_is_file .git/index.grep-worktree-recovery.lock &&
+		test_path_is_file .git/index.grep-worktree.lock &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before &&
+
+		cp .git/index.old .git/index &&
+		negative_hold="$PWD/.git/grep-worktree-negative-hold" &&
+		negative_ready="$PWD/.git/grep-worktree-negative-ready" &&
+		>"$negative_hold" &&
+		>.git/fsmonitor-mutate-target &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$negative_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$negative_ready" \
+				GIT_TRACE2_EVENT="$PWD/pending-negative.trace" \
+				git grep "absent recovery race" -- target \
+				>negative.out 2>negative.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $publisher_pid $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$negative_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$negative_ready" &&
+		test_path_is_missing .git/fsmonitor-mutate-target &&
+		cp .git/index.new .git/index &&
+		rm "$negative_hold" &&
+		test_expect_code 1 wait "$negative_pid" &&
+		trap "kill $publisher_pid 2>/dev/null || :" 0 &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<pending-negative.trace &&
+		test_path_is_file .git/index.grep-worktree-generation &&
+		! test_cmp .git/index.grep-worktree-generation.before \
+			.git/index.grep-worktree-generation &&
+		rm "$publisher_hold" &&
+		test_expect_code 1 wait "$publisher_pid" &&
+		trap - 0 &&
+		test_path_is_file .git/index.grep-worktree-recovery &&
+		test_path_is_missing .git/index.grep-worktree-recovery.lock &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/post-negative.trace" \
+			git grep "absent recovery race" -- target &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<post-negative.trace &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<post-negative.trace &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<post-negative.trace &&
+
+		>.git/fsmonitor-target &&
+		git checkout -- target &&
+		rm .git/fsmonitor-target &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 \
+			GIT_TRACE2_EVENT="$PWD/rebootstrap.trace" \
+			git grep "absent recovery race" -- target &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<rebootstrap.trace &&
+		test_path_is_file .git/index.grep-worktree-recovery &&
+		echo "recovery race shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		rawsz=$(test_oid rawsz) &&
+
+		hold="$PWD/.git/grep-worktree-promotion-hold" &&
+		ready="$PWD/.git/grep-worktree-promotion-ready" &&
+		>"$hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=recovery \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$ready" \
+				GIT_TRACE2_EVENT="$PWD/promotion.trace" \
+				git grep "absent recovery race" -- target \
+				>promotion.out 2>promotion.err &
+		} &&
+		grep_pid=$! &&
+		trap "kill $grep_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$ready" &&
+
+		sidecar_size=$(wc -c <.git/index.grep-worktree) &&
+		recovery_offset=$((20 + 2 * rawsz)) &&
+		{
+			test_copy_bytes "$recovery_offset" \
+				<.git/index.grep-worktree &&
+			test-tool genzeros "$rawsz" &&
+			dd if=.git/index.grep-worktree bs=1 \
+				skip=$((recovery_offset + rawsz)) \
+				count=$((sidecar_size - 2 * rawsz -
+					 recovery_offset)) 2>/dev/null
+		} >.git/index.grep-worktree.revoked &&
+		test-tool $(test_oid algo) -b \
+			<.git/index.grep-worktree.revoked \
+			>.git/index.grep-worktree.checksum &&
+		cat .git/index.grep-worktree.checksum \
+			>>.git/index.grep-worktree.revoked &&
+		mv .git/index.grep-worktree.revoked \
+			.git/index.grep-worktree &&
+		cp .git/index.grep-worktree .git/index.grep-worktree.revoked &&
+		rm "$hold" &&
+		test_expect_code 1 wait "$grep_pid" &&
+		trap - 0 &&
+		test_trace2_data grep worktree_blob/recovered_identity 1 \
+			<promotion.trace &&
+		test_cmp .git/index.grep-worktree.revoked \
+			.git/index.grep-worktree &&
+
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-recovery &&
+		git update-index --fsmonitor-valid target &&
+		positive_hold="$PWD/.git/grep-worktree-positive-hold" &&
+		positive_ready="$PWD/.git/grep-worktree-positive-ready" &&
+		>"$positive_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$positive_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$positive_ready" \
+				git grep "absent stale positive" -- target \
+				>positive.out 2>positive.err &
+		} &&
+		positive_pid=$! &&
+		trap "kill $positive_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$positive_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$positive_ready" &&
+
+		echo "changed after stale positive" >target &&
+		git update-index --fsmonitor-valid target &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/newer-negative.trace" \
+			git grep "absent stale positive" -- target &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<newer-negative.trace &&
+		rm "$positive_hold" &&
+		test_expect_code 1 wait "$positive_pid" &&
+		trap - 0 &&
+		echo "target:changed after stale positive" >expected &&
+		GIT_TRACE2_EVENT="$PWD/stale-positive.trace" \
+			git grep "changed after stale positive" -- \
+				target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<stale-positive.trace &&
+		test_trace2_data grep worktree_blob/recovered_identity 0 \
+			<stale-positive.trace &&
+
+		echo "recovery race" >target &&
+		git update-index --fsmonitor-valid target &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/sticky-negative.trace" \
+			git grep "absent sticky negative" -- target &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/sticky-negative-repeat.trace" \
+			git grep "absent sticky negative" -- target &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<sticky-negative.trace &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<sticky-negative.trace &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<sticky-negative-repeat.trace &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<sticky-negative-repeat.trace &&
+
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-recovery &&
+		git update-index --fsmonitor-valid target &&
+		test_expect_code 1 git grep \
+			"absent source checksum" -- target &&
+		echo "source checksum other" >checksum-other &&
+		test-tool chmtime =-5 checksum-other &&
+		git add checksum-other &&
+		git status --porcelain >/dev/null &&
+		echo "changed before delayed negative" >target &&
+		git update-index --fsmonitor-valid target &&
+		negative_hold="$PWD/.git/grep-worktree-checksum-hold" &&
+		negative_ready="$PWD/.git/grep-worktree-checksum-ready" &&
+		>"$negative_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$negative_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$negative_ready" \
+				GIT_TRACE2_EVENT="$PWD/checksum-negative.trace" \
+				git grep "absent source checksum" -- target \
+				>checksum-negative.out \
+				2>checksum-negative.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$negative_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$negative_ready" &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/checksum-positive.trace" \
+			git grep "absent source checksum" -- checksum-other &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<checksum-positive.trace &&
+		rm "$negative_hold" &&
+		test_expect_code 1 wait "$negative_pid" &&
+		trap - 0 &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<checksum-negative.trace &&
+		test_trace2_data grep worktree_blob/direct_write 1 \
+			<checksum-negative.trace &&
+		echo "target:changed before delayed negative" >expected &&
+		GIT_TRACE2_EVENT="$PWD/checksum-result.trace" \
+			git grep "changed before delayed negative" -- \
+				target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<checksum-result.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree repeated negative remaps after index change' '
+	test_when_finished "rm -rf grep-worktree-repeated-negative" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-repeated-negative &&
+		cd grep-worktree-repeated-negative &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "repeated negative target" >target &&
+		echo "direct negative target" >direct &&
+		test-tool chmtime =-5 target direct &&
+		git add target direct &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-recovery &&
+		echo "dirty repeated negative" >target &&
+		git update-index --fsmonitor-valid target &&
+		git grep "dirty repeated negative" -- target >actual &&
+		echo "target:dirty repeated negative" >expected &&
+		test_cmp expected actual &&
+		echo "dirty direct negative" >direct &&
+		git update-index --fsmonitor-valid direct &&
+		GIT_TRACE2_EVENT="$PWD/direct-negative.trace" \
+			git grep "dirty direct negative" -- direct >actual &&
+		echo "direct:dirty direct negative" >expected-direct &&
+		test_cmp expected-direct actual &&
+		test_trace2_data grep worktree_blob/direct_write 1 \
+			<direct-negative.trace &&
+		echo "direct negative target" >direct &&
+		git update-index --fsmonitor-valid direct &&
+		cp .git/index .git/index.repeated-old &&
+		cp .git/index.grep-worktree \
+			.git/index.grep-worktree.repeated-old &&
+
+		echo "repeated negative shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		echo "repeated negative target" >target &&
+		git update-index --fsmonitor-valid target &&
+		test_expect_code 1 git grep \
+			"absent repeated negative" -- target &&
+		cp .git/index .git/index.repeated-new &&
+		cp .git/index.grep-worktree \
+			.git/index.grep-worktree.repeated-new &&
+
+		cp .git/index.repeated-old .git/index &&
+		rm .git/index.grep-worktree &&
+		cp .git/index.grep-worktree.repeated-old \
+			.git/index.grep-worktree &&
+		echo "dirty repeated negative" >target &&
+		negative_hold="$PWD/.git/grep-worktree-repeated-hold" &&
+		negative_ready="$PWD/.git/grep-worktree-repeated-ready" &&
+		>"$negative_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$negative_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$negative_ready" \
+				GIT_TRACE2_EVENT="$PWD/repeated-negative.trace" \
+				git grep "dirty repeated negative" -- target \
+				>negative.out 2>negative.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$negative_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$negative_ready" &&
+		cp .git/index.repeated-new .git/index &&
+		rm .git/index.grep-worktree &&
+		cp .git/index.grep-worktree.repeated-new \
+			.git/index.grep-worktree &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before-repeated &&
+		rm "$negative_hold" &&
+		wait "$negative_pid" &&
+		trap - 0 &&
+		test_cmp .git/index.grep-worktree-generation.before-repeated \
+			.git/index.grep-worktree-generation &&
+		test_trace2_data grep worktree_blob/negative_noop 0 \
+			<repeated-negative.trace &&
+
+		GIT_TRACE2_EVENT="$PWD/repeated-result.trace" \
+			git grep "dirty repeated negative" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<repeated-result.trace &&
+		test_trace2_data grep worktree_blob/negative_noop 1 \
+			<repeated-result.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree negatives invalidate unsafe generations' '
+	test_when_finished "rm -rf grep-worktree-generation-race" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-generation-race &&
+		cd grep-worktree-generation-race &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "generation target" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent generation race" -- target &&
+
+		echo "generation shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		echo "negative before generation change" >target &&
+		git update-index --fsmonitor-valid target &&
+		negative_hold="$PWD/.git/grep-worktree-generation-negative-hold" &&
+		negative_ready="$PWD/.git/grep-worktree-generation-negative-ready" &&
+		>"$negative_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$negative_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$negative_ready" \
+				git grep "absent generation race" -- target \
+				>negative.out 2>negative.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$negative_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$negative_ready" &&
+
+		generation=.git/index.grep-worktree-generation &&
+		{
+			test_copy_bytes 12 <"$generation" &&
+			printf "replacement generation" |
+				test-tool $(test_oid algo) -b
+		} >"$generation.new-body" &&
+		test-tool $(test_oid algo) -b \
+			<"$generation.new-body" \
+			>"$generation.new-checksum" &&
+		cat "$generation.new-body" \
+			"$generation.new-checksum" \
+			>"$generation.new" &&
+		rm "$generation.new-body" \
+			"$generation.new-checksum" &&
+		mv "$generation.new" "$generation" &&
+		cp "$generation" "$generation.before-negative" &&
+
+		echo "generation target" >target &&
+		git update-index --fsmonitor-valid target &&
+		positive_hold="$PWD/.git/grep-worktree-generation-positive-hold" &&
+		positive_ready="$PWD/.git/grep-worktree-generation-positive-ready" &&
+		>"$positive_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$positive_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$positive_ready" \
+				git grep "absent generation race" -- target \
+				>positive.out 2>positive.err &
+		} &&
+		positive_pid=$! &&
+		trap "kill $negative_pid $positive_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$positive_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$positive_ready" &&
+
+		echo "changed after newer positive" >target &&
+		git update-index --fsmonitor-valid target &&
+		rm "$negative_hold" &&
+		test_expect_code 1 wait "$negative_pid" &&
+		trap "kill $positive_pid 2>/dev/null || :" 0 &&
+		! test_cmp "$generation.before-negative" "$generation" &&
+		rm "$positive_hold" &&
+		test_expect_code 1 wait "$positive_pid" &&
+		trap - 0 &&
+		echo "target:changed after newer positive" >expected &&
+		GIT_TRACE2_EVENT="$PWD/generation-result.trace" \
+			git grep "changed after newer positive" -- \
+				target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<generation-result.trace &&
+
+		echo "generation target" >target &&
+		git add target &&
+		git status --porcelain >/dev/null &&
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-recovery &&
+		test_expect_code 1 git grep \
+			"absent unmatched negative" -- target &&
+		cp .git/index .git/index.with-target &&
+		echo "unmatched shift" >unmatched-shift &&
+		test-tool chmtime =-5 unmatched-shift &&
+		git add unmatched-shift &&
+		git status --porcelain >/dev/null &&
+		echo "unmatched negative" >target &&
+		git update-index --fsmonitor-valid target &&
+		negative_hold="$PWD/.git/grep-worktree-unmatched-hold" &&
+		negative_ready="$PWD/.git/grep-worktree-unmatched-ready" &&
+		>"$negative_hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$negative_hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$negative_ready" \
+				git grep "absent unmatched negative" -- target \
+				>unmatched.out 2>unmatched.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$negative_ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$negative_ready" &&
+		git rm --cached -f target &&
+		cp "$generation" "$generation.before-unmatched" &&
+		rm "$negative_hold" &&
+		test_expect_code 1 wait "$negative_pid" &&
+		trap - 0 &&
+		! test_cmp "$generation.before-unmatched" "$generation" &&
+		cp .git/index.with-target .git/index &&
+		echo "target:unmatched negative" >expected &&
+		GIT_TRACE2_EVENT="$PWD/unmatched-result.trace" \
+			git grep "unmatched negative" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<unmatched-result.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree negative marks failed invalidation' '
+	test_when_finished "rm -rf grep-worktree-invalidation-failure" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-invalidation-failure &&
+		cd grep-worktree-invalidation-failure &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "invalidation target" >target &&
+		echo "invalidation other" >other &&
+		test-tool chmtime =-5 target other &&
+		git add target other &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent invalidation failure" -- target &&
+
+		echo "invalidation shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		echo "changed under invalidation failure" >target &&
+		git update-index --fsmonitor-valid target &&
+		lock=.git/index.grep-worktree.lock &&
+		invalid_lock=.git/index.grep-worktree-invalid.lock &&
+		>"$lock" &&
+		>"$invalid_lock" &&
+		env \
+			GIT_TEST_GREP_WORKTREE_INVALIDATION_FAILURE=1 \
+			GIT_TRACE2_EVENT="$PWD/negative.trace" \
+			git grep "changed under invalidation failure" \
+				-- target >actual 2>negative.err &&
+		echo "target:changed under invalidation failure" >expected &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<negative.trace &&
+		test_path_is_file .git/index.grep-worktree-invalid &&
+
+		cp .git/index.grep-worktree \
+			.git/index.grep-worktree.before-no-optional &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before-no-optional &&
+		GIT_TRACE2_EVENT="$PWD/no-optional.trace" \
+			git --no-optional-locks grep \
+				"changed under invalidation failure" \
+				-- target >actual &&
+		test_cmp expected actual &&
+		test_cmp .git/index.grep-worktree.before-no-optional \
+			.git/index.grep-worktree &&
+		test_cmp .git/index.grep-worktree-generation.before-no-optional \
+			.git/index.grep-worktree-generation &&
+		test_path_is_file .git/index.grep-worktree-invalid &&
+		! test_grep "worktree_blob/hits" no-optional.trace &&
+
+		rm "$lock" &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before-repair &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/repair.trace" \
+			git grep "absent invalidation repair" -- other &&
+		! test_cmp .git/index.grep-worktree-generation.before-repair \
+			.git/index.grep-worktree-generation &&
+		test_trace2_data grep worktree_blob/hits 0 <repair.trace &&
+		test_path_is_missing .git/index.grep-worktree-invalid &&
+
+		GIT_TRACE2_EVENT="$PWD/result.trace" \
+			git grep "changed under invalidation failure" \
+				-- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 <result.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX,SYMLINKS \
+	'worktree invalidation recognizes dangling symlink' '
+	test_when_finished "rm -rf grep-worktree-invalidation-symlink" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-invalidation-symlink &&
+		cd grep-worktree-invalidation-symlink &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "symlink invalidation target" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent symlink invalidation" -- target &&
+
+		echo "symlink invalidation shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent symlink invalidation" -- target &&
+
+		echo "dirty under symlink invalidation" >target &&
+		git update-index --fsmonitor-valid target &&
+		ln -s missing .git/index.grep-worktree-invalid &&
+		echo "target:dirty under symlink invalidation" >expected &&
+		GIT_TRACE2_EVENT="$PWD/symlink.trace" \
+			git --no-optional-locks grep \
+				"dirty under symlink invalidation" \
+				-- target >actual &&
+		test_cmp expected actual &&
+		test -L .git/index.grep-worktree-invalid &&
+		! test_grep "worktree_blob/hits" symlink.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree negative clears new split base' '
+	test_when_finished "rm -rf grep-worktree-split-negative" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-split-negative &&
+		cd grep-worktree-split-negative &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "split transition target" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep \
+			"absent split transition" -- target &&
+		cp .git/index.grep-worktree \
+			.git/index.grep-worktree.nonsplit &&
+		rm .git/index.grep-worktree &&
+
+		echo "changed across split transition" >target &&
+		git update-index --fsmonitor-valid target &&
+		hold="$PWD/.git/grep-worktree-split-negative-hold" &&
+		ready="$PWD/.git/grep-worktree-split-negative-ready" &&
+		>"$hold" &&
+		{
+			env \
+				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$hold" \
+				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+				GIT_TEST_GREP_WORKTREE_WRITE_READY="$ready" \
+				GIT_TRACE2_EVENT="$PWD/negative.trace" \
+				git grep "absent split transition" -- target \
+				>negative.out 2>negative.err &
+		} &&
+		negative_pid=$! &&
+		trap "kill $negative_pid 2>/dev/null || :" 0 &&
+		attempts=0 &&
+		while test ! -f "$ready" &&
+		      test "$attempts" -lt 30
+		do
+			sleep 1 &&
+			attempts=$(($attempts + 1)) ||
+			exit 1
+		done &&
+		test_path_is_file "$ready" &&
+
+		mv .git/index.grep-worktree.nonsplit \
+			.git/index.grep-worktree &&
+		echo "split transition target" >target &&
+		git update-index --split-index &&
+		git update-index --fsmonitor-valid target &&
+		test_path_is_file "$(git rev-parse --shared-index-path)" &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/populate-split.trace" \
+			git grep "absent split transition" -- target &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<populate-split.trace &&
+
+		echo "changed across split transition" >target &&
+		git update-index --fsmonitor-valid target &&
+		rm "$hold" &&
+		test_expect_code 1 wait "$negative_pid" &&
+		trap - 0 &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<negative.trace &&
+		echo "target:changed across split transition" >expected &&
+		GIT_TRACE2_EVENT="$PWD/post-negative.trace" \
+			git grep "changed across split transition" -- \
+				target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<post-negative.trace &&
+		test_trace2_data grep worktree_blob/recovered_split_base 0 \
+			<post-negative.trace
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree direct negative clears split base' '
+	test_when_finished "rm -rf grep-worktree-split-direct-negative" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-split-direct-negative &&
+		cd grep-worktree-split-direct-negative &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "direct split target" >target &&
+		echo "direct split other" >other &&
+		test-tool chmtime =-5 target other &&
+		git add target other &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --fsmonitor &&
+		git update-index --split-index &&
+		git status --porcelain >/dev/null &&
+		test_path_is_file "$(git rev-parse --shared-index-path)" &&
+		test_expect_code 1 git grep \
+			"absent direct split" -- target &&
+		cp .git/index .git/index.inherited &&
+
+		oid=$(git rev-parse :target) &&
+		git update-index --cacheinfo 100644 "$oid" target &&
+		git update-index --fsmonitor-valid target other &&
+		test_expect_code 1 git grep \
+			"absent direct split" -- other &&
+
+		echo "dirty direct split" >target &&
+		git update-index --fsmonitor-valid target &&
+		echo "target:dirty direct split" >expected &&
+		GIT_TRACE2_EVENT="$PWD/direct.trace" \
+			git grep "dirty direct split" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/direct_write 1 \
+			<direct.trace &&
+
+		cp .git/index.inherited .git/index &&
+		GIT_TRACE2_EVENT="$PWD/result.trace" \
+			git grep "dirty direct split" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<result.trace &&
+		test_trace2_data grep worktree_blob/recovered_split_base 0 \
+			<result.trace
+	)
 '
 
 test_expect_success NO_FORCED_SPLIT_INDEX \
@@ -2853,11 +4113,17 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		grep-worktree-sparse/.git/hooks &&
 	echo "inside sparse index" >grep-worktree-sparse/inside/file &&
 	echo "outside sparse index" >grep-worktree-sparse/outside/file &&
+	test-tool chmtime =-5 grep-worktree-sparse/inside/file \
+		grep-worktree-sparse/outside/file &&
 	git -C grep-worktree-sparse add . &&
 	git -C grep-worktree-sparse commit -m initial &&
 	test_hook -C grep-worktree-sparse --setup --clobber \
 		fsmonitor-test <<-\EOF &&
 		printf "last_update_token\0"
+		if test -f .git/fsmonitor-inside
+		then
+			printf "inside/file\0"
+		fi
 	EOF
 	git -C grep-worktree-sparse config \
 		core.fsmonitor .git/hooks/fsmonitor-test &&
@@ -2865,7 +4131,12 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 	git -C grep-worktree-sparse sparse-checkout init \
 		--cone --sparse-index &&
 	git -C grep-worktree-sparse sparse-checkout set inside &&
+	test-tool chmtime =-5 grep-worktree-sparse/inside/file &&
+	>grep-worktree-sparse/.git/fsmonitor-inside &&
 	git -C grep-worktree-sparse status --porcelain >/dev/null &&
+	rm grep-worktree-sparse/.git/fsmonitor-inside &&
+	git -C grep-worktree-sparse update-index \
+		--fsmonitor-valid inside/file &&
 	test_expect_code 1 git -C grep-worktree-sparse grep \
 		"absent sparse index" -- inside/file &&
 	test_expect_code 1 env \

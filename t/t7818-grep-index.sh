@@ -906,10 +906,18 @@ test_expect_success 'case-insensitive index rejects non-ASCII patterns' '
 
 test_expect_success 'content index prunes cached worktree blobs' '
 	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 &&
 	export GIT_TEST_GREP_LITERAL_PATHS &&
-	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
+	export GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS \
+		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES" &&
 	test_when_finished "rm -f .git/fsmonitor-ordinary \
-			    .git/index.grep-worktree &&
+			    .git/index.grep-worktree \
+			    .git/index.grep-worktree-generation \
+			    .git/index.grep-worktree-recovery \
+			    .git/index.grep-worktree.save \
+			    recovery-lookup.trace &&
+			    git rm -f --ignore-unmatch ordinary-shift &&
 			    git update-index --no-fsmonitor &&
 			    git checkout -- ordinary" &&
 	test_hook --setup --clobber fsmonitor-test <<-\EOF &&
@@ -926,6 +934,20 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_must_fail git grep "absent cached worktree" -- ordinary &&
 	test_path_is_file .git/index.grep-worktree &&
 	test_must_fail git grep "absent cached worktree" -- ordinary &&
+	echo "ordinary shift" >ordinary-shift &&
+	test-tool chmtime =-5 ordinary-shift &&
+	git add ordinary-shift &&
+	git status --porcelain >/dev/null &&
+	cp .git/index.grep-worktree .git/index.grep-worktree.save &&
+	echo "ordinary:ordinary contents" >expected &&
+	env GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=2 \
+		GIT_TRACE2_EVENT="$PWD/recovery-lookup.trace" \
+		git grep "ordinary contents" -- ordinary >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep worktree_blob/recovered_identity 1 \
+		<recovery-lookup.trace &&
+	test_cmp .git/index.grep-worktree.save \
+		.git/index.grep-worktree &&
 	echo "worktree-only-needle" >ordinary &&
 	>.git/fsmonitor-ordinary &&
 	oid=$(git rev-parse :ordinary) &&
@@ -944,7 +966,10 @@ test_expect_success FSMONITOR_DAEMON \
 	'content index selects worktree candidates first' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git checkout -- ordinary &&
-			    rm -f .git/index.grep-worktree candidate-*.trace" &&
+			    rm -f .git/index.grep-worktree \
+				.git/index.grep-worktree-generation \
+				.git/index.grep-worktree-recovery \
+				candidate-*.trace" &&
 	test_config grep.worktreeBlobCache true &&
 	test_config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
@@ -1003,6 +1028,8 @@ test_expect_success FSMONITOR_DAEMON \
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git checkout -- literal-candidate-a-01 &&
 			    rm -f .git/index.grep-worktree \
+				.git/index.grep-worktree-generation \
+				.git/index.grep-worktree-recovery \
 				candidate-literal-*.trace \
 				literal-candidate-paths" &&
 	test_config grep.worktreeBlobCache true &&
