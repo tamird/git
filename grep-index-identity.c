@@ -6,6 +6,7 @@
 #include "path.h"
 #include "read-cache-ll.h"
 #include "repository.h"
+#include "split-index.h"
 #include "strbuf.h"
 #include "wrapper.h"
 
@@ -252,9 +253,27 @@ int grep_index_identity_get(struct repository *repo,
 			    struct index_state *istate,
 			    struct grep_index_identity *identity)
 {
+	struct git_hash_ctx ctx;
 	struct object_id scope_oid;
 
 	hash_scope(repo, &scope_oid);
+	oidclr(&identity->worktree_split_base_identity, repo->hash_algo);
+	if (istate->split_index && istate->split_index->base &&
+	    istate->split_index->base->cache_nr) {
+		/*
+		 * Scope the immutable base to this checkout so its positions
+		 * cannot be reused by another worktree sharing the object store.
+		 */
+		repo->hash_algo->init_fn(&ctx);
+		git_hash_update(&ctx, "grep-worktree-split-base-v1", 27);
+		hash_uint32(&ctx, repo->hash_algo->format_id);
+		git_hash_update(&ctx, scope_oid.hash, repo->hash_algo->rawsz);
+		git_hash_update(&ctx, istate->split_index->base_oid.hash,
+				repo->hash_algo->rawsz);
+		hash_uint32(&ctx, istate->split_index->base->cache_nr);
+		git_hash_final_oid(&identity->worktree_split_base_identity,
+				   &ctx);
+	}
 	if (!load_token(repo, istate, &scope_oid, identity))
 		return 0;
 	if (compute_identity(repo, istate, identity))
