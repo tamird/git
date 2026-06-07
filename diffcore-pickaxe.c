@@ -41,6 +41,8 @@ struct diff_pickaxe_index {
 	unsigned pickaxe_opts;
 	int direct_tried;
 	int ipc;
+	int persistent_only;
+	int text;
 	int tried;
 	uint64_t cache_hits;
 	uint64_t tested;
@@ -168,6 +170,7 @@ static int pickaxe_index_maybe_contains(
 	const struct diff_filespec *spec)
 {
 	struct diff_pickaxe_index_entry *entry;
+	struct grep_index_location location;
 	int maybe;
 
 	if (!DIFF_FILE_VALID(spec))
@@ -181,11 +184,28 @@ static int pickaxe_index_maybe_contains(
 	}
 	if (!index->index)
 		return 1;
-	maybe = index->prepared ?
-			grep_index_prepared_maybe_contains(
-				index->prepared, repo, &spec->oid) :
-			grep_index_maybe_contains(
+	if (index->persistent_only && !index->prepared) {
+		if (!grep_index_is_transposed(index->index)) {
+			maybe = grep_index_maybe_contains(
 				index->index, repo, &spec->oid, index->query);
+		} else if (grep_index_resolve_location(
+				   index->index, &spec->oid, &location)) {
+			maybe = 1;
+		} else {
+			index->prepared =
+				grep_index_prepare(index->index, index->query);
+			maybe = !index->prepared ||
+				grep_index_prepared_location_maybe_contains(
+					index->prepared, &location);
+		}
+	} else {
+		maybe = index->prepared ?
+				grep_index_prepared_maybe_contains(
+					index->prepared, repo, &spec->oid) :
+				grep_index_maybe_contains(
+					index->index, repo, &spec->oid,
+					index->query);
+	}
 	index->tested++;
 	if (index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
 		CALLOC_ARRAY(entry, 1);
@@ -233,15 +253,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	if (textconv_one == textconv_two && diff_unmodified_pair(p))
 		return 0;
 
-	if ((o->pickaxe_opts & DIFF_PICKAXE_KIND_G) &&
-	    !o->flags.text &&
-	    ((!textconv_one && diff_filespec_is_binary(o->repo, p->one)) ||
-	     (!textconv_two && diff_filespec_is_binary(o->repo, p->two))))
-		return 0;
-
-	if (index &&
-	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
-	    !(o->pickaxe_opts & DIFF_PICKAXE_REGEX) &&
+	if (index && index->query &&
 	    !textconv_one && !textconv_two &&
 	    !pickaxe_index_maybe_contains(
 		    index, o->repo, p->one) &&
@@ -250,6 +262,12 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 		index->impossible_pairs++;
 		return 0;
 	}
+
+	if ((o->pickaxe_opts & DIFF_PICKAXE_KIND_G) &&
+	    !o->flags.text &&
+	    ((!textconv_one && diff_filespec_is_binary(o->repo, p->one)) ||
+	     (!textconv_two && diff_filespec_is_binary(o->repo, p->two))))
+		return 0;
 
 	mf1.size = fill_textconv(o->repo, textconv_one, p->one, &mf1.ptr);
 	mf2.size = fill_textconv(o->repo, textconv_two, p->two, &mf2.ptr);
@@ -323,6 +341,12 @@ void diffcore_pickaxe(struct diff_options *o)
 	size_t max_direct_oids = git_env_ulong(
 		"GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS",
 		PICKAXE_INDEX_DIRECT_MAX_OIDS);
+	unsigned query_opts =
+		opts & (DIFF_PICKAXE_KINDS_G_REGEX_MASK |
+			DIFF_PICKAXE_IGNORE_CASE);
+	int indexable_ere =
+		!(query_opts & DIFF_PICKAXE_KINDS_G_REGEX_MASK) ||
+		!(query_opts & DIFF_PICKAXE_IGNORE_CASE);
 	struct diff_pickaxe_index *index =
 		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
 	regex_t regex, *regexp = NULL;
@@ -375,13 +399,12 @@ void diffcore_pickaxe(struct diff_options *o)
 		BUG("unknown pickaxe_opts flag");
 	}
 
-	if ((opts & DIFF_PICKAXE_KIND_S) &&
-	    !(opts & DIFF_PICKAXE_REGEX) &&
+	if ((opts & (DIFF_PICKAXE_KIND_S | DIFF_PICKAXE_KIND_G)) &&
 	    o->pickaxe_index_state) {
 		if (index &&
 		    (strcmp(index->needle, needle) ||
-		     index->pickaxe_opts !=
-			     (opts & DIFF_PICKAXE_IGNORE_CASE))) {
+		     index->pickaxe_opts != query_opts ||
+		     index->text != o->flags.text)) {
 			diff_pickaxe_index_clear(o->pickaxe_index_state);
 			index = NULL;
 		}
@@ -389,8 +412,8 @@ void diffcore_pickaxe(struct diff_options *o)
 			CALLOC_ARRAY(index, 1);
 			index->repo = o->repo;
 			index->needle = xstrdup(needle);
-			index->pickaxe_opts =
-				opts & DIFF_PICKAXE_IGNORE_CASE;
+			index->pickaxe_opts = query_opts;
+			index->text = o->flags.text;
 			oidmap_init(&index->results, 0);
 			*o->pickaxe_index_state = index;
 		}
@@ -404,11 +427,20 @@ void diffcore_pickaxe(struct diff_options *o)
 			struct grep_opt opt;
 
 			index->tried = 1;
-			if (git_env_bool(
+			/*
+			 * Pickaxe EREs use the platform REG_ICASE rules,
+			 * which need not match the case-folding contract
+			 * used by grep index queries.
+			 */
+			if (indexable_ere &&
+			    git_env_bool(
 				    "GIT_TEST_PICKAXE_CONTENT_INDEX", 1)) {
 				grep_init(&opt, o->repo);
 				opt.pattern_type_option =
-					GREP_PATTERN_TYPE_FIXED;
+					(query_opts &
+					 DIFF_PICKAXE_KINDS_G_REGEX_MASK) ?
+						GREP_PATTERN_TYPE_ERE :
+						GREP_PATTERN_TYPE_FIXED;
 				opt.ignore_case =
 					!!(opts & DIFF_PICKAXE_IGNORE_CASE);
 				append_grep_pattern(
@@ -418,7 +450,11 @@ void diffcore_pickaxe(struct diff_options *o)
 				index->query =
 					grep_index_query_create(&opt);
 				free_grep_patterns(&opt);
-				if (index->query)
+				if (index->query &&
+				    (opts & DIFF_PICKAXE_KIND_G) &&
+				    !o->flags.text)
+					index->persistent_only = 1;
+				else if (index->query)
 					index->ipc =
 						grep_index_ipc_is_available(
 							o->repo);
@@ -552,7 +588,7 @@ void diffcore_pickaxe(struct diff_options *o)
 	    !index->direct_tried) {
 		index->direct_tried = 1;
 		index->index = grep_index_load(o->repo);
-		if (index->index)
+		if (index->index && !index->persistent_only)
 			index->prepared =
 				grep_index_prepare(index->index, index->query);
 	}
@@ -582,6 +618,9 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 			   !!index->index);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc",
 			   index->ipc);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/persistent_only",
+			   index->persistent_only);
 	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/direct_batches",
 			   index->direct_batches);

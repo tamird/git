@@ -307,6 +307,7 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_when_finished "git reset --hard HEAD" &&
 	unknown_oid=$(git rev-parse :daemon-unknown) &&
 	git grep-index --no-progress &&
+	test_when_finished "rm -rf .git/objects/info/grep-index" &&
 	unknown_object=.git/objects/$(test_oid_to_path "$unknown_oid") &&
 	mv "$unknown_object" "$unknown_object.save" &&
 	test_when_finished "mv \"$unknown_object.save\" \"$unknown_object\"" &&
@@ -333,14 +334,20 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 test_expect_success 'setup indexed pickaxe history' '
 	echo "pickaxe needle old" >pickaxe-old &&
 	echo "pickaxe daemon old" >pickaxe-daemon-history &&
+	cp pickaxe-old pickaxe-deleted &&
 	echo "pickaxe replacement" >pickaxe-new &&
+	printf "pickaxe binary old\\0" >pickaxe-binary-old &&
+	cp pickaxe-binary-old pickaxe-binary &&
 	cp pickaxe-old pickaxe-history &&
 	git add pickaxe-old pickaxe-new pickaxe-history \
-		pickaxe-daemon-history &&
+		pickaxe-daemon-history pickaxe-deleted \
+		pickaxe-binary-old pickaxe-binary &&
 	git commit -m "pickaxe old" &&
 	cp pickaxe-new pickaxe-history &&
 	cp pickaxe-new pickaxe-daemon-history &&
-	git add pickaxe-history pickaxe-daemon-history &&
+	printf "pickaxe binary new\\0" >pickaxe-binary &&
+	git rm pickaxe-deleted &&
+	git add pickaxe-history pickaxe-daemon-history pickaxe-binary &&
 	git commit -m "pickaxe new"
 '
 
@@ -367,6 +374,28 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 		-- pickaxe-history >actual 2>err &&
 	test_must_be_empty actual &&
 	test_must_be_empty err &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"abs.nt" HEAD^..HEAD \
+		-- pickaxe-history >actual-g 2>err-g &&
+	test_must_be_empty actual-g &&
+	test_must_be_empty err-g &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex -S"abs.nt" \
+		HEAD^..HEAD -- pickaxe-history >actual-regex 2>err-regex &&
+	test_must_be_empty actual-regex &&
+	test_must_be_empty err-regex &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -i -G"ABS.NT" HEAD^..HEAD \
+		-- pickaxe-history 2>err-icase-g &&
+	test_grep "unable to read" err-icase-g &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -i --pickaxe-regex -S"ABS.NT" \
+		HEAD^..HEAD -- pickaxe-history 2>err-icase-regex &&
+	test_grep "unable to read" err-icase-regex &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"a.*b" HEAD^..HEAD \
+		-- pickaxe-history 2>err-unsupported &&
+	test_grep "unable to read" err-unsupported &&
 	mv .git/objects/info/grep-index/chain-transposed \
 		.git/objects/info/grep-index/chain-transposed.save &&
 	test_when_finished "test ! -e \
@@ -378,6 +407,17 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 		-- pickaxe-history >actual-legacy 2>err-legacy &&
 	test_must_be_empty actual-legacy &&
 	test_must_be_empty err-legacy &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"abs.nt" HEAD^..HEAD \
+		-- pickaxe-history >actual-legacy-g 2>err-legacy-g &&
+	test_must_be_empty actual-legacy-g &&
+	test_must_be_empty err-legacy-g &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex -S"abs.nt" \
+		HEAD^..HEAD -- pickaxe-history >actual-legacy-regex \
+		2>err-legacy-regex &&
+	test_must_be_empty actual-legacy-regex &&
+	test_must_be_empty err-legacy-regex &&
 	mv .git/objects/info/grep-index/chain-transposed.save \
 		.git/objects/info/grep-index/chain-transposed &&
 	if test_have_prereq LIBPCRE2
@@ -395,8 +435,91 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 	test_grep "unable to read" err-no-index
 '
 
+test_expect_success 'content index preserves regex pickaxe results' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"needle|replacement" \
+		HEAD^..HEAD -- pickaxe-history >actual-g &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -G"needle|replacement" \
+		HEAD^..HEAD -- pickaxe-history >expect-g &&
+	test_cmp expect-g actual-g &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex \
+		-S"pickaxe|replacement" HEAD^..HEAD \
+		-- pickaxe-history >actual-regex &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s --pickaxe-regex \
+		-S"pickaxe|replacement" HEAD^..HEAD \
+		-- pickaxe-history >expect-regex &&
+	test_cmp expect-regex actual-regex &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --name-only --pickaxe-all \
+		-G"needle" HEAD^..HEAD >actual-all &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s --name-only --pickaxe-all \
+		-G"needle" HEAD^..HEAD >expect-all &&
+	test_cmp expect-all actual-all
+'
+
+test_expect_success 'content index preserves add and delete results' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"needle" HEAD~2..HEAD \
+		-- pickaxe-old pickaxe-deleted >actual-g &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -G"needle" HEAD~2..HEAD \
+		-- pickaxe-old pickaxe-deleted >expect-g &&
+	test_cmp expect-g actual-g &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex -S"needle" \
+		HEAD~2..HEAD -- pickaxe-old pickaxe-deleted >actual-regex &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s --pickaxe-regex -S"needle" \
+		HEAD~2..HEAD -- pickaxe-old pickaxe-deleted >expect-regex &&
+	test_cmp expect-regex actual-regex
+'
+
+test_expect_success 'content index prunes pickaxe binary reads' '
+	old_oid=$(git rev-parse HEAD^:pickaxe-binary) &&
+	new_oid=$(git rev-parse HEAD:pickaxe-binary) &&
+	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
+	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
+	mv "$old_object" "$old_object.save" &&
+	mv "$new_object" "$new_object.save" &&
+	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
+			    mv \"$new_object.save\" \"$new_object\"" &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s \
+		-G"__git_absent_binary_[p]attern__" HEAD^..HEAD \
+		-- pickaxe-binary >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err
+'
+
+test_expect_success 'content index preserves pickaxe binary behavior' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"binary" HEAD^..HEAD \
+		-- pickaxe-binary >actual &&
+	test_must_be_empty actual &&
+
+	echo "pickaxe new" >expect &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --text --format=%s -G"binary" HEAD^..HEAD \
+		-- pickaxe-binary >actual-text &&
+	test_cmp expect actual-text &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex -S"old" \
+		HEAD^..HEAD -- pickaxe-binary >actual-regex &&
+	test_cmp expect actual-regex
+'
+
 test_expect_success 'pickaxe index threshold spans commits' '
-	test_when_finished "rm -f pickaxe-threshold.trace" &&
+	test_when_finished "rm -f pickaxe-threshold.trace \
+			    pickaxe-regex-threshold.trace" &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=2 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-threshold.trace" \
 		git log --format=%s -Sabsent HEAD~2..HEAD \
@@ -406,7 +529,17 @@ test_expect_success 'pickaxe index threshold spans commits' '
 		pickaxe-threshold.trace &&
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
-		pickaxe-threshold.trace
+		pickaxe-threshold.trace &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=2 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-regex-threshold.trace" \
+		git log --format=%s -G"abs.nt" HEAD~2..HEAD \
+		-- pickaxe-history >actual-regex &&
+	test_must_be_empty actual-regex &&
+	test_grep "\"key\":\"content_index/query\",\"value\":\"1\"" \
+		pickaxe-regex-threshold.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-regex-threshold.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \
@@ -418,6 +551,7 @@ test_expect_success FSMONITOR_DAEMON \
 		GIT_TRACE2_EVENT="$PWD/daemon-prepared.trace" \
 		git fsmonitor--daemon start &&
 	test_when_finished "rm -f pickaxe-direct.trace pickaxe-ipc.trace \
+			    pickaxe-g-direct.trace pickaxe-g-ipc.trace \
 			    pickaxe-fallback.trace pickaxe-missing.trace \
 			    daemon-prepared.trace" &&
 	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
@@ -428,6 +562,27 @@ test_expect_success FSMONITOR_DAEMON \
 	mv "$new_object" "$new_object.save" &&
 	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
 			    mv \"$new_object.save\" \"$new_object\"" &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-g-direct.trace" \
+		git log --format=%s -G"abs.nt" HEAD^..HEAD \
+		-- pickaxe-history >actual-g-direct 2>err-g-direct &&
+	test_must_be_empty actual-g-direct &&
+	test_must_be_empty err-g-direct &&
+	test_grep "\"key\":\"content_index/index\",\"value\":\"1\"" \
+		pickaxe-g-direct.trace &&
+	test_grep "\"key\":\"content_index/prepared\",\"value\":\"1\"" \
+		pickaxe-g-direct.trace &&
+	test_grep "\"key\":\"content_index/tested\",\"value\":\"2\"" \
+		pickaxe-g-direct.trace &&
+	test_grep "\"key\":\"content_index/ipc\",\"value\":\"0\"" \
+		pickaxe-g-direct.trace &&
+	test_grep "\"key\":\"content_index/persistent_only\",\"value\":\"1\"" \
+		pickaxe-g-direct.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-g-direct.trace &&
+	! test_grep "\"key\":\"ipc_query/" daemon-prepared.trace &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-direct.trace" \
@@ -465,6 +620,25 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-ipc.trace &&
 	test_grep "\"key\":\"ipc_query/prepared\",\"value\":\"1\"" \
 		daemon-prepared.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-g-ipc.trace" \
+		git log --text --format=%s -G"abs.nt" HEAD^..HEAD \
+		-- pickaxe-history >actual-g-ipc 2>err-g-ipc &&
+	test_must_be_empty actual-g-ipc &&
+	test_must_be_empty err-g-ipc &&
+	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
+		pickaxe-g-ipc.trace &&
+	test_grep "\"key\":\"content_index/persistent_only\",\"value\":\"0\"" \
+		pickaxe-g-ipc.trace &&
+	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"0\"" \
+		pickaxe-g-ipc.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"1\"" \
+		pickaxe-g-ipc.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-g-ipc.trace &&
 
 	daemon_old_oid=$(git rev-parse HEAD^:pickaxe-daemon-history) &&
 	daemon_old_object=.git/objects/$(test_oid_to_path \
@@ -527,7 +701,15 @@ test_expect_success 'possible pickaxe blobs use normal reads' '
 	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sneedle HEAD^..HEAD \
 		-- pickaxe-history 2>err &&
-	test_grep "unable to read" err
+	test_grep "unable to read" err &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"replac.ment" HEAD^..HEAD \
+		-- pickaxe-history 2>err-g &&
+	test_grep "unable to read" err-g &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s --pickaxe-regex -S"replac.ment" \
+		HEAD^..HEAD -- pickaxe-history 2>err-regex &&
+	test_grep "unable to read" err-regex
 '
 
 test_expect_success 'pickaxe content index preserves textconv' '
@@ -548,7 +730,17 @@ test_expect_success 'pickaxe content index preserves textconv' '
 		git log --textconv --format=%s \
 		-S"converted pickaxe marker" HEAD^..HEAD \
 		-- pickaxe-history >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --textconv --format=%s \
+		-G"converted pickaxe marker" HEAD^..HEAD \
+		-- pickaxe-history >actual-g &&
+	test_cmp expect actual-g &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --textconv --format=%s --pickaxe-regex \
+		-S"converted.*marker" HEAD^..HEAD \
+		-- pickaxe-history >actual-regex &&
+	test_cmp expect actual-regex
 '
 
 test_expect_success 'pickaxe content index honors replacements' '
@@ -562,7 +754,11 @@ test_expect_success 'pickaxe content index honors replacements' '
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sreplacement-only-marker \
 		HEAD^..HEAD -- pickaxe-history >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -G"replacement-only-marker" \
+		HEAD^..HEAD -- pickaxe-history >actual-g &&
+	test_cmp expect actual-g
 '
 
 test_expect_success 'content index does not skip regex validation' '
