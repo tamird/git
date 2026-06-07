@@ -29,6 +29,26 @@ test_perf 'pickaxe across small diff queues' '
 		-S__git_perf_absent_pickaxe__ HEAD~256..HEAD -- >/dev/null
 '
 
+test_perf 'regex pickaxe across small diff queues' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --no-renames --format=%H --pickaxe-regex \
+		-S"__git_perf_absent_[p]ickaxe__" \
+		HEAD~256..HEAD -- >/dev/null
+'
+
+test_perf 'diff grep across small diff queues' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --no-renames --format=%H \
+		-G"__git_perf_absent_[p]ickaxe__" \
+		HEAD~256..HEAD -- >/dev/null
+'
+
+test_perf 'possible diff grep across small diff queues' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --no-renames --format=%H -G"content" \
+		HEAD~256..HEAD -- >/dev/null
+'
+
 test_expect_success 'stop fsmonitor daemon' '
 	git fsmonitor--daemon stop
 '
