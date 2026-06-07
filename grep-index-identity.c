@@ -10,7 +10,7 @@
 #include "wrapper.h"
 
 #define GREP_INDEX_TOKEN_SIGNATURE 0x47574944
-#define GREP_INDEX_TOKEN_VERSION 4
+#define GREP_INDEX_TOKEN_VERSION     5
 #define GREP_INDEX_TOKEN_HEADER_SIZE 76
 
 static void hash_uint32(struct git_hash_ctx *ctx, uint32_t value)
@@ -61,7 +61,7 @@ static int compute_identity(struct repository *repo,
 	grep_index_identity_oid_sequence_init(
 		repo, &oids_ctx, istate->cache_nr);
 	repo->hash_algo->init_fn(&entries_ctx);
-	git_hash_update(&entries_ctx, "grep-worktree-index-v1", 22);
+	git_hash_update(&entries_ctx, "grep-worktree-index-v2", 22);
 	hash_uint32(&entries_ctx, repo->hash_algo->format_id);
 	hash_string(&entries_ctx, repo_get_work_tree(repo));
 	hash_string(&entries_ctx, repo_get_git_dir(repo));
@@ -86,6 +86,29 @@ static int compute_identity(struct repository *repo,
 		strbuf_add(&entries, data, sizeof(data));
 		strbuf_add(&entries, ce->name, name_len);
 		strbuf_add(&entries, ce->oid.hash, repo->hash_algo->rawsz);
+		/*
+		 * Stat data does not prove byte equality, but distinguishes
+		 * index entry generations which retain a blob ID while their
+		 * converted worktree bytes change.
+		 */
+		put_be32(data, ce->ce_stat_data.sd_ctime.sec);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_ctime.nsec);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_mtime.sec);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_mtime.nsec);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_dev);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_ino);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_uid);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_gid);
+		strbuf_add(&entries, data, sizeof(data));
+		put_be32(data, ce->ce_stat_data.sd_size);
+		strbuf_add(&entries, data, sizeof(data));
 		if (entries.len >= 1024 * 1024) {
 			git_hash_update(&entries_ctx, entries.buf, entries.len);
 			strbuf_reset(&entries);

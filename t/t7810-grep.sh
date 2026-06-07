@@ -2444,8 +2444,14 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		echo "grep-worktree-converted -text" &&
 		echo "grep-worktree-equal text"
 	} >.gitattributes &&
+	git add .gitattributes &&
+	test_expect_code 1 git grep "absent worktree blob" -- \
+		grep-worktree-equal &&
+	>.git/fsmonitor-equal &&
 	printf "equal worktree blob\r\n" >grep-worktree-equal &&
-	git add .gitattributes grep-worktree-equal &&
+	git add grep-worktree-equal &&
+	rm .git/fsmonitor-equal &&
+	git status --porcelain >/dev/null &&
 	test "$oid" = "$(git rev-parse :grep-worktree-equal)" &&
 	pattern=$(printf "worktree blob\r") &&
 	printf "grep-worktree-equal:equal worktree blob\r\n" >expected &&
