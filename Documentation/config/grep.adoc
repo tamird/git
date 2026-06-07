@@ -29,9 +29,10 @@
 	the size threshold and the `--quiet` exclusion. `auto` starts using it
 	when the current search covers at least 1 GiB of eligible files, except
 	for `--quiet` searches. `false` disables both reading and writing the
-	cache. Observations are stored in a sidecar next to the index; disabling
-	the cache leaves an existing sidecar in place. Reading through the
-	object database may increase memory use.
+	cache. Observations, recovery data, their generation, and invalidation
+	state are stored in sidecars next to the index; disabling the cache
+	leaves existing sidecars in place. Reading through the object database
+	may increase memory use.
 
 `grep.fullName`::
 	If set to `true`, enable `--full-name` option by default.
