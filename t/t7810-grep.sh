@@ -2346,6 +2346,39 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		git grep "absent worktree blob" -- grep-worktree-equal &&
 	test_trace2_data grep worktree_blob/hits 1 \
 		<grep-worktree-trace-recovered &&
+	rawsz=$(test_oid rawsz) &&
+	git ls-files >grep-worktree-index-files &&
+	index_nr=$(wc -l <grep-worktree-index-files) &&
+	rm grep-worktree-index-files &&
+	bitmap_size=$(((index_nr + 7) / 8)) &&
+	# Keep the exact section valid, but pair zero base entries with a
+	# non-null base identity.
+	{
+		test_copy_bytes 16 <.git/index.grep-worktree &&
+		test-tool genzeros 4 &&
+		dd if=.git/index.grep-worktree bs=1 skip=20 \
+			count="$rawsz" 2>/dev/null &&
+		printf "\001" &&
+		test-tool genzeros $((rawsz - 1)) &&
+		dd if=.git/index.grep-worktree bs=1 \
+			skip=$((20 + 2 * rawsz)) \
+			count="$bitmap_size" 2>/dev/null
+	} >.git/index.grep-worktree.malformed &&
+	test-tool $(test_oid algo) -b \
+		<.git/index.grep-worktree.malformed \
+		>.git/index.grep-worktree.checksum &&
+	cat .git/index.grep-worktree.checksum \
+		>>.git/index.grep-worktree.malformed &&
+	mv .git/index.grep-worktree.malformed \
+		.git/index.grep-worktree &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-malformed-base" \
+		git grep "absent worktree blob" -- grep-worktree-equal &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<grep-worktree-trace-malformed-base &&
+	test_trace2_data grep worktree_blob/recorded_equal 1 \
+		<grep-worktree-trace-malformed-base &&
+	rm .git/index.grep-worktree.checksum &&
 	rm .git/index.grep-worktree &&
 	mv .git/index.grep-worktree.save .git/index.grep-worktree &&
 
@@ -2464,6 +2497,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-same-oid &&
 	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-same-oid &&
+	test_trace2_data grep worktree_blob/recovered_split_base 0 \
+		<grep-worktree-trace-same-oid &&
 
 	mkdir grep-worktree-other &&
 	echo "other worktree blob" >grep-worktree-other/grep-worktree-equal &&
@@ -2550,6 +2585,259 @@ test_expect_success 'grep rejects cache after index replacement' '
 
 test_lazy_prereq NO_FORCED_SPLIT_INDEX '
 	! test_bool_env GIT_TEST_SPLIT_INDEX false
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache accepts empty split-index base' '
+	test_when_finished "rm -rf grep-worktree-empty-split" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-empty-split &&
+		cd grep-worktree-empty-split &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		test_path_is_file "$(git rev-parse --shared-index-path)" &&
+		echo "empty split overlay" >overlay &&
+		test-tool chmtime =-5 overlay &&
+		git add overlay &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep "absent empty split" -- overlay &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-empty-split" \
+			git grep "absent empty split" -- overlay &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-empty-split
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache follows split-index base' '
+	test_when_finished "rm -rf grep-worktree-split" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-split &&
+		cd grep-worktree-split &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "split base target" >target &&
+		echo "split base other" >other &&
+		echo "split base cycle" >cycle &&
+		{
+			echo "cycle text" &&
+			echo "target text"
+		} >.gitattributes &&
+		test-tool chmtime =-5 .gitattributes cycle target other &&
+		git add .gitattributes cycle target other &&
+		cycle_oid=$(git rev-parse :cycle) &&
+		target_oid=$(git rev-parse :target) &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		base=$(git rev-parse --shared-index-path) &&
+		test_path_is_file "$base" &&
+		test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-target
+			then
+				printf "target\0"
+			fi
+			if test -f .git/fsmonitor-cycle
+			then
+				printf "cycle\0"
+			fi
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-initial" \
+			git grep "absent split base" -- cycle target other &&
+		test_trace2_data grep worktree_blob/recorded_equal 3 \
+			<trace-initial &&
+
+		mkdir other-worktree &&
+		echo "split scope worktree" >other-worktree/target &&
+		echo "target:split scope worktree" >expected &&
+		GIT_TRACE2_EVENT="$PWD/trace-other-worktree" \
+			git --no-optional-locks \
+				--work-tree="$PWD/other-worktree" \
+				grep "split scope worktree" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<trace-other-worktree &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-other-worktree &&
+
+		echo "split overlay addition" >added &&
+		test-tool chmtime =-5 added &&
+		git add added &&
+		git status --porcelain >/dev/null &&
+		current_base=$(git rev-parse --shared-index-path) &&
+		test "$base" = "$current_base" &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-recovered" \
+			git grep "absent split base" -- target &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-recovered &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 1 \
+			<trace-recovered &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<trace-recovered &&
+
+		git rm --cached cycle &&
+		>.git/fsmonitor-cycle &&
+		printf "split base cycle\r\n" >cycle &&
+		test-tool chmtime =-5 cycle &&
+		git add cycle &&
+		rm .git/fsmonitor-cycle &&
+		git status --porcelain >/dev/null &&
+		current_cycle_oid=$(git rev-parse :cycle) &&
+		test "$cycle_oid" = "$current_cycle_oid" &&
+		pattern=$(printf "cycle\r") &&
+		printf "cycle:split base cycle\r\n" >expected &&
+		GIT_TRACE2_EVENT="$PWD/trace-readded" \
+			git grep "$pattern" -- cycle >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<trace-readded &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-readded &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<trace-readded &&
+
+		>.git/fsmonitor-target &&
+		printf "split base target\r\n" >target &&
+		test-tool chmtime =-5 target &&
+		git add target &&
+		rm .git/fsmonitor-target &&
+		git status --porcelain >/dev/null &&
+		current_target_oid=$(git rev-parse :target) &&
+		test "$target_oid" = "$current_target_oid" &&
+		current_base=$(git rev-parse --shared-index-path) &&
+		test "$base" = "$current_base" &&
+		pattern=$(printf "target\r") &&
+		printf "target:split base target\r\n" >expected &&
+		GIT_TRACE2_EVENT="$PWD/trace-replacement" \
+			git grep "$pattern" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<trace-replacement &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-replacement &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<trace-replacement &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-added" \
+			git grep "absent split base" -- added &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-added &&
+
+		git config splitIndex.maxPercentChange 0 &&
+		git update-index --force-write-index &&
+		current_base=$(git rev-parse --shared-index-path) &&
+		test "$base" != "$current_base" &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-new-base-exact" \
+			git grep "absent split base" -- added &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-new-base-exact &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-new-base-exact &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-new-base" \
+			git grep "absent split base" -- other &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<trace-new-base &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-new-base &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-new-base
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree cache merges across split overlay race' '
+	test_when_finished "rm -rf grep-worktree-split-race" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-split-race &&
+		cd grep-worktree-split-race &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "split race cached" >cached &&
+		echo "split race pending" >pending &&
+		test-tool chmtime =-5 cached pending &&
+		git add cached pending &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		base=$(git rev-parse --shared-index-path) &&
+		test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-replace-index
+			then
+				mv .git/index.replace .git/index
+				rm .git/fsmonitor-replace-index
+				git grep "absent split race" -- added \
+					>/dev/null 2>&1
+				test $? = 1 || exit 1
+			fi
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep "absent split race" -- cached &&
+		cp .git/index .git/index.original &&
+
+		echo "split race added" >added &&
+		test-tool chmtime =-5 added &&
+		git add added &&
+		git status --porcelain >/dev/null &&
+		current_base=$(git rev-parse --shared-index-path) &&
+		test "$base" = "$current_base" &&
+		cp .git/index .git/index.replace &&
+		mv .git/index.original .git/index &&
+		>.git/fsmonitor-replace-index &&
+
+		test_expect_code 1 git grep "absent split race" -- pending &&
+		test_path_is_missing .git/fsmonitor-replace-index &&
+		added_oid=$(git rev-parse :added) &&
+		worktree_oid=$(git hash-object added) &&
+		test "$added_oid" = "$worktree_oid" &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-race-base" \
+			git grep "absent split race" -- pending &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-race-base &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 1 \
+			<trace-race-base &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-race-exact" \
+			git grep "absent split race" -- added &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-race-exact &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-race-exact
+	)
 '
 
 test_expect_success NO_FORCED_SPLIT_INDEX \

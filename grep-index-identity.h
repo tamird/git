@@ -9,6 +9,7 @@ struct repository;
 struct grep_index_identity {
 	struct object_id oid_sequence;
 	struct object_id worktree;
+	struct object_id worktree_split_base_identity;
 };
 
 void grep_index_identity_oid_sequence_init(
