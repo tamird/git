@@ -14,6 +14,7 @@
 #include "environment.h"
 #include "quote.h"
 #include "dir.h"
+#include "fsmonitor-ll.h"
 #include "gettext.h"
 #include "object-name.h"
 #include "strbuf.h"
@@ -418,6 +419,9 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 	if (!(show_cached || show_stage || show_deleted || show_modified))
 		return;
 
+	if (show_deleted || show_modified)
+		refresh_fsmonitor(repo->index);
+
 	for (i = 0; i < repo->index->cache_nr; i++) {
 		const struct cache_entry *ce = repo->index->cache[i];
 		struct stat st;
@@ -430,6 +434,8 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 			 * alone.
 			 */
 			ensure_full_index(repo->index);
+			if (show_deleted || show_modified)
+				refresh_fsmonitor(repo->index);
 			ce = repo->index->cache[i];
 		}
 
@@ -453,6 +459,8 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 		if (!(show_deleted || show_modified))
 			continue;
 		if (ce_skip_worktree(ce))
+			continue;
+		if (ce->ce_flags & CE_FSMONITOR_VALID)
 			continue;
 		/*
 		 * match_pathspec() is linear in pathspec.nr, so prefilter only
