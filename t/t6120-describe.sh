@@ -260,6 +260,51 @@ test_expect_success '--exclude does not work for other types' '
 	esac
 '
 
+test_expect_success 'describe --exclude preserves non-matching candidates' '
+	test_create_repo exclude-patterns &&
+	test_commit -C exclude-patterns --no-tag first &&
+	git -C exclude-patterns tag -a -m child literal/child &&
+	test_commit -C exclude-patterns --no-tag second &&
+	second=$(git -C exclude-patterns rev-parse HEAD) &&
+	git -C exclude-patterns update-ref refs/remotes/subtree $second &&
+	test_commit -C exclude-patterns --no-tag wildcard &&
+	wildcard=$(git -C exclude-patterns rev-parse HEAD) &&
+	git -C exclude-patterns tag foo/child $wildcard &&
+	git -C exclude-patterns tag foobar $wildcard &&
+	git -C exclude-patterns tag keep $wildcard &&
+	test_commit -C exclude-patterns --no-tag bracket &&
+	bracket=$(git -C exclude-patterns rev-parse HEAD) &&
+	git -C exclude-patterns tag foo/b $bracket &&
+	git -C exclude-patterns tag keep2 $bracket &&
+	git -C exclude-patterns update-ref -d refs/heads/main &&
+	git -C exclude-patterns pack-refs --all &&
+
+	echo literal/child >expect &&
+	git -C exclude-patterns describe --exact-match \
+		--exclude=literal literal/child^0 >actual &&
+	test_cmp expect actual &&
+
+	echo remotes/subtree >expect &&
+	git -C exclude-patterns describe --all --exact-match \
+		--exclude="subtree/*" $second >actual &&
+	test_cmp expect actual &&
+
+	echo keep >expect &&
+	git -C exclude-patterns describe --tags --exact-match \
+		--exclude="foo*" $wildcard >actual &&
+	test_cmp expect actual &&
+
+	echo foo/b >expect &&
+	git -C exclude-patterns describe --tags --exact-match \
+		--exclude="foo[a]*" $bracket >actual &&
+	test_cmp expect actual &&
+
+	git -C exclude-patterns rev-parse --short $second >expect &&
+	git -C exclude-patterns describe --all --always \
+		--exclude="*" $second >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'name-rev with exact tags' '
 	echo A >expect &&
 	tag_object=$(git rev-parse refs/tags/A) &&
