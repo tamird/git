@@ -14,6 +14,7 @@
 #include "environment.h"
 #include "quote.h"
 #include "dir.h"
+#include "fsmonitor.h"
 #include "gettext.h"
 #include "object-name.h"
 #include "strbuf.h"
@@ -238,7 +239,6 @@ static void show_submodule(struct repository *superproject,
 				null_oid(superproject->hash_algo)))
 		return;
 
-	subrepo.index->lazy_cache_tree = 1;
 	if (repo_read_index(&subrepo) < 0)
 		die("index file corrupt");
 
@@ -418,6 +418,9 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 	if (!(show_cached || show_stage || show_deleted || show_modified))
 		return;
 
+	if (show_deleted || show_modified)
+		refresh_fsmonitor(repo->index);
+
 	for (i = 0; i < repo->index->cache_nr; i++) {
 		const struct cache_entry *ce = repo->index->cache[i];
 		struct stat st;
@@ -430,6 +433,8 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 			 * alone.
 			 */
 			ensure_full_index(repo->index);
+			if (show_deleted || show_modified)
+				refresh_fsmonitor(repo->index);
 			ce = repo->index->cache[i];
 		}
 
@@ -464,6 +469,8 @@ static void show_files(struct repository *repo, struct dir_struct *dir)
 				    fullname.len, max_prefix_len, NULL,
 				    S_ISDIR(ce->ce_mode) ||
 				    S_ISGITLINK(ce->ce_mode)))
+			continue;
+		if (ce->ce_flags & CE_FSMONITOR_VALID)
 			continue;
 		stat_err = lstat(fullname.buf, &st);
 		if (stat_err && (errno != ENOENT && errno != ENOTDIR))
@@ -679,7 +686,6 @@ int cmd_ls_files(int argc,
 		prefix_len = strlen(prefix);
 	repo_config(repo, git_default_config, NULL);
 
-	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die("index file corrupt");
 

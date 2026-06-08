@@ -201,6 +201,10 @@ test_fsmonitor_suite () {
 		git status -- "*tracked"
 	'
 
+	test_perf_w_drop_caches "ls-files --deleted ($DESC)" '
+		git ls-files --deleted
+	'
+
 	# Update the mtimes on upto 100k files to make status think
 	# that they are dirty.  For simplicity, omit any files with
 	# LFs (i.e. anything that ls-files thinks it needs to dquote)
