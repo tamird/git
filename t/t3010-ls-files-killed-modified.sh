@@ -142,4 +142,68 @@ test_expect_success 'worktree modes honor wildcard pathspecs' '
 	test_must_fail git ls-files --modified --error-unmatch -- path10
 '
 
+test_expect_success 'worktree modes honor fsmonitor-valid entries' '
+	test_create_repo fsmonitor &&
+	(
+		cd fsmonitor &&
+		echo modified >modified &&
+		echo deleted >deleted &&
+		git add modified deleted &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git update-index --fsmonitor &&
+		git update-index --fsmonitor-valid modified deleted &&
+		echo changed >modified &&
+		rm deleted &&
+		git ls-files --deleted >actual &&
+		test_must_be_empty actual &&
+		git ls-files --modified >actual &&
+		test_must_be_empty actual &&
+
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "modified\0"
+			printf "deleted\0"
+		EOF
+		echo deleted >expect &&
+		git ls-files --deleted >actual &&
+		test_cmp expect actual &&
+		cat >expect <<-\EOF &&
+		deleted
+		modified
+		EOF
+		git ls-files --modified >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'worktree modes refresh after sparse index expansion' '
+	sane_unset GIT_TEST_SPLIT_INDEX &&
+	test_create_repo sparse &&
+	(
+		cd sparse &&
+		mkdir outside &&
+		echo outside >outside/file &&
+		echo tracked >tracked &&
+		git add outside/file tracked &&
+		git commit -m initial &&
+		git sparse-checkout init --cone --sparse-index &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git update-index --fsmonitor &&
+		git update-index --fsmonitor-valid tracked &&
+		echo modified >tracked &&
+		echo tracked >expect &&
+		git ls-files --modified >actual &&
+		test_cmp expect actual &&
+		git ls-files --modified --with-tree=HEAD >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_done
