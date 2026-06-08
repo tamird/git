@@ -606,6 +606,7 @@ int cmd_describe(int argc,
 	struct refs_for_each_ref_options for_each_ref_opts = {
 		.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
 	};
+	struct strvec ref_excludes = STRVEC_INIT;
 	int contains = 0;
 	struct option options[] = {
 		OPT_BOOL(0, "contains",   &contains, N_("find the tag that comes after the commit")),
@@ -717,9 +718,52 @@ int cmd_describe(int argc,
 	if (!all)
 		for_each_ref_opts.prefix = "refs/tags/";
 
+	/*
+	 * The refs machinery can skip literal directory prefixes, while
+	 * describe accepts wildmatch patterns. A literal prefix followed only
+	 * by asterisks matches every ref below that prefix, so it is safe to
+	 * pass the prefix as a best-effort exclusion. The refs machinery adds
+	 * a directory boundary, so "foo*" skips "foo/" but not "foobar".
+	 * get_name() remains responsible for matches outside that subtree and
+	 * for backends that ignore exclusions.
+	 */
+	if (exclude_patterns.nr) {
+		struct string_list_item *item;
+
+		for_each_string_list_item(item, &exclude_patterns) {
+			const char *pattern = item->string;
+			size_t pattern_len = strlen(pattern);
+			size_t prefix_len = pattern_len;
+			size_t i;
+
+			while (prefix_len && pattern[prefix_len - 1] == '*')
+				prefix_len--;
+			if (prefix_len == pattern_len)
+				continue;
+
+			for (i = 0; i < prefix_len; i++)
+				if (is_glob_special(pattern[i]))
+					break;
+			if (i != prefix_len)
+				continue;
+
+			strvec_pushf(&ref_excludes, "refs/tags/%.*s",
+				     (int)prefix_len, pattern);
+			if (all) {
+				strvec_pushf(&ref_excludes, "refs/heads/%.*s",
+					     (int)prefix_len, pattern);
+				strvec_pushf(&ref_excludes, "refs/remotes/%.*s",
+					     (int)prefix_len, pattern);
+			}
+		}
+
+		for_each_ref_opts.exclude_patterns = ref_excludes.v;
+	}
+
 	hashmap_init(&names, commit_name_neq, NULL, 0);
 	refs_for_each_ref_ext(get_main_ref_store(the_repository),
 			      get_name, NULL, &for_each_ref_opts);
+	strvec_clear(&ref_excludes);
 	if (!hashmap_get_size(&names) && !always)
 		die(_("No names found, cannot describe anything."));
 
