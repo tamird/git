@@ -57,6 +57,10 @@ struct fsm_listen_data
 	unsigned int stream_started:1;
 };
 
+static void fsm_listen__queue_marker(void *ctx UNUSED)
+{
+}
+
 static void log_flags_set(const char *path, const FSEventStreamEventFlags flag)
 {
 	struct strbuf msg = STRBUF_INIT;
@@ -524,6 +528,19 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	pthread_mutex_lock(&data->dq_lock);
 	pthread_cond_wait(&data->dq_finished, &data->dq_lock);
 	pthread_mutex_unlock(&data->dq_lock);
+
+	/*
+	 * FSEventStreamStop() prevents callbacks while the stream is stopped,
+	 * but does not guarantee that a queued or active callback has finished.
+	 * Drain the serial queue before returning; the caller then clears
+	 * current_token_data.
+	 *
+	 * This thread is not running on dq and no longer holds dq_lock, so a
+	 * callback can finish even if it initiated shutdown.
+	 */
+	FSEventStreamStop(data->stream);
+	data->stream_started = 0;
+	dispatch_sync_f(data->dq, NULL, fsm_listen__queue_marker);
 
 	switch (data->shutdown_style) {
 	case FORCE_ERROR_STOP:
