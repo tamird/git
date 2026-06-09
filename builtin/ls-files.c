@@ -239,6 +239,7 @@ static void show_submodule(struct repository *superproject,
 				null_oid(superproject->hash_algo)))
 		return;
 
+	subrepo.index->lazy_cache_tree = 1;
 	if (repo_read_index(&subrepo) < 0)
 		die("index file corrupt");
 
@@ -686,6 +687,7 @@ int cmd_ls_files(int argc,
 		prefix_len = strlen(prefix);
 	repo_config(repo, git_default_config, NULL);
 
+	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die("index file corrupt");
 
