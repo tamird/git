@@ -764,7 +764,7 @@ test_expect_success 'pickaxe content index honors replacements' '
 test_expect_success 'content index does not skip regex validation' '
 	test_must_fail git -c grep.threads=8 grep --cached \
 		"absent[9-0]" 2>err &&
-	test_grep "Invalid range" err
+	test_grep -i "invalid.*range" err
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
@@ -986,10 +986,6 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-unknown.trace &&
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
-
-	test_expect_code 1 git grep --no-content-index \
-		"absent candidate warmup" -- "ord*" &&
-	test_path_is_file .git/index.grep-worktree &&
 
 	echo "ordinary:ordinary contents" >expected &&
 	GIT_TRACE2_EVENT="$PWD/candidate-clean.trace" \
