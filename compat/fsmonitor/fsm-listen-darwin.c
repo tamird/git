@@ -525,6 +525,14 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	pthread_cond_wait(&data->dq_finished, &data->dq_lock);
 	pthread_mutex_unlock(&data->dq_lock);
 
+	/*
+	 * Stop callbacks before the listener thread clears daemon state.
+	 * FSEventStreamStop() guarantees that the callback will not be
+	 * called again for this stream.
+	 */
+	FSEventStreamStop(data->stream);
+	data->stream_started = 0;
+
 	switch (data->shutdown_style) {
 	case FORCE_ERROR_STOP:
 		state->listen_error_code = -1;
