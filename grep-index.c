@@ -1656,7 +1656,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			    p->pattern[i + 1] == '|') {
 				separator_len = 2;
 				alternation = 1;
-			} else if (pattern_type == GREP_PATTERN_TYPE_ERE &&
+			} else if ((pattern_type == GREP_PATTERN_TYPE_ERE ||
+				    pattern_type == GREP_PATTERN_TYPE_PCRE) &&
 				   ch == '|') {
 				separator_len = 1;
 				alternation = 1;
