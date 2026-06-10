@@ -40,6 +40,22 @@ test_expect_success 'blame follows renames across unchanged commits' '
 	test_grep "^filename old$" actual
 '
 
+test_expect_success 'blame uses Bloom filters in shallow repositories' '
+	git init shallow &&
+	test_commit -C shallow base file line &&
+	test_commit -C shallow boundary unrelated boundary &&
+	for i in 1 2 3 4 5 6 7 8 9 10
+	do
+		test_commit -C shallow later-$i unrelated || exit 1
+	done &&
+	git -C shallow commit-graph write --reachable --changed-paths &&
+	git -C shallow rev-parse boundary^{commit} >shallow/.git/shallow &&
+
+	check_blame shallow --porcelain file &&
+	boundary=$(git -C shallow rev-parse boundary) &&
+	test_grep "^$boundary " actual
+'
+
 test_expect_success 'blame handles ignored revisions' '
 	git init ignore &&
 	test_write_lines line1 line2 >ignore/file &&
