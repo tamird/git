@@ -1279,9 +1279,6 @@ static int maybe_changed_path(struct repository *r,
 	if (!bd)
 		return 1;
 
-	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY)
-		return 1;
-
 	filter = get_bloom_filter(r, commit);
 
 	if (!filter)
