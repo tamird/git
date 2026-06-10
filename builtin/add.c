@@ -505,8 +505,7 @@ int cmd_add(int argc,
 		if (!ignored_too) {
 			if (pathspec.nr)
 				dir.flags |= DIR_COLLECT_IGNORED;
-			else
-				dir.untracked = repo->index->untracked;
+			dir.untracked = repo->index->untracked;
 			setup_standard_excludes(&dir);
 		}
 
