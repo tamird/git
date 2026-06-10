@@ -47,7 +47,8 @@ test_expect_success 'push from shallow clone' '
 	(
 	cd shallow &&
 	commit 5 &&
-	git push ../.git +main:refs/remotes/shallow/main
+	git -c pack.useAggressiveShallowEdges=false \
+		push ../.git +main:refs/remotes/shallow/main
 	) &&
 	git log --format=%s shallow/main >actual &&
 	git fsck &&
