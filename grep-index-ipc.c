@@ -39,6 +39,7 @@ int grep_index_ipc_query(struct repository *repo UNUSED,
 int grep_index_ipc_query_index(struct repository *repo UNUSED,
 			       const struct grep_index_query *query UNUSED,
 			       unsigned char *maybe UNUSED,
+			       unsigned char *unresolved UNUSED,
 			       size_t nr UNUSED,
 			       struct object_id *identity UNUSED,
 			       int *negative_cache_supported UNUSED)
@@ -110,6 +111,7 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server UNUSED)
 # define GREP_INDEX_IPC_INDEX_REQUEST_SIGNATURE  0x47494951
 # define GREP_INDEX_IPC_INDEX_RESPONSE_SIGNATURE 0x47494950
 # define GREP_INDEX_IPC_INDEX_CACHED_RESPONSE_SIGNATURE 0x47494943
+# define GREP_INDEX_IPC_INDEX_OVERLAY_REQUEST_SIGNATURE 0x47494f51
 # define GREP_INDEX_IPC_INDEX_MISSING_SIGNATURE  0x4749494d
 # define GREP_INDEX_IPC_REGISTER_REQUEST_SIGNATURE  0x47495247
 # define GREP_INDEX_IPC_REGISTER_RESPONSE_SIGNATURE 0x47495253
@@ -958,7 +960,8 @@ static int grep_index_ipc_handle_index_request(
 	struct grep_index_ipc_server *server,
 	const char *request, size_t request_len,
 	ipc_server_reply_cb *reply,
-	struct ipc_server_reply_data *reply_data)
+	struct ipc_server_reply_data *reply_data,
+	int include_unresolved)
 {
 	struct grep_index_query *query = NULL;
 	struct grep_index_prepared *prepared = NULL;
@@ -1037,15 +1040,20 @@ static int grep_index_ipc_handle_index_request(
 	response_header_size = cache_negatives ?
 				       GREP_INDEX_IPC_CACHED_RESPONSE_HEADER_SIZE :
 				       GREP_INDEX_IPC_RESPONSE_HEADER_SIZE;
-	strbuf_grow(&response, bitmap_size);
-	for (size_t i = 0; i < bitmap_size; i++)
+	strbuf_grow(&response, bitmap_size * (1 + include_unresolved));
+	for (size_t i = 0; i < bitmap_size * (1 + include_unresolved); i++)
 		strbuf_addch(&response, 0);
-	for (size_t i = 0; i < nr; i++)
+	for (size_t i = 0; i < nr; i++) {
 		if (grep_index_prepared_location_maybe_contains(
 			    prepared, &cached->locations[i]))
 			response.buf[response_header_size +
 				     i / 8] |=
 				1u << (i & 7);
+		if (include_unresolved && !cached->locations[i].valid)
+			response.buf[response_header_size + bitmap_size +
+				     i / 8] |=
+				1u << (i & 7);
+	}
 	if (cache_negatives) {
 		struct grep_index_ipc_cached_negative *negative;
 		uint32_t hits = 0;
@@ -1055,12 +1063,18 @@ static int grep_index_ipc_handle_index_request(
 		if (negative) {
 			unsigned char *bitmap =
 				(unsigned char *)response.buf + response_header_size;
+			unsigned char *unresolved = NULL;
+
+			if (include_unresolved)
+				unresolved = bitmap + bitmap_size;
 
 			for (size_t i = 0; i < bitmap_size; i++) {
 				unsigned char cleared = bitmap[i] &
 							negative->bitmap[i];
 
 				bitmap[i] &= ~negative->bitmap[i];
+				if (unresolved)
+					unresolved[i] &= ~negative->bitmap[i];
 				while (cleared) {
 					cleared &= cleared - 1;
 					hits++;
@@ -1108,7 +1122,12 @@ static int grep_index_ipc_handle_request(
 	    get_be32(request) ==
 		    GREP_INDEX_IPC_INDEX_REQUEST_SIGNATURE)
 		return grep_index_ipc_handle_index_request(
-			server, request, request_len, reply, reply_data);
+			server, request, request_len, reply, reply_data, 0);
+	if (request_len >= sizeof(uint32_t) &&
+	    get_be32(request) ==
+		    GREP_INDEX_IPC_INDEX_OVERLAY_REQUEST_SIGNATURE)
+		return grep_index_ipc_handle_index_request(
+			server, request, request_len, reply, reply_data, 1);
 	if (request_len >= sizeof(uint32_t) &&
 	    get_be32(request) ==
 		    GREP_INDEX_IPC_REGISTER_REQUEST_SIGNATURE)
@@ -1709,7 +1728,8 @@ cleanup:
 
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
-			       unsigned char *maybe, size_t nr,
+			       unsigned char *maybe,
+			       unsigned char *unresolved, size_t nr,
 			       struct object_id *result_identity,
 			       int *negative_cache_supported)
 {
@@ -1730,11 +1750,14 @@ int grep_index_ipc_query_index(struct repository *repo,
 	const struct object_id *cache_key =
 		grep_index_query_cache_key(query);
 	int cache_request = !!cache_key;
+	int overlay_request = !!unresolved;
 	int registered = 0;
 	int result = -1;
 
 	if (negative_cache_supported)
 		*negative_cache_supported = 0;
+	if (unresolved)
+		memset(unresolved, 0, bitmap_size);
 
 	if (!query || !repo->index || nr != repo->index->cache_nr ||
 	    !nr || nr > UINT32_MAX ||
@@ -1759,19 +1782,23 @@ int grep_index_ipc_query_index(struct repository *repo,
 
 	options.wait_if_busy = 1;
 	options.uds_disallow_chdir = 1;
-	/* Extended request, legacy fallback, and post-registration retry. */
-	for (int attempt = 0; attempt < 3; attempt++) {
+	/* Overlay request, legacy fallback, and post-registration retry. */
+	for (int attempt = 0; attempt < 4; attempt++) {
 		size_t response_header_size = cache_request ?
 						      GREP_INDEX_IPC_CACHED_RESPONSE_HEADER_SIZE :
 						      GREP_INDEX_IPC_RESPONSE_HEADER_SIZE;
 		uint32_t response_signature = cache_request ?
 						      GREP_INDEX_IPC_INDEX_CACHED_RESPONSE_SIGNATURE :
 						      GREP_INDEX_IPC_INDEX_RESPONSE_SIGNATURE;
+		size_t response_size = response_header_size +
+				       bitmap_size * (1 + overlay_request);
 
 		strbuf_reset(&request);
 		strbuf_reset(&response);
 		grep_index_ipc_put_u32(
-			&request, GREP_INDEX_IPC_INDEX_REQUEST_SIGNATURE);
+			&request, overlay_request ?
+					  GREP_INDEX_IPC_INDEX_OVERLAY_REQUEST_SIGNATURE :
+					  GREP_INDEX_IPC_INDEX_REQUEST_SIGNATURE);
 		grep_index_ipc_put_u32(&request, GREP_INDEX_IPC_VERSION);
 		grep_index_ipc_put_u32(
 			&request, repo->hash_algo->format_id);
@@ -1792,7 +1819,7 @@ int grep_index_ipc_query_index(struct repository *repo,
 			goto cleanup;
 		ipc_client_close_connection(connection);
 		connection = NULL;
-		if (response.len == response_header_size + bitmap_size &&
+		if (response.len == response_size &&
 		    get_be32(response.buf) == response_signature &&
 		    get_be32(response.buf + 4) ==
 			    GREP_INDEX_IPC_VERSION &&
@@ -1800,6 +1827,17 @@ int grep_index_ipc_query_index(struct repository *repo,
 			memcpy(maybe,
 			       response.buf + response_header_size,
 			       bitmap_size);
+			if (overlay_request) {
+				const unsigned char *unresolved_response =
+					(const unsigned char *)response.buf +
+					response_header_size + bitmap_size;
+
+				for (size_t i = 0; i < bitmap_size; i++) {
+					unresolved[i] = unresolved_response[i];
+					/* Preserve candidates if the bitmaps disagree. */
+					maybe[i] |= unresolved[i];
+				}
+			}
 			if (cache_request) {
 				trace2_data_intmax(
 					"grep", repo,
@@ -1819,6 +1857,10 @@ int grep_index_ipc_query_index(struct repository *repo,
 		    get_be32(response.buf + 4) !=
 			    GREP_INDEX_IPC_VERSION ||
 		    get_be32(response.buf + 8) != nr) {
+			if (overlay_request) {
+				overlay_request = 0;
+				continue;
+			}
 			if (cache_request) {
 				/* A running older daemon expects the original layout. */
 				cache_request = 0;

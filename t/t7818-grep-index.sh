@@ -835,6 +835,143 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	test_cmp expect actual
 '
 
+test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f overlay-*.trace .git/index.grep-worktree \
+				.git/index.grep-worktree-generation \
+				.git/index.grep-worktree-recovery" &&
+	test_path_is_file .git/objects/info/grep-index/chain-transposed &&
+	printf "overlay unrelated contents\n" >overlay-absent &&
+	printf "overlay present needle 7818\n" >overlay-present &&
+	printf "overlay missing contents\n" >overlay-missing &&
+	printf "overlay worktree contents\n" >overlay-worktree &&
+	printf "overlay worktree missing needle 7818\n" \
+		>overlay-worktree-missing &&
+	git add overlay-absent overlay-present overlay-missing overlay-worktree \
+		overlay-worktree-missing &&
+	test_config grep.worktreeBlobCache true &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	git status --porcelain >/dev/null &&
+
+	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/overlay-absent.trace" \
+		git grep --cached "overlay absent needle 7818" \
+		-- overlay-absent &&
+	test_trace2_data grep content_index_overlay_objects 1 \
+		<overlay-absent.trace &&
+	test_trace2_data grep content_index_overlay_rejected 1 \
+		<overlay-absent.trace &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<overlay-absent.trace &&
+	absent_oid=$(git rev-parse :overlay-absent) &&
+	absent_object=.git/objects/$(test_oid_to_path "$absent_oid") &&
+	mv "$absent_object" "$absent_object.save" &&
+	test_when_finished "test ! -e \"$absent_object.save\" ||
+			    mv \"$absent_object.save\" \"$absent_object\"" &&
+	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/overlay-hit.trace" \
+		git grep --cached "overlay absent needle 7818" \
+		-- overlay-absent 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<overlay-hit.trace &&
+	! test_grep content_index_overlay_objects overlay-hit.trace &&
+	mv "$absent_object.save" "$absent_object" &&
+
+	echo "overlay-present:overlay present needle 7818" >expect &&
+	GIT_TRACE2_EVENT="$PWD/overlay-present.trace" \
+		git grep --cached "overlay present needle 7818" \
+		-- overlay-present >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_overlay_objects 1 \
+		<overlay-present.trace &&
+	test_trace2_data grep content_index_overlay_rejected 0 \
+		<overlay-present.trace &&
+
+	missing_oid=$(git rev-parse :overlay-missing) &&
+	missing_object=.git/objects/$(test_oid_to_path "$missing_oid") &&
+	mv "$missing_object" "$missing_object.save" &&
+	test_when_finished "test ! -e \"$missing_object.save\" ||
+			    mv \"$missing_object.save\" \"$missing_object\"" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/overlay-missing.trace" \
+		git grep --cached "overlay absent missing needle 7818" \
+		-- overlay-missing 2>err-missing &&
+	test_grep "unable to read" err-missing &&
+	mv "$missing_object.save" "$missing_object" &&
+
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		git grep --no-content-index \
+		"overlay worktree warmup needle 7818" -- overlay-worktree &&
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/overlay-worktree.trace" \
+		git grep "overlay absent worktree needle 7818" \
+		-- overlay-worktree &&
+	test_trace2_data grep content_index_overlay_objects 1 \
+		<overlay-worktree.trace &&
+	test_trace2_data grep content_index_overlay_rejected 1 \
+		<overlay-worktree.trace &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<overlay-worktree.trace &&
+
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		git grep --no-content-index \
+		"overlay present warmup absent 7818" -- overlay-present &&
+	set -- overlay-worktree overlay-present literal-candidate-* &&
+	echo "overlay-present:overlay present needle 7818" >expect &&
+	env \
+		GIT_TRACE2_EVENT="$PWD/overlay-literal.trace" \
+		git grep "overlay present needle 7818" -- "$@" >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep literal_path_candidates 42 \
+		<overlay-literal.trace &&
+	test_trace2_data grep content_index_overlay_objects 2 \
+		<overlay-literal.trace &&
+	test_trace2_data grep content_index_overlay_rejected 1 \
+		<overlay-literal.trace &&
+	test_trace2_data grep content_index_literal_path_candidates 41 \
+		<overlay-literal.trace &&
+	test_trace2_data grep content_index_literal_path_rejected 1 \
+		<overlay-literal.trace &&
+
+	echo "overlay absent worktree needle 7818" >overlay-worktree &&
+	git status --porcelain >/dev/null &&
+	echo "overlay-worktree:overlay absent worktree needle 7818" >expect &&
+	env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/overlay-worktree-changed.trace" \
+		git grep "overlay absent worktree needle 7818" \
+		-- overlay-worktree >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<overlay-worktree-changed.trace &&
+	git checkout -- overlay-worktree &&
+	git status --porcelain >/dev/null &&
+
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		git grep --no-content-index \
+		"overlay worktree missing warmup 7818" \
+		-- overlay-worktree-missing &&
+	worktree_missing_oid=$(git rev-parse :overlay-worktree-missing) &&
+	worktree_missing_object=.git/objects/$(test_oid_to_path \
+		"$worktree_missing_oid") &&
+	mv "$worktree_missing_object" "$worktree_missing_object.save" &&
+	test_when_finished "test ! -e \"$worktree_missing_object.save\" ||
+			    mv \"$worktree_missing_object.save\" \
+				\"$worktree_missing_object\"" &&
+	echo "overlay-worktree-missing:overlay worktree missing needle 7818" \
+		>expect &&
+	env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/overlay-worktree-missing.trace" \
+		git grep "overlay worktree missing needle 7818" \
+		-- overlay-worktree-missing >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_overlay_objects 1 \
+		<overlay-worktree-missing.trace &&
+	test_trace2_data grep content_index_overlay_rejected 0 \
+		<overlay-worktree-missing.trace &&
+	mv "$worktree_missing_object.save" "$worktree_missing_object"
+'
+
 test_expect_success 'content index prunes impossible blobs' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&

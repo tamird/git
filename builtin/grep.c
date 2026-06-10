@@ -1018,6 +1018,33 @@ static int grep_submodule(struct grep_opt *opt,
 	return hit;
 }
 
+static int grep_cache_entry_uses_oid(struct repository *repo,
+				     const struct pathspec *pathspec,
+				     int cached, int literal_selected,
+				     size_t pos)
+{
+	const struct cache_entry *ce = repo->index->cache[pos];
+	int use_oid = cached || (ce->ce_flags & CE_VALID);
+
+	if ((!cached && ce_skip_worktree(ce)) ||
+	    !S_ISREG(ce->ce_mode) || ce_stage(ce) ||
+	    ce_intent_to_add(ce) ||
+	    (!literal_selected &&
+	     !match_pathspec(repo->index, pathspec, ce->name,
+			     ce_namelen(ce), 0, NULL, 0)))
+		return 0;
+	if (use_oid || !worktree_cache ||
+	    !grep_worktree_cache_entry_eligible(ce))
+		return use_oid;
+	if (threads_started)
+		grep_lock();
+	use_oid = grep_worktree_cache_lookup(worktree_cache, pos) ==
+		  GREP_WORKTREE_CACHE_EQUAL;
+	if (threads_started)
+		grep_unlock();
+	return use_oid;
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached)
 {
@@ -1268,20 +1295,96 @@ static int grep_cache(struct grep_opt *opt,
 			repo->index->cache_nr / 8 +
 			!!(repo->index->cache_nr % 8);
 		unsigned char *maybe;
+		unsigned char *unresolved;
 		int negative_cache_supported;
 
 		CALLOC_ARRAY(maybe, bitmap_size);
+		CALLOC_ARRAY(unresolved, bitmap_size);
 		if (!grep_index_ipc_query_index(
-			    repo, content_index_query, maybe,
+			    repo, content_index_query, maybe, unresolved,
 			    repo->index->cache_nr,
 			    &content_index_negative_identity,
 			    &negative_cache_supported)) {
+			int have_unresolved = 0;
+
 			used_index_ipc = 1;
 			if (negative_cache_supported) {
 				content_index_negative_nr =
 					repo->index->cache_nr;
 				CALLOC_ARRAY(content_index_negative_result,
 					     bitmap_size);
+			}
+			for (size_t i = 0; i < bitmap_size; i++)
+				if (unresolved[i]) {
+					have_unresolved = 1;
+					break;
+				}
+			if (have_unresolved) {
+				struct object_id *oids = NULL;
+				size_t *positions = NULL;
+				unsigned char *results = NULL;
+				size_t nr_oids = 0;
+				size_t oids_alloc = 0;
+				size_t positions_alloc = 0;
+				size_t limit = literal_selected ? selected_nr :
+								  repo->index->cache_nr;
+
+				for (size_t pos = 0; pos < limit; pos++) {
+					size_t i = literal_selected ? selected[pos] : pos;
+					const struct cache_entry *ce =
+						repo->index->cache[i];
+
+					if (!(unresolved[i / 8] &
+					      (1u << (i & 7))) ||
+					    !grep_cache_entry_uses_oid(
+						    repo, pathspec, cached,
+						    literal_selected, i))
+						continue;
+					ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
+					ALLOC_GROW(positions, nr_oids + 1,
+						   positions_alloc);
+					oidcpy(&oids[nr_oids], &ce->oid);
+					positions[nr_oids++] = i;
+				}
+				if (nr_oids) {
+					ALLOC_ARRAY(results, nr_oids);
+					if (!grep_index_ipc_query(
+						    repo, content_index_query, oids,
+						    nr_oids, results)) {
+						uint64_t rejected = 0;
+
+						for (size_t i = 0; i < nr_oids; i++) {
+							size_t index_pos = positions[i];
+							unsigned char bit =
+								1u << (index_pos & 7);
+
+							if (results[i] !=
+							    GREP_INDEX_IPC_IMPOSSIBLE)
+								continue;
+							maybe[index_pos / 8] &= ~bit;
+							if (content_index_negative_result &&
+							    !(content_index_negative_result
+								      [index_pos / 8] &
+							      bit)) {
+								content_index_negative_result
+									[index_pos / 8] |= bit;
+								content_index_negative_entries++;
+							}
+							rejected++;
+						}
+						trace2_data_intmax(
+							"grep", repo,
+							"content_index_overlay_objects",
+							nr_oids);
+						trace2_data_intmax(
+							"grep", repo,
+							"content_index_overlay_rejected",
+							rejected);
+					}
+				}
+				free(results);
+				free(positions);
+				free(oids);
 			}
 			if (cached &&
 			    repo->index->sparse_index == INDEX_EXPANDED) {
@@ -1426,6 +1529,7 @@ static int grep_cache(struct grep_opt *opt,
 							GREP_INDEX_IPC_IMPOSSIBLE;
 			}
 		}
+		free(unresolved);
 		free(maybe);
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
@@ -1488,26 +1592,9 @@ static int grep_cache(struct grep_opt *opt,
 		for (size_t pos = 0; pos < limit; pos++) {
 			size_t i = literal_selected ? selected[pos] : pos;
 			const struct cache_entry *ce = repo->index->cache[i];
-			int use_oid = cached || (ce->ce_flags & CE_VALID);
 
-			if ((!cached && ce_skip_worktree(ce)) ||
-			    !S_ISREG(ce->ce_mode) || ce_stage(ce) ||
-			    ce_intent_to_add(ce) ||
-			    (!literal_selected &&
-			     !match_pathspec(repo->index, pathspec, ce->name,
-					     ce_namelen(ce), 0, NULL, 0)))
-				continue;
-			if (!use_oid && worktree_cache &&
-			    grep_worktree_cache_entry_eligible(ce)) {
-				if (threads_started)
-					grep_lock();
-				use_oid = grep_worktree_cache_lookup(
-						  worktree_cache, i) ==
-					  GREP_WORKTREE_CACHE_EQUAL;
-				if (threads_started)
-					grep_unlock();
-			}
-			if (!use_oid)
+			if (!grep_cache_entry_uses_oid(
+				    repo, pathspec, cached, literal_selected, i))
 				continue;
 			ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
 			ALLOC_GROW(positions, nr_oids + 1,

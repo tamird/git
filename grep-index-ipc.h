@@ -25,7 +25,8 @@ int grep_index_ipc_query(struct repository *repo,
 			 unsigned char *maybe);
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
-			       unsigned char *maybe, size_t nr,
+			       unsigned char *maybe,
+			       unsigned char *unresolved, size_t nr,
 			       struct object_id *identity,
 			       int *negative_cache_supported);
 int grep_index_ipc_report_negatives(
