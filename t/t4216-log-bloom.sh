@@ -59,6 +59,38 @@ test_expect_success 'commit-graph write wrote out the bloom chunks' '
 	graph_read_expect 16
 '
 
+test_expect_success 'shallow repositories use Bloom filters' '
+	git init shallow-bloom &&
+	(
+		cd shallow-bloom &&
+		test_commit base boundary-path &&
+		test_commit boundary unrelated &&
+		for i in 1 2 3 4 5 6 7 8 9 10
+		do
+			test_commit later-$i unrelated || exit 1
+		done &&
+		git commit-graph write --reachable --changed-paths &&
+		git rev-parse boundary^{commit} >.git/shallow &&
+		test_must_fail test-tool repository parse_commit_in_graph \
+			.git . "$(git rev-parse HEAD)" 2>err &&
+		test_grep "Couldn.t parse commit" err &&
+		git -c core.commitGraph=false log --format=%s \
+			-- boundary-path >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/shallow.perf" \
+			git -c core.commitGraph=true log --format=%s \
+			-- boundary-path >actual &&
+		test_cmp expect actual &&
+		test_grep boundary actual &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/shallow.perf" &&
+		git -c core.commitGraph=false log --format=%s \
+			--topo-order -- boundary-path >expect &&
+		git -c core.commitGraph=true log --format=%s \
+			--topo-order -- boundary-path >actual &&
+		test_cmp expect actual
+	)
+'
+
 # Turn off any inherited trace2 settings for this test.
 sane_unset GIT_TRACE2 GIT_TRACE2_PERF GIT_TRACE2_EVENT
 sane_unset GIT_TRACE2_PERF_BRIEF

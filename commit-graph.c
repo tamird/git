@@ -220,8 +220,11 @@ static struct commit_graph *alloc_commit_graph(void)
 	return g;
 }
 
-static int commit_graph_compatible(struct repository *r)
+static int commit_graph_compatible(struct repository *r, int allow_shallow)
 {
+	int i;
+	int is_shallow;
+
 	if (!r->gitdir)
 		return 0;
 
@@ -232,11 +235,15 @@ static int commit_graph_compatible(struct repository *r)
 	}
 
 	prepare_commit_graft(r);
-	if (r->parsed_objects &&
-	    (r->parsed_objects->grafts_nr || r->parsed_objects->substituted_parent))
-		return 0;
-	if (is_repository_shallow(r))
-		return 0;
+	is_shallow = allow_shallow && is_repository_shallow(r);
+	if (r->parsed_objects) {
+		for (i = 0; i < r->parsed_objects->grafts_nr; i++)
+			if (!is_shallow ||
+			    r->parsed_objects->grafts[i]->nr_parent >= 0)
+				return 0;
+		if (r->parsed_objects->substituted_parent)
+			return 0;
+	}
 
 	return 1;
 }
@@ -735,7 +742,8 @@ struct commit_graph *read_commit_graph_one(struct odb_source *source)
  * On the first invocation, this function attempts to load the commit
  * graph if the repository is configured to have one.
  */
-static struct commit_graph *prepare_commit_graph(struct repository *r)
+static struct commit_graph *prepare_commit_graph_internal(struct repository *r,
+							  int allow_shallow)
 {
 	struct odb_source *source;
 
@@ -765,7 +773,7 @@ static struct commit_graph *prepare_commit_graph(struct repository *r)
 		 */
 		return NULL;
 
-	if (!commit_graph_compatible(r))
+	if (!commit_graph_compatible(r, allow_shallow))
 		return NULL;
 
 	odb_prepare_alternates(r->objects);
@@ -776,6 +784,18 @@ static struct commit_graph *prepare_commit_graph(struct repository *r)
 	}
 
 	return r->objects->commit_graph;
+}
+
+static struct commit_graph *prepare_commit_graph(struct repository *r)
+{
+	if (is_repository_shallow(r))
+		return NULL;
+	return prepare_commit_graph_internal(r, 0);
+}
+
+static struct commit_graph *prepare_commit_graph_for_bloom(struct repository *r)
+{
+	return prepare_commit_graph_internal(r, 1);
 }
 
 int generation_numbers_enabled(struct repository *r)
@@ -808,8 +828,8 @@ struct bloom_filter_settings *get_bloom_filter_settings(struct repository *r)
 {
 	struct commit_graph *g;
 
-	if (!prepare_commit_graph(r))
-	       return NULL;
+	if (!prepare_commit_graph_for_bloom(r))
+		return NULL;
 
 	g = r->objects->commit_graph;
 	while (g) {
@@ -915,6 +935,9 @@ static void fill_commit_graph_info(struct commit *item, struct commit_graph *g, 
 			graph_data->generation = item->date + offset;
 	} else
 		graph_data->generation = get_be32(commit_data + g->hash_algo->rawsz + 8) >> 2;
+	/* Generation data includes parents hidden by the shallow boundary. */
+	if (is_repository_shallow(g->odb_source->odb->repo))
+		graph_data->generation = GENERATION_NUMBER_INFINITY;
 
 	if (g->topo_levels)
 		*topo_level_slab_at(g->topo_levels, item) = get_be32(commit_data + g->hash_algo->rawsz + 8) >> 2;
@@ -928,6 +951,8 @@ static inline void set_commit_tree(struct commit *c, struct tree *t)
 static int fill_commit_in_graph(struct commit *item,
 				struct commit_graph *g, uint32_t pos)
 {
+	struct repository *r = g->odb_source->odb->repo;
+	struct commit_graft *graft;
 	uint32_t edge_value;
 	uint32_t parent_data_pos;
 	struct commit_list **pptr;
@@ -947,6 +972,10 @@ static int fill_commit_in_graph(struct commit *item,
 	set_commit_tree(item, NULL);
 
 	pptr = &item->parents;
+	graft = lookup_commit_graft(r, &item->object.oid);
+	/* Do not expose graph parents hidden by the shallow boundary. */
+	if (graft && graft->nr_parent < 0)
+		return 1;
 
 	edge_value = get_be32(commit_data + g->hash_algo->rawsz);
 	if (edge_value == GRAPH_PARENT_NONE)
@@ -1020,6 +1049,18 @@ struct commit_graph *repo_find_commit_pos_in_graph(struct repository *r,
 	return g;
 }
 
+struct commit_graph *repo_find_commit_pos_in_graph_for_bloom(struct repository *r,
+							     struct commit *c,
+							     uint32_t *pos)
+{
+	struct commit_graph *g = prepare_commit_graph_for_bloom(r);
+	if (!g)
+		return NULL;
+	if (!find_commit_pos_in_graph(c, g, pos))
+		return NULL;
+	return g;
+}
+
 int repo_commit_graph_contains_oid(struct repository *r,
 				   const struct object_id *oid)
 {
@@ -1085,6 +1126,9 @@ int parse_commit_in_graph(struct repository *r, struct commit *item)
 	checked_env = 1;
 
 	g = prepare_commit_graph(r);
+	/* A shallow path walk may already have loaded the graph for Bloom data. */
+	if (!g && is_repository_shallow(r))
+		g = r->objects->commit_graph;
 	if (!g)
 		return 0;
 	return parse_commit_in_graph_one(g, item);
@@ -2590,7 +2634,7 @@ int write_commit_graph(struct odb_source *source,
 		warning(_("attempting to write a commit-graph, but 'core.commitGraph' is disabled"));
 		return 0;
 	}
-	if (!commit_graph_compatible(r))
+	if (!commit_graph_compatible(r, 0))
 		return 0;
 	if (r->settings.commit_graph_changed_paths_version < -1
 	    || r->settings.commit_graph_changed_paths_version > 2) {

@@ -63,6 +63,14 @@ struct commit_graph *repo_find_commit_pos_in_graph(struct repository *r,
 						   uint32_t *pos);
 
 /*
+ * As above, but allows Bloom filter data to be read in a shallow repository.
+ * Callers must not use topology or generation data from the returned graph.
+ */
+struct commit_graph *repo_find_commit_pos_in_graph_for_bloom(struct repository *r,
+							     struct commit *c,
+							     uint32_t *pos);
+
+/*
  * Return whether the commit graph contains `oid`, without allocating or
  * parsing a commit. This does not check whether the object is still present
  * in the object database.

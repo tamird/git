@@ -48,6 +48,7 @@
 #include "list-objects-filter-options.h"
 #include "resolve-undo.h"
 #include "parse-options.h"
+#include "shallow.h"
 #include "wildmatch.h"
 
 static char *term_bad;
@@ -809,8 +810,15 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 	if (!revs->bloom_keyvecs_nr)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
-	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY)
-		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY) {
+		struct commit_graft *graft;
+
+		if (!is_repository_shallow(revs->repo))
+			return REVISION_BLOOM_FILTER_UNAVAILABLE;
+		graft = lookup_commit_graft(revs->repo, &commit->object.oid);
+		if (graft && graft->nr_parent < 0)
+			return REVISION_BLOOM_FILTER_UNAVAILABLE;
+	}
 
 	filter = get_bloom_filter(revs->repo, commit);
 
