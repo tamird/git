@@ -332,6 +332,42 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_must_be_empty err-takeover
 '
 
+test_expect_success FSMONITOR_DAEMON 'daemon rotates saturated content cache' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	GIT_TEST_GREP_INDEX_MEMORY_MAX_BYTES=8 \
+		git fsmonitor--daemon start &&
+	echo "first saturated cache object" >saturated-first &&
+	echo "second saturated cache object" >saturated-second &&
+	git add saturated-first saturated-second &&
+	test_when_finished "git reset --hard HEAD" &&
+	first_oid=$(git rev-parse :saturated-first) &&
+	second_oid=$(git rev-parse :saturated-second) &&
+	test_must_fail git grep --cached "absent saturated pattern" \
+		-- saturated-first &&
+	test_must_fail git grep --cached "absent saturated pattern" \
+		-- saturated-second &&
+	first_object=.git/objects/$(test_oid_to_path "$first_oid") &&
+	mv "$first_object" "$first_object.save" &&
+	test_when_finished "test ! -e \"$first_object.save\" ||
+			    mv \"$first_object.save\" \"$first_object\"" &&
+	test_must_fail git grep --cached "different absent saturated pattern" \
+		-- saturated-first 2>err-first &&
+	test_must_be_empty err-first &&
+	mv "$first_object.save" "$first_object" &&
+	test_must_fail git grep --cached "absent saturated pattern" \
+		-- saturated-second &&
+	test_must_fail git grep --cached "absent saturated pattern" \
+		-- saturated-second &&
+	second_object=.git/objects/$(test_oid_to_path "$second_oid") &&
+	mv "$second_object" "$second_object.save" &&
+	test_when_finished "mv \"$second_object.save\" \"$second_object\"" &&
+	test_must_fail git grep --cached "different absent saturated pattern" \
+		-- saturated-second 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success 'setup indexed pickaxe history' '
 	echo "pickaxe needle old" >pickaxe-old &&
 	echo "pickaxe daemon old" >pickaxe-daemon-history &&

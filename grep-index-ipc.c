@@ -1105,6 +1105,7 @@ static int grep_index_ipc_handle_request(
 	ipc_server_reply_cb *reply, struct ipc_server_reply_data *reply_data)
 {
 	struct grep_index_ipc_server *server = data;
+	struct grep_index_memory *stale_index = NULL;
 	struct grep_index_query *query = NULL;
 	struct grep_index_prepared *prepared = NULL;
 	struct strbuf response = STRBUF_INIT;
@@ -1203,9 +1204,22 @@ static int grep_index_ipc_handle_request(
 			   "ipc_query/prepared", !!prepared);
 	result = reply(reply_data, response.buf, response.len);
 	pthread_mutex_lock(&server->request_mutex);
-	if (!--server->active_requests)
+	if (!--server->active_requests) {
+		struct grep_index_memory *replacement;
+
 		grep_index_memory_release_object_store(server->index);
+		/* request_mutex prevents a new user during rotation. */
+		replacement = grep_index_memory_rotate_if_requested(
+			server->index);
+		if (replacement) {
+			stale_index = server->index;
+			server->index = replacement;
+			trace2_data_intmax("grep-index", &server->repo,
+					   "memory_cache/rotations", 1);
+		}
+	}
 	pthread_mutex_unlock(&server->request_mutex);
+	grep_index_memory_free(stale_index);
 	grep_index_prepared_free(prepared);
 	pthread_rwlock_unlock(&server->generation_lock);
 	grep_index_query_free(query);
