@@ -1614,6 +1614,29 @@ test_expect_success LIBPCRE2 'content index prunes impossible PCRE literal' '
 	test_must_be_empty err
 '
 
+test_expect_success LIBPCRE2 'content index prunes PCRE alternatives' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i -P \
+		"ABSENT ALPHA|MISSING BETA" -- short 2>err &&
+	test_must_be_empty err &&
+
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -i -P \
+		"ABSENT ALPHA|PRESENT NEEDLE" -- present 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"present\\|absent suffix" -- present 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success 'possible matches use normal blob reads' '
 	oid=$(git rev-parse :present) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
