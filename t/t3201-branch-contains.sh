@@ -264,4 +264,23 @@ test_expect_success 'branch --merged with --verbose' '
 	test_cmp expect actual
 '
 
+test_expect_success 'branch --contains respects shallow boundaries' '
+	test_when_finished "rm -f .git/shallow" &&
+	target=$(git rev-parse main^) &&
+	git branch above-shallow topic &&
+	git branch below-shallow "$target" &&
+	git commit-graph write --reachable &&
+	git rev-parse main >.git/shallow &&
+
+	echo below-shallow >expect &&
+	git branch --format="%(refname:short)" --contains "$target" \
+		above-shallow below-shallow >actual &&
+	test_cmp expect actual &&
+
+	echo above-shallow >expect &&
+	git branch --format="%(refname:short)" --no-contains "$target" \
+		above-shallow below-shallow >actual &&
+	test_cmp expect actual
+'
+
 test_done
