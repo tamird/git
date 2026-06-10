@@ -787,6 +787,54 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_must_be_empty err
 '
 
+test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f negative-learn.trace negative-hit.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached foo -- ordinary 2>err-before &&
+	test_grep "unable to read" err-before &&
+	mv "$object.save" "$object" &&
+
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/negative-learn.trace" \
+		git grep --cached foo -- ordinary &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<negative-learn.trace &&
+	mv "$object" "$object.save" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/negative-hit.trace" \
+		git grep --cached --text foo -- ordinary 2>err-after &&
+	test_must_be_empty err-after &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<negative-hit.trace &&
+	mv "$object.save" "$object" &&
+
+	printf "foo\0" >negative-binary &&
+	git add negative-binary &&
+	binary_oid=$(git rev-parse :negative-binary) &&
+	binary_object=.git/objects/$(test_oid_to_path "$binary_oid") &&
+	test_must_fail git grep --cached -I foo -- negative-binary &&
+	mv "$binary_object" "$binary_object.save" &&
+	test_when_finished "test ! -e \"$binary_object.save\" ||
+			    mv \"$binary_object.save\" \"$binary_object\"" &&
+	test_must_fail git grep --cached foo -- negative-binary \
+		2>err-binary &&
+	test_grep "unable to read" err-binary &&
+	mv "$binary_object.save" "$binary_object" &&
+
+	echo "foo contents" >ordinary &&
+	git add ordinary &&
+	echo "ordinary:foo contents" >expect &&
+	git grep --cached foo -- ordinary >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'content index prunes impossible blobs' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&

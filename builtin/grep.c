@@ -67,6 +67,10 @@ static struct grep_index_prepared *content_index_prepared;
 static struct grep_index_query *content_index_query;
 static unsigned char *content_index_ipc_result;
 static size_t content_index_ipc_nr;
+static unsigned char *content_index_negative_result;
+static size_t content_index_negative_nr;
+static size_t content_index_negative_entries;
+static struct object_id content_index_negative_identity;
 static enum worktree_blob_cache_mode worktree_blob_cache_mode =
 	WORKTREE_BLOB_CACHE_ALWAYS;
 static struct grep_worktree_cache *worktree_cache;
@@ -190,6 +194,29 @@ static void grep_result_cache_lock(void)
 
 static void grep_result_cache_unlock(void)
 {
+	if (threads_started)
+		grep_unlock();
+}
+
+static void content_index_record_negative(struct grep_source *source,
+					  size_t pos, int negative)
+{
+	unsigned char bit;
+
+	/* File fallback bytes need not match the indexed object. */
+	if (!content_index_negative_result || !negative ||
+	    (source->type != GREP_SOURCE_OID &&
+	     (source->type != GREP_SOURCE_OID_OR_FILE ||
+	      !source->worktree_blob_used)) ||
+	    pos >= content_index_negative_nr)
+		return;
+	bit = 1u << (pos & 7);
+	if (threads_started)
+		grep_lock();
+	if (!(content_index_negative_result[pos / 8] & bit)) {
+		content_index_negative_result[pos / 8] |= bit;
+		content_index_negative_entries++;
+	}
 	if (threads_started)
 		grep_unlock();
 }
@@ -375,9 +402,15 @@ static void *run(void *arg)
 			break;
 
 		opt->output_priv = w;
-		if (!grep_result_cache_contains(opt, &w->source)) {
+		if (grep_result_cache_contains(opt, &w->source)) {
+			content_index_record_negative(
+				&w->source, w->worktree_blob_pos, 1);
+		} else {
 			int source_hit = grep_source(opt, &w->source);
 
+			content_index_record_negative(
+				&w->source, w->worktree_blob_pos,
+				!source_hit && w->source.buf);
 			/*
 			 * grep_source() also returns zero after a load
 			 * failure. Only cache successfully loaded blobs.
@@ -764,6 +797,7 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 	strbuf_release(&pathbuf);
 
 	if (grep_result_cache_contains(opt, &gs)) {
+		content_index_record_negative(&gs, pos, 1);
 		grep_source_clear(&gs);
 		return 0;
 	}
@@ -779,6 +813,7 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 		int hit;
 
 		hit = grep_source(opt, &gs);
+		content_index_record_negative(&gs, pos, !hit && gs.buf);
 		if (!hit && gs.buf)
 			grep_result_cache_add(opt, &gs);
 		if (gs.worktree_blob_used)
@@ -1209,12 +1244,21 @@ static int grep_cache(struct grep_opt *opt,
 			repo->index->cache_nr / 8 +
 			!!(repo->index->cache_nr % 8);
 		unsigned char *maybe;
+		int negative_cache_supported;
 
 		CALLOC_ARRAY(maybe, bitmap_size);
 		if (!grep_index_ipc_query_index(
 			    repo, content_index_query, maybe,
-			    repo->index->cache_nr)) {
+			    repo->index->cache_nr,
+			    &content_index_negative_identity,
+			    &negative_cache_supported)) {
 			used_index_ipc = 1;
+			if (negative_cache_supported) {
+				content_index_negative_nr =
+					repo->index->cache_nr;
+				CALLOC_ARRAY(content_index_negative_result,
+					     bitmap_size);
+			}
 			if (cached &&
 			    repo->index->sparse_index == INDEX_EXPANDED) {
 				for (size_t i = 0;
@@ -1648,9 +1692,10 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		strbuf_add(base, entry.path, te_len);
 
 		if (S_ISREG(entry.mode)) {
+			/* Tree entries have no position in a sparse index. */
 			hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
 					check_attr ? base->buf + tn_len : NULL,
-					0, 0, 0);
+					0, SIZE_MAX, 0);
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
 			struct tree_desc sub;
@@ -2398,6 +2443,15 @@ int cmd_grep(int argc,
 
 	if (threads_started)
 		hit |= wait_all();
+	if (content_index_negative_entries) {
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_negative_cache_entries",
+				   content_index_negative_entries);
+		grep_index_ipc_report_negatives(
+			the_repository, content_index_query,
+			&content_index_negative_identity,
+			content_index_negative_result, content_index_negative_nr);
+	}
 	if (hit && show_in_pager)
 		run_pager(&opt, prefix);
 
@@ -2433,6 +2487,9 @@ out:
 	grep_index_free(content_index);
 	FREE_AND_NULL(content_index_ipc_result);
 	content_index_ipc_nr = 0;
+	FREE_AND_NULL(content_index_negative_result);
+	content_index_negative_nr = 0;
+	content_index_negative_entries = 0;
 	free_repos();
 	return ret;
 }
