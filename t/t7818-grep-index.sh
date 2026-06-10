@@ -1086,6 +1086,17 @@ test_expect_success 'content index prunes impossible multiple patterns' '
 	test_must_be_empty err
 '
 
+test_expect_success 'content index intersects --all-match patterns' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached --all-match \
+		-e "present needle" -e "absent alpha" -- present 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success ENHANCED_BRE \
 	'content index prunes impossible basic alternation' '
 	oid=$(git rev-parse :short) &&
