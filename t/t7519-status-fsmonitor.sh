@@ -899,6 +899,7 @@ test_expect_success UNTRACKED_CACHE 'set up full untracked pruning' '
 		echo ignored-only/ >.gitignore &&
 		: >clean/a/tracked &&
 		: >ignored-only/sub/ignored &&
+		: >ignored-only/sub/one &&
 		: >quiet/b/tracked &&
 		git add . &&
 		git commit -m initial &&
@@ -941,6 +942,35 @@ test_expect_success UNTRACKED_CACHE 'prune full status from normal cache' '
 	test_grep "directories-visited:[1-9]" trace-status-full
 '
 
+test_expect_success UNTRACKED_CACHE 'prune git add with wildcard pathspec' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-wildcard" \
+			git add -N -- "*/one" &&
+		git ls-files --error-unmatch results/one &&
+		test_must_fail git ls-files --error-unmatch \
+			ignored-only/sub/one &&
+		git reset -q -- results/one &&
+		git status --porcelain >../actual
+	) &&
+	echo "?? results/" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-add-wildcard &&
+	test_grep "directories-visited:[1-9]" trace-add-wildcard
+'
+
+test_expect_success UNTRACKED_CACHE 'git add reports explicit ignored path' '
+	(
+		cd full-untracked &&
+		test_must_fail env \
+			GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-ignored" \
+			git add --dry-run -N -- ignored-only/sub/ignored \
+			2>../err
+	) &&
+	test_grep "Use -f if" err &&
+	test_grep "subtrees-pruned:0" trace-add-ignored
+'
+
 test_expect_success UNTRACKED_CACHE 'prune ls-files from normal cache' '
 	(
 		cd full-untracked &&
@@ -964,6 +994,7 @@ test_expect_success UNTRACKED_CACHE 'ls-files without excludes scans all' '
 	) &&
 	cat >expect <<-\EOF &&
 	ignored-only/sub/ignored
+	ignored-only/sub/one
 	results/one
 	results/two
 	EOF
