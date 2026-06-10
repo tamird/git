@@ -12,6 +12,8 @@
 #include "odb.h"
 #include "odb/source.h"
 #include "oid-array.h"
+#include "oidset.h"
+#include "parse.h"
 #include "path.h"
 #include "progress.h"
 #include "read-cache-ll.h"
@@ -44,6 +46,7 @@
 #define GREP_INDEX_MEMORY_MAX_ENTRIES	  (1024 * 1024)
 #define GREP_INDEX_MEMORY_MAX_BLOB_SIZE	  (64 * 1024 * 1024)
 #define GREP_INDEX_MEMORY_FILTER_CLASSES	  18
+#define GREP_INDEX_MEMORY_MAX_MISSES		  (64 * 1024)
 
 struct grep_index_segment {
 	void *map;
@@ -82,6 +85,7 @@ enum grep_index_memory_entry_state {
 	GREP_INDEX_MEMORY_BUILDING,
 	GREP_INDEX_MEMORY_READY,
 	GREP_INDEX_MEMORY_FAILED,
+	GREP_INDEX_MEMORY_SATURATED,
 };
 
 struct grep_index_memory_entry {
@@ -110,6 +114,10 @@ struct grep_index_memory {
 	pthread_mutex_t mutex;
 	size_t entries_nr;
 	uint64_t filter_bytes;
+	size_t max_entries;
+	uint64_t max_filter_bytes;
+	struct oidset misses[2];
+	int rotate_requested;
 };
 
 static int grep_index_memory_entry_cmp(
@@ -2763,19 +2771,23 @@ struct grep_index_memory *grep_index_memory_new(
 	CALLOC_ARRAY(index, 1);
 	index->repo = repo;
 	index->persistent = persistent;
+	index->max_entries = git_env_ulong(
+		"GIT_TEST_GREP_INDEX_MEMORY_MAX_ENTRIES",
+		GREP_INDEX_MEMORY_MAX_ENTRIES);
+	index->max_filter_bytes = git_env_ulong(
+		"GIT_TEST_GREP_INDEX_MEMORY_MAX_BYTES",
+		GREP_INDEX_MEMORY_MAX_BYTES);
 	hashmap_init(&index->entries, grep_index_memory_entry_cmp, NULL, 0);
 	pthread_mutex_init(&index->mutex, NULL);
 	enable_obj_read_lock();
 	return index;
 }
 
-void grep_index_memory_free(struct grep_index_memory *index)
+static void grep_index_memory_clear(struct grep_index_memory *index)
 {
 	struct hashmap_iter iter;
 	struct grep_index_memory_entry *entry;
 
-	if (!index)
-		return;
 	hashmap_for_each_entry(&index->entries, &iter, entry, ent) {
 		if (entry->cond_initialized)
 			pthread_cond_destroy(&entry->cond);
@@ -2784,8 +2796,48 @@ void grep_index_memory_free(struct grep_index_memory *index)
 		free(entry);
 	}
 	hashmap_clear(&index->entries);
+	for (size_t i = 0; i < ARRAY_SIZE(index->misses); i++)
+		oidset_clear(&index->misses[i]);
+	index->entries_nr = 0;
+	index->filter_bytes = 0;
+	index->rotate_requested = 0;
+}
+
+void grep_index_memory_free(struct grep_index_memory *index)
+{
+	if (!index)
+		return;
+	grep_index_memory_clear(index);
 	pthread_mutex_destroy(&index->mutex);
 	free(index);
+}
+
+struct grep_index_memory *grep_index_memory_rotate_if_requested(
+	struct grep_index_memory *index)
+{
+	struct grep_index_memory *replacement = NULL;
+
+	pthread_mutex_lock(&index->mutex);
+	if (index->rotate_requested)
+		replacement = grep_index_memory_new(
+			index->repo, index->persistent);
+	pthread_mutex_unlock(&index->mutex);
+	return replacement;
+}
+
+static void grep_index_memory_note_miss(
+	struct grep_index_memory *index, const struct object_id *oid, int mode)
+{
+	/* Rotate only after reuse; one-pass scans keep the existing generation. */
+	if (oidset_insert(&index->misses[mode], oid)) {
+		index->rotate_requested = 1;
+		return;
+	}
+	if (oidset_size(&index->misses[mode]) <=
+	    GREP_INDEX_MEMORY_MAX_MISSES)
+		return;
+	oidset_clear(&index->misses[mode]);
+	oidset_insert(&index->misses[mode], oid);
 }
 
 void grep_index_memory_release_object_store(struct grep_index_memory *index)
@@ -2813,6 +2865,7 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	uint32_t filter_size;
 	int mode;
 	int reserved = 0;
+	int cache_saturated = 0;
 	int result;
 
 	if (!index || !query)
@@ -2841,9 +2894,15 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 			pthread_mutex_unlock(&index->mutex);
 			return -1;
 		}
+		if (entry->state[mode] == GREP_INDEX_MEMORY_SATURATED) {
+			grep_index_memory_note_miss(index, oid, mode);
+			pthread_mutex_unlock(&index->mutex);
+			return -1;
+		}
 	} else {
-		if (index->entries_nr >= GREP_INDEX_MEMORY_MAX_ENTRIES ||
-		    index->filter_bytes >= GREP_INDEX_MEMORY_MAX_BYTES) {
+		if (index->entries_nr >= index->max_entries ||
+		    index->filter_bytes >= index->max_filter_bytes) {
+			grep_index_memory_note_miss(index, oid, mode);
 			pthread_mutex_unlock(&index->mutex);
 			return -1;
 		}
@@ -2867,10 +2926,13 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	    size <= GREP_INDEX_MEMORY_MAX_BLOB_SIZE) {
 		filter_size = filter_size_for_blob(size);
 		pthread_mutex_lock(&index->mutex);
-		if (filter_size <= GREP_INDEX_MEMORY_MAX_BYTES -
+		if (filter_size <= index->max_filter_bytes -
 					   index->filter_bytes) {
 			index->filter_bytes += filter_size;
 			reserved = 1;
+		} else {
+			grep_index_memory_note_miss(index, oid, mode);
+			cache_saturated = 1;
 		}
 		pthread_mutex_unlock(&index->mutex);
 		if (reserved) {
@@ -2896,7 +2958,9 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	} else {
 		if (reserved)
 			index->filter_bytes -= filter_size;
-		entry->state[mode] = GREP_INDEX_MEMORY_FAILED;
+		entry->state[mode] = cache_saturated ?
+					     GREP_INDEX_MEMORY_SATURATED :
+					     GREP_INDEX_MEMORY_FAILED;
 	}
 	pthread_cond_broadcast(&entry->cond);
 	pthread_mutex_unlock(&index->mutex);

@@ -53,6 +53,9 @@ void grep_index_prepared_free(struct grep_index_prepared *prepared);
 struct grep_index_memory *grep_index_memory_new(
 	struct repository *repo, struct grep_index *persistent);
 void grep_index_memory_free(struct grep_index_memory *index);
+/* Return a replacement generation while no other thread can use index. */
+struct grep_index_memory *grep_index_memory_rotate_if_requested(
+	struct grep_index_memory *index);
 void grep_index_memory_release_object_store(struct grep_index_memory *index);
 int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 				     const struct object_id *oid,
