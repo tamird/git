@@ -83,6 +83,7 @@ test_expect_success 'setup' '
 	star_left*star_right
 	question_left?question_right
 	bracket_left[bracket_right
+	bracket_pair_left[bracket_pair_right]
 	slash_left\slash_right
 	dollar_left$dollar_right
 	open_left(open_right
@@ -1672,6 +1673,18 @@ test_expect_success 'possible escaped literal bridge alone reads blob' '
 	test_grep "unable to read" err
 '
 
+test_expect_success 'content index prunes escaped BRE closing bracket' '
+	oid=$(git rev-parse :escaped-literal-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached \
+		"absent_left\\[absent_right\\]" \
+		-- escaped-literal-positive 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success 'escaped ERE literals preserve positive results' '
 	cat >patterns <<-\EOF &&
 	star_left\*star_right
@@ -1704,6 +1717,7 @@ test_expect_success 'escaped BRE literals preserve positive results' '
 	cat >patterns <<-\EOF &&
 	dot_left\.dot_right
 	bracket_left\[bracket_right
+	bracket_pair_left\[bracket_pair_right\]
 	slash_left\\slash_right
 	star_left\*star_right
 	caret_left\^caret_right

@@ -1760,9 +1760,13 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					separator_len++;
 			} else if (ch == '^' || ch == '$') {
 				separator_len = 1;
+				/*
+				 * Keep \] opaque: its BRE meaning is not portable enough
+				 * to include it in the escaped-literal set below.
+				 */
 			} else if (ch == '\\' && i + 1 < scan_end &&
 				   ((pattern_type == GREP_PATTERN_TYPE_BRE &&
-				     strchr(".[\\*^$b",
+				     strchr(".[\\*^$b]",
 					    p->pattern[i + 1])) ||
 				    pattern_type == GREP_PATTERN_TYPE_ERE ||
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
