@@ -213,6 +213,7 @@ static timestamp_t unpack_unreachable_expiration;
 static int pack_loose_unreachable;
 static int cruft;
 static int shallow = 0;
+static int use_aggressive_shallow_edges = 1;
 static timestamp_t cruft_expiration;
 static int local;
 static int have_non_local_packs;
@@ -3726,6 +3727,10 @@ static int git_pack_config(const char *k, const char *v,
 		use_bitmap_index_default = git_config_bool(k, v);
 		return 0;
 	}
+	if (!strcmp(k, "pack.useaggressiveshallowedges")) {
+		use_aggressive_shallow_edges = git_config_bool(k, v);
+		return 0;
+	}
 	if (!strcmp(k, "pack.allowpackreuse")) {
 		int res = git_parse_maybe_bool_text(v);
 		if (res < 0) {
@@ -5317,7 +5322,7 @@ int cmd_pack_objects(int argc,
 		strvec_push(&rp, "--objects");
 	} else if (thin) {
 		use_internal_rev_list = 1;
-		strvec_push(&rp, shallow
+		strvec_push(&rp, shallow && use_aggressive_shallow_edges
 				? "--objects-edge-aggressive"
 				: "--objects-edge");
 	} else
