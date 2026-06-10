@@ -1399,7 +1399,6 @@ int grep_index_ipc_query(struct repository *repo,
 			threads_nr = cpus;
 	}
 	CALLOC_ARRAY(tasks, threads_nr);
-	ALLOC_ARRAY(threads, threads_nr);
 	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
 		size_t remaining = nr - pos;
 		size_t task_nr = DIV_ROUND_UP(remaining, threads_nr - i);
@@ -1412,6 +1411,15 @@ int grep_index_ipc_query(struct repository *repo,
 		tasks[i].nr = task_nr;
 		tasks[i].maybe = maybe + pos;
 		pos += task_nr;
+	}
+	if (threads_nr == 1) {
+		grep_index_ipc_query_thread(&tasks[0]);
+		if (!tasks[0].result)
+			result = 0;
+		goto cleanup;
+	}
+	ALLOC_ARRAY(threads, threads_nr);
+	for (size_t i = 0; i < threads_nr; i++) {
 		if (pthread_create(&threads[i], NULL,
 				   grep_index_ipc_query_thread, &tasks[i]))
 			goto join;
