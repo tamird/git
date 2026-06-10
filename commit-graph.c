@@ -788,13 +788,6 @@ static struct commit_graph *prepare_commit_graph_internal(struct repository *r,
 
 static struct commit_graph *prepare_commit_graph(struct repository *r)
 {
-	if (is_repository_shallow(r))
-		return NULL;
-	return prepare_commit_graph_internal(r, 0);
-}
-
-static struct commit_graph *prepare_commit_graph_for_bloom(struct repository *r)
-{
 	return prepare_commit_graph_internal(r, 1);
 }
 
@@ -803,6 +796,8 @@ int generation_numbers_enabled(struct repository *r)
 	uint32_t first_generation;
 	struct commit_graph *g;
 
+	if (is_repository_shallow(r))
+		return 0;
 	g = prepare_commit_graph(r);
 	if (!g || !g->num_commits)
 	       return 0;
@@ -817,6 +812,8 @@ int corrected_commit_dates_enabled(struct repository *r)
 {
 	struct commit_graph *g;
 
+	if (is_repository_shallow(r))
+		return 0;
 	g = prepare_commit_graph(r);
 	if (!g || !g->num_commits)
 		return 0;
@@ -828,7 +825,7 @@ struct bloom_filter_settings *get_bloom_filter_settings(struct repository *r)
 {
 	struct commit_graph *g;
 
-	if (!prepare_commit_graph_for_bloom(r))
+	if (!prepare_commit_graph(r))
 		return NULL;
 
 	g = r->objects->commit_graph;
@@ -1049,18 +1046,6 @@ struct commit_graph *repo_find_commit_pos_in_graph(struct repository *r,
 	return g;
 }
 
-struct commit_graph *repo_find_commit_pos_in_graph_for_bloom(struct repository *r,
-							     struct commit *c,
-							     uint32_t *pos)
-{
-	struct commit_graph *g = prepare_commit_graph_for_bloom(r);
-	if (!g)
-		return NULL;
-	if (!find_commit_pos_in_graph(c, g, pos))
-		return NULL;
-	return g;
-}
-
 int repo_commit_graph_contains_oid(struct repository *r,
 				   const struct object_id *oid)
 {
@@ -1126,9 +1111,6 @@ int parse_commit_in_graph(struct repository *r, struct commit *item)
 	checked_env = 1;
 
 	g = prepare_commit_graph(r);
-	/* A shallow path walk may already have loaded the graph for Bloom data. */
-	if (!g && is_repository_shallow(r))
-		g = r->objects->commit_graph;
 	if (!g)
 		return 0;
 	return parse_commit_in_graph_one(g, item);

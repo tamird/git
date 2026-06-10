@@ -462,7 +462,7 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 		struct commit_graph *g;
 		uint32_t graph_pos;
 
-		g = repo_find_commit_pos_in_graph_for_bloom(r, c, &graph_pos);
+		g = repo_find_commit_pos_in_graph(r, c, &graph_pos);
 		if (g)
 			load_bloom_filter_from_graph(g, filter, graph_pos);
 	}

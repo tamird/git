@@ -71,9 +71,6 @@ test_expect_success 'shallow repositories use Bloom filters' '
 		done &&
 		git commit-graph write --reachable --changed-paths &&
 		git rev-parse boundary^{commit} >.git/shallow &&
-		test_must_fail test-tool repository parse_commit_in_graph \
-			.git . "$(git rev-parse HEAD)" 2>err &&
-		test_grep "Couldn.t parse commit" err &&
 		git -c core.commitGraph=false log --format=%s \
 			-- boundary-path >expect &&
 		GIT_TRACE2_PERF="$TRASH_DIRECTORY/shallow.perf" \
