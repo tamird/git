@@ -134,6 +134,7 @@ static struct work_item todo[TODO_SIZE];
 static int todo_start;
 static int todo_end;
 static int todo_done;
+static int status_only_hit;
 
 /* Has all work items been added? */
 static int all_work_added;
@@ -282,16 +283,21 @@ static void grep_result_cache_add(struct grep_opt *opt,
 	grep_result_cache_unlock();
 }
 
-static void add_work(struct grep_opt *opt, struct grep_source *gs,
-		     size_t worktree_blob_pos)
+static int add_work(struct grep_opt *opt, struct grep_source *gs,
+		    size_t worktree_blob_pos)
 {
 	if (opt->binary != GREP_BINARY_TEXT)
 		grep_source_load_driver(gs, opt->repo->index);
 
 	grep_lock();
 
-	while ((todo_end+1) % ARRAY_SIZE(todo) == todo_done) {
+	while (!status_only_hit &&
+	       (todo_end + 1) % ARRAY_SIZE(todo) == todo_done)
 		pthread_cond_wait(&cond_write, &grep_mutex);
+	if (status_only_hit) {
+		grep_unlock();
+		grep_source_clear(gs);
+		return 1;
 	}
 
 	todo[todo_end].source = *gs;
@@ -302,6 +308,7 @@ static void add_work(struct grep_opt *opt, struct grep_source *gs,
 
 	pthread_cond_signal(&cond_add);
 	grep_unlock();
+	return 0;
 }
 
 static struct work_item *get_work(int worker_id)
@@ -418,6 +425,24 @@ static void *run(void *arg)
 			if (!source_hit && w->source.buf)
 				grep_result_cache_add(opt, &w->source);
 			hit |= source_hit;
+			if (source_hit && opt->status_only) {
+				grep_lock();
+				if (!status_only_hit) {
+					int i;
+
+					/*
+					 * Retire pending items through work_done(),
+					 * after earlier in-flight items finish.
+					 */
+					for (i = todo_start; i != todo_end;
+					     i = (i + 1) % ARRAY_SIZE(todo))
+						todo[i].done = 1;
+					todo_start = todo_end;
+					status_only_hit = 1;
+				}
+				pthread_cond_signal(&cond_write);
+				grep_unlock();
+			}
 		}
 		grep_source_clear_data(&w->source);
 		work_done(w, worker_id);
@@ -575,6 +600,7 @@ static void start_threads(struct grep_opt *opt)
 	pthread_cond_init(&cond_result, NULL);
 	grep_use_locks = 1;
 	enable_obj_read_lock();
+	status_only_hit = 0;
 	threads_started = 1;
 	worker_lease_stop = 0;
 
@@ -804,11 +830,10 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 
 	if (num_threads > 1) {
 		/*
-		 * add_work() copies gs and thus assumes ownership of
-		 * its fields, so do not call grep_source_clear()
+		 * add_work() consumes gs, so do not call
+		 * grep_source_clear().
 		 */
-		add_work(opt, &gs, pos);
-		return 0;
+		return add_work(opt, &gs, pos);
 	} else {
 		int hit;
 
@@ -843,11 +868,10 @@ static int grep_file(struct grep_opt *opt, const char *filename,
 
 	if (num_threads > 1) {
 		/*
-		 * add_work() copies gs and thus assumes ownership of
-		 * its fields, so do not call grep_source_clear()
+		 * add_work() consumes gs, so do not call
+		 * grep_source_clear().
 		 */
-		add_work(opt, &gs, pos);
-		return 0;
+		return add_work(opt, &gs, pos);
 	} else {
 		int hit;
 
