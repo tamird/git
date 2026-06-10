@@ -154,7 +154,9 @@ struct grep_index_query {
 	size_t branches_alloc;
 	size_t alternatives_nr;
 	size_t trigrams_nr;
+	struct object_id cache_key;
 	int ignore_case;
+	int cacheable;
 };
 
 struct grep_index_query_boundary {
@@ -2112,6 +2114,39 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		query->branches_alloc = 1;
 		query->alternatives_nr = patterns_nr;
 	}
+	/*
+	 * Cache only scans whose no-match result proves this raw byte string
+	 * absent. Default binary handling and --text both search the bytes;
+	 * -I, folding, word boundaries, and regular-expression operators do
+	 * not share that invariant.
+	 */
+	if (!opt->ignore_case && !opt->word_regexp &&
+	    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match &&
+	    patterns_nr == 1 && pattern_type != GREP_PATTERN_TYPE_PCRE) {
+		const struct grep_pat *pattern = opt->pattern_list;
+		int fixed = pattern_type == GREP_PATTERN_TYPE_FIXED;
+
+		if (!fixed) {
+			fixed = 1;
+			for (size_t i = 0; i < pattern->patternlen; i++)
+				if (is_regex_special(pattern->pattern[i])) {
+					fixed = 0;
+					break;
+				}
+		}
+		if (fixed) {
+			static const char domain[] =
+				"grep-index-negative-v1";
+			struct git_hash_ctx ctx;
+
+			opt->repo->hash_algo->init_fn(&ctx);
+			git_hash_update(&ctx, domain, sizeof(domain));
+			git_hash_update(&ctx, pattern->pattern,
+					pattern->patternlen);
+			git_hash_final_oid(&query->cache_key, &ctx);
+			query->cacheable = 1;
+		}
+	}
 	free(enrichments);
 	free(boundaries);
 	return query;
@@ -2122,6 +2157,12 @@ unsupported:
 	free(clause.trigrams);
 	grep_index_query_free(query);
 	return NULL;
+}
+
+const struct object_id *grep_index_query_cache_key(
+	const struct grep_index_query *query)
+{
+	return query && query->cacheable ? &query->cache_key : NULL;
 }
 
 static int grep_index_query_clause_maybe_contains(

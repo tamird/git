@@ -26,6 +26,8 @@ int grep_index_query_serialize(const struct grep_index_query *query,
 			       struct strbuf *buf);
 struct grep_index_query *grep_index_query_deserialize(const char *data,
 						      size_t len);
+const struct object_id *grep_index_query_cache_key(
+	const struct grep_index_query *query);
 
 int grep_index_maybe_contains(struct grep_index *index,
 			      struct repository *repo,
