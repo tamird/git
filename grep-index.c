@@ -1085,6 +1085,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	size_t enrichments_nr = 0;
 	size_t enrichments_alloc = 0;
 	size_t enrichment_trigrams_nr = 0;
+	size_t patterns_nr = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
 
@@ -1109,6 +1110,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 
 		if (p->token != GREP_PATTERN)
 			goto unsupported;
+		patterns_nr++;
 		if (opt->ignore_case) {
 			for (size_t i = 0; i < p->patternlen; i++) {
 				if ((unsigned char)p->pattern[i] & 0x80)
@@ -2079,6 +2081,36 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		grep_index_query_clause_add_enrichments(
 			query, &query->clauses[enrichment->clause_nr],
 			enrichment, 1);
+	}
+	/*
+	 * --all-match requires every top-level pattern expression. A single
+	 * clause per pattern maps directly to the existing AND-of-OR groups;
+	 * leave more complex expressions on the conservative OR path.
+	 */
+	if (opt->all_match && !query->branches_nr &&
+	    query->clauses_nr == patterns_nr) {
+		struct grep_index_query_branch branch = { 0 };
+
+		CALLOC_ARRAY(branch.groups, patterns_nr);
+		branch.groups_nr = patterns_nr;
+		branch.groups_alloc = patterns_nr;
+		for (size_t i = 0; i < patterns_nr; i++) {
+			struct grep_index_query_group *group = &branch.groups[i];
+
+			ALLOC_ARRAY(group->alternatives, 1);
+			group->alternatives[0] = query->clauses[i];
+			group->alternatives_nr = 1;
+			group->alternatives_alloc = 1;
+		}
+		free(query->clauses);
+		query->clauses = NULL;
+		query->clauses_nr = 0;
+		query->clauses_alloc = 0;
+		ALLOC_ARRAY(query->branches, 1);
+		query->branches[0] = branch;
+		query->branches_nr = 1;
+		query->branches_alloc = 1;
+		query->alternatives_nr = patterns_nr;
 	}
 	free(enrichments);
 	free(boundaries);
