@@ -176,6 +176,8 @@ struct untracked_cache_dir {
 	struct untracked_cache_dir **dirs;
 	char **untracked;
 	struct stat_data stat_data;
+	/* Transient subtree size for parallel validation; not serialized. */
+	size_t validation_nr;
 	unsigned int untracked_alloc, dirs_nr, dirs_alloc;
 	unsigned int untracked_nr;
 	unsigned int check_only : 1;
@@ -184,6 +186,8 @@ struct untracked_cache_dir {
 	unsigned int recurse : 1;
 	/* The active subtree is valid and replays no untracked result. */
 	unsigned int can_skip_replay : 1;
+	/* Transient parallel-validation result; not serialized. */
+	unsigned int stat_matches : 1;
 	/* null object ID means this directory does not have .gitignore */
 	struct object_id exclude_oid;
 	char name[FLEX_ARRAY];

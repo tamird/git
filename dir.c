@@ -33,6 +33,7 @@
 #include "strbuf.h"
 #include "submodule-config.h"
 #include "symlinks.h"
+#include "thread-utils.h"
 #include "trace2.h"
 #include "tree.h"
 #include "hex.h"
@@ -2594,7 +2595,8 @@ static int valid_cached_dir(struct dir_struct *dir,
 	 * With fsmonitor, we can trust the untracked cache's valid field.
 	 */
 	refresh_fsmonitor(istate);
-	if (!(dir->untracked->use_fsmonitor && untracked->valid)) {
+	if (!(dir->untracked->use_fsmonitor && untracked->valid) &&
+	    (!untracked->valid || !untracked->stat_matches)) {
 		if (lstat(path->len ? path->buf : ".", &st)) {
 			memset(&untracked->stat_data, 0, sizeof(untracked->stat_data));
 			return 0;
@@ -2625,6 +2627,190 @@ static int valid_cached_dir(struct dir_struct *dir,
 
 	/* hopefully prep_exclude() haven't invalidated this entry... */
 	return untracked->valid;
+}
+
+struct untracked_stat_task {
+	struct untracked_cache_dir *untracked;
+	char *path;
+};
+
+struct untracked_stat_data {
+	pthread_mutex_t mutex;
+	struct index_state *istate;
+	struct untracked_stat_task *tasks;
+	size_t next_task;
+	size_t nr_tasks;
+};
+
+struct untracked_stat_thread {
+	pthread_t pthread;
+	struct untracked_stat_data *shared;
+	int nr_lstat;
+};
+
+#define MAX_UNTRACKED_STAT_THREADS	20
+#define UNTRACKED_STAT_TASKS_PER_THREAD 4
+#define UNTRACKED_STAT_MIN_TASK_SIZE	500
+
+/*
+ * After an fsmonitor fallback, cached directory stat checks are independent.
+ * Precheck matching entries in parallel; the ordered traversal still handles
+ * changed entries and validates per-directory exclude files.
+ */
+static void validate_untracked_stat(struct untracked_cache_dir *untracked,
+				    struct index_state *istate,
+				    struct strbuf *path, int *nr_lstat,
+				    int recurse)
+{
+	struct stat st;
+	size_t i, len = path->len;
+
+	untracked->stat_matches = 0;
+	if (untracked->valid) {
+		(*nr_lstat)++;
+		if (!lstat(path->len ? path->buf : ".", &st) &&
+		    !match_stat_data_racy(istate, &untracked->stat_data, &st))
+			untracked->stat_matches = 1;
+	}
+	if (!recurse)
+		return;
+
+	for (i = 0; i < untracked->dirs_nr; i++) {
+		if (path->len)
+			strbuf_addch(path, '/');
+		strbuf_addstr(path, untracked->dirs[i]->name);
+		validate_untracked_stat(untracked->dirs[i], istate, path,
+					nr_lstat, 1);
+		strbuf_setlen(path, len);
+	}
+}
+
+static size_t count_untracked_dirs(struct untracked_cache_dir *untracked)
+{
+	size_t i, nr = 1;
+
+	for (i = 0; i < untracked->dirs_nr; i++)
+		nr += count_untracked_dirs(untracked->dirs[i]);
+	return untracked->validation_nr = nr;
+}
+
+static void prepare_untracked_stat_tasks(struct untracked_stat_data *shared,
+					 struct untracked_cache_dir *untracked,
+					 struct strbuf *path, size_t task_size,
+					 size_t *alloc, int *nr_lstat)
+{
+	size_t i, len = path->len;
+
+	if (!untracked->dirs_nr || untracked->validation_nr <= task_size) {
+		ALLOC_GROW(shared->tasks, shared->nr_tasks + 1, *alloc);
+		shared->tasks[shared->nr_tasks].untracked = untracked;
+		shared->tasks[shared->nr_tasks].path = xstrdup(path->buf);
+		shared->nr_tasks++;
+		return;
+	}
+
+	validate_untracked_stat(untracked, shared->istate, path, nr_lstat, 0);
+	for (i = 0; i < untracked->dirs_nr; i++) {
+		if (path->len)
+			strbuf_addch(path, '/');
+		strbuf_addstr(path, untracked->dirs[i]->name);
+		prepare_untracked_stat_tasks(shared, untracked->dirs[i], path,
+					     task_size, alloc, nr_lstat);
+		strbuf_setlen(path, len);
+	}
+}
+
+static void *validate_untracked_stat_thread(void *data)
+{
+	struct untracked_stat_thread *thread = data;
+	struct untracked_stat_data *shared = thread->shared;
+	struct strbuf path = STRBUF_INIT;
+
+	for (;;) {
+		struct untracked_stat_task *task;
+		size_t task_nr;
+
+		pthread_mutex_lock(&shared->mutex);
+		task_nr = shared->next_task++;
+		pthread_mutex_unlock(&shared->mutex);
+		if (task_nr >= shared->nr_tasks)
+			break;
+
+		task = &shared->tasks[task_nr];
+		strbuf_addstr(&path, task->path);
+		validate_untracked_stat(task->untracked, shared->istate, &path,
+					&thread->nr_lstat, 1);
+		strbuf_reset(&path);
+	}
+
+	strbuf_release(&path);
+	return NULL;
+}
+
+static void validate_untracked_stats(struct untracked_cache_dir *root,
+				     struct index_state *istate)
+{
+	struct untracked_stat_data shared = {
+		.istate = istate,
+	};
+	struct untracked_stat_thread *data;
+	struct strbuf path = STRBUF_INIT;
+	size_t alloc = 0, nr_dirs, task_size;
+	int i, threads, nr_lstat = 0;
+	int test_threads = git_env_bool("GIT_TEST_UNTRACKED_CACHE_THREADS", 0);
+
+	if (!HAVE_THREADS)
+		return;
+	threads = online_cpus();
+	if (threads > MAX_UNTRACKED_STAT_THREADS)
+		threads = MAX_UNTRACKED_STAT_THREADS;
+	if (test_threads && threads < 2)
+		threads = 2;
+	nr_dirs = count_untracked_dirs(root);
+	if (threads < 2 || (nr_dirs < 1000 && !test_threads))
+		return;
+	if (test_threads)
+		task_size = 1;
+	else
+		task_size = nr_dirs /
+			    (threads * UNTRACKED_STAT_TASKS_PER_THREAD);
+	if (!test_threads && task_size < UNTRACKED_STAT_MIN_TASK_SIZE)
+		task_size = UNTRACKED_STAT_MIN_TASK_SIZE;
+	prepare_untracked_stat_tasks(&shared, root, &path, task_size, &alloc,
+				     &nr_lstat);
+	if (threads > shared.nr_tasks)
+		threads = shared.nr_tasks;
+
+	CALLOC_ARRAY(data, threads);
+	i = pthread_mutex_init(&shared.mutex, NULL);
+	if (i)
+		die("unable to initialize untracked cache mutex: %s",
+		    strerror(i));
+
+	for (i = 0; i < threads; i++) {
+		int err;
+
+		data[i].shared = &shared;
+		err = pthread_create(&data[i].pthread, NULL,
+				     validate_untracked_stat_thread, &data[i]);
+		if (err)
+			die("unable to create untracked cache thread: %s",
+			    strerror(err));
+	}
+	for (i = 0; i < threads; i++) {
+		if (pthread_join(data[i].pthread, NULL))
+			die("unable to join untracked cache thread");
+		nr_lstat += data[i].nr_lstat;
+	}
+
+	pthread_mutex_destroy(&shared.mutex);
+	strbuf_release(&path);
+	for (i = 0; i < shared.nr_tasks; i++)
+		free(shared.tasks[i].path);
+	free(shared.tasks);
+	free(data);
+	trace2_data_intmax("read_directory", istate->repo,
+			   "parallel-lstat", nr_lstat);
 }
 
 static int open_cached_dir(struct cached_dir *cdir,
@@ -3278,7 +3464,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 				dir->internal.can_prune_replay = 1;
 				if (has_pathspec || prune_only)
 					untracked_prune = untracked_cache->root;
-			}
+			} else if (untracked)
+				validate_untracked_stats(untracked, istate);
 		}
 	}
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))

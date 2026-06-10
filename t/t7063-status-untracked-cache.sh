@@ -987,6 +987,36 @@ test_expect_success '"status" after file replacement should be clean with UC=fal
 	status_is_clean
 '
 
+test_expect_success PTHREADS 'parallel cached directory validation' '
+	test_create_repo parallel-validation &&
+	(
+		cd parallel-validation &&
+		git config core.untrackedCache true &&
+		mkdir one two &&
+		echo ignored >.gitignore &&
+		>one/ignored &&
+		>two/ignored &&
+		git add .gitignore &&
+		git commit -m base &&
+		git status --porcelain >../actual &&
+		test_must_be_empty ../actual &&
+
+		echo visible >.gitignore &&
+		>two/new &&
+		cat >../expect <<-\EOF &&
+		 M .gitignore
+		?? one/
+		?? two/
+		EOF
+		GIT_TEST_UNTRACKED_CACHE_THREADS=1 \
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/parallel-validation.trace" \
+			git status --porcelain >../actual &&
+		test_cmp ../expect ../actual &&
+		test_grep "parallel-lstat:[1-9]" \
+			"$TRASH_DIRECTORY/parallel-validation.trace"
+	)
+'
+
 test_expect_success 'empty repo (no index) and core.untrackedCache' '
 	git init emptyrepo &&
 	git -C emptyrepo -c core.untrackedCache=true write-tree
