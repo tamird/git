@@ -12,6 +12,7 @@
 #include "tree-walk.h"
 #include "config.h"
 #include "repository.h"
+#include "shallow.h"
 
 define_commit_slab(bloom_filter_slab, struct bloom_filter);
 
@@ -418,9 +419,15 @@ static struct bloom_filter *upgrade_filter(struct repository *r, struct commit *
 
 struct bloom_filter *get_bloom_filter(struct repository *r, struct commit *c)
 {
+	struct commit_graft *graft;
 	struct bloom_filter *filter;
 	int hash_version;
 
+	if (is_repository_shallow(r)) {
+		graft = lookup_commit_graft(r, &c->object.oid);
+		if (graft && graft->nr_parent < 0)
+			return NULL;
+	}
 	filter = get_or_compute_bloom_filter(r, c, 0, NULL, NULL);
 	if (!filter)
 		return NULL;
