@@ -353,11 +353,24 @@ test_expect_success 'commit grafts invalidate commit-graph' '
 	)
 '
 
-test_expect_success 'replace-objects invalidates commit-graph' '
+test_expect_success 'shallow repositories read but do not write commit-graphs' '
 	test_when_finished rm -rf shallow &&
 	git clone --depth 2 "file://$TRASH_DIRECTORY/full" shallow &&
+	cp full/$objdir/info/commit-graph \
+		shallow/$objdir/info/commit-graph &&
 	(
 		cd shallow &&
+		git -c core.commitGraph=false show -s --format="%ct %P" \
+			HEAD >expect &&
+		test-tool repository parse_commit_in_graph \
+			.git . "$(git rev-parse HEAD)" >actual &&
+		test_cmp expect actual &&
+		git -c core.commitGraph=false show -s --format=%ct \
+			HEAD^ >expect &&
+		test-tool repository parse_commit_in_graph \
+			.git . "$(git rev-parse HEAD^)" >actual &&
+		test_cmp expect actual &&
+		rm .git/objects/info/commit-graph &&
 		git commit-graph write --reachable &&
 		test_path_is_missing .git/objects/info/commit-graph &&
 		git fetch origin --unshallow &&
