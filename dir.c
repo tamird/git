@@ -3261,6 +3261,7 @@ void remove_untracked_cache(struct index_state *istate)
 static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *dir,
 							    int base_len,
 							    struct index_state *istate,
+							    const struct pathspec *pathspec,
 							    int *negative_only)
 {
 	const unsigned int normal_flags =
@@ -3294,10 +3295,20 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	if (base_len)
 		return NULL;
 
-	/* We don't support collecting ignore files */
-	if (dir->flags & (DIR_SHOW_IGNORED | DIR_SHOW_IGNORED_TOO |
-			DIR_COLLECT_IGNORED))
+	/* We don't support showing ignore files */
+	if (dir->flags & (DIR_SHOW_IGNORED | DIR_SHOW_IGNORED_TOO))
 		return NULL;
+	if (dir->flags & DIR_COLLECT_IGNORED) {
+		if (!pathspec || !pathspec->nr)
+			return NULL;
+		/*
+		 * exclude_matches_pathspec() cannot collect a path when every
+		 * pathspec item has an empty fixed prefix.
+		 */
+		for (i = 0; pathspec && i < pathspec->nr; i++)
+			if (pathspec->items[i].nowildcard_len)
+				return NULL;
+	}
 
 	/*
 	 * If we use .gitignore in the cache and now you change it to
@@ -3322,7 +3333,9 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	}
 
 	if (*negative_only) {
-		if ((dir->flags != 0 && dir->flags != normal_flags) ||
+		unsigned int flags = dir->flags & ~DIR_COLLECT_IGNORED;
+
+		if ((flags != 0 && flags != normal_flags) ||
 		    (dir->untracked->dir_flags != 0 &&
 		     dir->untracked->dir_flags != normal_flags))
 			return NULL;
@@ -3454,7 +3467,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		return dir->nr;
 	}
 
-	untracked = validate_untracked_cache(dir, len, istate, &negative_only);
+	untracked = validate_untracked_cache(dir, len, istate, pathspec,
+					     &negative_only);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
