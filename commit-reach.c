@@ -8,6 +8,7 @@
 #include "prio-queue.h"
 #include "ref-filter.h"
 #include "revision.h"
+#include "shallow.h"
 #include "tag.h"
 #include "commit-reach.h"
 #include "ewah/ewok.h"
@@ -875,7 +876,8 @@ int commit_contains(struct ref_filter *filter, struct commit *commit,
 	if (!list)
 		return 1;
 	if (filter->with_commit_tag_algo ||
-	    generation_numbers_enabled(the_repository))
+	    generation_numbers_enabled(the_repository) ||
+	    is_repository_shallow(the_repository))
 		return contains_tag_algo(commit, list, cache) == CONTAINS_YES;
 
 	result = repo_is_descendant_of(the_repository, commit, list);
