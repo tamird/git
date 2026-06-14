@@ -51,6 +51,7 @@ void git_test_write_commit_graph_or_die(struct odb_source *source)
 #define GRAPH_CHUNKID_BLOOMINDEXES 0x42494458 /* "BIDX" */
 #define GRAPH_CHUNKID_BLOOMDATA 0x42444154 /* "BDAT" */
 #define GRAPH_CHUNKID_BASE 0x42415345 /* "BASE" */
+#define GRAPH_CHUNKID_SHALLOW		       0x5348414c /* "SHAL" */
 
 #define GRAPH_VERSION_1 0x1
 #define GRAPH_VERSION GRAPH_VERSION_1
@@ -246,6 +247,18 @@ static int commit_graph_compatible(struct repository *r, int allow_shallow)
 	}
 
 	return 1;
+}
+
+static void collect_shallow_oids(struct repository *r, struct oid_array *oids)
+{
+	prepare_commit_graft(r);
+	for (int i = 0; i < r->parsed_objects->grafts_nr; i++) {
+		struct commit_graft *graft = r->parsed_objects->grafts[i];
+
+		if (graft->nr_parent < 0)
+			oid_array_append(oids, &graft->oid);
+	}
+	oid_array_sort(oids);
 }
 
 int open_commit_graph(const char *graph_file, int *fd, struct stat *st)
@@ -455,6 +468,26 @@ struct commit_graph *parse_commit_graph(struct repository *r,
 	if (read_chunk(cf, GRAPH_CHUNKID_DATA, graph_read_commit_data, graph)) {
 		error(_("commit-graph required commit data chunk missing or corrupted"));
 		goto free_and_return;
+	}
+	pair_chunk(cf, GRAPH_CHUNKID_SHALLOW, &graph->chunk_shallow,
+		   &graph->chunk_shallow_size);
+	if (graph->chunk_shallow) {
+		struct oid_array shallow_oids = OID_ARRAY_INIT;
+		size_t expected_size;
+		int mismatch;
+
+		collect_shallow_oids(r, &shallow_oids);
+		expected_size = st_mult(shallow_oids.nr, r->hash_algo->rawsz);
+		mismatch = !expected_size ||
+			   graph->chunk_shallow_size != expected_size;
+		for (size_t i = 0; !mismatch && i < shallow_oids.nr; i++)
+			mismatch = memcmp(graph->chunk_shallow +
+						  st_mult(i, r->hash_algo->rawsz),
+					  shallow_oids.oid[i].hash,
+					  r->hash_algo->rawsz);
+		oid_array_clear(&shallow_oids);
+		if (mismatch)
+			goto free_and_return;
 	}
 
 	pair_chunk(cf, GRAPH_CHUNKID_EXTRAEDGES, &graph->chunk_extra_edges,
@@ -855,6 +888,12 @@ void close_commit_graph(struct object_database *o)
 	o->commit_graph = NULL;
 }
 
+void repo_invalidate_commit_graph(struct repository *r)
+{
+	close_commit_graph(r->objects);
+	r->objects->commit_graph_attempted = 0;
+}
+
 static int bsearch_graph(struct commit_graph *g, const struct object_id *oid, uint32_t *pos)
 {
 	return bsearch_hash(oid->hash, g->chunk_oid_fanout,
@@ -1174,6 +1213,7 @@ struct write_commit_graph_context {
 	struct odb_source *odb_source;
 	char *graph_name;
 	struct oid_array oids;
+	struct oid_array shallow_oids;
 	struct commit_stack commits;
 	int num_extra_edges;
 	int num_generation_data_overflows;
@@ -1249,6 +1289,16 @@ static int write_graph_chunk_oids(struct hashfile *f,
 		hashwrite(f, (*list)->object.oid.hash, f->algop->rawsz);
 	}
 
+	return 0;
+}
+
+static int write_graph_chunk_shallow(struct hashfile *f, void *data)
+{
+	struct write_commit_graph_context *ctx = data;
+
+	for (size_t i = 0; i < ctx->shallow_oids.nr; i++)
+		hashwrite(f, ctx->shallow_oids.oid[i].hash,
+			  ctx->r->hash_algo->rawsz);
 	return 0;
 }
 
@@ -2197,6 +2247,10 @@ static int write_commit_graph_file(struct write_commit_graph_context *ctx)
 		  write_graph_chunk_oids);
 	add_chunk(cf, GRAPH_CHUNKID_DATA, st_mult(hashsz + 16, ctx->commits.nr),
 		  write_graph_chunk_data);
+	if (ctx->shallow_oids.nr)
+		add_chunk(cf, GRAPH_CHUNKID_SHALLOW,
+			  st_mult(hashsz, ctx->shallow_oids.nr),
+			  write_graph_chunk_shallow);
 
 	if (ctx->write_generation_data)
 		add_chunk(cf, GRAPH_CHUNKID_GENERATION_DATA,
@@ -2623,8 +2677,9 @@ int write_commit_graph(struct odb_source *source,
 		warning(_("attempting to write a commit-graph, but 'core.commitGraph' is disabled"));
 		return 0;
 	}
-	if (!commit_graph_compatible(r, 0))
+	if (!commit_graph_compatible(r, 1))
 		return 0;
+	collect_shallow_oids(r, &ctx.shallow_oids);
 	if (r->settings.commit_graph_changed_paths_version < -1 || r->settings.commit_graph_changed_paths_version > 3) {
 		warning(_("attempting to write a commit-graph, but "
 			  "'commitGraph.changedPathsVersion' (%d) is not supported"),
@@ -2758,6 +2813,7 @@ cleanup:
 	free(ctx.base_graph_name);
 	commit_stack_clear(&ctx.commits);
 	oid_array_clear(&ctx.oids);
+	oid_array_clear(&ctx.shallow_oids);
 	clear_topo_level_slab(&topo_levels);
 
 	if (ctx.r->objects->commit_graph) {
@@ -2813,6 +2869,7 @@ static int verify_one_commit_graph(struct commit_graph *g,
 	struct object_id prev_oid, cur_oid;
 	struct commit *seen_gen_zero = NULL;
 	struct commit *seen_gen_non_zero = NULL;
+	int verify_generations = !is_repository_shallow(r);
 
 	if (!commit_graph_checksum_valid(g)) {
 		graph_report(_("the commit-graph file has incorrect checksum and is likely corrupt"));
@@ -2916,29 +2973,32 @@ static int verify_one_commit_graph(struct commit_graph *g,
 			graph_report(_("commit-graph parent list for commit %s terminates early"),
 				     oid_to_hex(&cur_oid));
 
-		if (commit_graph_generation_from_graph(graph_commit))
-			seen_gen_non_zero = graph_commit;
-		else
-			seen_gen_zero = graph_commit;
+		if (verify_generations) {
+			if (commit_graph_generation_from_graph(graph_commit))
+				seen_gen_non_zero = graph_commit;
+			else
+				seen_gen_zero = graph_commit;
 
-		if (seen_gen_zero)
-			continue;
+			if (seen_gen_zero)
+				continue;
 
-		/*
-		 * If we are using topological level and one of our parents has
-		 * generation GENERATION_NUMBER_V1_MAX, then our generation is
-		 * also GENERATION_NUMBER_V1_MAX. Decrement to avoid extra logic
-		 * in the following condition.
-		 */
-		if (!g->read_generation_data && max_generation == GENERATION_NUMBER_V1_MAX)
-			max_generation--;
+			/*
+			 * If we are using topological level and one of our parents has
+			 * generation GENERATION_NUMBER_V1_MAX, then our generation is
+			 * also GENERATION_NUMBER_V1_MAX. Decrement to avoid extra logic
+			 * in the following condition.
+			 */
+			if (!g->read_generation_data &&
+			    max_generation == GENERATION_NUMBER_V1_MAX)
+				max_generation--;
 
-		generation = commit_graph_generation(graph_commit);
-		if (generation < max_generation + 1)
-			graph_report(_("commit-graph generation for commit %s is %"PRItime" < %"PRItime),
-				     oid_to_hex(&cur_oid),
-				     generation,
-				     max_generation + 1);
+			generation = commit_graph_generation(graph_commit);
+			if (generation < max_generation + 1)
+				graph_report(_("commit-graph generation for commit %s is %" PRItime " < %" PRItime),
+					     oid_to_hex(&cur_oid),
+					     generation,
+					     max_generation + 1);
+		}
 
 		if (graph_commit->date != odb_commit->date)
 			graph_report(_("commit date for commit %s in commit-graph is %"PRItime" != %"PRItime),
@@ -2947,7 +3007,7 @@ static int verify_one_commit_graph(struct commit_graph *g,
 				     odb_commit->date);
 	}
 
-	if (seen_gen_zero && seen_gen_non_zero)
+	if (verify_generations && seen_gen_zero && seen_gen_non_zero)
 		graph_report(_("commit-graph has both zero and non-zero "
 			       "generations (e.g., commits '%s' and '%s')"),
 			     oid_to_hex(&seen_gen_zero->object.oid),

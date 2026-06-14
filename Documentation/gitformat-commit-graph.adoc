@@ -172,6 +172,11 @@ All multi-byte numbers are in network byte order.
       file's OID Lookup chunk is equal to i plus the number of commits in all
       base graphs.  If B is non-zero, this chunk must exist.
 
+==== Shallow Boundary (ID: {'S', 'H', 'A', 'L'}) [Optional]
+    * The OIDs listed in the repository's shallow file when this graph was
+      written, in lexicographic order. A graph with this chunk is used only
+      while the repository has exactly the same shallow boundary.
+
 === TRAILER:
 
 	H-byte HASH-checksum of all of the above.

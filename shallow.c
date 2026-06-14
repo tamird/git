@@ -7,6 +7,7 @@
 #include "lockfile.h"
 #include "odb.h"
 #include "commit.h"
+#include "commit-graph.h"
 #include "tag.h"
 #include "pkt-line.h"
 #include "refs.h"
@@ -37,6 +38,9 @@ int register_shallow(struct repository *r, const struct object_id *oid)
 		xmalloc(sizeof(struct commit_graft));
 	struct commit *commit = lookup_commit(r, oid);
 
+	if (r->objects->commit_graph)
+		repo_invalidate_commit_graph(r);
+
 	oidcpy(&graft->oid, oid);
 	graft->nr_parent = -1;
 	if (commit && commit->object.parsed) {
@@ -48,15 +52,19 @@ int register_shallow(struct repository *r, const struct object_id *oid)
 
 int unregister_shallow(const struct object_id *oid)
 {
-	int pos = commit_graft_pos(the_repository, oid);
+	struct repository *r = the_repository;
+	int pos = commit_graft_pos(r, oid);
 	if (pos < 0)
 		return -1;
-	free(the_repository->parsed_objects->grafts[pos]);
-	if (pos + 1 < the_repository->parsed_objects->grafts_nr)
-		MOVE_ARRAY(the_repository->parsed_objects->grafts + pos,
-			   the_repository->parsed_objects->grafts + pos + 1,
-			   the_repository->parsed_objects->grafts_nr - pos - 1);
-	the_repository->parsed_objects->grafts_nr--;
+	if (r->objects->commit_graph)
+		repo_invalidate_commit_graph(r);
+	unparse_commit(r, oid);
+	free(r->parsed_objects->grafts[pos]);
+	if (pos + 1 < r->parsed_objects->grafts_nr)
+		MOVE_ARRAY(r->parsed_objects->grafts + pos,
+			   r->parsed_objects->grafts + pos + 1,
+			   r->parsed_objects->grafts_nr - pos - 1);
+	r->parsed_objects->grafts_nr--;
 	return 0;
 }
 
@@ -96,6 +104,8 @@ int is_repository_shallow(struct repository *r)
 
 static void reset_repository_shallow(struct repository *r)
 {
+	if (r->objects->commit_graph)
+		repo_invalidate_commit_graph(r);
 	r->parsed_objects->is_shallow = -1;
 	stat_validity_clear(r->parsed_objects->shallow_stat);
 	parsed_object_pool_reset_commit_grafts(r->parsed_objects);
