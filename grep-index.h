@@ -4,6 +4,7 @@
 struct object_id;
 struct grep_opt;
 struct repository;
+struct rev_info;
 struct strbuf;
 
 struct grep_index;
@@ -61,7 +62,8 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 				     const struct object_id *oid,
 				     const struct grep_index_query *query);
 
-int write_grep_index(struct repository *repo, int show_progress);
+int write_grep_index(struct repository *repo, int show_progress,
+		     struct rev_info *revs);
 int write_transposed_grep_index(struct repository *repo);
 
 #endif
