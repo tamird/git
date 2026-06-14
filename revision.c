@@ -808,6 +808,8 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 
 	if (!revs->bloom_keyvecs_nr)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+	if (commit_graph_position(commit) == COMMIT_NOT_FROM_GRAPH)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	filter = get_bloom_filter(revs->repo, commit);
 
