@@ -69,6 +69,7 @@ struct saved_parents;
 struct follow_pathspec_slab;
 struct bloom_keyvec;
 struct bloom_filter_settings;
+struct bloom_query_node;
 struct option;
 struct parse_opt_ctx_t;
 define_shared_commit_slab(revision_sources, char *);
@@ -392,6 +393,11 @@ struct rev_info {
 	/* The bloom filter key(s) for the pathspec */
 	struct bloom_keyvec **bloom_keyvecs;
 	int bloom_keyvecs_nr;
+	struct bloom_keyvec **bloom_query_components;
+	struct bloom_query_node *bloom_query;
+	int bloom_query_nr;
+	int bloom_query_alloc;
+	int bloom_query_root;
 	enum follow_bloom_elision_state follow_bloom_elision;
 	/* Query result produced while choosing the next --follow commit. */
 	struct commit *bloom_filter_queried_commit;
