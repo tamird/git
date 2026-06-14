@@ -1063,6 +1063,8 @@ static int grep_cache(struct grep_opt *opt,
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
 	int worktree_sidecar_loaded = 0;
+	const char *recursive_basename = NULL;
+	size_t recursive_basename_len = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	if (repo->submodule_prefix) {
@@ -1073,14 +1075,25 @@ static int grep_cache(struct grep_opt *opt,
 	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
+	if (pathspec->nr == 1) {
+		const struct pathspec_item *item = &pathspec->items[0];
+		const char *basename;
+
+		if (!item->magic && !item->prefix &&
+		    pathspec_item_get_recursive_basename(item, &basename)) {
+			recursive_basename = basename;
+			recursive_basename_len = strlen(basename);
+		}
+	}
 	/*
 	 * Whole-index pathspec walks cost more than resolving explicitly named
 	 * worktree files directly.
 	 */
 	if (git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
 	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
-	    !pathspec->has_wildcard &&
-	    !(pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))) {
+	    (recursive_basename ||
+	     (!pathspec->has_wildcard &&
+	      !(pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))))) {
 		struct strbuf dir = STRBUF_INIT;
 		size_t selected_map_size =
 			DIV_ROUND_UP(repo->index->cache_nr, 8);
@@ -1094,17 +1107,23 @@ static int grep_cache(struct grep_opt *opt,
 			int end;
 			int dir_pos;
 
-			if (!item->len || item->match[item->len - 1] == '/' ||
-			    item->nowildcard_len != item->len ||
-			    item->magic &
-				    ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL)) {
+			if (!recursive_basename &&
+			    (!item->len || item->match[item->len - 1] == '/' ||
+			     item->nowildcard_len != item->len ||
+			     item->magic &
+				     ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))) {
 				can_select = 0;
 				break;
 			}
 
-			nr = index_name_pos_sparse(repo->index, item->match,
-						   item->len);
-			if (nr < 0) {
+			if (recursive_basename) {
+				nr = 0;
+				end = repo->index->cache_nr;
+			} else {
+				nr = index_name_pos_sparse(repo->index, item->match,
+							   item->len);
+			}
+			if (!recursive_basename && nr < 0) {
 				nr = -nr - 1;
 				if (nr < repo->index->cache_nr &&
 				    !strcmp(repo->index->cache[nr]->name,
@@ -1158,14 +1177,23 @@ static int grep_cache(struct grep_opt *opt,
 					}
 					continue;
 				}
-			} else {
+			} else if (!recursive_basename) {
 				end = nr + 1;
 			}
 
 			for (; nr < end; nr++) {
 				const struct cache_entry *ce =
 					repo->index->cache[nr];
+				size_t name_len = ce_namelen(ce);
 				unsigned char bit = 1u << (nr & 7);
+
+				if (recursive_basename &&
+				    (name_len <= recursive_basename_len ||
+				     ce->name[name_len - recursive_basename_len - 1] != '/' ||
+				     memcmp(ce->name + name_len - recursive_basename_len,
+					    recursive_basename,
+					    recursive_basename_len)))
+					continue;
 
 				if (ce_stage(ce)) {
 					can_select = 0;
@@ -1200,7 +1228,9 @@ static int grep_cache(struct grep_opt *opt,
 			use_selected = 1;
 			literal_selected = 1;
 			trace2_data_intmax("grep", repo,
-					   "literal_path_candidates",
+					   recursive_basename ?
+						   "recursive_basename_path_candidates" :
+						   "literal_path_candidates",
 					   selected_nr);
 			if (selected_nr < GREP_MIN_FILES_FOR_THREADS) {
 				uint64_t selected_bytes = 0;

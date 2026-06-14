@@ -111,6 +111,15 @@ static struct pathspec_magic {
 	{ PATHSPEC_ATTR,    '\0', "attr" },
 };
 
+int pathspec_item_get_recursive_basename(
+	const struct pathspec_item *item, const char **basename)
+{
+	return !(item->magic & PATHSPEC_LITERAL) &&
+	       skip_prefix(item->match, "**/", basename) && **basename &&
+	       !strchr(*basename, '/') && !strchr(*basename, '\\') &&
+	       no_wildcard(*basename);
+}
+
 static void prefix_magic(struct strbuf *sb, int prefixlen,
 			 unsigned magic, const char *element)
 {

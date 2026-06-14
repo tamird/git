@@ -2128,6 +2128,7 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_when_finished "rm -f grep-literal-trace-* &&
 		git rm -rf grep-literal-a grep-literal-z \
 			grep-literal-dir grep-literal-dir.sibling \
+			grep-literal-component grep-literal-recursive \
 			grep-literal-many-*" &&
 	echo "literal needle a" >grep-literal-a &&
 	echo "literal needle z" >grep-literal-z &&
@@ -2174,6 +2175,41 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_cmp expected actual &&
 	test_trace2_data grep literal_path_candidates 2 \
 		<grep-literal-trace-overlap &&
+	mkdir -p grep-literal-recursive/a \
+		grep-literal-recursive/b/grep-literal-component &&
+	echo "recursive needle root" >grep-literal-component &&
+	echo "recursive needle file" \
+		>grep-literal-recursive/a/grep-literal-component &&
+	echo "recursive needle child" \
+		>grep-literal-recursive/b/grep-literal-component/child &&
+	echo "recursive needle suffix" \
+		>grep-literal-recursive/b/grep-literal-component-suffix &&
+	git add grep-literal-component grep-literal-recursive &&
+	cat >recursive-expected <<-\EOF &&
+	grep-literal-recursive/a/grep-literal-component:recursive needle file
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-recursive-basename" \
+		git grep "recursive needle" -- \
+			"**/grep-literal-component" >actual &&
+	test_cmp recursive-expected actual &&
+	test_trace2_data grep recursive_basename_path_candidates 1 \
+		<grep-literal-trace-recursive-basename &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-escaped-basename" \
+		git grep "recursive needle" -- \
+			"**/grep-literal\\-component" >actual &&
+	test_cmp recursive-expected actual &&
+	test_grep ! "recursive_basename_path_candidates" \
+		grep-literal-trace-escaped-basename &&
+	cat >glob-expected <<-\EOF &&
+	grep-literal-component:recursive needle root
+	grep-literal-recursive/a/grep-literal-component:recursive needle file
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-glob-basename" \
+		git grep "recursive needle" -- \
+			":(glob)**/grep-literal-component" >actual &&
+	test_cmp glob-expected actual &&
+	test_grep ! "recursive_basename_path_candidates" \
+		grep-literal-trace-glob-basename &&
 	for i in $(test_seq 1 40)
 	do
 		echo "many literal paths" >grep-literal-many-$i || return 1

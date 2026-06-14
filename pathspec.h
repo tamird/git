@@ -55,6 +55,9 @@ struct pathspec {
 	} *items;
 };
 
+int pathspec_item_get_recursive_basename(
+	const struct pathspec_item *item, const char **basename);
+
 #define GUARD_PATHSPEC(ps, mask) \
 	do { \
 		if ((ps)->magic & ~(mask))	       \

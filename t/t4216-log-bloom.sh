@@ -580,6 +580,7 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 		mkdir -p nested/target &&
 		test_commit nested nested/target/file &&
 		test_commit named nested/file4 &&
+		test_commit escaped nested/foobar &&
 		test_commit other unrelated &&
 		git -c commitGraph.changedPathsVersion=3 commit-graph write \
 			--reachable --changed-paths &&
@@ -596,7 +597,11 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 			git log --format=%s -- "**/file4" >actual-file &&
 		test_cmp expect-file actual-file &&
 		test_grep "\"definitely_not\":[1-9]" \
-			"$TRASH_DIRECTORY/basename-file.perf"
+			"$TRASH_DIRECTORY/basename-file.perf" &&
+		git -c core.commitGraph=false log --format=%s \
+			-- "**/foo\\bar" >expect-escaped &&
+		git log --format=%s -- "**/foo\\bar" >actual-escaped &&
+		test_cmp expect-escaped actual-escaped
 	)
 '
 
