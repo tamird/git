@@ -43,6 +43,7 @@ int cache_tree_verify(struct repository *, struct index_state *);
 #define WRITE_TREE_DRY_RUN 4
 #define WRITE_TREE_SILENT 8
 #define WRITE_TREE_REPAIR 16
+#define WRITE_TREE_NO_INDEX_WRITE    32
 
 /* error return codes */
 #define WRITE_TREE_UNREADABLE_INDEX (-1)

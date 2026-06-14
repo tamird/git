@@ -562,3 +562,5 @@ include::config/versionsort.adoc[]
 include::config/web.adoc[]
 
 include::config/worktree.adoc[]
+
+include::config/write-tree.adoc[]

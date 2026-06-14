@@ -728,7 +728,9 @@ static int write_index_as_tree_internal(struct object_id *oid,
 		cache_tree_valid = 0;
 	}
 
-	if (!cache_tree_valid && cache_tree_update(index_state, flags) < 0)
+	if (!cache_tree_valid &&
+	    cache_tree_update(index_state,
+			      flags & ~WRITE_TREE_NO_INDEX_WRITE) < 0)
 		return WRITE_TREE_UNMERGED_INDEX;
 
 	if (prefix) {
@@ -773,8 +775,10 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	int entries, was_valid;
 	struct lock_file lock_file = LOCK_INIT;
 	int ret;
+	int write_index = !(flags & WRITE_TREE_NO_INDEX_WRITE);
 
-	hold_lock_file_for_update(&lock_file, index_path, LOCK_DIE_ON_ERROR);
+	if (write_index)
+		hold_lock_file_for_update(&lock_file, index_path, LOCK_DIE_ON_ERROR);
 
 	entries = read_index_from(index_state, index_path,
 				  repo_get_git_dir(the_repository));
@@ -788,7 +792,7 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 
 	ret = write_index_as_tree_internal(oid, index_state, was_valid, flags,
 					   prefix);
-	if (!ret && !was_valid) {
+	if (!ret && !was_valid && write_index) {
 		write_locked_index(index_state, &lock_file, COMMIT_LOCK);
 		/* Not being able to write is fine -- we are only interested
 		 * in updating the cache-tree part, and if the next caller

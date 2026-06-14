@@ -18,6 +18,19 @@ static const char * const write_tree_usage[] = {
 	NULL
 };
 
+static int persist_cache_tree = 1;
+
+static int write_tree_config(const char *var, const char *value,
+			     const struct config_context *ctx, void *cb)
+{
+	if (!strcmp(var, "writetree.persistcachetree")) {
+		persist_cache_tree = git_config_bool(var, value);
+		return 0;
+	}
+
+	return git_default_config(var, value, ctx, cb);
+}
+
 int cmd_write_tree(int argc,
 		   const char **argv,
 		   const char *cmd_prefix,
@@ -44,12 +57,14 @@ int cmd_write_tree(int argc,
 		OPT_END()
 	};
 
-	repo_config(the_repository, git_default_config, NULL);
+	repo_config(the_repository, write_tree_config, NULL);
 	argc = parse_options(argc, argv, cmd_prefix, write_tree_options,
 			     write_tree_usage, 0);
 
 	prepare_repo_settings(the_repository);
 	the_repository->settings.command_requires_full_index = 0;
+	if (!persist_cache_tree || !use_optional_locks())
+		flags |= WRITE_TREE_NO_INDEX_WRITE;
 
 	ret = write_index_as_tree(&oid, the_repository->index,
 				  repo_get_index_file(the_repository),

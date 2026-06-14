@@ -125,6 +125,26 @@ test_expect_success 'write-tree establishes cache-tree' '
 	test_cache_tree
 '
 
+test_expect_success 'write-tree can skip cache-tree persistence' '
+	test_when_finished "rm -f .git/index.lock .git/actual-oid \
+		.git/expect-oid no-persist && git reset --hard" &&
+	echo novel >no-persist &&
+	git add no-persist &&
+	test-tool scrap-cache-tree &&
+	test_no_cache_tree &&
+	>.git/index.lock &&
+	actual=$(git -c writeTree.persistCacheTree=false write-tree) &&
+	git cat-file -e "$actual^{tree}" &&
+	git ls-tree --format="%(objectname)" "$actual" no-persist \
+		>.git/actual-oid &&
+	git hash-object no-persist >.git/expect-oid &&
+	test_cmp .git/expect-oid .git/actual-oid &&
+	test_no_cache_tree &&
+	optional=$(git --no-optional-locks write-tree) &&
+	test "$actual" = "$optional" &&
+	test_no_cache_tree
+'
+
 test_expect_success 'test-tool scrap-cache-tree works' '
 	git read-tree HEAD &&
 	test-tool scrap-cache-tree &&
