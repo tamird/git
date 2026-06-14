@@ -16,6 +16,7 @@
 #include "commit.h"
 #include "diff.h"
 #include "diff-merges.h"
+#include "dir.h"
 #include "refs.h"
 #include "revision.h"
 #include "repository.h"
@@ -710,6 +711,15 @@ static int convert_pathspec_to_bloom_keyvec(struct bloom_keyvec **out,
 	const char *path;
 	size_t len;
 	int res = -1;
+	const char *basename;
+
+	if (settings->hash_version == 3 &&
+	    !(pi->magic & PATHSPEC_LITERAL) &&
+	    skip_prefix(pi->match, "**/", &basename) && *basename &&
+	    !strchr(basename, '/') && no_wildcard(basename)) {
+		*out = bloom_keyvec_new(basename, strlen(basename), settings);
+		return 0;
+	}
 
 	len = pi->nowildcard_len;
 	if (len != pi->len) {

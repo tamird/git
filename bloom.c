@@ -229,7 +229,7 @@ void bloom_key_fill(struct bloom_key *key, const char *data, size_t len,
 	const uint32_t seed0 = 0x293ae76f;
 	const uint32_t seed1 = 0x7e646e2c;
 	uint32_t hash0, hash1;
-	if (settings->hash_version == 2) {
+	if (settings->hash_version == 2 || settings->hash_version == 3) {
 		hash0 = murmur3_seeded_v2(seed0, data, len);
 		hash1 = murmur3_seeded_v2(seed1, data, len);
 	} else {
@@ -406,6 +406,10 @@ static struct bloom_filter *upgrade_filter(struct repository *r, struct commit *
 					   int hash_version)
 {
 	struct commit_list *p = c->parents;
+
+	if (filter->version != 1 || hash_version != 2)
+		return NULL;
+
 	if (commit_tree_has_high_bit_paths(r, c))
 		return NULL;
 
@@ -528,6 +532,16 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 					hashmap_add(&pathmap, &e->entry);
 				else
 					free(e);
+
+				if (settings->hash_version == 3 && last_slash) {
+					FLEX_ALLOC_STR(e, path, last_slash + 1);
+					hashmap_entry_init(&e->entry,
+							   strhash(e->path));
+					if (!hashmap_get(&pathmap, &e->entry, NULL))
+						hashmap_add(&pathmap, &e->entry);
+					else
+						free(e);
+				}
 
 				if (!last_slash)
 					last_slash = path;

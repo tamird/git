@@ -356,6 +356,7 @@ static int graph_read_bloom_data(const unsigned char *chunk_start,
 				  size_t chunk_size, void *data)
 {
 	struct commit_graph *g = data;
+	uint32_t hash_version;
 
 	if (chunk_size < BLOOMDATA_CHUNK_HEADER_SIZE) {
 		warning(_("ignoring too-small changed-path chunk"
@@ -364,12 +365,18 @@ static int graph_read_bloom_data(const unsigned char *chunk_start,
 			(uintmax_t)BLOOMDATA_CHUNK_HEADER_SIZE);
 		return -1;
 	}
+	hash_version = get_be32(chunk_start);
+	if (hash_version < 1 || hash_version > 3) {
+		warning(_("ignoring changed-path chunk with unsupported hash version %" PRIu32),
+			hash_version);
+		return -1;
+	}
 
 	g->chunk_bloom_data = chunk_start;
 	g->chunk_bloom_data_size = chunk_size;
 
 	g->bloom_filter_settings = xmalloc(sizeof(struct bloom_filter_settings));
-	g->bloom_filter_settings->hash_version = get_be32(chunk_start);
+	g->bloom_filter_settings->hash_version = hash_version;
 	g->bloom_filter_settings->num_hashes = get_be32(chunk_start + 4);
 	g->bloom_filter_settings->bits_per_entry = get_be32(chunk_start + 8);
 	g->bloom_filter_settings->max_changed_paths = DEFAULT_BLOOM_MAX_CHANGES;
@@ -2618,8 +2625,7 @@ int write_commit_graph(struct odb_source *source,
 	}
 	if (!commit_graph_compatible(r, 0))
 		return 0;
-	if (r->settings.commit_graph_changed_paths_version < -1
-	    || r->settings.commit_graph_changed_paths_version > 2) {
+	if (r->settings.commit_graph_changed_paths_version < -1 || r->settings.commit_graph_changed_paths_version > 3) {
 		warning(_("attempting to write a commit-graph, but "
 			  "'commitGraph.changedPathsVersion' (%d) is not supported"),
 			r->settings.commit_graph_changed_paths_version);
@@ -2658,7 +2664,9 @@ int write_commit_graph(struct odb_source *source,
 		}
 	}
 
-	bloom_settings.hash_version = bloom_settings.hash_version == 2 ? 2 : 1;
+	if (bloom_settings.hash_version != 2 &&
+	    bloom_settings.hash_version != 3)
+		bloom_settings.hash_version = 1;
 
 	if (ctx.split) {
 		for (struct commit_graph *chain = g; chain; chain = chain->base_graph)

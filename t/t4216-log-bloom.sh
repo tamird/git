@@ -565,6 +565,53 @@ test_expect_success 'git log with path only contains wildcard part does not use 
 	test_bloom_filters_not_used "-- \*"
 '
 
+test_expect_success 'version 3 uses Bloom filters for literal basenames' '
+	git init basename-v3 &&
+	(
+		cd basename-v3 &&
+		test_commit base unrelated &&
+		mkdir -p nested/target &&
+		test_commit nested nested/target/file &&
+		test_commit named nested/file4 &&
+		test_commit other unrelated &&
+		git -c commitGraph.changedPathsVersion=3 commit-graph write \
+			--reachable --changed-paths &&
+		git -c core.commitGraph=false log --format=%s \
+			-- "**/target" >expect-directory &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/basename-directory.perf" \
+			git log --format=%s -- "**/target" >actual-directory &&
+		test_cmp expect-directory actual-directory &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/basename-directory.perf" &&
+		git -c core.commitGraph=false log --format=%s \
+			-- "**/file4" >expect-file &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/basename-file.perf" \
+			git log --format=%s -- "**/file4" >actual-file &&
+		test_cmp expect-file actual-file &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/basename-file.perf"
+	)
+'
+
+test_expect_success 'mixed version 2 and 3 layers ignore basename filters' '
+	git init basename-mixed &&
+	mkdir -p basename-mixed/nested/target &&
+	test_commit -C basename-mixed nested nested/target/file &&
+	git -C basename-mixed rev-parse HEAD >in &&
+	git -C basename-mixed -c commitGraph.changedPathsVersion=2 \
+		commit-graph write --stdin-commits --changed-paths --split <in &&
+	test_commit -C basename-mixed other unrelated &&
+	git -C basename-mixed rev-parse HEAD >in &&
+	git -C basename-mixed -c commitGraph.changedPathsVersion=3 \
+		commit-graph write --stdin-commits --changed-paths \
+		--split=no-merge <in &&
+	git -C basename-mixed -c core.commitGraph=false log --format=%s \
+		-- "**/target" >expect &&
+	git -C basename-mixed log --format=%s -- "**/target" >actual 2>err &&
+	test_cmp expect actual &&
+	test_grep "disabling Bloom filters" err
+'
+
 test_expect_success 'git log with path contains various magic signatures' '
 	cd A &&
 	test_bloom_filters_used "-- \:\(top\)B" &&
@@ -1106,7 +1153,7 @@ test_expect_success 'when writing commit graph, do not reuse changed-path of ano
 	test_filter_upgraded 0 trace2.txt &&
 
 	git -C doublewrite commit-graph write --reachable --changed-paths &&
-	for v in -2 3
+	for v in -2 4
 	do
 		git -C doublewrite config --add commitGraph.changedPathsVersion $v &&
 		git -C doublewrite commit-graph write --reachable --changed-paths 2>err &&
@@ -1128,7 +1175,14 @@ test_expect_success 'when writing commit graph, do not reuse changed-path of ano
 		echo "c01f" >expect &&
 		get_first_changed_path_filter >actual &&
 		test_cmp expect actual
-	)
+	) &&
+
+	git -C doublewrite config --add commitGraph.changedPathsVersion 3 &&
+	>trace2.txt &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+		git -C doublewrite commit-graph write --reachable --changed-paths &&
+	test_filter_computed 1 trace2.txt &&
+	test_filter_upgraded 0 trace2.txt
 '
 
 test_expect_success 'when writing commit graph, reuse changed-path of another version where possible' '
