@@ -164,6 +164,9 @@ struct grep_index_query {
 	size_t alternatives_nr;
 	size_t trigrams_nr;
 	struct object_id cache_key;
+	char *cache_pattern;
+	size_t cache_patternlen;
+	int cache_pattern_alternation;
 	int ignore_case;
 	int cacheable;
 };
@@ -845,6 +848,7 @@ void grep_index_query_free(struct grep_index_query *query)
 		grep_index_query_branch_clear(&query->branches[i]);
 	free(query->clauses);
 	free(query->branches);
+	free(query->cache_pattern);
 	free(query);
 }
 
@@ -2125,32 +2129,71 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		query->alternatives_nr = patterns_nr;
 	}
 	/*
-	 * Cache only scans whose no-match result proves this raw byte string
-	 * absent. Default binary handling and --text both search the bytes;
-	 * -I, folding, word boundaries, and regular-expression operators do
-	 * not share that invariant.
+	 * Cache only searches whose no-match result can be proved from the raw
+	 * bytes. Default binary handling and --text both search those bytes;
+	 * -I, folding, and word boundaries do not share that invariant. Fixed
+	 * patterns and plain ASCII BRE and ERE literals are checked against the
+	 * bytes before their negative result is reported.
 	 */
 	if (!opt->ignore_case && !opt->word_regexp &&
 	    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match &&
 	    patterns_nr == 1 && pattern_type != GREP_PATTERN_TYPE_PCRE) {
 		const struct grep_pat *pattern = opt->pattern_list;
 		int fixed = pattern_type == GREP_PATTERN_TYPE_FIXED;
+		int literal_regex = 0;
 
-		if (!fixed) {
-			fixed = 1;
-			for (size_t i = 0; i < pattern->patternlen; i++)
-				if (is_regex_special(pattern->pattern[i])) {
-					fixed = 0;
+		if (!fixed && (pattern_type == GREP_PATTERN_TYPE_BRE ||
+			       pattern_type == GREP_PATTERN_TYPE_ERE)) {
+			size_t literal_len = 0;
+
+			literal_regex = 1;
+			for (size_t i = 0; i < pattern->patternlen; i++) {
+				unsigned char ch = pattern->pattern[i];
+
+				if (pattern_type == GREP_PATTERN_TYPE_ERE &&
+				    ch == '|') {
+					if (!literal_len) {
+						literal_regex = 0;
+						break;
+					}
+					literal_len = 0;
+					continue;
+				}
+				if (ch & 0x80 || is_regex_special(ch) ||
+				    (pattern_type == GREP_PATTERN_TYPE_ERE &&
+				     ch == '}')) {
+					literal_regex = 0;
 					break;
 				}
+				literal_len++;
+			}
+			if (!literal_len)
+				literal_regex = 0;
 		}
-		if (fixed) {
-			static const char domain[] =
-				"grep-index-negative-v1";
+		if (fixed || literal_regex) {
+			static const char fixed_domain[] =
+				"grep-index-negative-v2";
+			static const char regex_domain[] =
+				"grep-index-negative-literal-regex-v1";
 			struct git_hash_ctx ctx;
+			unsigned char type = pattern_type;
 
 			opt->repo->hash_algo->init_fn(&ctx);
-			git_hash_update(&ctx, domain, sizeof(domain));
+			if (literal_regex) {
+				git_hash_update(&ctx, regex_domain,
+						sizeof(regex_domain));
+				git_hash_update(&ctx, &type, sizeof(type));
+			} else {
+				git_hash_update(&ctx, fixed_domain,
+						sizeof(fixed_domain));
+			}
+			query->cache_pattern =
+				xmemdupz(pattern->pattern, pattern->patternlen);
+			query->cache_patternlen = pattern->patternlen;
+			query->cache_pattern_alternation =
+				literal_regex &&
+				pattern_type == GREP_PATTERN_TYPE_ERE &&
+				memchr(pattern->pattern, '|', pattern->patternlen);
 			git_hash_update(&ctx, pattern->pattern,
 					pattern->patternlen);
 			git_hash_final_oid(&query->cache_key, &ctx);
@@ -2173,6 +2216,28 @@ const struct object_id *grep_index_query_cache_key(
 	const struct grep_index_query *query)
 {
 	return query && query->cacheable ? &query->cache_key : NULL;
+}
+
+int grep_index_query_negative_is_cacheable(
+	const struct grep_index_query *query, const char *buf, size_t len)
+{
+	size_t start = 0;
+
+	if (!query || !query->cache_pattern)
+		return 1;
+	if (!buf)
+		return 0;
+	if (!query->cache_pattern_alternation)
+		return !memmem(buf, len, query->cache_pattern,
+			       query->cache_patternlen);
+	for (size_t i = 0; i <= query->cache_patternlen; i++) {
+		if (i < query->cache_patternlen && query->cache_pattern[i] != '|')
+			continue;
+		if (memmem(buf, len, query->cache_pattern + start, i - start))
+			return 0;
+		start = i + 1;
+	}
+	return 1;
 }
 
 static int grep_index_query_clause_maybe_contains(
