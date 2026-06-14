@@ -210,7 +210,7 @@ test_expect_success 'trivial reordering' '
 '
 
 test_expect_success 'removed a commit' '
-	git range-diff --no-color main topic removed >actual &&
+	git range-diff --no-color --max-memory=1 main topic removed >actual &&
 	cat >expect <<-EOF &&
 	1:  $(test_oid t1) = 1:  $(test_oid d1) s/5/A/
 	2:  $(test_oid t2) < -:  $(test_oid __) s/4/A/
@@ -221,7 +221,7 @@ test_expect_success 'removed a commit' '
 '
 
 test_expect_success 'added a commit' '
-	git range-diff --no-color main topic added >actual &&
+	git range-diff --no-color --max-memory=1 main topic added >actual &&
 	cat >expect <<-EOF &&
 	1:  $(test_oid t1) = 1:  $(test_oid a1) s/5/A/
 	2:  $(test_oid t2) = 2:  $(test_oid a2) s/4/A/
@@ -230,6 +230,77 @@ test_expect_success 'added a commit' '
 	4:  $(test_oid t4) = 5:  $(test_oid a5) s/12/B/
 	EOF
 	test_cmp expect actual
+'
+
+test_expect_success 'unique one-sided correspondence' '
+	git range-diff --no-color --no-patch --creation-factor=50 \
+		--max-memory=1 main..topic \
+		$(test_oid c2)..$(test_oid c3) >actual &&
+	cat >expect <<-EOF &&
+	1:  $(test_oid t1) < -:  $(test_oid __) s/5/A/
+	2:  $(test_oid t2) < -:  $(test_oid __) s/4/A/
+	3:  $(test_oid t3) ! 1:  $(test_oid c3) s/11/B/
+	4:  $(test_oid t4) < -:  $(test_oid __) s/12/B/
+	EOF
+	test_cmp expect actual &&
+
+	git range-diff --no-color --no-patch --creation-factor=50 \
+		--max-memory=1 $(test_oid c2)..$(test_oid c3) \
+		main..topic >actual &&
+	cat >expect <<-EOF &&
+	-:  $(test_oid __) > 1:  $(test_oid t1) s/5/A/
+	-:  $(test_oid __) > 2:  $(test_oid t2) s/4/A/
+	1:  $(test_oid c3) ! 3:  $(test_oid t3) s/11/B/
+	-:  $(test_oid __) > 4:  $(test_oid t4) s/12/B/
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'all-positive one-sided costs' '
+	git range-diff --no-color --no-patch --creation-factor=0 \
+		--max-memory=1 main..topic \
+		$(test_oid c2)..$(test_oid c3) >actual &&
+	cat >expect <<-EOF &&
+	1:  $(test_oid t1) < -:  $(test_oid __) s/5/A/
+	2:  $(test_oid t2) < -:  $(test_oid __) s/4/A/
+	3:  $(test_oid t3) < -:  $(test_oid __) s/11/B/
+	4:  $(test_oid t4) < -:  $(test_oid __) s/12/B/
+	-:  $(test_oid __) > 1:  $(test_oid c3) s/11/B/
+	EOF
+	test_cmp expect actual
+'
+
+test_expect_success 'exact-zero one-sided cost uses solver' '
+	# The pair costs six lines; deletion and creation cost three each.
+	git range-diff --no-color --no-patch --creation-factor=30 \
+		$(test_oid t2)^! $(test_oid s2)^! >actual &&
+	cat >expect <<-EOF &&
+	1:  $(test_oid t2) ! 1:  $(test_oid s2) s/4/A/
+	EOF
+	test_cmp expect actual &&
+
+	test_must_fail git range-diff --no-patch --creation-factor=30 \
+		--max-memory=1 $(test_oid t2)^! $(test_oid s2)^! \
+		>out 2>err &&
+	test_grep "cost matrix" err
+'
+
+test_expect_success 'equal negative one-sided costs use solver' '
+	# The first two old patches have equal negative minimum costs.
+	git range-diff --no-color --no-patch --creation-factor=1000 \
+		main..topic $(test_oid b5)^! >actual &&
+	cat >expect <<-EOF &&
+	1:  $(test_oid t1) < -:  $(test_oid __) s/5/A/
+	2:  $(test_oid t2) ! 1:  $(test_oid b5) s/4/A/
+	3:  $(test_oid t3) < -:  $(test_oid __) s/11/B/
+	4:  $(test_oid t4) < -:  $(test_oid __) s/12/B/
+	EOF
+	test_cmp expect actual &&
+
+	test_must_fail git range-diff --no-patch --creation-factor=1000 \
+		--max-memory=1 main..topic $(test_oid b5)^! \
+		>out 2>err &&
+	test_grep "cost matrix" err
 '
 
 test_expect_success 'new base, A B C' '
