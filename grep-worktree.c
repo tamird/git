@@ -1418,7 +1418,6 @@ merge_current:
 	if (direct_current)
 		cache->direct_write++;
 
-write_output:
 	f = hashfd(cache->repo->hash_algo, fd, get_lock_file_path(&lock));
 	hashwrite_be32(f, GREP_WORKTREE_CACHE_SIGNATURE);
 	hashwrite_be32(f, GREP_WORKTREE_CACHE_VERSION);
