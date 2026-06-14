@@ -24,6 +24,8 @@ static void dump_graph_info(struct commit_graph *graph)
 		printf(" oid_lookup");
 	if (graph->chunk_commit_data)
 		printf(" commit_metadata");
+	if (graph->chunk_shallow)
+		printf(" shallow");
 	if (graph->chunk_generation_data)
 		printf(" generation_data");
 	if (graph->chunk_generation_data_overflow)

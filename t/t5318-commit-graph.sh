@@ -353,15 +353,15 @@ test_expect_success 'commit grafts invalidate commit-graph' '
 	)
 '
 
-test_expect_success 'shallow repositories read but do not write commit-graphs' '
+test_expect_success 'shallow commit-graphs follow the shallow boundary' '
 	test_when_finished rm -rf shallow &&
 	git clone --depth 2 "file://$TRASH_DIRECTORY/full" shallow &&
 	cp full/$objdir/info/commit-graph \
 		shallow/$objdir/info/commit-graph &&
 	(
 		cd shallow &&
-		git -c core.commitGraph=false show -s --format="%ct %P" \
-			HEAD >expect &&
+		git -c core.commitGraph=false show -s --format="%ct %P" HEAD |
+			sed "s/ \$//" >expect &&
 		test-tool repository parse_commit_in_graph \
 			.git . "$(git rev-parse HEAD)" >actual &&
 		test_cmp expect actual &&
@@ -370,9 +370,27 @@ test_expect_success 'shallow repositories read but do not write commit-graphs' '
 		test-tool repository parse_commit_in_graph \
 			.git . "$(git rev-parse HEAD^)" >actual &&
 		test_cmp expect actual &&
+		cp .git/shallow shallow-one &&
+		git rev-parse HEAD >>.git/shallow &&
 		rm .git/objects/info/commit-graph &&
 		git commit-graph write --reachable &&
-		test_path_is_missing .git/objects/info/commit-graph &&
+		test_path_is_file .git/objects/info/commit-graph &&
+		git -c core.commitGraph=false show -s --format="%ct %P" HEAD |
+			sed "s/ \$//" >expect &&
+		test-tool repository parse_commit_in_graph \
+			.git . "$(git rev-parse HEAD)" >actual &&
+		test_cmp expect actual &&
+		extra=$(echo extra | git commit-tree HEAD^{tree}) &&
+		test-tool repository invalidate_graph_after_shallow \
+			.git . "$(git rev-parse HEAD)" "$extra" &&
+		{
+			git rev-parse HEAD &&
+			echo "$extra"
+		} >.git/shallow &&
+		test_must_fail test-tool repository parse_commit_in_graph \
+			.git . "$(git rev-parse HEAD)" 2>err &&
+		test_grep "Couldn.t parse commit" err &&
+		cp shallow-one .git/shallow &&
 		git fetch origin --unshallow &&
 		git commit-graph write --reachable &&
 		test_path_is_file .git/objects/info/commit-graph
