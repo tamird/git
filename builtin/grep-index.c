@@ -8,7 +8,8 @@
 #include "revision.h"
 
 static const char * const builtin_grep_index_usage[] = {
-	N_("git grep-index [--[no-]progress] [--reachable [<revision>...]]"),
+	N_("git grep-index [--[no-]progress] "
+	   "[--reachable [<revision>...] [-- [<path>...]]]"),
 	NULL
 };
 
