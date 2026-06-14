@@ -205,7 +205,9 @@ static void content_index_record_negative(struct grep_source *source,
 	unsigned char bit;
 
 	/* File fallback bytes need not match the indexed object. */
-	if (!content_index_negative_result || !negative ||
+	if (!content_index_negative_result || !negative || source->match_error ||
+	    !grep_index_query_negative_is_cacheable(
+		    content_index_query, source->buf, source->size) ||
 	    (source->type != GREP_SOURCE_OID &&
 	     (source->type != GREP_SOURCE_OID_OR_FILE ||
 	      !source->worktree_blob_used)) ||

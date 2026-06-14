@@ -23,6 +23,41 @@ test_lazy_prereq PCRE2_UTF8_LOCALE '
 		"non-ascii k contents" -- non-ascii
 '
 
+test_lazy_prereq REGEX_MATCH_ERROR '
+	invalid=$(printf "\\377foo") &&
+	LC_ALL=C test-tool regex --silent "foo|bar" "$invalid" EXTENDED &&
+	invalid_status=$(
+		LC_ALL=en_US.UTF-8 test-tool regex --silent \
+			"foo|bar" "$invalid" EXTENDED
+		echo $?
+	) &&
+	nomatch_status=$(
+		LC_ALL=en_US.UTF-8 test-tool regex --silent \
+			"foo|bar" absent EXTENDED
+		echo $?
+	) &&
+	test "$invalid_status" -ne 0 &&
+	test "$invalid_status" != "$nomatch_status"
+'
+
+test_lazy_prereq SJIS_REGEX_NOMATCH '
+	invalid=$(printf "\\202foo") &&
+	LC_ALL=C test-tool regex --silent \
+		"foo|absent" "$invalid" EXTENDED &&
+	sjis_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			"foo|absent" "$invalid" EXTENDED
+		echo $?
+	) &&
+	nomatch_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			absent present EXTENDED
+		echo $?
+	) &&
+	test "$sjis_status" -ne 0 &&
+	test "$sjis_status" = "$nomatch_status"
+'
+
 wait_for_file_value () {
 	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
 	do
@@ -843,7 +878,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git reset --hard HEAD &&
-			    rm -f negative-learn.trace negative-hit.trace" &&
+			    rm -f negative-learn.trace negative-hit.trace \
+				  negative-alt-*.trace" &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
 	oid=$(git rev-parse :ordinary) &&
@@ -866,6 +902,26 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	test_trace2_data grep content_index_negative_cache_hits 1 \
 		<negative-hit.trace &&
 	mv "$object.save" "$object" &&
+	echo "present:present needle" >expect-alt &&
+	env GIT_TRACE2_EVENT="$PWD/negative-alt-learn.trace" \
+		git grep --cached -E "conts|needle" -- ordinary present \
+		>actual-alt &&
+	test_cmp expect-alt actual-alt &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<negative-alt-learn.trace &&
+	mv "$object" "$object.save" &&
+	env GIT_TRACE2_EVENT="$PWD/negative-alt-hit.trace" \
+		git grep --cached -E "conts|needle" -- ordinary present \
+		>actual-alt 2>err-alt &&
+	test_must_be_empty err-alt &&
+	test_cmp expect-alt actual-alt &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<negative-alt-hit.trace &&
+	mv "$object.save" "$object" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/negative-alt-fixed.trace" \
+		git grep --cached -F "conts|needle" -- ordinary &&
+	test_trace2_data grep content_index_negative_cache_hits 0 \
+		<negative-alt-fixed.trace &&
 
 	printf "foo\0" >negative-binary &&
 	git add negative-binary &&
@@ -885,6 +941,86 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	echo "ordinary:foo contents" >expect &&
 	git grep --cached foo -- ordinary >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success FSMONITOR_DAEMON,REGEX_MATCH_ERROR \
+	'daemon does not cache regex errors' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f negative-locale-*.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	printf "\\377foo\\n" >negative-locale &&
+	git add negative-locale &&
+	oid=$(git rev-parse :negative-locale) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail env LC_ALL=en_US.UTF-8 \
+		GIT_TRACE2_EVENT="$PWD/negative-locale-learn.trace" \
+		git grep --cached -E "foo|bar" -- negative-locale &&
+	mv "$object" "$object.save" &&
+	test_must_fail env LC_ALL=en_US.UTF-8 \
+		GIT_TRACE2_EVENT="$PWD/negative-locale-miss.trace" \
+		git grep --cached -E "foo|bar" -- negative-locale \
+		2>err-locale &&
+	test_grep "unable to read" err-locale &&
+	test_trace2_data grep content_index_negative_cache_hits 0 \
+		<negative-locale-miss.trace
+'
+
+test_expect_success FSMONITOR_DAEMON,SJIS_REGEX_NOMATCH \
+	'daemon verifies ERE negatives against blob bytes' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f negative-bytes-ere*.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	printf "\\202foo\\n" >negative-bytes &&
+	git add negative-bytes &&
+	oid=$(git rev-parse :negative-bytes) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail env LC_ALL=ja_JP.SJIS \
+		GIT_TRACE2_EVENT="$PWD/negative-bytes-ere.trace" \
+		git grep --cached -E "foo|absent" -- negative-bytes &&
+	mv "$object" "$object.save" &&
+	test_must_fail env LC_ALL=ja_JP.SJIS \
+		GIT_TRACE2_EVENT="$PWD/negative-bytes-ere-miss.trace" \
+		git grep --cached -E "foo|absent" -- negative-bytes \
+		2>err-ere-bytes &&
+	test_grep "unable to read" err-ere-bytes &&
+	test_trace2_data grep content_index_negative_cache_hits 0 \
+		<negative-bytes-ere-miss.trace
+'
+
+test_expect_success FSMONITOR_DAEMON,SJIS_REGEX_NOMATCH,!LIBPCRE2 \
+	'daemon verifies fixed negatives against blob bytes' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f negative-bytes-fixed*.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	printf "\\202foo\\n" >negative-bytes &&
+	git add negative-bytes &&
+	oid=$(git rev-parse :negative-bytes) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail env LC_ALL=ja_JP.SJIS \
+		GIT_TRACE2_EVENT="$PWD/negative-bytes-fixed.trace" \
+		git grep --cached -F foo -- negative-bytes &&
+	mv "$object" "$object.save" &&
+	test_must_fail env LC_ALL=ja_JP.SJIS \
+		GIT_TRACE2_EVENT="$PWD/negative-bytes-fixed-miss.trace" \
+		git grep --cached -F foo -- negative-bytes 2>err-fixed-bytes &&
+	test_grep "unable to read" err-fixed-bytes &&
+	test_trace2_data grep content_index_negative_cache_hits 0 \
+		<negative-bytes-fixed-miss.trace
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
