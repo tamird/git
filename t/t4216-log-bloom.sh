@@ -269,6 +269,9 @@ test_expect_success '--follow prunes a first-parent-treesame side branch' '
 
 		git rm new &&
 		git commit -m delete-side-new &&
+		echo unrelated >unrelated &&
+		git add unrelated &&
+		git commit -m unrelated &&
 		git mv old new &&
 		git commit -m rename &&
 		git commit-graph write --reachable --changed-paths &&
@@ -289,6 +292,9 @@ test_expect_success '--follow prunes a first-parent-treesame side branch' '
 		test_follow_prune_stat \
 			"$TRASH_DIRECTORY/follow-prune.perf" \
 			parent_edges_pruned 1 &&
+		test_follow_prune_stat \
+			"$TRASH_DIRECTORY/follow-prune.perf" \
+			linear_commits_pruned 1 &&
 		test_follow_prune_stat \
 			"$TRASH_DIRECTORY/follow-prune.perf" path_updates 1 &&
 

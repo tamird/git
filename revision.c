@@ -638,6 +638,7 @@ static unsigned int count_follow_prune_first_parent_same;
 static unsigned int count_follow_prune_parent_edges;
 static unsigned int count_follow_prune_path_updates;
 static unsigned int count_follow_prune_disabled_different;
+static unsigned int count_follow_prune_linear_commits_pruned;
 
 static void trace2_bloom_filter_statistics_atexit(void)
 {
@@ -676,6 +677,8 @@ static void trace2_follow_prune_statistics_atexit(void)
 			 count_follow_prune_path_updates);
 	jw_object_intmax(&jw, "disabled_different",
 			 count_follow_prune_disabled_different);
+	jw_object_intmax(&jw, "linear_commits_pruned",
+			 count_follow_prune_linear_commits_pruned);
 	jw_end(&jw);
 
 	trace2_data_json("follow_prune", the_repository, "statistics", &jw);
@@ -922,6 +925,10 @@ static int rev_compare_tree(struct rev_info *revs,
 				count_follow_prune_bloom_definitely_not++;
 			return REV_TREE_SAME;
 		}
+		/*
+		 * Parent expansion precedes rename detection for commit. Only
+		 * skip ahead when commit itself cannot change the followed path.
+		 */
 		if (revs->follow_prune &&
 		    bloom_ret == REVISION_BLOOM_FILTER_MAYBE)
 			count_follow_prune_bloom_maybe++;
@@ -1347,6 +1354,19 @@ static int process_parents(struct rev_info *revs, struct commit *commit,
 				oidset_insert(&revs->missing_commits, &p->object.oid);
 			else
 				return -1; /* corrupt repository */
+		}
+		if (revs->follow_prune &&
+		    commit->parents && !commit->parents->next &&
+		    check_maybe_different_in_bloom_filter(revs, commit) ==
+			    REVISION_BLOOM_FILTER_DEFINITELY_NOT) {
+			while (p->parents && !p->parents->next &&
+			       check_maybe_different_in_bloom_filter(revs, p) ==
+				       REVISION_BLOOM_FILTER_DEFINITELY_NOT) {
+				p = p->parents->item;
+				count_follow_prune_linear_commits_pruned++;
+				if (repo_parse_commit(revs->repo, p) < 0)
+					return -1;
+			}
 		}
 		if (revs->sources) {
 			char **slot = revision_sources_at(revs->sources, p);
