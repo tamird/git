@@ -125,7 +125,8 @@ test_bloom_filters_not_used () {
 		data="$data\"filter_not_present\":[0-9][0-9]*,"
 		data="$data\"maybe\":0,"
 		data="$data\"definitely_not\":0,"
-		data="$data\"false_positive\":0}"
+		data="$data\"false_positive\":0,"
+		data="$data\"trie_steps\":0}"
 
 		grep -q "$data" "$TRASH_DIRECTORY/trace.perf"
 	fi &&
@@ -596,6 +597,29 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 		test_cmp expect-file actual-file &&
 		test_grep "\"definitely_not\":[1-9]" \
 			"$TRASH_DIRECTORY/basename-file.perf"
+	)
+'
+
+test_expect_success 'version 3 factors multi-path Bloom queries' '
+	git init multi-path-v3 &&
+	(
+		cd multi-path-v3 &&
+		test_commit base unrelated &&
+		mkdir -p first/shared second/shared decoy/other &&
+		test_commit first first/shared/lock &&
+		test_commit second second/shared/lock &&
+		test_commit decoy decoy/other/lock &&
+		test_commit other unrelated &&
+		git -c commitGraph.changedPathsVersion=3 commit-graph write \
+			--reachable --changed-paths &&
+		git -c core.commitGraph=false log --format=%s -- \
+			first/shared/lock second/shared/lock >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/multi-path.perf" \
+			git log --format=%s -- first/shared/lock \
+			second/shared/lock >actual &&
+		test_cmp expect actual &&
+		test_grep "\"trie_steps\":[1-9]" \
+			"$TRASH_DIRECTORY/multi-path.perf"
 	)
 '
 

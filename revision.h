@@ -67,6 +67,7 @@ struct string_list;
 struct saved_parents;
 struct bloom_keyvec;
 struct bloom_filter_settings;
+struct bloom_query_node;
 struct option;
 struct parse_opt_ctx_t;
 define_shared_commit_slab(revision_sources, char *);
@@ -374,6 +375,11 @@ struct rev_info {
 	/* The bloom filter key(s) for the pathspec */
 	struct bloom_keyvec **bloom_keyvecs;
 	int bloom_keyvecs_nr;
+	struct bloom_keyvec **bloom_query_components;
+	struct bloom_query_node *bloom_query;
+	int bloom_query_nr;
+	int bloom_query_alloc;
+	int bloom_query_root;
 
 	/*
 	 * The bloom filter settings used to generate the key.

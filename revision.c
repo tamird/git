@@ -629,6 +629,7 @@ static unsigned int count_bloom_filter_maybe;
 static unsigned int count_bloom_filter_definitely_not;
 static unsigned int count_bloom_filter_false_positive;
 static unsigned int count_bloom_filter_not_present;
+static uint64_t count_bloom_filter_trie_steps;
 static int follow_prune_atexit_registered;
 static unsigned int count_follow_prune_merge_compares;
 static unsigned int count_follow_prune_bloom_definitely_not;
@@ -649,6 +650,7 @@ static void trace2_bloom_filter_statistics_atexit(void)
 	jw_object_intmax(&jw, "maybe", count_bloom_filter_maybe);
 	jw_object_intmax(&jw, "definitely_not", count_bloom_filter_definitely_not);
 	jw_object_intmax(&jw, "false_positive", count_bloom_filter_false_positive);
+	jw_object_intmax(&jw, "trie_steps", count_bloom_filter_trie_steps);
 	jw_end(&jw);
 
 	trace2_data_json("bloom", the_repository, "statistics", &jw);
@@ -706,9 +708,44 @@ static int forbid_bloom_filters(struct pathspec *spec)
 
 static void release_revisions_bloom_keyvecs(struct rev_info *revs);
 
-static int convert_pathspec_to_bloom_keyvec(struct bloom_keyvec **out,
-					    const struct pathspec_item *pi,
-					    const struct bloom_filter_settings *settings)
+struct bloom_query_node {
+	struct bloom_key *key;
+	int parent;
+	int child;
+	int last_child;
+	int sibling;
+	unsigned terminal:1;
+};
+
+struct bloom_query_entry {
+	struct hashmap_entry ent;
+	struct bloom_key *key;
+	int parent;
+	int node;
+};
+
+static int bloom_query_entry_cmp(const void *cmp_data,
+				 const struct hashmap_entry *eptr,
+				 const struct hashmap_entry *entry_or_key,
+				 const void *keydata UNUSED)
+{
+	const struct bloom_filter_settings *settings = cmp_data;
+	const struct bloom_query_entry *e1 =
+		container_of(eptr, const struct bloom_query_entry, ent);
+	const struct bloom_query_entry *e2 =
+		container_of(entry_or_key, const struct bloom_query_entry, ent);
+
+	return e1->parent != e2->parent ||
+	       memcmp(e1->key->hashes, e2->key->hashes,
+		      st_mult(settings->num_hashes,
+			      sizeof(*e1->key->hashes)));
+}
+
+static int convert_pathspec_to_bloom_keyvec(
+	struct bloom_keyvec **out,
+	struct bloom_keyvec **components_out,
+	const struct pathspec_item *pi,
+	const struct bloom_filter_settings *settings)
 {
 	char *path_alloc = NULL;
 	const char *path;
@@ -721,6 +758,9 @@ static int convert_pathspec_to_bloom_keyvec(struct bloom_keyvec **out,
 	    skip_prefix(pi->match, "**/", &basename) && *basename &&
 	    !strchr(basename, '/') && no_wildcard(basename)) {
 		*out = bloom_keyvec_new(basename, strlen(basename), settings);
+		if (components_out)
+			*components_out = bloom_keyvec_new(
+				basename, strlen(basename), settings);
 		return 0;
 	}
 
@@ -748,6 +788,28 @@ static int convert_pathspec_to_bloom_keyvec(struct bloom_keyvec **out,
 		path = pi->match;
 
 	*out = bloom_keyvec_new(path, len, settings);
+	if (components_out && settings->hash_version == 3) {
+		size_t count = 1;
+		size_t end = len;
+
+		for (size_t nr = 0; nr < len; nr++)
+			if (path[nr] == '/')
+				count++;
+		*components_out = xcalloc(
+			1, st_add(sizeof(**components_out),
+				  st_mult(count,
+					  sizeof((*components_out)->key[0]))));
+		(*components_out)->count = count;
+		for (size_t nr = 0; nr < count; nr++) {
+			size_t start = end;
+
+			while (start > 0 && path[start - 1] != '/')
+				start--;
+			bloom_key_fill(&(*components_out)->key[nr],
+				       path + start, end - start, settings);
+			end = start ? start - 1 : 0;
+		}
+	}
 
 	res = 0;
 cleanup:
@@ -758,18 +820,137 @@ cleanup:
 static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 				       const struct pathspec *pathspec)
 {
+	struct hashmap query_map = HASHMAP_INIT(
+		bloom_query_entry_cmp, revs->bloom_filter_settings);
+	int root_count = 0;
+	int last_root = -1;
+
 	release_revisions_bloom_keyvecs(revs);
+	revs->bloom_query_root = -1;
 
 	revs->bloom_keyvecs_nr = pathspec->nr;
 	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
+	if (pathspec->nr > 1 &&
+	    revs->bloom_filter_settings->hash_version == 3)
+		CALLOC_ARRAY(revs->bloom_query_components,
+			     revs->bloom_keyvecs_nr);
 
 	for (int i = 0; i < pathspec->nr; i++) {
+		struct bloom_keyvec *vec;
+		int parent = -1;
+
 		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[i],
+						     revs->bloom_query_components ?
+							     &revs->bloom_query_components[i] :
+							     NULL,
 						     &pathspec->items[i],
 						     revs->bloom_filter_settings)) {
+			hashmap_clear_and_free(&query_map,
+					       struct bloom_query_entry, ent);
 			release_revisions_bloom_keyvecs(revs);
 			return -1;
 		}
+		if (!revs->bloom_query_components)
+			continue;
+
+		vec = revs->bloom_keyvecs[i];
+		for (size_t key_nr = 0;
+		     key_nr < vec->count +
+				      (revs->bloom_query_components[i] ?
+					       revs->bloom_query_components[i]->count :
+					       0);
+		     key_nr++) {
+			struct bloom_query_entry lookup, *entry;
+			struct bloom_key *key;
+			int node;
+
+			if (revs->bloom_query_components[i] &&
+			    key_nr < revs->bloom_query_components[i]->count)
+				key = &revs->bloom_query_components[i]->key[key_nr];
+			else {
+				size_t vec_nr = key_nr -
+						(revs->bloom_query_components[i] ?
+							 revs->bloom_query_components[i]
+								 ->count :
+							 0);
+
+				key = &vec->key[vec->count - vec_nr - 1];
+			}
+
+			if (parent >= 0 &&
+			    !memcmp(key->hashes,
+				    revs->bloom_query[parent].key->hashes,
+				    st_mult(revs->bloom_filter_settings->num_hashes,
+					    sizeof(*key->hashes))))
+				continue;
+
+			lookup.key = key;
+			lookup.parent = parent;
+			hashmap_entry_init(
+				&lookup.ent,
+				memhash(key->hashes,
+					st_mult(revs->bloom_filter_settings->num_hashes,
+						sizeof(*key->hashes))) +
+					parent);
+			entry = hashmap_get_entry(&query_map, &lookup, ent, NULL);
+			if (entry)
+				node = entry->node;
+			else {
+				ALLOC_GROW(revs->bloom_query,
+					   revs->bloom_query_nr + 1,
+					   revs->bloom_query_alloc);
+				node = revs->bloom_query_nr++;
+				revs->bloom_query[node].key = key;
+				revs->bloom_query[node].parent = parent;
+				revs->bloom_query[node].child = -1;
+				revs->bloom_query[node].last_child = -1;
+				revs->bloom_query[node].sibling = -1;
+				revs->bloom_query[node].terminal = 0;
+
+				if (parent >= 0) {
+					if (revs->bloom_query[parent].last_child >= 0)
+						revs->bloom_query[revs->bloom_query[parent].last_child]
+							.sibling = node;
+					else
+						revs->bloom_query[parent].child = node;
+					revs->bloom_query[parent].last_child = node;
+				} else {
+					if (last_root >= 0)
+						revs->bloom_query[last_root].sibling = node;
+					else
+						revs->bloom_query_root = node;
+					last_root = node;
+					root_count++;
+				}
+
+				CALLOC_ARRAY(entry, 1);
+				hashmap_entry_init(&entry->ent, lookup.ent.hash);
+				entry->key = key;
+				entry->parent = parent;
+				entry->node = node;
+				hashmap_add(&query_map, &entry->ent);
+			}
+			parent = node;
+		}
+		revs->bloom_query[parent].terminal = 1;
+	}
+	hashmap_clear_and_free(&query_map, struct bloom_query_entry, ent);
+
+	/*
+	 * Each path is an AND of its full path and directory-prefix keys,
+	 * while the pathspec is an OR across paths. Factoring those keys into
+	 * a trie avoids repeating common predicates. Version 3 filters also
+	 * contain every path component as a basename, so put those keys first
+	 * to reject unrelated commits before testing the longer prefixes.
+	 */
+	if (root_count > revs->bloom_keyvecs_nr / 2) {
+		FREE_AND_NULL(revs->bloom_query);
+		revs->bloom_query_nr = 0;
+		revs->bloom_query_alloc = 0;
+		revs->bloom_query_root = -1;
+		for (size_t nr = 0; nr < revs->bloom_keyvecs_nr; nr++)
+			bloom_keyvec_free(revs->bloom_query_components[nr]);
+		FREE_AND_NULL(revs->bloom_query_components);
 	}
 
 	return 0;
@@ -831,10 +1012,36 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 	}
 
-	for (size_t nr = 0; !result && nr < revs->bloom_keyvecs_nr; nr++) {
-		result = bloom_filter_contains_vec(filter,
-						   revs->bloom_keyvecs[nr],
-						   revs->bloom_filter_settings);
+	if (revs->bloom_query) {
+		int node = revs->bloom_query_root;
+
+		while (node >= 0) {
+			count_bloom_filter_trie_steps++;
+			if (bloom_filter_contains(
+				    filter, revs->bloom_query[node].key,
+				    revs->bloom_filter_settings)) {
+				if (revs->bloom_query[node].terminal) {
+					result = 1;
+					break;
+				}
+				if (revs->bloom_query[node].child >= 0) {
+					node = revs->bloom_query[node].child;
+					continue;
+				}
+			}
+
+			while (node >= 0 &&
+			       revs->bloom_query[node].sibling < 0)
+				node = revs->bloom_query[node].parent;
+			if (node >= 0)
+				node = revs->bloom_query[node].sibling;
+		}
+	} else {
+		for (size_t nr = 0; !result && nr < revs->bloom_keyvecs_nr;
+		     nr++)
+			result = bloom_filter_contains_vec(
+				filter, revs->bloom_keyvecs[nr],
+				revs->bloom_filter_settings);
 	}
 
 	if (result)
@@ -3424,6 +3631,14 @@ static void release_revisions_topo_walk_info(struct topo_walk_info *info);
 
 static void release_revisions_bloom_keyvecs(struct rev_info *revs)
 {
+	FREE_AND_NULL(revs->bloom_query);
+	revs->bloom_query_nr = 0;
+	revs->bloom_query_alloc = 0;
+	revs->bloom_query_root = -1;
+	if (revs->bloom_query_components)
+		for (size_t nr = 0; nr < revs->bloom_keyvecs_nr; nr++)
+			bloom_keyvec_free(revs->bloom_query_components[nr]);
+	FREE_AND_NULL(revs->bloom_query_components);
 	for (size_t nr = 0; nr < revs->bloom_keyvecs_nr; nr++)
 		bloom_keyvec_free(revs->bloom_keyvecs[nr]);
 	FREE_AND_NULL(revs->bloom_keyvecs);
