@@ -422,7 +422,8 @@ static void *run(void *arg)
 			 * grep_source() also returns zero after a load
 			 * failure. Only cache successfully loaded blobs.
 			 */
-			if (!source_hit && w->source.buf)
+			if (!source_hit && w->source.buf &&
+			    !w->source.match_error)
 				grep_result_cache_add(opt, &w->source);
 			hit |= source_hit;
 			if (source_hit && opt->status_only) {
@@ -839,7 +840,7 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 
 		hit = grep_source(opt, &gs);
 		content_index_record_negative(&gs, pos, !hit && gs.buf);
-		if (!hit && gs.buf)
+		if (!hit && gs.buf && !gs.match_error)
 			grep_result_cache_add(opt, &gs);
 		if (gs.worktree_blob_used)
 			grep_worktree_cache_hit(worktree_cache);

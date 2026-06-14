@@ -21,6 +21,23 @@ test_invalid_grep_expression() {
 LC_ALL=en_US.UTF-8 test-tool regex '^.$' '¿' &&
   test_set_prereq MB_REGEX
 
+test_lazy_prereq REGEX_MATCH_ERROR '
+	invalid=$(printf "\\377foo") &&
+	LC_ALL=C test-tool regex --silent "foo|bar" "$invalid" EXTENDED &&
+	invalid_status=$(
+		LC_ALL=en_US.UTF-8 test-tool regex --silent \
+			"foo|bar" "$invalid" EXTENDED
+		echo $?
+	) &&
+	nomatch_status=$(
+		LC_ALL=en_US.UTF-8 test-tool regex --silent \
+			"foo|bar" absent EXTENDED
+		echo $?
+	) &&
+	test "$invalid_status" -ne 0 &&
+	test "$invalid_status" != "$nomatch_status"
+'
+
 cat >hello.c <<EOF
 #include <assert.h>
 #include <stdio.h>
@@ -1157,7 +1174,8 @@ test_expect_success 'setup repeated revision grep' '
 	(
 		cd result-cache &&
 		echo haystack >shared &&
-		git add shared &&
+		printf "\\377foo\\n" >regex-error &&
+		git add shared regex-error &&
 		git commit -m base &&
 		git tag cache-base &&
 
@@ -1207,6 +1225,32 @@ test_expect_success 'grep caches repeated no-output blobs' '
 		<result-cache-no-output.trace &&
 	test_trace2_data grep result_cache/hits 1 \
 		<result-cache-no-output.trace
+'
+
+test_expect_success REGEX_MATCH_ERROR \
+	'grep does not cache regex errors' '
+	test_must_fail env LC_ALL=en_US.UTF-8 \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error.trace" \
+		git -C result-cache grep --threads=1 -E "foo|bar" \
+		cache-base cache-tip -- regex-error >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 0 \
+		<result-cache-regex-error.trace &&
+	test_trace2_data grep result_cache/hits 0 \
+		<result-cache-regex-error.trace
+'
+
+test_expect_success PTHREADS,REGEX_MATCH_ERROR \
+	'threaded grep does not cache regex errors' '
+	test_must_fail env LC_ALL=en_US.UTF-8 \
+		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error-threaded.trace" \
+		git -C result-cache grep --threads=8 -E "foo|bar" \
+		cache-base cache-tip -- regex-error >actual &&
+	test_must_be_empty actual &&
+	test_trace2_data grep result_cache/entries 0 \
+		<result-cache-regex-error-threaded.trace &&
+	test_trace2_data grep result_cache/hits 0 \
+		<result-cache-regex-error-threaded.trace
 '
 
 test_expect_success 'grep caches repeated -L suppression' '

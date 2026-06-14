@@ -924,6 +924,7 @@ static int patmatch(struct grep_pat *p,
 	case REG_NOMATCH:
 		return 0;
 	default:
+		p->match_error = 1;
 		return -1;
 	}
 }
@@ -1836,26 +1837,49 @@ static int chk_hit_marker(struct grep_expr *x)
 
 int grep_source(struct grep_opt *opt, struct grep_source *gs)
 {
+	struct grep_pat *p;
+	int result;
+
+	gs->match_error = 0;
+	for (p = opt->pattern_list; p; p = p->next)
+		p->match_error = 0;
+	for (p = opt->header_list; p; p = p->next)
+		p->match_error = 0;
+
 	/*
 	 * we do not have to do the two-pass grep when we do not check
 	 * buffer-wide "all-match".
 	 */
 	if (!opt->all_match && !opt->no_body_match)
-		return grep_source_1(opt, gs, 0);
+		result = grep_source_1(opt, gs, 0);
+	else {
+		/* Otherwise the toplevel "or" terms hit a bit differently.
+		 * We first clear hit markers from them.
+		 */
+		clr_hit_marker(opt->pattern_expression);
+		opt->body_hit = 0;
+		grep_source_1(opt, gs, 1);
 
-	/* Otherwise the toplevel "or" terms hit a bit differently.
-	 * We first clear hit markers from them.
-	 */
-	clr_hit_marker(opt->pattern_expression);
-	opt->body_hit = 0;
-	grep_source_1(opt, gs, 1);
+		if (opt->all_match && !chk_hit_marker(opt->pattern_expression))
+			result = 0;
+		else if (opt->no_body_match && opt->body_hit)
+			result = 0;
+		else
+			result = grep_source_1(opt, gs, 0);
+	}
 
-	if (opt->all_match && !chk_hit_marker(opt->pattern_expression))
-		return 0;
-	if (opt->no_body_match && opt->body_hit)
-		return 0;
-
-	return grep_source_1(opt, gs, 0);
+	for (p = opt->pattern_list; p; p = p->next)
+		if (p->match_error) {
+			gs->match_error = 1;
+			break;
+		}
+	if (!gs->match_error)
+		for (p = opt->header_list; p; p = p->next)
+			if (p->match_error) {
+				gs->match_error = 1;
+				break;
+			}
+	return result;
 }
 
 static void grep_source_init_buf(struct grep_source *gs,
@@ -1874,6 +1898,7 @@ static void grep_source_init_buf(struct grep_source *gs,
 	gs->worktree_blob_observed = 0;
 	gs->worktree_blob_match = 0;
 	gs->worktree_blob_used = 0;
+	gs->match_error = 0;
 }
 
 int grep_buffer(struct grep_opt *opt, const char *buf, unsigned long size)
@@ -1904,6 +1929,7 @@ void grep_source_init_file(struct grep_source *gs, const char *name,
 	gs->worktree_blob_observed = 0;
 	gs->worktree_blob_match = 0;
 	gs->worktree_blob_used = 0;
+	gs->match_error = 0;
 }
 
 void grep_source_init_oid(struct grep_source *gs, const char *name,
@@ -1922,6 +1948,7 @@ void grep_source_init_oid(struct grep_source *gs, const char *name,
 	gs->worktree_blob_observed = 0;
 	gs->worktree_blob_match = 0;
 	gs->worktree_blob_used = 0;
+	gs->match_error = 0;
 }
 
 void grep_source_clear(struct grep_source *gs)

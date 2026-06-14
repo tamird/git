@@ -87,6 +87,7 @@ struct grep_pat {
 	unsigned is_fixed:1;
 	unsigned ignore_case:1;
 	unsigned word_regexp:1;
+	unsigned match_error:1;
 };
 
 enum grep_expr_node {
@@ -246,6 +247,7 @@ struct grep_source {
 	unsigned worktree_blob_observed : 1;
 	unsigned worktree_blob_match : 1;
 	unsigned worktree_blob_used : 1;
+	unsigned match_error:1;
 };
 
 void grep_source_init_file(struct grep_source *gs, const char *name,
