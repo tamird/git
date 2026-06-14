@@ -959,6 +959,21 @@ test_expect_success UNTRACKED_CACHE 'prune git add with wildcard pathspec' '
 	test_grep "directories-visited:[1-9]" trace-add-wildcard
 '
 
+test_expect_success UNTRACKED_CACHE 'prune pathless git add' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-all" \
+			git add --dry-run --all >../actual
+	) &&
+	cat >expect <<-EOF &&
+	add ${SQ}results/one${SQ}
+	add ${SQ}results/two${SQ}
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-add-all &&
+	test_grep "directories-visited:[1-9]" trace-add-all
+'
+
 test_expect_success UNTRACKED_CACHE 'git add reports explicit ignored path' '
 	(
 		cd full-untracked &&
