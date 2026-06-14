@@ -151,6 +151,8 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server UNUSED)
 # define GREP_INDEX_IPC_WORKER_RELEASE_RESPONSE_SIZE \
 	(2 * sizeof(uint32_t) + sizeof(uint64_t))
 # define GREP_INDEX_IPC_WORKER_LEASE_NS (1000ULL * 1000 * 1000)
+# define GREP_INDEX_IPC_OBJECT_STORE_RELEASE_NS \
+	(10ULL * 1000 * 1000 * 1000)
 # define GREP_INDEX_IPC_MAX_WORKER_LEASES    1024
 
 enum grep_index_ipc_worker_request_result {
@@ -201,6 +203,7 @@ struct grep_index_ipc_server {
 	pthread_rwlock_t generation_lock;
 	size_t active_requests;
 	size_t cached_index_bytes;
+	uint64_t object_store_released_at;
 	uint32_t worker_capacity;
 	int repo_initialized;
 	int legacy_manifest_stat_valid;
@@ -1206,8 +1209,17 @@ static int grep_index_ipc_handle_request(
 	pthread_mutex_lock(&server->request_mutex);
 	if (!--server->active_requests) {
 		struct grep_index_memory *replacement;
+		uint64_t now = getnanotime();
 
-		grep_index_memory_release_object_store(server->index);
+		/* Avoid reopening packs for every small request. */
+		if (now - server->object_store_released_at >=
+		    GREP_INDEX_IPC_OBJECT_STORE_RELEASE_NS) {
+			grep_index_memory_release_object_store(server->index);
+			server->object_store_released_at = now;
+			trace2_data_intmax("grep-index", &server->repo,
+					   "object_store/releases", 1);
+		}
+
 		/* request_mutex prevents a new user during rotation. */
 		replacement = grep_index_memory_rotate_if_requested(
 			server->index);
@@ -1249,6 +1261,7 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 	int result;
 
 	CALLOC_ARRAY(server, 1);
+	server->object_store_released_at = getnanotime();
 	if (repo_init(&server->repo, gitdir, NULL)) {
 		free(server);
 		*server_out = NULL;
