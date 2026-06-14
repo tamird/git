@@ -576,6 +576,54 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		regerror(err, &p->regexp, errbuf, 1024);
 		compile_regexp_failed(p, errbuf);
 	}
+#ifdef USE_LIBPCRE2
+	int have_alternation = 0;
+	int have_literal = 0;
+	int have_wildcard = 0;
+
+	/*
+	 * TRE can be very slow on long buffers with alternation. Compile the
+	 * subset with identical PCRE2 syntax for use as a candidate finder;
+	 * the POSIX matcher still decides whether each candidate line matches.
+	 */
+	if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE) {
+		for (size_t i = 0; i < p->patternlen; i++) {
+			unsigned char ch = p->pattern[i];
+
+			if (ch < 0x80 &&
+			    (isalnum(ch) || strchr("_ =-/", ch))) {
+				have_literal = 1;
+				continue;
+			}
+			if (ch == '\\' && i + 1 < p->patternlen &&
+			    p->pattern[i + 1] == '.') {
+				have_literal = 1;
+				i++;
+				continue;
+			}
+			if (ch == '.' && i + 1 < p->patternlen &&
+			    p->pattern[i + 1] == '*') {
+				have_wildcard = 1;
+				i++;
+				continue;
+			}
+			if (ch == '|' && have_literal &&
+			    i + 1 < p->patternlen) {
+				have_alternation = 1;
+				have_literal = 0;
+				continue;
+			}
+			have_literal = 0;
+			break;
+		}
+	}
+	if (have_alternation && have_literal && have_wildcard) {
+		CALLOC_ARRAY(p->pcre2_lookahead, 1);
+		p->pcre2_lookahead->pattern = p->pattern;
+		p->pcre2_lookahead->patternlen = p->patternlen;
+		compile_pcre2_pattern(p->pcre2_lookahead, opt);
+	}
+#endif
 }
 
 static struct grep_expr *grep_not_expr(struct grep_expr *expr)
@@ -848,6 +896,10 @@ static void free_grep_pat(struct grep_pat *pattern)
 		case GREP_PATTERN: /* atom */
 		case GREP_PATTERN_HEAD:
 		case GREP_PATTERN_BODY:
+			if (p->pcre2_lookahead) {
+				free_pcre2_pattern(p->pcre2_lookahead);
+				free(p->pcre2_lookahead);
+			}
 			if (p->pcre2_pattern)
 				free_pcre2_pattern(p);
 			else
@@ -1474,10 +1526,32 @@ static int look_ahead(struct grep_opt *opt,
 	for (p = opt->pattern_list; p; p = p->next) {
 		int hit;
 		regmatch_t m;
+		struct grep_pat *lookahead = p->pcre2_lookahead ?
+						     p->pcre2_lookahead :
+						     p;
 
-		hit = patmatch(p, bol, bol + *left_p, &m, 0);
+		hit = patmatch(lookahead, bol, bol + *left_p, &m, 0);
 		if (hit < 0)
 			return -1;
+		if (p->pcre2_lookahead) {
+			const char *limit = hit ? bol + m.rm_so : bol + *left_p;
+			const char *non_ascii = bol;
+
+			/*
+			 * PCRE2 may fold or reject non-ASCII input differently from
+			 * regexec(). Make every such line a candidate so a PCRE2 miss
+			 * cannot change POSIX matches or suppress matcher errors.
+			 */
+			while (non_ascii < limit &&
+			       !((unsigned char)*non_ascii & 0x80))
+				non_ascii++;
+			if (non_ascii < limit) {
+				while (non_ascii > bol && non_ascii[-1] != '\n')
+					non_ascii--;
+				m.rm_so = m.rm_eo = non_ascii - bol;
+				hit = 1;
+			}
+		}
 		if (!hit || m.rm_so < 0 || m.rm_eo < 0)
 			continue;
 		if (earliest < 0 || m.rm_so < earliest)

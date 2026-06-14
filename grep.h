@@ -82,6 +82,7 @@ struct grep_pat {
 	pcre2_compile_context *pcre2_compile_context;
 	pcre2_general_context *pcre2_general_context;
 	const uint8_t *pcre2_tables;
+	struct grep_pat *pcre2_lookahead;
 	uint32_t pcre2_jit_on;
 	unsigned fixed:1;
 	unsigned is_fixed:1;
