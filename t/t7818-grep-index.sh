@@ -2452,4 +2452,35 @@ test_expect_success 'writer includes linked worktree indexes' '
 	test_must_be_empty err
 '
 
+test_expect_success 'writer includes reachable historical blobs' '
+	test_create_repo reachable-index &&
+	(
+		cd reachable-index &&
+		echo "historical contents" >historical &&
+		echo "other historical contents" >other &&
+		git add historical other &&
+		git commit -m historical &&
+		historical_oid=$(git rev-parse :historical) &&
+		other_oid=$(git rev-parse :other) &&
+		git rm historical other &&
+		git commit -m deleted &&
+
+		git grep-index --reachable --no-progress HEAD -- historical &&
+		historical_object=.git/objects/$(test_oid_to_path \
+			"$historical_oid") &&
+		other_object=.git/objects/$(test_oid_to_path "$other_oid") &&
+		mv "$historical_object" "$historical_object.save" &&
+		mv "$other_object" "$other_object.save" &&
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+			git log --format=%s -Sabsent HEAD^..HEAD -- historical \
+			>actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+		test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+			git log --format=%s -Sabsent HEAD^..HEAD -- other \
+			2>err &&
+		test_grep "$other_oid" err
+	)
+'
+
 test_done

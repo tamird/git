@@ -15,6 +15,7 @@
 #include "oidset.h"
 #include "parse.h"
 #include "path.h"
+#include "path-walk.h"
 #include "progress.h"
 #include "read-cache-ll.h"
 #include "replace-object.h"
@@ -2996,6 +2997,19 @@ static void collect_worktree_oids(struct repository *repo,
 	free_worktrees(worktrees);
 }
 
+static int collect_reachable_blob_oids(const char *path UNUSED,
+				       struct oid_array *oids,
+				       enum object_type type,
+				       void *data)
+{
+	struct oid_array *reachable = data;
+
+	if (type == OBJ_BLOB)
+		for (size_t i = 0; i < oids->nr; i++)
+			oid_array_append(reachable, &oids->oid[i]);
+	return 0;
+}
+
 static int update_grep_index_chain(struct repository *repo,
 				   const char *chain_name,
 				   const char *hex)
@@ -3461,7 +3475,8 @@ int write_transposed_grep_index(struct repository *repo)
 	return result;
 }
 
-int write_grep_index(struct repository *repo, int show_progress)
+int write_grep_index(struct repository *repo, int show_progress,
+		     struct rev_info *revs)
 {
 	struct grep_index *existing = grep_index_load(repo);
 	struct oid_array oids = OID_ARRAY_INIT;
@@ -3481,7 +3496,22 @@ int write_grep_index(struct repository *repo, int show_progress)
 	size_t dst = 0;
 	int result = -1;
 
-	collect_worktree_oids(repo, &oids);
+	if (revs) {
+		struct path_walk_info info = PATH_WALK_INFO_INIT;
+
+		info.revs = revs;
+		info.path_fn = collect_reachable_blob_oids;
+		info.path_fn_data = &oids;
+		info.commits = info.trees = info.tags = 0;
+		info.strict_types = 1;
+		if (walk_objects_by_path(&info)) {
+			path_walk_info_clear(&info);
+			goto cleanup;
+		}
+		path_walk_info_clear(&info);
+	} else {
+		collect_worktree_oids(repo, &oids);
+	}
 	oid_array_sort(&oids);
 	CALLOC_ARRAY(filter_sizes, oids.nr);
 	CALLOC_ARRAY(blob_sizes, oids.nr);

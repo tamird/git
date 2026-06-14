@@ -9,7 +9,7 @@ git-grep-index - Write grep acceleration indexes
 SYNOPSIS
 --------
 [verse]
-'git grep-index' [--[no-]progress]
+'git grep-index' [--[no-]progress] [--reachable [<revision>...] [-- [<path>...]]]
 
 DESCRIPTION
 -----------
@@ -23,6 +23,10 @@ case-sensitive literal searches, linkgit:git-grep[1] uses the filters to
 avoid reading blobs that cannot contain the pattern. Blobs not present in
 the content index are searched normally.
 
+By default, blobs are selected from the indexes of all worktrees. With
+`--reachable`, blobs are instead selected by a revision walk. If no revision
+is given, all refs are walked.
+
 OPTIONS
 -------
 
@@ -31,6 +35,11 @@ OPTIONS
 	Turn progress reporting on or off explicitly. If neither is
 	specified, progress is shown if standard error is connected to a
 	terminal.
+
+--reachable::
+	Index blobs reachable from the given revisions, optionally restricted
+	by a pathspec. With a pathspec and no revision, specify `--all`
+	explicitly.
 
 GIT
 ---
