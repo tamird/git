@@ -327,11 +327,74 @@ static int diffsize(const char *a, const char *b)
 static void get_correspondences(struct string_list *a, struct string_list *b,
 				int creation_factor, size_t max_memory)
 {
-	int n = a->nr + b->nr;
+	int n;
 	int *cost, c, *a2b, *b2a;
+	int a_nr = 0, b_nr = 0, a_single = -1, b_single = -1;
 	int i, j;
-	size_t cost_size = st_mult(n, n);
-	size_t cost_bytes = st_mult(sizeof(int), cost_size);
+	size_t cost_size, cost_bytes;
+
+	/* Exact matches already have fixed correspondences. */
+	for (i = 0; i < a->nr; i++)
+		if (((struct patch_util *)a->items[i].util)->matching < 0) {
+			a_single = i;
+			a_nr++;
+		}
+	for (i = 0; i < b->nr; i++)
+		if (((struct patch_util *)b->items[i].util)->matching < 0) {
+			b_single = i;
+			b_nr++;
+		}
+
+	if (!a_nr || !b_nr)
+		return;
+
+	/*
+	 * With one item on either side, there can be at most one new pair.
+	 * Handle an unambiguous result directly, but let the general solver
+	 * retain its tie-breaking behavior.
+	 */
+	if (a_nr == 1 || b_nr == 1) {
+		int best_a = -1, best_b = -1, best_cost = 0, best_count = 0;
+		int pair_nr = a_nr == 1 ? b->nr : a->nr;
+
+		for (i = 0; i < pair_nr; i++) {
+			int a_pos = a_nr == 1 ? a_single : i;
+			int b_pos = a_nr == 1 ? i : b_single;
+			struct patch_util *a_util = a->items[a_pos].util;
+			struct patch_util *b_util = b->items[b_pos].util;
+			int pair_cost;
+
+			if (a_util->matching >= 0 || b_util->matching >= 0)
+				continue;
+			pair_cost = diffsize(a_util->diff, b_util->diff) -
+				    a_util->diffsize * creation_factor / 100 -
+				    b_util->diffsize * creation_factor / 100;
+
+			if (!best_count || pair_cost < best_cost) {
+				best_a = a_pos;
+				best_b = b_pos;
+				best_cost = pair_cost;
+				best_count = 1;
+			} else if (pair_cost == best_cost) {
+				best_count++;
+			}
+		}
+
+		if (best_cost > 0)
+			return;
+		if (best_cost < 0 && best_count == 1) {
+			struct patch_util *a_util = a->items[best_a].util;
+			struct patch_util *b_util = b->items[best_b].util;
+
+			a_util->matching = best_b;
+			b_util->matching = best_a;
+			return;
+		}
+	}
+
+	n = a->nr + b->nr;
+	cost_size = st_mult(n, n);
+	cost_bytes = st_mult(sizeof(int), cost_size);
 	if (cost_bytes >= max_memory) {
 		struct strbuf cost_str = STRBUF_INIT;
 		struct strbuf max_str = STRBUF_INIT;
