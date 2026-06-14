@@ -1375,6 +1375,44 @@ test_expect_success FSMONITOR_DAEMON \
 	test_trace2_data grep content_index_worktree_candidates 0 \
 		<candidate-negative.trace &&
 
+	git update-index --no-fsmonitor-valid ordinary &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/candidate-unrefreshed.trace" git grep \
+		"absent candidate-only needle" -- "ord*" 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_worktree_candidates 1 \
+		<candidate-unrefreshed.trace &&
+	test_grep ! '"category":"index","label":"refresh"' \
+		candidate-unrefreshed.trace &&
+
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/candidate-refreshed.trace" git grep \
+		"absent candidate-only needle" -- "ord*" 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_worktree_candidates 0 \
+		<candidate-refreshed.trace &&
+
+	echo "unrefreshed worktree candidate needle" >ordinary &&
+	echo "ordinary:unrefreshed worktree candidate needle" >expected &&
+	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/candidate-unrefreshed-dirty.trace" \
+		git grep "unrefreshed worktree candidate needle" \
+		-- "ord*" >actual &&
+	test_cmp expected actual &&
+	test_trace2_data grep content_index_worktree_candidates 1 \
+		<candidate-unrefreshed-dirty.trace &&
+	test_trace2_data grep worktree_blob/hits 0 \
+		<candidate-unrefreshed-dirty.trace &&
+
+	test_expect_code 1 env \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/candidate-literal.trace" git grep \
+		"absent literal needle" -- ordinary 2>err &&
+	test_must_be_empty err &&
+	test_grep ! '"category":"index","label":"refresh"' \
+		candidate-literal.trace &&
+
 	echo "worktree candidate-only needle" >ordinary &&
 	git status --porcelain >/dev/null &&
 	echo "ordinary:worktree candidate-only needle" >expected &&

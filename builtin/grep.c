@@ -1287,6 +1287,42 @@ static int grep_cache(struct grep_opt *opt,
 		if (worktree_bytes >= min_bytes)
 			worktree_cache = grep_worktree_cache_load(
 				repo, repo->index, &worktree_sidecar_loaded);
+		if (worktree_cache && worktree_sidecar_loaded &&
+		    worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS &&
+		    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC) {
+			size_t limit = literal_selected ? selected_nr :
+							  repo->index->cache_nr;
+			uint64_t refresh_min_bytes = git_env_ulong(
+				"GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
+				GREP_WORKTREE_CACHE_MIN_BYTES);
+			uint64_t refresh_bytes = 0;
+
+			for (pos = 0; pos < limit; pos++) {
+				const struct cache_entry *ce;
+
+				nr = literal_selected ? selected[pos] : pos;
+				ce = repo->index->cache[nr];
+				if (!grep_worktree_cache_entry_refreshable(ce) ||
+				    ce->ce_flags & CE_FSMONITOR_VALID ||
+				    (!literal_selected &&
+				     !match_pathspec(repo->index, pathspec, ce->name,
+						     ce_namelen(ce), 0, NULL, 0)))
+					continue;
+				if (UINT64_MAX - refresh_bytes <
+				    ce->ce_stat_data.sd_size)
+					refresh_bytes = UINT64_MAX;
+				else
+					refresh_bytes += ce->ce_stat_data.sd_size;
+				if (refresh_bytes >= refresh_min_bytes)
+					break;
+			}
+			if (refresh_bytes >= refresh_min_bytes)
+				refresh_index(repo->index,
+					      REFRESH_QUIET | REFRESH_UNMERGED |
+						      REFRESH_IGNORE_SUBMODULES |
+						      REFRESH_IGNORE_SKIP_WORKTREE,
+					      pathspec, NULL, NULL);
+		}
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&

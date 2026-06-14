@@ -455,11 +455,16 @@ done:
 	return result;
 }
 
-int grep_worktree_cache_entry_eligible(const struct cache_entry *ce)
+int grep_worktree_cache_entry_refreshable(const struct cache_entry *ce)
 {
 	return S_ISREG(ce->ce_mode) && !ce_skip_worktree(ce) &&
 	       !ce_stage(ce) && !ce_intent_to_add(ce) &&
-	       !(ce->ce_flags & (CE_VALID | CE_REMOVE)) &&
+	       !(ce->ce_flags & (CE_VALID | CE_REMOVE));
+}
+
+int grep_worktree_cache_entry_eligible(const struct cache_entry *ce)
+{
+	return grep_worktree_cache_entry_refreshable(ce) &&
 	       (ce->ce_flags & CE_FSMONITOR_VALID);
 }
 
