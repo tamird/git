@@ -544,6 +544,16 @@ test_expect_success 'cache object metadata shared by refs' '
 		<metadata-cache.trace &&
 	test_trace2_data ref-filter object_metadata/hits 1 \
 		<metadata-cache.trace &&
+	git commit-graph write --reachable &&
+	GIT_TRACE2_EVENT="$PWD/metadata-graph.trace" \
+		${git_for_each_ref} --format="%(refname)" \
+		--sort=committerdate refs/heads/duplicate-a \
+		refs/heads/duplicate-b refs/heads/duplicate-old >actual &&
+	test_cmp expect actual &&
+	test_trace2_data ref-filter object_metadata/entries 2 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/hits 3 \
+		<metadata-graph.trace &&
 	GIT_TRACE2_EVENT="$PWD/metadata-formatted.trace" \
 		${git_for_each_ref} --format="%(refname)" \
 		--sort=committerdate:iso8601 refs/heads/duplicate-a \

@@ -18,6 +18,7 @@
 #include "repo-settings.h"
 #include "repository.h"
 #include "commit.h"
+#include "commit-graph.h"
 #include "mailmap.h"
 #include "ident.h"
 #include "remote.h"
@@ -2660,6 +2661,22 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 	metadata = ref_filter_object_metadata_enabled ?
 			   oidmap_get(&ref_filter_object_metadata, &ref->objectname) :
 			   NULL;
+	if (ref_filter_object_metadata_enabled && !metadata &&
+	    ref_filter_object_metadata_entries <
+		    REF_FILTER_OBJECT_METADATA_MAX_ENTRIES) {
+		struct commit *commit =
+			lookup_commit_in_graph(the_repository, &ref->objectname);
+
+		if (commit &&
+		    odb_has_object(the_repository->objects, &ref->objectname, 0)) {
+			CALLOC_ARRAY(metadata, 1);
+			oidcpy(&metadata->ent.oid, &ref->objectname);
+			metadata->type = OBJ_COMMIT;
+			metadata->committerdate = commit->date;
+			oidmap_put(&ref_filter_object_metadata, metadata);
+			ref_filter_object_metadata_entries++;
+		}
+	}
 	if (metadata) {
 		for (i = 0; i < used_atom_cnt; i++) {
 			struct used_atom *atom = &used_atom[i];
