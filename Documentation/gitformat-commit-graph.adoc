@@ -152,6 +152,9 @@ All multi-byte numbers are in network byte order.
 	when char is signed and the repository has path names that have characters >=
 	0x80; Git supports reading and writing them, but this ability will be removed
 	in a future version of Git.
+	Version 3 uses the version 2 hash algorithm and also adds the basename of
+	each changed path and leading directory to the filter. This allows a query
+	for a literal basename at any depth to use the filter.
       - The number of times a path is hashed and hence the number of bit positions
 	      that cumulatively determine whether a file is present in the commit.
       - The minimum number of bits 'b' per entry in the Bloom filter. If the filter
