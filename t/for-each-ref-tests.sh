@@ -521,6 +521,48 @@ test_expect_success 'Verify descending sort' '
 	test_cmp expected actual
 '
 
+test_expect_success 'cache object metadata shared by refs' '
+	test_when_finished "git branch -D duplicate-a duplicate-b duplicate-old" &&
+	test_tick &&
+	old_oid=$(echo old | git commit-tree main^{tree} -p main) &&
+	test_tick &&
+	duplicate_oid=$(echo duplicate | git commit-tree main^{tree} -p main) &&
+	git branch duplicate-a "$duplicate_oid" &&
+	git branch duplicate-b "$duplicate_oid" &&
+	git branch duplicate-old "$old_oid" &&
+	cat >expect <<-\EOF &&
+	refs/heads/duplicate-old
+	refs/heads/duplicate-a
+	refs/heads/duplicate-b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/metadata-cache.trace" \
+		${git_for_each_ref} --format="%(refname)" \
+		--sort=committerdate refs/heads/duplicate-a \
+		refs/heads/duplicate-b refs/heads/duplicate-old >actual &&
+	test_cmp expect actual &&
+	test_trace2_data ref-filter object_metadata/entries 2 \
+		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/hits 1 \
+		<metadata-cache.trace &&
+	GIT_TRACE2_EVENT="$PWD/metadata-formatted.trace" \
+		${git_for_each_ref} --format="%(refname)" \
+		--sort=committerdate:iso8601 refs/heads/duplicate-a \
+		refs/heads/duplicate-b refs/heads/duplicate-old >actual &&
+	test_cmp expect actual &&
+	test_trace2_data ref-filter object_metadata/entries 0 \
+		<metadata-formatted.trace &&
+	test_trace2_data ref-filter object_metadata/hits 0 \
+		<metadata-formatted.trace &&
+	GIT_TRACE2_EVENT="$PWD/metadata-subject.trace" \
+		${git_for_each_ref} --format="%(refname) %(subject)" \
+		--sort=committerdate refs/heads/duplicate-a \
+		refs/heads/duplicate-b refs/heads/duplicate-old >/dev/null &&
+	test_trace2_data ref-filter object_metadata/entries 0 \
+		<metadata-subject.trace &&
+	test_trace2_data ref-filter object_metadata/hits 0 \
+		<metadata-subject.trace
+'
+
 test_expect_success 'Give help even with invalid sort atoms' '
 	test_expect_code 129 ${git_for_each_ref} --sort=bogus -h >actual 2>&1 &&
 	grep "^usage: ${git_for_each_ref}" actual

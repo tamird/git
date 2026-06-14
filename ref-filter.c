@@ -14,6 +14,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "oid-array.h"
+#include "oidmap.h"
 #include "repo-settings.h"
 #include "repository.h"
 #include "commit.h"
@@ -28,6 +29,7 @@
 #include "utf8.h"
 #include "versioncmp.h"
 #include "trailer.h"
+#include "trace2.h"
 #include "wt-status.h"
 #include "commit-slab.h"
 #include "commit-reach.h"
@@ -94,6 +96,19 @@ static struct expand_data {
 	struct object *maybe_object;
 	struct object_info info;
 } oi, oi_deref;
+
+struct ref_filter_object_metadata {
+	struct oidmap_entry ent;
+	timestamp_t committerdate;
+	enum object_type type;
+};
+
+#define REF_FILTER_OBJECT_METADATA_MAX_ENTRIES (1U << 20)
+
+static struct oidmap ref_filter_object_metadata = OIDMAP_INIT;
+static size_t ref_filter_object_metadata_entries;
+static size_t ref_filter_object_metadata_hits;
+static int ref_filter_object_metadata_enabled = -1;
 
 struct ref_to_worktree_entry {
 	struct hashmap_entry ent;
@@ -190,6 +205,9 @@ static struct used_atom {
 	const char *name;
 	cmp_type type;
 	info_source source;
+	unsigned int used_in_format:1;
+	unsigned int used_in_numeric_sort:1;
+	unsigned int used_in_string_sort:1;
 	union {
 		char color[COLOR_MAXLEN];
 		struct align align;
@@ -1084,6 +1102,9 @@ static int parse_ref_filter_atom(struct ref_format *format,
 	used_atom[at].name = xmemdupz(atom, ep - atom);
 	used_atom[at].type = valid_atom[i].cmp_type;
 	used_atom[at].source = valid_atom[i].source;
+	used_atom[at].used_in_format = 0;
+	used_atom[at].used_in_numeric_sort = 0;
+	used_atom[at].used_in_string_sort = 0;
 	if (used_atom[at].source == SOURCE_OBJ) {
 		if (*atom == '*')
 			oi_deref.info.contentp = &oi_deref.content;
@@ -1398,6 +1419,7 @@ int verify_ref_format(struct ref_format *format)
 		at = parse_ref_filter_atom(format, sp + 2, ep, &err);
 		if (at < 0)
 			die("%s", err.buf);
+		used_atom[at].used_in_format = 1;
 		if (reject_atom(used_atom[at].atom_type))
 			die(_("this command reject atom %%(%.*s)"), (int)(ep - sp - 2), sp + 2);
 
@@ -2430,6 +2452,7 @@ static char *get_worktree_path(const struct ref_array_item *ref)
  */
 static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 {
+	struct ref_filter_object_metadata *metadata;
 	int i;
 	struct object_info empty = OBJECT_INFO_INIT;
 	int ahead_behind_atoms = 0;
@@ -2609,6 +2632,75 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 					       oid_to_hex(&ref->objectname), ref->refname);
 	}
 
+	if (ref_filter_object_metadata_enabled < 0) {
+		int wants_object_metadata = 0;
+
+		ref_filter_object_metadata_enabled = 1;
+		for (i = 0; i < used_atom_cnt; i++) {
+			struct used_atom *atom = &used_atom[i];
+			const char *name = atom->name;
+
+			if (atom->atom_type == ATOM_COMMITTERDATE &&
+			    *name != '*' && atom->used_in_numeric_sort &&
+			    !atom->used_in_string_sort && !atom->used_in_format) {
+				wants_object_metadata = 1;
+				continue;
+			}
+			if (atom->source == SOURCE_OBJ ||
+			    (atom->source == SOURCE_OTHER &&
+			     atom->atom_type != ATOM_OBJECTNAME &&
+			     atom->atom_type != ATOM_AHEADBEHIND &&
+			     atom->atom_type != ATOM_ISBASE)) {
+				ref_filter_object_metadata_enabled = 0;
+				break;
+			}
+		}
+		ref_filter_object_metadata_enabled &= wants_object_metadata;
+	}
+	metadata = ref_filter_object_metadata_enabled ?
+			   oidmap_get(&ref_filter_object_metadata, &ref->objectname) :
+			   NULL;
+	if (metadata) {
+		for (i = 0; i < used_atom_cnt; i++) {
+			struct used_atom *atom = &used_atom[i];
+			struct atom_value *v = &ref->value[i];
+
+			if (v->s)
+				continue;
+			if (atom->atom_type == ATOM_COMMITTERDATE &&
+			    *atom->name != '*' && atom->used_in_numeric_sort &&
+			    !atom->used_in_string_sort && !atom->used_in_format)
+				continue;
+			if (atom->atom_type == ATOM_OBJECTNAME &&
+			    *atom->name == '*' && metadata->type != OBJ_TAG)
+				continue;
+			if (atom->source != SOURCE_NONE)
+				break;
+		}
+		if (i == used_atom_cnt) {
+			for (i = 0; i < used_atom_cnt; i++) {
+				struct used_atom *atom = &used_atom[i];
+				struct atom_value *v = &ref->value[i];
+
+				if (v->s)
+					continue;
+				if (atom->atom_type == ATOM_COMMITTERDATE &&
+				    *atom->name != '*' &&
+				    atom->used_in_numeric_sort &&
+				    !atom->used_in_string_sort &&
+				    !atom->used_in_format) {
+					v->value = metadata->committerdate;
+					v->s = xstrdup("");
+				} else if (atom->atom_type == ATOM_OBJECTNAME &&
+					   *atom->name == '*') {
+					v->s = xstrdup("");
+				}
+			}
+			ref_filter_object_metadata_hits++;
+			return 0;
+		}
+	}
+
 	if (need_tagged)
 		oi.info.contentp = &oi.content;
 	if (!memcmp(&oi.info, &empty, sizeof(empty)) &&
@@ -2619,6 +2711,22 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 	oi.oid = ref->objectname;
 	if (get_object(ref, 0, &oi, err))
 		return -1;
+	if (ref_filter_object_metadata_enabled && !metadata &&
+	    ref_filter_object_metadata_entries <
+		    REF_FILTER_OBJECT_METADATA_MAX_ENTRIES) {
+		CALLOC_ARRAY(metadata, 1);
+		oidcpy(&metadata->ent.oid, &ref->objectname);
+		metadata->type = oi.type;
+		for (i = 0; i < used_atom_cnt; i++) {
+			if (used_atom[i].atom_type != ATOM_COMMITTERDATE ||
+			    *used_atom[i].name == '*' || !ref->value[i].s)
+				continue;
+			metadata->committerdate = ref->value[i].value;
+			break;
+		}
+		oidmap_put(&ref_filter_object_metadata, metadata);
+		ref_filter_object_metadata_entries++;
+	}
 
 	/*
 	 * If there is no atom that wants to know about tagged
@@ -3125,6 +3233,16 @@ void ref_array_clear(struct ref_array *array)
 	}
 	FREE_AND_NULL(used_atom);
 	used_atom_cnt = 0;
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/entries",
+			   ref_filter_object_metadata_entries);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/hits",
+			   ref_filter_object_metadata_hits);
+	oidmap_clear(&ref_filter_object_metadata, 1);
+	ref_filter_object_metadata_entries = 0;
+	ref_filter_object_metadata_hits = 0;
+	ref_filter_object_metadata_enabled = -1;
 
 	if (ref_to_worktree_map.worktrees) {
 		hashmap_clear_and_free(&(ref_to_worktree_map.map),
@@ -3699,6 +3817,7 @@ static int parse_sorting_atom(const char *atom)
 static void parse_ref_sorting(struct ref_sorting **sorting_tail, const char *arg)
 {
 	struct ref_sorting *s;
+	const char *atom;
 
 	CALLOC_ARRAY(s, 1);
 	s->next = *sorting_tail;
@@ -3711,7 +3830,14 @@ static void parse_ref_sorting(struct ref_sorting **sorting_tail, const char *arg
 	if (skip_prefix(arg, "version:", &arg) ||
 	    skip_prefix(arg, "v:", &arg))
 		s->sort_flags |= REF_SORTING_VERSION;
-	s->atom = parse_sorting_atom(arg);
+	atom = arg;
+	s->atom = parse_sorting_atom(atom);
+	if (used_atom[s->atom].atom_type == ATOM_COMMITTERDATE) {
+		if (!(s->sort_flags & REF_SORTING_VERSION) && !strchr(atom, ':'))
+			used_atom[s->atom].used_in_numeric_sort = 1;
+		else
+			used_atom[s->atom].used_in_string_sort = 1;
+	}
 }
 
 struct ref_sorting *ref_sorting_options(struct string_list *options)
