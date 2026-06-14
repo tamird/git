@@ -14,6 +14,7 @@ enum grep_worktree_cache_result {
 	GREP_WORKTREE_CACHE_EQUAL,
 };
 
+int grep_worktree_cache_entry_refreshable(const struct cache_entry *ce);
 int grep_worktree_cache_entry_eligible(const struct cache_entry *ce);
 /* sidecar_loaded is set when a compact or recovery cache can be reused. */
 struct grep_worktree_cache *grep_worktree_cache_load(
