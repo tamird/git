@@ -589,6 +589,7 @@ test_expect_success FSMONITOR_DAEMON \
 		git fsmonitor--daemon start &&
 	test_when_finished "rm -f pickaxe-direct.trace pickaxe-ipc.trace \
 			    pickaxe-g-direct.trace pickaxe-g-ipc.trace \
+			    pickaxe-saturated.trace \
 			    pickaxe-fallback.trace pickaxe-missing.trace \
 			    daemon-prepared.trace" &&
 	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
@@ -657,6 +658,21 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-ipc.trace &&
 	test_grep "\"key\":\"ipc_query/prepared\",\"value\":\"1\"" \
 		daemon-prepared.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_ENTRIES=1 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-saturated.trace" \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual-saturated 2>err-saturated &&
+	test_must_be_empty actual-saturated &&
+	test_must_be_empty err-saturated &&
+	test_grep \
+		"\"key\":\"content_index/batch_result_entries\",\"value\":\"1\"" \
+		pickaxe-saturated.trace &&
+	test_grep \
+		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
+		pickaxe-saturated.trace &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \

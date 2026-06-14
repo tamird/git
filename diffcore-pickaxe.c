@@ -35,9 +35,11 @@ struct diff_pickaxe_index {
 	struct grep_index_query *query;
 	struct grep_index_prepared *prepared;
 	struct oidmap results;
+	struct oidmap batch_results;
 	char *needle;
 	size_t pairs;
 	size_t results_nr;
+	size_t max_results;
 	unsigned pickaxe_opts;
 	int direct_tried;
 	int ipc;
@@ -45,6 +47,7 @@ struct diff_pickaxe_index {
 	int text;
 	int tried;
 	uint64_t cache_hits;
+	uint64_t batch_result_entries;
 	uint64_t tested;
 	uint64_t impossible_pairs;
 	uint64_t direct_batches;
@@ -182,6 +185,9 @@ static int pickaxe_index_maybe_contains(
 		index->cache_hits++;
 		return entry->maybe;
 	}
+	entry = oidmap_get(&index->batch_results, &spec->oid);
+	if (entry)
+		return entry->maybe;
 	if (!index->index)
 		return 1;
 	if (index->persistent_only && !index->prepared) {
@@ -207,7 +213,7 @@ static int pickaxe_index_maybe_contains(
 					index->query);
 	}
 	index->tested++;
-	if (index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
+	if (index->results_nr < index->max_results) {
 		CALLOC_ARRAY(entry, 1);
 		oidcpy(&entry->entry.oid, &spec->oid);
 		entry->maybe = maybe;
@@ -414,7 +420,11 @@ void diffcore_pickaxe(struct diff_options *o)
 			index->needle = xstrdup(needle);
 			index->pickaxe_opts = query_opts;
 			index->text = o->flags.text;
+			index->max_results = git_env_ulong(
+				"GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_ENTRIES",
+				PICKAXE_INDEX_MAX_ENTRIES);
 			oidmap_init(&index->results, 0);
+			oidmap_init(&index->batch_results, 0);
 			*o->pickaxe_index_state = index;
 		}
 		if (index->pairs < min_index_pairs) {
@@ -462,16 +472,13 @@ void diffcore_pickaxe(struct diff_options *o)
 		}
 	}
 
-	if (index && index->ipc &&
-	    index->results_nr < PICKAXE_INDEX_MAX_ENTRIES) {
+	if (index && index->ipc) {
 		struct oidset pending = OIDSET_INIT;
 		struct grep_index_location *locations = NULL;
 		struct object_id *oids = NULL;
 		unsigned char *maybe = NULL;
 		size_t oids_nr = 0;
 		size_t oids_alloc = 0;
-		size_t remaining = PICKAXE_INDEX_MAX_ENTRIES -
-				   index->results_nr;
 		int queried = 0;
 
 		for (int i = 0; i < diff_queued_diff.nr; i++) {
@@ -494,17 +501,17 @@ void diffcore_pickaxe(struct diff_options *o)
 				    oidmap_get(
 					    &index->results,
 					    &spec->oid) ||
+				    oidmap_get(
+					    &index->batch_results,
+					    &spec->oid) ||
 				    oidset_insert(&pending, &spec->oid))
 					continue;
 				ALLOC_GROW(oids, oids_nr + 1,
 					   oids_alloc);
 				oidcpy(&oids[oids_nr++], &spec->oid);
-				if (oids_nr == remaining)
-					goto query;
 			}
 		}
 
-	query:
 		if (oids_nr && oids_nr <= max_direct_oids) {
 			/*
 			 * Small history diffs would otherwise pay for one
@@ -568,14 +575,22 @@ void diffcore_pickaxe(struct diff_options *o)
 		if (queried) {
 			for (size_t i = 0; i < oids_nr; i++) {
 				struct diff_pickaxe_index_entry *entry;
+				struct oidmap *results;
 
 				CALLOC_ARRAY(entry, 1);
 				oidcpy(&entry->entry.oid, &oids[i]);
 				entry->maybe =
 					maybe[i] !=
 					GREP_INDEX_IPC_IMPOSSIBLE;
-				oidmap_put(&index->results, entry);
-				index->results_nr++;
+					if (index->results_nr < index->max_results) {
+						results = &index->results;
+						index->results_nr++;
+					} else {
+						/* Retain overflow only for this diff. */
+						results = &index->batch_results;
+					index->batch_result_entries++;
+				}
+				oidmap_put(results, entry);
 			}
 			index->tested += oids_nr;
 		}
@@ -594,6 +609,8 @@ void diffcore_pickaxe(struct diff_options *o)
 	}
 
 	pickaxe(&diff_queued_diff, o, regexp, kws, fn);
+	if (index)
+		oidmap_clear(&index->batch_results, 1);
 
 	if (regexp)
 		regfree(regexp);
@@ -632,9 +649,13 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 	trace2_data_intmax("pickaxe", index->repo, "content_index/cache_hits",
 			   index->cache_hits);
 	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/batch_result_entries",
+			   index->batch_result_entries);
+	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/impossible_pairs",
 			   index->impossible_pairs);
 	oidmap_clear(&index->results, 1);
+	oidmap_clear(&index->batch_results, 1);
 	grep_index_prepared_free(index->prepared);
 	grep_index_query_free(index->query);
 	grep_index_free(index->index);
