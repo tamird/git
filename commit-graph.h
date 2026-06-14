@@ -107,6 +107,8 @@ struct commit_graph {
 	const uint32_t *chunk_oid_fanout;
 	const unsigned char *chunk_oid_lookup;
 	const unsigned char *chunk_commit_data;
+	const unsigned char *chunk_shallow;
+	size_t chunk_shallow_size;
 	const unsigned char *chunk_generation_data;
 	const unsigned char *chunk_generation_data_overflow;
 	size_t chunk_generation_data_overflow_size;
@@ -194,6 +196,7 @@ int write_commit_graph(struct odb_source *source,
 int verify_commit_graph(struct commit_graph *g, int flags);
 
 void close_commit_graph(struct object_database *);
+void repo_invalidate_commit_graph(struct repository *);
 void free_commit_graph(struct commit_graph *);
 
 /*
