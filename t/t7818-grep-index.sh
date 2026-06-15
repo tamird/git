@@ -663,7 +663,7 @@ test_expect_success FSMONITOR_DAEMON \
 		-- pickaxe-history >actual 2>err &&
 	test_must_be_empty actual &&
 	test_must_be_empty err &&
-	test_grep "\"key\":\"content_index/prepared\",\"value\":\"1\"" \
+	test_grep "\"key\":\"content_index/prepared\",\"value\":\"0\"" \
 		pickaxe-direct.trace &&
 	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
 		pickaxe-direct.trace &&
@@ -674,6 +674,10 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-direct.trace &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sneedle HEAD^..HEAD \
+		-- pickaxe-history 2>err-direct-positive &&
+	test_grep "unable to read" err-direct-positive &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \

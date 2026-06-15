@@ -515,11 +515,11 @@ void diffcore_pickaxe(struct diff_options *o)
 		if (oids_nr && oids_nr <= max_direct_oids) {
 			/*
 			 * Small history diffs would otherwise pay for one
-			 * IPC connection and client thread per commit. Prepare
-			 * the local transposed index once when it covers every
-			 * object in this batch. The daemon remains responsible
-			 * for historical objects missing from the persistent
-			 * index and for larger batches.
+			 * IPC connection and client thread per commit. Query the
+			 * local transposed index when it covers every object in
+			 * the batch. The daemon remains responsible for historical
+			 * objects missing from the persistent index and larger
+			 * batches.
 			 */
 			if (!index->direct_tried) {
 				index->direct_tried = 1;
@@ -536,18 +536,14 @@ void diffcore_pickaxe(struct diff_options *o)
 						covered = 0;
 						break;
 					}
-				if (covered && !index->prepared)
-					index->prepared =
-						grep_index_prepare(
-							index->index,
-							index->query);
-				if (covered && index->prepared) {
+				if (covered) {
 					ALLOC_ARRAY(maybe, oids_nr);
 					for (size_t i = 0; i < oids_nr; i++) {
 						int contains =
-							grep_index_prepared_location_maybe_contains(
-								index->prepared,
-								&locations[i]);
+							grep_index_location_maybe_contains(
+								index->index,
+								&locations[i],
+								index->query);
 
 						maybe[i] = contains ?
 							GREP_INDEX_IPC_MAYBE :

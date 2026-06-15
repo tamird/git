@@ -2394,8 +2394,9 @@ static int grep_index_transposed_clause_maybe_contains(
 			    transposed->segment,
 			    transposed->rows_offset +
 				    (uint64_t)bit *
-					    filter_class->row_bytes,
-			    filter_class->row_bytes)) {
+					    filter_class->row_bytes +
+				    transposed->pos / 8,
+			    1)) {
 			transposed->verification_failed = 1;
 			return 1;
 		}
@@ -2406,27 +2407,17 @@ static int grep_index_transposed_clause_maybe_contains(
 	return 1;
 }
 
-static int grep_index_transposed_maybe_contains(
-	struct grep_index_segment *segment, const struct object_id *oid,
+static int grep_index_transposed_location_maybe_contains(
+	struct grep_index_segment *segment, uint32_t class_nr, uint32_t pos,
 	const struct grep_index_query *query)
 {
 	struct grep_index_memory_filter_class filter_class;
 	struct grep_index_transposed_query transposed;
-	const unsigned char *locator;
 	const unsigned char *class_entry;
 	uint64_t offset;
-	uint32_t class_nr;
-	uint32_t pos;
 	uint32_t nr;
-	uint32_t oid_pos;
 	int result;
 
-	if (!segment_oid_pos(segment, oid, &oid_pos))
-		return -1;
-	locator = segment->locators +
-		  (size_t)oid_pos * GREP_INDEX_TRANSPOSED_LOCATOR_SIZE;
-	class_nr = get_be32(locator);
-	pos = get_be32(locator + sizeof(uint32_t));
 	class_entry = segment->classes +
 		      (size_t)class_nr * GREP_INDEX_TRANSPOSED_CLASS_SIZE;
 	nr = get_be32(class_entry + sizeof(uint32_t));
@@ -2449,6 +2440,22 @@ static int grep_index_transposed_maybe_contains(
 		query, grep_index_transposed_clause_maybe_contains,
 		&transposed);
 	return transposed.verification_failed ? 1 : result;
+}
+
+static int grep_index_transposed_maybe_contains(
+	struct grep_index_segment *segment, const struct object_id *oid,
+	const struct grep_index_query *query)
+{
+	const unsigned char *locator;
+	uint32_t oid_pos;
+
+	if (!segment_oid_pos(segment, oid, &oid_pos))
+		return -1;
+	locator = segment->locators +
+		  (size_t)oid_pos * GREP_INDEX_TRANSPOSED_LOCATOR_SIZE;
+	return grep_index_transposed_location_maybe_contains(
+		segment, get_be32(locator),
+		get_be32(locator + sizeof(uint32_t)), query);
 }
 
 static void grep_index_bitmap_fill(unsigned char *bitmap, size_t nr)
@@ -2648,6 +2655,21 @@ int grep_index_resolve_location(
 		return 0;
 	}
 	return -1;
+}
+
+int grep_index_location_maybe_contains(
+	struct grep_index *index,
+	const struct grep_index_location *location,
+	const struct grep_index_query *query)
+{
+	if (!index || !location || !location->valid || !query)
+		return 1;
+	if (location->segment >= index->segments_nr ||
+	    location->filter_class >= GREP_INDEX_MEMORY_FILTER_CLASSES)
+		BUG("invalid grep index location");
+	return grep_index_transposed_location_maybe_contains(
+		&index->segments[location->segment], location->filter_class,
+		location->position, query);
 }
 
 int grep_index_prepared_location_maybe_contains(
