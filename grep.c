@@ -578,8 +578,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		compile_regexp_failed(p, errbuf);
 	}
 
-	if (!p->ignore_case &&
-	    (p->token == GREP_PATTERN_HEAD ||
+	if ((p->token == GREP_PATTERN_HEAD ||
 	     p->token == GREP_PATTERN_BODY) &&
 	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
 	     opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)) {
@@ -611,7 +610,9 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				if (i == start)
 					break;
 				if (!p->kws)
-					p->kws = kwsalloc(NULL);
+					p->kws = kwsalloc(p->ignore_case ?
+								  tolower_trans_tbl :
+								  NULL);
 				kwserr = kwsincr(p->kws, p->pattern + start,
 						 i - start);
 				if (kwserr)

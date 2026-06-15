@@ -939,12 +939,32 @@ test_expect_success ENHANCED_BRE 'log grep with literal BRE alternatives' '
 	test_cmp expect actual
 '
 
+test_expect_success ENHANCED_BRE \
+	'log grep with case-insensitive literal BRE alternatives' '
+	cat >expect <<-\EOF &&
+	fourth
+	second
+	EOF
+	git log -i --grep="SECOND\\|FOURTH" --format=%s >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'log grep with literal ERE alternatives' '
 	cat >expect <<-\EOF &&
 	fourth
 	second
 	EOF
 	git log -E --grep="second|fourth" --format=%s >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success \
+	'log grep with case-insensitive literal ERE alternatives' '
+	cat >expect <<-\EOF &&
+	fourth
+	second
+	EOF
+	git log -i -E --grep="SECOND|FOURTH" --format=%s >actual &&
 	test_cmp expect actual
 '
 
