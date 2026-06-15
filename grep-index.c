@@ -1090,6 +1090,41 @@ static void grep_index_query_clause_add_required_enrichments(
 	*enrichments_nr = enrichment_clause_start;
 }
 
+static int grep_index_pcre_class_end(const char *pattern, size_t start,
+				     size_t scan_end, size_t *class_end)
+{
+	size_t i = start + 1;
+
+	if (i < scan_end && pattern[i] == '^')
+		i++;
+	if (i < scan_end && pattern[i] == ']')
+		i++;
+	for (; i < scan_end; i++) {
+		if (pattern[i] == '\\') {
+			if (++i == scan_end || pattern[i] == 'Q' ||
+			    pattern[i] == 'c')
+				return -1;
+		} else if (pattern[i] == '[' && i + 1 < scan_end &&
+			   strchr(".:=", pattern[i + 1])) {
+			unsigned char marker = pattern[i + 1];
+
+			for (i += 2;
+			     i + 1 < scan_end &&
+			     !(pattern[i] == marker && pattern[i + 1] == ']');
+			     i++)
+				if (pattern[i] == '\\' || pattern[i] == '[')
+					return -1;
+			if (i + 1 == scan_end)
+				return -1;
+			i++;
+		} else if (pattern[i] == ']') {
+			*class_end = i;
+			return 0;
+		}
+	}
+	return -1;
+}
+
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
@@ -1735,26 +1770,50 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				    strchr("*+?", p->pattern[j + 1]))
 					separator_len++;
 			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
-				   ch == '(' && i + 2 < scan_end &&
-				   p->pattern[i + 1] == '?' &&
-				   p->pattern[i + 2] == ':') {
+				   ch == '(') {
 				size_t j;
 
-				for (j = i + 3; j < scan_end; j++) {
+				if (i + 1 < scan_end && p->pattern[i + 1] == '*') {
+					goto unsupported;
+				} else if (i + 1 < scan_end &&
+					   p->pattern[i + 1] == '?') {
+					if (i + 2 == scan_end ||
+					    p->pattern[i + 2] != ':')
+						goto unsupported;
+					j = i + 3;
+				} else {
+					j = i + 1;
+				}
+				for (; j < scan_end; j++) {
 					unsigned char group_ch = p->pattern[j];
 
 					if (group_ch == '\\') {
 						if (++j == scan_end ||
-						    p->pattern[j] == 'Q')
+						    p->pattern[j] == 'Q' ||
+						    p->pattern[j] == 'c')
 							goto unsupported;
-					} else if (group_ch == '[' ||
-						   group_ch == '(') {
+					} else if (group_ch == '[') {
+						if (grep_index_pcre_class_end(
+							    p->pattern, j, scan_end, &j))
+							goto unsupported;
+					} else if (group_ch == '(') {
 						goto unsupported;
 					} else if (group_ch == ')') {
 						break;
 					}
 				}
 				if (j == scan_end)
+					goto unsupported;
+				separator_len = j - i + 1;
+				if (j + 1 < scan_end &&
+				    strchr("*+?", p->pattern[j + 1]))
+					separator_len++;
+			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+				   ch == '[') {
+				size_t j;
+
+				if (grep_index_pcre_class_end(p->pattern, i,
+							      scan_end, &j))
 					goto unsupported;
 				separator_len = j - i + 1;
 				if (j + 1 < scan_end &&
@@ -1816,6 +1875,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				     (is_regex_special(p->pattern[i + 1]) ||
 				      p->pattern[i + 1] == '}' ||
+				      p->pattern[i + 1] == 'b' ||
+				      p->pattern[i + 1] == 'B' ||
 				      p->pattern[i + 1] == 's' ||
 				      p->pattern[i + 1] == 'S')))) {
 				unsigned char next = p->pattern[i + 1];

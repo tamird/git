@@ -2158,6 +2158,31 @@ test_expect_success LIBPCRE2 'content index prunes simple PCRE groups' '
 	test_must_be_empty err
 '
 
+test_expect_success LIBPCRE2 'content index prunes PCRE boundaries' '
+	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
+	pattern="(^|[^[:alnum:]_])import[[:space:]]+" &&
+	pattern="$pattern(sample_ext\\.)?vendor_internal" &&
+	pattern="$pattern($|[^[:alnum:]_])" &&
+	git grep --cached -P "$pattern" -- agent-regex >actual &&
+	test_cmp expect actual &&
+	git grep --cached -P \
+		"\\bimport[[:space:]]+(sample_ext\\.)?vendor_internal\\b" \
+		-- agent-regex >actual &&
+	test_cmp expect actual &&
+
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"\\babsent[[:space:]]+(optional)?needle\\b" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"(^|[^[:alnum:]_])absent(optional)?needle" -- short 2>err &&
+	test_must_be_empty err
+'
+
 test_expect_success LIBPCRE2 'complex PCRE groups use normal blob reads' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -2166,6 +2191,15 @@ test_expect_success LIBPCRE2 'complex PCRE groups use normal blob reads' '
 
 	test_must_fail git grep --cached -P \
 		"absent(?:nested(group))needle" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"absent(?:\\Q(group)\\E)needle" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"absent[\\Q]\\E]needle" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"(*ACCEPT)absent" -- short 2>err &&
 	test_grep "unable to read" err
 '
 
