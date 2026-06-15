@@ -499,16 +499,27 @@ test_expect_success 'commit index prunes pickaxe tree diff' '
 		pickaxe-commit-index.trace
 '
 
-test_expect_success 'commit index bypasses broader diff semantics' '
-	test_when_finished "rm -f pickaxe-scoped.trace pickaxe-copies.trace" &&
+test_expect_success 'commit index safely prunes scoped pickaxe' '
+	test_when_finished "rm -f pickaxe-scoped.trace" &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-scoped.trace" \
 		git log --format=%s -Sabsent refs/grep-index-test/new \
 		-- probe >actual-scoped &&
 	test_must_be_empty actual-scoped &&
-	test_grep "\"key\":\"commit_index/tested\",\"value\":\"0\"" \
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
 		pickaxe-scoped.trace &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sneedle refs/grep-index-test/new \
+		-- probe >actual-scoped-positive &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -Sneedle refs/grep-index-test/new \
+		-- probe >expect-scoped-positive &&
+	test_file_not_empty expect-scoped-positive &&
+	test_cmp expect-scoped-positive actual-scoped-positive
+'
 
+test_expect_success 'commit index bypasses harder copies' '
+	test_when_finished "rm -f pickaxe-copies.trace" &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-copies.trace" \
 		git log --find-copies-harder --format=%s -Sabsent \
@@ -547,6 +558,33 @@ test_expect_success 'commit index binds records to commits' '
 	test_cmp expect-corrupt actual-corrupt &&
 	test_grep "\"key\":\"commit_index/tested\",\"value\":\"0\"" \
 		pickaxe-corrupt.trace
+'
+
+test_expect_success 'commit index writer includes ignored gitlinks' '
+	index=.git/objects/info/grep-index/commit-edges &&
+	cp "$index" "$index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	old_commit=$(git rev-parse refs/grep-index-test/old) &&
+	new_commit=$(git rev-parse refs/grep-index-test/middle) &&
+	old_tree=$(printf "160000 commit %s\tsub\n" "$old_commit" |
+		git mktree) &&
+	new_tree=$(printf "160000 commit %s\tsub\n" "$new_commit" |
+		git mktree) &&
+	old_tip=$(echo gitlink-old | git commit-tree "$old_tree") &&
+	new_tip=$(echo gitlink-new |
+		git commit-tree "$new_tree" -p "$old_tip") &&
+	git update-ref refs/grep-index-test/gitlink "$new_tip" &&
+	test_config diff.ignoreSubmodules all &&
+	git grep-index --commit-edges refs/grep-index-test/gitlink &&
+	gitlink_oid=$(git rev-parse refs/grep-index-test/gitlink^:sub) &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --ignore-submodules=none --format=%s -S"$gitlink_oid" \
+		refs/grep-index-test/gitlink >actual-gitlink &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --ignore-submodules=none --format=%s -S"$gitlink_oid" \
+		refs/grep-index-test/gitlink >expect-gitlink &&
+	test_file_not_empty expect-gitlink &&
+	test_cmp expect-gitlink actual-gitlink
 '
 
 test_expect_success 'content index prunes pickaxe blob reads' '
