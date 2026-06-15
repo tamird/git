@@ -38,6 +38,28 @@ test_lazy_prereq REGEX_MATCH_ERROR '
 	test "$invalid_status" != "$nomatch_status"
 '
 
+test_lazy_prereq ENHANCED_BRE '
+	test-tool regex --silent "a\|b" a
+'
+
+test_lazy_prereq SJIS_REGEX_NOMATCH '
+	invalid=$(printf "\\202foo") &&
+	LC_ALL=C test-tool regex --silent \
+		"foo|absent" "$invalid" EXTENDED &&
+	sjis_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			"foo|absent" "$invalid" EXTENDED
+		echo $?
+	) &&
+	nomatch_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			absent present EXTENDED
+		echo $?
+	) &&
+	test "$sjis_status" -ne 0 &&
+	test "$sjis_status" = "$nomatch_status"
+'
+
 cat >hello.c <<EOF
 #include <assert.h>
 #include <stdio.h>
@@ -869,7 +891,57 @@ test_expect_success 'grep -C1 hunk mark between files' '
 test_expect_success 'log grep setup' '
 	test_commit --append --author "With * Asterisk <xyzzy@frotz.com>" second file a &&
 	test_commit --append third file a &&
-	test_commit --append --author "Night Fall <nitfol@frobozz.com>" fourth file a
+	test_commit --append --author "Night Fall <nitfol@frobozz.com>" fourth file a &&
+	printf "\\202foo\n" |
+	git commit-tree HEAD^{tree} -p HEAD >log-grep-sjis
+'
+
+test_expect_success ENHANCED_BRE 'log grep with literal BRE alternatives' '
+	cat >expect <<-\EOF &&
+	fourth
+	second
+	EOF
+	git log --grep="second\\|fourth" --format=%s >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log grep with literal ERE alternatives' '
+	cat >expect <<-\EOF &&
+	fourth
+	second
+	EOF
+	git log -E --grep="second|fourth" --format=%s >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success ENHANCED_BRE \
+	'log grep BRE fast path requires complete pattern' '
+	echo fourth >expect &&
+	git log --grep="missing\\|f.urth" --format=%s >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'log grep ERE fast path requires complete pattern' '
+	echo fourth >expect &&
+	git log -E --grep="missing|f.urth" --format=%s >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success SJIS_REGEX_NOMATCH \
+	'log grep leaves multibyte candidates to POSIX' '
+	LC_ALL=ja_JP.SJIS git log --encoding=none -1 -E \
+		--grep="foo|absent" --format=%s \
+		$(cat log-grep-sjis) >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success 'log grep with literal author alternatives' '
+	cat >expect <<-\EOF &&
+	fourth
+	second
+	EOF
+	git log -E --author="With|Night" --format=%s >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'log grep (1)' '
