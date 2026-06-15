@@ -195,6 +195,32 @@ test_expect_success ENHANCED_BRE,LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success ENHANCED_BRE,LIBPCRE2 \
+	'BRE literal alternatives preserve matches' '
+	test_when_finished "rm -f bre-lookahead" &&
+	printf "foo\nbar\nbaz\n" >bre-lookahead &&
+	printf "bre-lookahead:1:foo\nbre-lookahead:2:bar\n" >expect &&
+	git grep --no-index -n "foo\\|bar" -- bre-lookahead >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
+	test_when_finished "rm -f ere-lookahead" &&
+	cat >ere-lookahead <<-\EOF &&
+	load_graph(
+	direct_dependencies
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-lookahead:1:load_graph(
+	ere-lookahead:2:direct_dependencies
+	EOF
+	git grep --no-index -n -E \
+		"load_graph\\(|direct_dependencies" \
+		-- ere-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
@@ -1390,7 +1416,7 @@ test_expect_success PTHREADS,REGEX_MATCH_ERROR \
 	'threaded grep does not cache regex errors' '
 	test_must_fail env LC_ALL=en_US.UTF-8 \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error-threaded.trace" \
-		git -C result-cache grep --threads=8 -E "foo.*bar|absent" \
+		git -C result-cache grep --threads=8 -E "foo|absent" \
 		cache-base cache-tip -- regex-error >actual &&
 	test_must_be_empty actual &&
 	test_trace2_data grep result_cache/entries 0 \
