@@ -319,16 +319,26 @@ static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt
 		pcre2_malloc, pcre2_free, NULL);
 	if (!p->pcre2_general_context)
 		die("Couldn't allocate PCRE2 general context");
+	if (p->pcre2_newline_lf ||
+	    (opt->ignore_case && !opt->ignore_locale &&
+	     has_non_ascii(p->pattern))) {
+		p->pcre2_compile_context = pcre2_compile_context_create(
+			p->pcre2_general_context);
+		if (!p->pcre2_compile_context)
+			die("Couldn't allocate PCRE2 compile context");
+	}
 
 	if (opt->ignore_case) {
 		if (!opt->ignore_locale && has_non_ascii(p->pattern)) {
 			p->pcre2_tables = pcre2_maketables(p->pcre2_general_context);
-			p->pcre2_compile_context = pcre2_compile_context_create(p->pcre2_general_context);
 			pcre2_set_character_tables(p->pcre2_compile_context,
 							p->pcre2_tables);
 		}
 		options |= PCRE2_CASELESS;
 	}
+	if (p->pcre2_newline_lf &&
+	    pcre2_set_newline(p->pcre2_compile_context, PCRE2_NEWLINE_LF))
+		BUG("could not set PCRE2 newline convention");
 	if (!opt->ignore_locale && is_utf8_locale() && !literal)
 		options |= (PCRE2_UTF | PCRE2_UCP | PCRE2_MATCH_INVALID_UTF);
 
@@ -646,13 +656,12 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		}
 	}
 #ifdef USE_LIBPCRE2
-	int have_alternation = 0;
 	int have_literal = 0;
 	int have_wildcard = 0;
 	struct strbuf lookahead_pattern = STRBUF_INIT;
 
 	/*
-	 * TRE can be very slow on long buffers with alternation. Compile the
+	 * TRE can be very slow on long buffers with wildcards. Compile the
 	 * supported subset as PCRE2 for use as a candidate finder; the POSIX
 	 * matcher still decides whether each candidate line matches.
 	 */
@@ -679,7 +688,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			    ch == '\\' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '|' && have_literal &&
 			    i + 2 < p->patternlen) {
-				have_alternation = 1;
 				have_literal = 0;
 				strbuf_addch(&lookahead_pattern, '|');
 				i++;
@@ -695,7 +703,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '|' && have_literal &&
 			    i + 1 < p->patternlen) {
-				have_alternation = 1;
 				have_literal = 0;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
@@ -704,12 +711,13 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			break;
 		}
 	}
-	if (have_alternation && have_literal && have_wildcard) {
+	if (have_literal && have_wildcard) {
 		struct grep_opt lookahead_opt = *opt;
 
 		CALLOC_ARRAY(p->pcre2_lookahead, 1);
 		p->pcre2_lookahead->pattern = strbuf_detach(&lookahead_pattern,
 							    &p->pcre2_lookahead->patternlen);
+		p->pcre2_lookahead->pcre2_newline_lf = 1;
 		/* Non-ASCII lines are sent to the POSIX matcher below. */
 		lookahead_opt.ignore_locale = 1;
 		compile_pcre2_pattern(p->pcre2_lookahead, &lookahead_opt);

@@ -164,6 +164,26 @@ test_expect_success ENHANCED_BRE,LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 \
+	'POSIX wildcard preserves matches' '
+	test_when_finished "rm -f bre-lookahead" &&
+	cat >bre-lookahead <<-\EOF &&
+	copy UvIndex
+	copy the UvIndex
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	bre-lookahead:1:copy UvIndex
+	bre-lookahead:2:copy the UvIndex
+	EOF
+	git grep --no-index -n "copy.*UvIndex" -- bre-lookahead >actual &&
+	test_cmp expect actual &&
+	git grep --no-index -n -E "copy.*UvIndex" -- bre-lookahead >actual &&
+	test_cmp expect actual &&
+	printf "copy\rUvIndex\n" >bre-lookahead &&
+	git grep --no-index -q "copy.*UvIndex" -- bre-lookahead
+'
+
 test_expect_success ENHANCED_BRE,LIBPCRE2 \
 	'BRE candidate finder requires complete pattern' '
 	test_when_finished "rm -f bre-lookahead" &&
@@ -1357,7 +1377,7 @@ test_expect_success REGEX_MATCH_ERROR \
 	'grep does not cache regex errors' '
 	test_must_fail env LC_ALL=en_US.UTF-8 \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error.trace" \
-		git -C result-cache grep --threads=1 -E "foo.*bar|absent" \
+		git -C result-cache grep --threads=1 -E "foo.*bar" \
 		cache-base cache-tip -- regex-error >actual &&
 	test_must_be_empty actual &&
 	test_trace2_data grep result_cache/entries 0 \
