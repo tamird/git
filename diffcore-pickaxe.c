@@ -9,6 +9,7 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "grep.h"
+#include "grep-commit-index.h"
 #include "grep-index.h"
 #include "grep-index-ipc.h"
 #include "xdiff-interface.h"
@@ -18,11 +19,14 @@
 #include "parse.h"
 #include "pretty.h"
 #include "quote.h"
+#include "repository.h"
 #include "trace2.h"
+#include "userdiff.h"
 
 #define PICKAXE_INDEX_MAX_ENTRIES (1U << 20)
 #define PICKAXE_INDEX_MIN_PAIRS	  4096
 #define PICKAXE_INDEX_DIRECT_MAX_OIDS 64
+#define PICKAXE_INDEX_MAX_UNCOVERED_EDGES 64
 
 struct diff_pickaxe_index_entry {
 	struct oidmap_entry entry;
@@ -31,6 +35,7 @@ struct diff_pickaxe_index_entry {
 
 struct diff_pickaxe_index {
 	struct repository *repo;
+	struct grep_commit_index *commit_index;
 	struct grep_index *index;
 	struct grep_index_query *query;
 	struct grep_index_prepared *prepared;
@@ -40,12 +45,20 @@ struct diff_pickaxe_index {
 	size_t pairs;
 	size_t results_nr;
 	size_t max_results;
+	size_t commit_backoff_edges;
+	size_t commit_sparse_oids;
+	size_t commit_uncovered_streak;
 	unsigned pickaxe_opts;
 	int direct_tried;
+	int commit_index_disabled;
+	int commit_index_tried;
+	int commit_prepare_tried;
 	int ipc;
 	int persistent_only;
 	int text;
 	int tried;
+	int textconv_checked;
+	int textconv_possible;
 	uint64_t cache_hits;
 	uint64_t batch_result_entries;
 	uint64_t tested;
@@ -53,6 +66,11 @@ struct diff_pickaxe_index {
 	uint64_t direct_batches;
 	uint64_t ipc_batches;
 	uint64_t ipc_failures;
+	uint64_t commit_edges_tested;
+	uint64_t commit_edges_pruned;
+	uint64_t commit_oids_impossible;
+	uint64_t commit_oids_maybe;
+	uint64_t commit_oids_unknown;
 };
 
 typedef int (*pickaxe_fn)(mmfile_t *one, mmfile_t *two,
@@ -615,6 +633,182 @@ void diffcore_pickaxe(struct diff_options *o)
 	return;
 }
 
+static int userdiff_driver_has_textconv(
+	struct userdiff_driver *driver,
+	enum userdiff_driver_type type UNUSED,
+	void *data UNUSED)
+{
+	return !!driver->textconv;
+}
+
+static int pickaxe_commit_index_note_result(
+	struct diff_pickaxe_index *index,
+	const struct object_id *oid,
+	unsigned char result)
+{
+	struct diff_pickaxe_index_entry *entry;
+	int contains = result != GREP_INDEX_IPC_IMPOSSIBLE;
+
+	if (result == GREP_INDEX_IPC_IMPOSSIBLE)
+		index->commit_oids_impossible++;
+	else if (result == GREP_INDEX_IPC_MAYBE)
+		index->commit_oids_maybe++;
+	else
+		index->commit_oids_unknown++;
+	if (index->results_nr < index->max_results) {
+		CALLOC_ARRAY(entry, 1);
+		oidcpy(&entry->entry.oid, oid);
+		entry->maybe = contains;
+		oidmap_put(&index->results, entry);
+		index->results_nr++;
+	}
+	return contains;
+}
+
+int diff_pickaxe_edge_maybe_contains(
+	struct diff_options *o,
+	const struct object_id *commit_oid,
+	const struct object_id *parent_oid)
+{
+	struct diff_pickaxe_index *index =
+		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
+	struct grep_commit_index_edge edge;
+	struct grep_index_location location_stack[PICKAXE_INDEX_DIRECT_MAX_OIDS];
+	struct grep_index_location *locations = location_stack;
+	struct object_id oid_stack[PICKAXE_INDEX_DIRECT_MAX_OIDS];
+	struct object_id *oids = oid_stack;
+	size_t oids_nr = 0;
+	int result = 1;
+
+	if (!index || !index->query || index->commit_index_disabled ||
+	    o->flags.follow_renames)
+		return 1;
+	if (o->pathspec.nr) {
+		int matches_all = 0;
+
+		/* Complete edge records cannot accelerate a narrow tree walk. */
+		for (int i = 0; i < o->pathspec.nr; i++) {
+			const struct pathspec_item *item = &o->pathspec.items[i];
+
+			if (!(item->magic & (PATHSPEC_EXCLUDE | PATHSPEC_ATTR |
+					     PATHSPEC_MAXDEPTH)) &&
+			    !item->len) {
+				matches_all = 1;
+				break;
+			}
+		}
+		if (!matches_all)
+			return 1;
+	}
+	/* Copy detection may use an unchanged source omitted from the edge. */
+	if (o->flags.find_copies_harder)
+		return 1;
+	if (o->flags.allow_textconv) {
+		if (!index->textconv_checked) {
+			index->textconv_checked = 1;
+			index->textconv_possible = for_each_userdiff_driver(
+				userdiff_driver_has_textconv, NULL);
+		}
+		if (index->textconv_possible)
+			return 1;
+	}
+	if (index->commit_backoff_edges) {
+		index->commit_backoff_edges--;
+		return 1;
+	}
+	if (!index->commit_index_tried) {
+		index->commit_index_tried = 1;
+		index->commit_index = grep_commit_index_load(o->repo);
+	}
+	if (grep_commit_index_lookup(index->commit_index, commit_oid,
+				     parent_oid, &edge))
+		return 1;
+	if (o->detect_rename && o->rename_limit >= 0 &&
+	    edge.changed_pairs > (uint32_t)o->rename_limit)
+		return 1;
+	index->commit_edges_tested++;
+	if (!edge.nr) {
+		result = 0;
+		goto cleanup;
+	}
+	if (!index->direct_tried) {
+		index->direct_tried = 1;
+		index->index = grep_index_load(o->repo);
+	}
+	if (!index->index || !grep_index_is_transposed(index->index)) {
+		index->commit_index_disabled = 1;
+		goto cleanup;
+	}
+	if (edge.nr > ARRAY_SIZE(oid_stack)) {
+		ALLOC_ARRAY(oids, edge.nr);
+		ALLOC_ARRAY(locations, edge.nr);
+	}
+
+	for (size_t i = 0; i < edge.nr; i++) {
+		struct diff_pickaxe_index_entry *entry;
+		struct object_id oid;
+
+		oidread(&oid, edge.oids + i * edge.oid_size,
+			o->repo->hash_algo);
+		entry = oidmap_get(&index->results, &oid);
+		if (entry) {
+			index->cache_hits++;
+			if (entry->maybe)
+				goto cleanup;
+			continue;
+		}
+		if (grep_index_resolve_location(
+			    index->index, &oid, &locations[oids_nr])) {
+			index->commit_oids_unknown++;
+			index->commit_uncovered_streak++;
+			if (index->commit_uncovered_streak >=
+			    PICKAXE_INDEX_MAX_UNCOVERED_EDGES) {
+				index->commit_uncovered_streak = 0;
+				index->commit_backoff_edges =
+					PICKAXE_INDEX_MAX_UNCOVERED_EDGES;
+			}
+			goto cleanup;
+		}
+		oidcpy(&oids[oids_nr++], &oid);
+	}
+	index->commit_uncovered_streak = 0;
+	for (size_t i = 0; i < oids_nr; i++) {
+		int contains;
+
+		if (!index->prepared && !index->commit_prepare_tried &&
+		    index->commit_sparse_oids >=
+			    PICKAXE_INDEX_DIRECT_MAX_OIDS) {
+			index->commit_prepare_tried = 1;
+			index->prepared = grep_index_prepare(
+				index->index, index->query);
+		}
+		contains = index->prepared ?
+				   grep_index_prepared_location_maybe_contains(
+					   index->prepared, &locations[i]) :
+				   grep_index_location_maybe_contains(
+					   index->index, &locations[i], index->query);
+
+		if (!index->prepared && index->commit_sparse_oids < SIZE_MAX)
+			index->commit_sparse_oids++;
+		index->tested++;
+		if (pickaxe_commit_index_note_result(
+			    index, &oids[i],
+			    contains ? GREP_INDEX_IPC_MAYBE :
+				       GREP_INDEX_IPC_IMPOSSIBLE))
+			goto cleanup;
+	}
+	result = 0;
+
+cleanup:
+	if (!result)
+		index->commit_edges_pruned++;
+	if (oids != oid_stack)
+		free(oids);
+	if (locations != location_stack)
+		free(locations);
+	return result;
+}
+
 void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 {
 	struct diff_pickaxe_index *index = *state;
@@ -642,6 +836,33 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/ipc_failures",
 			   index->ipc_failures);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/tested",
+			   index->commit_edges_tested);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/pruned",
+			   index->commit_edges_pruned);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/disabled",
+			   index->commit_index_disabled);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/backoff_edges",
+			   index->commit_backoff_edges);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/sparse_oids",
+			   index->commit_sparse_oids);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/uncovered_streak",
+			   index->commit_uncovered_streak);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/oids_impossible",
+			   index->commit_oids_impossible);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/oids_maybe",
+			   index->commit_oids_maybe);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "commit_index/oids_unknown",
+			   index->commit_oids_unknown);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/cache_hits",
 			   index->cache_hits);
 	trace2_data_intmax("pickaxe", index->repo,
@@ -653,6 +874,7 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 	oidmap_clear(&index->results, 1);
 	oidmap_clear(&index->batch_results, 1);
 	grep_index_prepared_free(index->prepared);
+	grep_commit_index_free(index->commit_index);
 	grep_index_query_free(index->query);
 	grep_index_free(index->index);
 	free(index->needle);
