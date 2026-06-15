@@ -676,6 +676,9 @@ int diff_queue_is_empty(struct diff_options *o);
 void diff_flush(struct diff_options*);
 void diff_free(struct diff_options*);
 void diff_pickaxe_index_clear(struct diff_pickaxe_index **);
+int diff_pickaxe_edge_maybe_contains(struct diff_options *,
+				     const struct object_id *,
+				     const struct object_id *);
 void diff_warn_rename_limit(const char *varname, int needed, int degraded_cc);
 
 /* diff-raw status letters */
