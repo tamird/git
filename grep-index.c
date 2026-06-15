@@ -1125,6 +1125,36 @@ static int grep_index_pcre_class_end(const char *pattern, size_t start,
 	return -1;
 }
 
+static size_t grep_index_pcre_quantifier_len(const char *pattern,
+					     size_t start, size_t scan_end)
+{
+	size_t i = start;
+
+	if (i == scan_end)
+		return 0;
+	if (strchr("*+?", pattern[i])) {
+		i++;
+	} else if (pattern[i] == '{') {
+		if (++i == scan_end || !isdigit(pattern[i]))
+			return 0;
+		while (i < scan_end && isdigit(pattern[i]))
+			i++;
+		if (i < scan_end && pattern[i] == ',') {
+			i++;
+			while (i < scan_end && isdigit(pattern[i]))
+				i++;
+		}
+		if (i == scan_end || pattern[i] != '}')
+			return 0;
+		i++;
+	} else {
+		return 0;
+	}
+	if (i < scan_end && strchr("+?", pattern[i]))
+		i++;
+	return i - start;
+}
+
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
@@ -1910,6 +1940,11 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 								p->pattern
 									[i + 3]));
 				}
+			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+				   ch == '.') {
+				separator_len = 1;
+				separator_len += grep_index_pcre_quantifier_len(
+					p->pattern, i + separator_len, scan_end);
 			} else if (ch == '.' && i + 1 < scan_end &&
 				   (p->pattern[i + 1] == '*' ||
 				    (pattern_type != GREP_PATTERN_TYPE_BRE &&

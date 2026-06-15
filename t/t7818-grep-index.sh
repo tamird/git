@@ -2183,6 +2183,28 @@ test_expect_success LIBPCRE2 'content index prunes PCRE boundaries' '
 	test_must_be_empty err
 '
 
+test_expect_success LIBPCRE2 'content index prunes PCRE wildcard ranges' '
+	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
+	git grep --cached -P \
+		"import.{0,20}vendor_internal" -- agent-regex >actual &&
+	test_cmp expect actual &&
+
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"absent.{0,240}needle" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"absent.{0,240}?needle" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"absent.{,3}needle" -- short 2>err &&
+	test_grep "unable to read" err
+'
+
 test_expect_success LIBPCRE2 'complex PCRE groups use normal blob reads' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
