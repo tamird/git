@@ -2205,6 +2205,26 @@ test_expect_success LIBPCRE2 'content index prunes PCRE wildcard ranges' '
 	test_grep "unable to read" err
 '
 
+test_expect_success LIBPCRE2 'content index prunes PCRE negative lookaheads' '
+	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
+	git grep --cached -P \
+		"^(?!\\s*(#|from ))[^\\n]*vendor_internal" \
+		-- agent-regex >actual &&
+	test_cmp expect actual &&
+
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"^(?!\\s*(#|from |import ))[^\\n]*absent" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"^(?!(?:prefix))absent" -- short 2>err &&
+	test_grep "unable to read" err
+'
+
 test_expect_success 'content index prunes escaped ERE classes' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -E \

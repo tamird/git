@@ -1802,14 +1802,21 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				   ch == '(') {
 				size_t j;
+				int allow_nested = 0;
+				int depth = 1;
 
 				if (i + 1 < scan_end && p->pattern[i + 1] == '*') {
 					goto unsupported;
 				} else if (i + 1 < scan_end &&
 					   p->pattern[i + 1] == '?') {
-					if (i + 2 == scan_end ||
-					    p->pattern[i + 2] != ':')
+					if (i + 2 == scan_end)
 						goto unsupported;
+					if (p->pattern[i + 2] == '!') {
+						/* Literals outside the assertion remain required. */
+						allow_nested = 1;
+					} else if (p->pattern[i + 2] != ':') {
+						goto unsupported;
+					}
 					j = i + 3;
 				} else {
 					j = i + 1;
@@ -1827,8 +1834,13 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							    p->pattern, j, scan_end, &j))
 							goto unsupported;
 					} else if (group_ch == '(') {
-						goto unsupported;
-					} else if (group_ch == ')') {
+						if (!allow_nested ||
+						    (j + 1 < scan_end &&
+						     (p->pattern[j + 1] == '*' ||
+						      p->pattern[j + 1] == '?')))
+							goto unsupported;
+						depth++;
+					} else if (group_ch == ')' && !--depth) {
 						break;
 					}
 				}
