@@ -701,11 +701,13 @@ static int forbid_bloom_filters(struct pathspec *spec)
 		PATHSPEC_GLOB |
 		PATHSPEC_ATTR;
 
-	if (spec->magic & ~allowed_magic)
-		return 1;
-	for (size_t nr = 0; nr < spec->nr; nr++)
+	/* Exclusions only narrow the union of the positive pathspecs. */
+	for (size_t nr = 0; nr < spec->nr; nr++) {
+		if (spec->items[nr].magic & PATHSPEC_EXCLUDE)
+			continue;
 		if (spec->items[nr].magic & ~allowed_magic)
 			return 1;
+	}
 
 	return 0;
 }
@@ -824,26 +826,36 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 {
 	struct hashmap query_map = HASHMAP_INIT(
 		bloom_query_entry_cmp, revs->bloom_filter_settings);
+	size_t keyvec_nr = 0;
 	int root_count = 0;
 	int last_root = -1;
 
 	release_revisions_bloom_keyvecs(revs);
 	revs->bloom_query_root = -1;
 
-	revs->bloom_keyvecs_nr = pathspec->nr;
+	for (size_t nr = 0; nr < pathspec->nr; nr++)
+		if (!(pathspec->items[nr].magic & PATHSPEC_EXCLUDE))
+			revs->bloom_keyvecs_nr++;
+	if (!revs->bloom_keyvecs_nr)
+		return -1;
+
 	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
-	if (pathspec->nr > 1 &&
+	if (revs->bloom_keyvecs_nr > 1 &&
 	    revs->bloom_filter_settings->hash_version == 3)
 		CALLOC_ARRAY(revs->bloom_query_components,
 			     revs->bloom_keyvecs_nr);
 
 	for (int i = 0; i < pathspec->nr; i++) {
 		struct bloom_keyvec *vec;
+		size_t slot;
 		int parent = -1;
 
-		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[i],
+		if (pathspec->items[i].magic & PATHSPEC_EXCLUDE)
+			continue;
+		slot = keyvec_nr++;
+		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[slot],
 						     revs->bloom_query_components ?
-							     &revs->bloom_query_components[i] :
+							     &revs->bloom_query_components[slot] :
 							     NULL,
 						     &pathspec->items[i],
 						     revs->bloom_filter_settings)) {
@@ -855,24 +867,24 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 		if (!revs->bloom_query_components)
 			continue;
 
-		vec = revs->bloom_keyvecs[i];
+		vec = revs->bloom_keyvecs[slot];
 		for (size_t key_nr = 0;
 		     key_nr < vec->count +
-				      (revs->bloom_query_components[i] ?
-					       revs->bloom_query_components[i]->count :
+				      (revs->bloom_query_components[slot] ?
+					       revs->bloom_query_components[slot]->count :
 					       0);
 		     key_nr++) {
 			struct bloom_query_entry lookup, *entry;
 			struct bloom_key *key;
 			int node;
 
-			if (revs->bloom_query_components[i] &&
-			    key_nr < revs->bloom_query_components[i]->count)
-				key = &revs->bloom_query_components[i]->key[key_nr];
+			if (revs->bloom_query_components[slot] &&
+			    key_nr < revs->bloom_query_components[slot]->count)
+				key = &revs->bloom_query_components[slot]->key[key_nr];
 			else {
 				size_t vec_nr = key_nr -
-						(revs->bloom_query_components[i] ?
-							 revs->bloom_query_components[i]
+						(revs->bloom_query_components[slot] ?
+							 revs->bloom_query_components[slot]
 								 ->count :
 							 0);
 

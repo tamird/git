@@ -624,7 +624,19 @@ test_expect_success 'version 3 factors multi-path Bloom queries' '
 			second/shared/lock >actual &&
 		test_cmp expect actual &&
 		test_grep "\"trie_steps\":[1-9]" \
-			"$TRASH_DIRECTORY/multi-path.perf"
+			"$TRASH_DIRECTORY/multi-path.perf" &&
+		git -c core.commitGraph=false log --format=%s -- \
+			first/shared/lock ":(exclude)first/shared/lock" \
+			second/shared/lock >expect-exclude &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/multi-path-exclude.perf" \
+			git log --format=%s -- first/shared/lock \
+			":(exclude)first/shared/lock" second/shared/lock \
+			>actual-exclude &&
+		test_cmp expect-exclude actual-exclude &&
+		test_grep "\"trie_steps\":[1-9]" \
+			"$TRASH_DIRECTORY/multi-path-exclude.perf" &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/multi-path-exclude.perf"
 	)
 '
 
@@ -655,6 +667,10 @@ test_expect_success 'git log with path contains various magic signatures' '
 	test_bloom_filters_used "-- \:\(glob\)A/\*\*/C" &&
 	test_bloom_filters_not_used "-- \:\(icase\)FILE4" &&
 	test_bloom_filters_not_used "-- \:\(exclude\)A/B/C" &&
+	test_bloom_filters_used "-- A \:\(exclude\)A/B/C" &&
+	test_bloom_filters_used "-- A file4 \:\(exclude\)A/B/C" &&
+	test_bloom_filters_used "-- A \:\(exclude\,icase\)A/B/C" &&
+	test_bloom_filters_not_used "-- \:\(icase\)A \:\(exclude\)A/B/C" &&
 
 	test_when_finished "rm -f .gitattributes" &&
 	cat >.gitattributes <<-EOF &&
