@@ -92,6 +92,7 @@ struct grep_pat {
 	unsigned kws_final:1;
 	unsigned word_regexp:1;
 	unsigned match_error:1;
+	unsigned pcre2_newline_lf:1;
 };
 
 enum grep_expr_node {
