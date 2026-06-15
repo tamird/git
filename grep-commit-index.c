@@ -1,10 +1,12 @@
 #include "git-compat-util.h"
 #include "grep-commit-index.h"
 #include "commit.h"
+#include "copy.h"
 #include "csum-file.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "environment.h"
+#include "grep-index.h"
 #include "hex.h"
 #include "lockfile.h"
 #include "oid-array.h"
@@ -15,6 +17,7 @@
 #include "repository.h"
 #include "revision.h"
 #include "strbuf.h"
+#include "tempfile.h"
 #include "tree.h"
 
 #define GREP_COMMIT_INDEX_SIGNATURE	   0x47434945 /* "GCIE" */
@@ -52,7 +55,8 @@ struct grep_commit_index {
 
 struct grep_commit_edge_record {
 	struct object_id parent_oid;
-	struct oid_array oids;
+	size_t oid_offset;
+	size_t oids_nr;
 	uint32_t changed_pairs;
 	int complete;
 };
@@ -367,13 +371,17 @@ static int collect_parent_edge(struct repository *repo,
 			       struct diff_options *diffopt,
 			       struct commit *commit,
 			       struct commit *parent,
-			       struct grep_commit_edge_record *edge)
+			       struct grep_commit_edge_record *edge,
+			       struct oid_array *scratch,
+			       struct oid_array *endpoint_oids)
 {
 	struct tree *commit_tree;
 	struct tree *parent_tree = NULL;
 	size_t dst = 0;
 
 	memset(edge, 0, sizeof(*edge));
+	scratch->nr = 0;
+	scratch->sorted = 0;
 	edge->complete = 1;
 	if (parent)
 		oidcpy(&edge->parent_oid, &parent->object.oid);
@@ -415,46 +423,50 @@ static int collect_parent_edge(struct repository *repo,
 				edge->complete = 0;
 				continue;
 			}
-			oid_array_append(&edge->oids, &spec->oid);
+			oid_array_append(scratch, &spec->oid);
 		}
 	}
 	diff_queue_clear(&diff_queued_diff);
 
-	oid_array_sort(&edge->oids);
-	for (size_t i = 0; i < edge->oids.nr;
-	     i = oid_array_next_unique(&edge->oids, i)) {
+	oid_array_sort(scratch);
+	for (size_t i = 0; i < scratch->nr;
+	     i = oid_array_next_unique(scratch, i)) {
 		if (dst != i)
-			oidcpy(&edge->oids.oid[dst], &edge->oids.oid[i]);
+			oidcpy(&scratch->oid[dst], &scratch->oid[i]);
 		dst++;
 	}
-	edge->oids.nr = dst;
-	if (dst) {
-		REALLOC_ARRAY(edge->oids.oid, dst);
-		edge->oids.alloc = dst;
-	} else {
-		oid_array_clear(&edge->oids);
-	}
+	edge->oid_offset = endpoint_oids->nr;
+	edge->oids_nr = dst;
+	for (size_t i = 0; i < dst; i++)
+		oid_array_append(endpoint_oids, &scratch->oid[i]);
 	return 0;
 }
 
 int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
-			    struct progress *progress)
+			    int show_progress)
 {
 	struct grep_commit_record *records = NULL;
+	struct oid_array collected_oids = OID_ARRAY_INIT;
+	struct oid_array hydration_oids = OID_ARRAY_INIT;
+	struct oid_array scratch = OID_ARRAY_INIT;
 	struct oidset seen_commits = OIDSET_INIT;
 	struct diff_options diffopt;
 	struct lock_file lock = LOCK_INIT;
 	struct hashfile *hashfile = NULL;
 	struct hashfile_checkpoint metadata_checkpoint;
 	struct object_id metadata_checksum;
+	struct progress *progress = NULL;
+	struct tempfile *temp = NULL;
 	struct strbuf path = STRBUF_INIT;
 	struct strbuf record_buf = STRBUF_INIT;
+	struct strbuf temp_path = STRBUF_INIT;
 	uint64_t *offsets = NULL;
 	size_t records_nr = 0;
 	size_t records_alloc = 0;
 	uint64_t progress_nr = 0;
 	int result = -1;
 	int fd;
+	int temp_fd;
 
 	if (!repo || !revs)
 		return -1;
@@ -469,6 +481,9 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	revs->full_diff = 1;
 	if (prepare_revision_walk(revs))
 		goto cleanup;
+	if (show_progress)
+		progress = start_delayed_progress(repo, _("Indexing commit edges"),
+						  0);
 
 	for (;;) {
 		struct commit *commit = get_revision(revs);
@@ -492,7 +507,8 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 		CALLOC_ARRAY(record->edges, record->edges_nr);
 		if (!parents) {
 			if (collect_parent_edge(repo, &diffopt, commit, NULL,
-						&record->edges[0]))
+						&record->edges[0], &scratch,
+						&collected_oids))
 				goto cleanup;
 		} else {
 			size_t i = 0;
@@ -502,7 +518,8 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 					&record->edges[i++];
 
 				if (collect_parent_edge(repo, &diffopt, commit,
-							p->item, edge))
+							p->item, edge, &scratch,
+							&collected_oids))
 					goto cleanup;
 			}
 		}
@@ -521,6 +538,7 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 		if (oideq(&records[i - 1].commit_oid,
 			  &records[i].commit_oid))
 			goto cleanup;
+	stop_progress(&progress);
 
 	CALLOC_ARRAY(offsets, records_nr + 1);
 	for (size_t i = 0; i < records_nr; i++) {
@@ -535,10 +553,10 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 					 GREP_COMMIT_INDEX_EDGE_HEADER_SIZE;
 			uint64_t oid_bytes;
 
-			if (edge->oids.nr > UINT32_MAX ||
-			    edge->oids.nr > UINT64_MAX / repo->hash_algo->rawsz)
+			if (edge->oids_nr > UINT32_MAX ||
+			    edge->oids_nr > UINT64_MAX / repo->hash_algo->rawsz)
 				goto cleanup;
-			oid_bytes = edge->oids.nr * repo->hash_algo->rawsz;
+			oid_bytes = edge->oids_nr * repo->hash_algo->rawsz;
 			if (fixed > UINT64_MAX - size ||
 			    oid_bytes > UINT64_MAX - size - fixed)
 				goto cleanup;
@@ -552,10 +570,14 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	grep_commit_index_path(repo, &path);
 	if (safe_create_leading_directories(repo, path.buf))
 		goto cleanup;
-	fd = hold_lock_file_for_update_mode(&lock, path.buf, 0, 0444);
-	if (fd < 0)
+	strbuf_addf(&temp_path, "%s.tmp_XXXXXX", path.buf);
+	temp = mks_tempfile_m(temp_path.buf, 0444);
+	if (!temp)
 		goto cleanup;
-	hashfile = hashfd(repo->hash_algo, fd, get_lock_file_path(&lock));
+	if (adjust_shared_perm(repo, get_tempfile_path(temp)))
+		goto cleanup;
+	hashfile = hashfd(repo->hash_algo, get_tempfile_fd(temp),
+			  get_tempfile_path(temp));
 	hashwrite_be32(hashfile, GREP_COMMIT_INDEX_SIGNATURE);
 	hashwrite_be32(hashfile, GREP_COMMIT_INDEX_VERSION);
 	hashwrite_be32(hashfile, repo->hash_algo->format_id);
@@ -595,10 +617,13 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 			strbuf_add(&record_buf, &value, sizeof(value));
 			value = htonl(edge->changed_pairs);
 			strbuf_add(&record_buf, &value, sizeof(value));
-			value = htonl(edge->oids.nr);
+			value = htonl(edge->oids_nr);
 			strbuf_add(&record_buf, &value, sizeof(value));
-			for (size_t k = 0; k < edge->oids.nr; k++)
-				strbuf_add(&record_buf, edge->oids.oid[k].hash,
+			for (size_t k = 0; k < edge->oids_nr; k++)
+				strbuf_add(&record_buf,
+					   collected_oids
+						   .oid[edge->oid_offset + k]
+						   .hash,
 					   repo->hash_algo->rawsz);
 		}
 		if (record_buf.len + repo->hash_algo->rawsz !=
@@ -622,28 +647,50 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 			  repo->hash_algo->rawsz);
 	}
 	hashwrite(hashfile, metadata_checksum.hash, repo->hash_algo->rawsz);
-	finalize_hashfile(hashfile, NULL, FSYNC_COMPONENT_PACK_METADATA,
-			  CSUM_FSYNC);
+	temp_fd = finalize_hashfile(hashfile, NULL,
+				    FSYNC_COMPONENT_PACK_METADATA, CSUM_FSYNC);
 	hashfile = NULL;
+	for (size_t i = 0; i < records_nr; i++)
+		free(records[i].edges);
+	FREE_AND_NULL(records);
+	records_nr = 0;
+	FREE_AND_NULL(offsets);
+	strbuf_release(&record_buf);
+
+	hydration_oids = collected_oids;
+	collected_oids = (struct oid_array)OID_ARRAY_INIT;
+	if (write_grep_index_oids(repo, show_progress, &hydration_oids, 0))
+		goto cleanup;
+
+	if (lseek(temp_fd, 0, SEEK_SET) < 0)
+		goto cleanup;
+	fd = hold_lock_file_for_update_mode(&lock, path.buf, 0, 0444);
+	if (fd < 0 || copy_fd(temp_fd, fd))
+		goto cleanup;
+	fsync_component_or_die(FSYNC_COMPONENT_PACK_METADATA, fd,
+			       get_lock_file_path(&lock));
 	if (commit_lock_file(&lock))
 		goto cleanup;
 	result = 0;
 
 cleanup:
+	stop_progress(&progress);
 	if (hashfile)
 		discard_hashfile(hashfile);
+	delete_tempfile(&temp);
 	rollback_lock_file(&lock);
 	diff_queue_clear(&diff_queued_diff);
 	diff_free(&diffopt);
-	for (size_t i = 0; i < records_nr; i++) {
-		for (size_t j = 0; j < records[i].edges_nr; j++)
-			oid_array_clear(&records[i].edges[j].oids);
+	for (size_t i = 0; i < records_nr; i++)
 		free(records[i].edges);
-	}
 	free(records);
 	free(offsets);
+	oid_array_clear(&hydration_oids);
+	oid_array_clear(&scratch);
+	oid_array_clear(&collected_oids);
 	oidset_clear(&seen_commits);
 	strbuf_release(&path);
 	strbuf_release(&record_buf);
+	strbuf_release(&temp_path);
 	return result;
 }
