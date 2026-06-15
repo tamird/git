@@ -1695,6 +1695,97 @@ test_expect_success 'inside git repository but with --no-index' '
 	)
 '
 
+test_expect_success 'grep --untracked merges worktree paths in order' '
+	test_create_repo grep-untracked-merge &&
+	(
+		cd grep-untracked-merge &&
+		echo b-tracked >.gitignore &&
+		echo j-ignored >>.gitignore &&
+		echo needle >b-tracked &&
+		echo needle >d-tracked &&
+		test_ln_s_add missing g-type &&
+		echo needle >h-sparse &&
+		echo needle >i-absent &&
+		git add -f .gitignore b-tracked d-tracked h-sparse i-absent &&
+		git commit -m initial &&
+		git update-index --add --cacheinfo 160000,$(git rev-parse HEAD),k-gitlink &&
+		echo needle >a-untracked &&
+		echo needle >c-untracked &&
+		echo needle >e-intent &&
+		echo needle >j-ignored &&
+		echo needle >k-gitlink &&
+		git add -N e-intent &&
+		stage1=$(echo one | git hash-object -w --stdin) &&
+		stage2=$(echo two | git hash-object -w --stdin) &&
+		stage3=$(echo three | git hash-object -w --stdin) &&
+		{
+			printf "100644 %s 1\tf-unmerged\n" "$stage1" &&
+			printf "100644 %s 2\tf-unmerged\n" "$stage2" &&
+			printf "100644 %s 3\tf-unmerged\n" "$stage3"
+		} | git update-index --index-info &&
+		echo needle >f-unmerged &&
+		rm g-type &&
+		echo needle >g-type &&
+		git config core.sparseCheckout true &&
+		echo "/*" >.git/info/sparse-checkout &&
+		git update-index --skip-worktree h-sparse &&
+		rm i-absent &&
+		git update-index --skip-worktree i-absent &&
+		cat >expect <<-\EOF &&
+		a-untracked
+		b-tracked
+		c-untracked
+		d-tracked
+		e-intent
+		f-unmerged
+		g-type
+		h-sparse
+		k-gitlink
+		EOF
+		git -c grep.threads=1 grep --untracked -l needle >actual &&
+		test_cmp expect actual &&
+		git -c grep.threads=4 grep --untracked -l needle >actual &&
+		test_cmp expect actual &&
+		cat >expect <<-\EOF &&
+		a-untracked
+		b-tracked
+		c-untracked
+		d-tracked
+		e-intent
+		f-unmerged
+		g-type
+		h-sparse
+		j-ignored
+		k-gitlink
+		EOF
+		git grep --untracked --no-exclude-standard -l needle >actual &&
+		test_cmp expect actual &&
+		test_must_fail git grep --untracked -l needle -- "k-gitlink/*" \
+			>actual &&
+		test_must_be_empty actual &&
+		git config sparse.expectFilesOutsideOfPatterns true &&
+		git update-index --skip-worktree h-sparse &&
+		echo h-sparse >expect &&
+		git grep --untracked -l needle -- h-sparse >actual &&
+		test_cmp expect actual &&
+		git config core.sparseCheckout false &&
+		manual=$(echo needle | git hash-object -w --stdin) &&
+		git update-index --add --cacheinfo 100644,$manual,l-manual &&
+		git update-index --skip-worktree l-manual &&
+		echo needle >l-manual &&
+		echo l-manual >expect &&
+		git grep --untracked -l needle -- l-manual >actual &&
+		test_cmp expect actual &&
+		git update-index --add --cacheinfo \
+			160000,$(git rev-parse HEAD),m-gitlink-dir &&
+		mkdir m-gitlink-dir &&
+		echo needle >m-gitlink-dir/child &&
+		echo m-gitlink-dir/child >expect &&
+		git grep --untracked -l needle -- m-gitlink-dir >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'grep --no-index descends into repos, but not .git' '
 	rm -fr non &&
 	mkdir -p non/git &&

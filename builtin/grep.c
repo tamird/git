@@ -15,6 +15,7 @@
 #include "hex.h"
 #include "config.h"
 #include "tag.h"
+#include "tree.h"
 #include "tree-walk.h"
 #include "parse-options.h"
 #include "string-list.h"
@@ -914,7 +915,11 @@ static void run_pager(struct grep_opt *opt, const char *prefix)
 }
 
 static int grep_cache(struct grep_opt *opt,
-		      const struct pathspec *pathspec, int cached);
+		      const struct pathspec *pathspec, int cached,
+		      int include_untracked, int use_exclude);
+static int grep_directory(struct grep_opt *opt,
+			  const struct pathspec *pathspec, int exc_std,
+			  int use_index, struct index_state *istate);
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
 		     int check_attr);
@@ -1015,7 +1020,7 @@ static int grep_submodule(struct grep_opt *opt,
 		strbuf_release(&base);
 		free(data);
 	} else {
-		hit = grep_cache(&subopt, pathspec, cached);
+		hit = grep_cache(&subopt, pathspec, cached, 0, 0);
 	}
 
 	return hit;
@@ -1049,11 +1054,14 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 }
 
 static int grep_cache(struct grep_opt *opt,
-		      const struct pathspec *pathspec, int cached)
+		      const struct pathspec *pathspec, int cached,
+		      int include_untracked, int use_exclude)
 {
 	struct repository *repo = opt->repo;
+	struct dir_struct untracked_dir = DIR_INIT;
 	int hit = 0;
 	int nr;
+	size_t untracked_pos = 0;
 	int *selected = NULL;
 	size_t selected_nr = 0;
 	size_t selected_alloc = 0;
@@ -1075,6 +1083,41 @@ static int grep_cache(struct grep_opt *opt,
 	repo->index->lazy_cache_tree = 1;
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
+	if (include_untracked) {
+		struct strbuf path = STRBUF_INIT;
+		int fallback = 0;
+
+		for (size_t i = 0; i < repo->index->cache_nr; i++) {
+			const struct cache_entry *ce = repo->index->cache[i];
+			struct stat st;
+
+			if (!S_ISGITLINK(ce->ce_mode))
+				continue;
+			strbuf_reset(&path);
+			strbuf_addstr(&path, ce->name);
+			if (!lstat(path.buf, &st) && S_ISDIR(st.st_mode) &&
+			    !is_nonbare_repository_dir(&path)) {
+				fallback = 1;
+				break;
+			}
+		}
+		strbuf_release(&path);
+		if (fallback) {
+			struct index_state empty_index = INDEX_STATE_INIT(repo);
+
+			hit = grep_directory(opt, pathspec, use_exclude, 1,
+					     &empty_index);
+			release_index(&empty_index);
+			return hit;
+		}
+		if (use_exclude) {
+			untracked_dir.untracked = repo->index->untracked;
+			untracked_dir.untracked_cache_prune_only = 1;
+			setup_standard_excludes(&untracked_dir);
+		}
+		/* Merge these sorted paths with the index traversal below. */
+		fill_directory(&untracked_dir, repo->index, pathspec);
+	}
 	if (pathspec->nr == 1) {
 		const struct pathspec_item *item = &pathspec->items[0];
 		const char *basename;
@@ -1089,7 +1132,8 @@ static int grep_cache(struct grep_opt *opt,
 	 * Whole-index pathspec walks cost more than resolving explicitly named
 	 * worktree files directly.
 	 */
-	if (git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
+	if (!include_untracked &&
+	    git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
 	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
 	    (recursive_basename ||
 	     (!pathspec->has_wildcard &&
@@ -1264,7 +1308,8 @@ static int grep_cache(struct grep_opt *opt,
 		free(selected_map);
 		strbuf_release(&dir);
 	}
-	if (!skip_cache_setup && repo == the_repository && !cached &&
+	if (!include_untracked && !skip_cache_setup &&
+	    repo == the_repository && !cached &&
 	    !opt->allow_textconv &&
 	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
 	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
@@ -1720,17 +1765,41 @@ static int grep_cache(struct grep_opt *opt,
 		free(oids);
 	}
 
-	for (nr = 0;
-	     use_selected ? selected_pos < selected_nr :
-			    nr < repo->index->cache_nr;
-	     use_selected ? selected_pos++ : nr++) {
-		const struct cache_entry *ce;
+	nr = 0;
+	while ((use_selected ? selected_pos < selected_nr :
+			       nr < repo->index->cache_nr) ||
+	       untracked_pos < untracked_dir.nr) {
+		const struct cache_entry *ce = NULL;
+		int pos = -1;
 
+		if (use_selected ? selected_pos < selected_nr :
+				   nr < repo->index->cache_nr) {
+			pos = use_selected ? selected[selected_pos] : nr;
+			ce = repo->index->cache[pos];
+		}
+		if (untracked_pos < untracked_dir.nr &&
+		    (!ce || name_compare(untracked_dir.entries[untracked_pos]->name,
+					 untracked_dir.entries[untracked_pos]->len,
+					 ce->name, ce_namelen(ce)) < 0)) {
+			hit |= grep_file(opt,
+					 untracked_dir.entries[untracked_pos]->name,
+					 NULL, SIZE_MAX);
+			untracked_pos++;
+			if (hit && opt->status_only)
+				break;
+			continue;
+		}
+		if (!ce)
+			break;
 		if (use_selected)
-			nr = selected[selected_pos];
-		ce = repo->index->cache[nr];
+			selected_pos++;
+		else
+			nr++;
 
-		if (!use_selected && !cached && ce_skip_worktree(ce))
+		if (!use_selected && !cached && ce_skip_worktree(ce) &&
+		    (!include_untracked ||
+		     (repo_config_values(repo)->apply_sparse_checkout &&
+		      !sparse_expect_files_outside_of_patterns)))
 			continue;
 
 		strbuf_setlen(&name, name_base_len);
@@ -1755,18 +1824,19 @@ static int grep_cache(struct grep_opt *opt,
 			 * Every producer of selected[] applies the pathspec while
 			 * constructing it.
 			 */
-		} else if (S_ISREG(ce->ce_mode) &&
+		} else if ((include_untracked || S_ISREG(ce->ce_mode)) &&
 			   (use_selected ||
 			    match_pathspec(repo->index, pathspec, name.buf,
 					   name.len, 0, NULL,
-					   S_ISDIR(ce->ce_mode) ||
-						   S_ISGITLINK(
-							   ce->ce_mode)))) {
+					   !include_untracked &&
+						   (S_ISDIR(ce->ce_mode) ||
+						    S_ISGITLINK(
+							    ce->ce_mode))))) {
 			enum grep_worktree_cache_result cache_result =
 				GREP_WORKTREE_CACHE_UNKNOWN;
 			const struct cache_entry *cache_candidate = NULL;
 			int can_cache =
-				repo == the_repository && !cached &&
+				!include_untracked && repo == the_repository && !cached &&
 				!opt->allow_textconv &&
 				grep_worktree_cache_entry_eligible(ce) &&
 				worktree_cache;
@@ -1776,7 +1846,7 @@ static int grep_cache(struct grep_opt *opt,
 				grep_lock();
 			if (can_cache)
 				cache_result = grep_worktree_cache_lookup(
-					worktree_cache, nr);
+					worktree_cache, pos);
 			if (can_cache && threads_started)
 				grep_unlock();
 			use_worktree_blob =
@@ -1792,26 +1862,27 @@ static int grep_cache(struct grep_opt *opt,
 			 * worktree and blob bytes and fsmonitor reports no
 			 * subsequent change.
 			 */
-			if (cached || (ce->ce_flags & CE_VALID) ||
-			    use_worktree_blob) {
+			if (!include_untracked &&
+			    (cached || (ce->ce_flags & CE_VALID) ||
+			     use_worktree_blob)) {
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
 				if (content_index_ipc_result &&
-				    nr < content_index_ipc_nr &&
-				    content_index_ipc_result[nr] == 1)
+				    pos < content_index_ipc_nr &&
+				    content_index_ipc_result[pos] == 1)
 					continue;
 				hit |= grep_oid(opt, &ce->oid, name.buf,
-						0, name.buf, use_worktree_blob, nr,
+						0, name.buf, use_worktree_blob, pos,
 						used_index_ipc ||
 							(content_index_ipc_result &&
-							 nr <
+							 pos <
 								 content_index_ipc_nr &&
 							 content_index_ipc_result
-								 [nr]));
+								 [pos]));
 			} else {
 				hit |= grep_file(opt, name.buf,
 						 can_cache ? cache_candidate : NULL,
-						 nr);
+						 pos);
 			}
 		} else if (recurse_submodules && S_ISGITLINK(ce->ce_mode) &&
 			   submodule_path_match(repo->index, pathspec, name.buf, NULL)) {
@@ -1822,17 +1893,16 @@ static int grep_cache(struct grep_opt *opt,
 		}
 
 		if (!use_selected && ce_stage(ce)) {
-			do {
+			while (nr < repo->index->cache_nr &&
+			       !strcmp(ce->name, repo->index->cache[nr]->name))
 				nr++;
-			} while (nr < repo->index->cache_nr &&
-				 !strcmp(ce->name, repo->index->cache[nr]->name));
-			nr--; /* compensate for loop control */
 		}
 		if (hit && opt->status_only)
 			break;
 	}
 
 	free(selected);
+	dir_clear(&untracked_dir);
 	strbuf_release(&name);
 	return hit;
 }
@@ -2126,7 +2196,8 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 }
 
 static int grep_directory(struct grep_opt *opt, const struct pathspec *pathspec,
-			  int exc_std, int use_index)
+			  int exc_std, int use_index,
+			  struct index_state *istate)
 {
 	struct dir_struct dir = DIR_INIT;
 	int i, hit = 0;
@@ -2136,7 +2207,7 @@ static int grep_directory(struct grep_opt *opt, const struct pathspec *pathspec,
 	if (exc_std)
 		setup_standard_excludes(&dir);
 
-	fill_directory(&dir, opt->repo->index, pathspec);
+	fill_directory(&dir, istate, pathspec);
 	for (i = 0; i < dir.nr; i++) {
 		hit |= grep_file(opt, dir.entries[i]->name, NULL, 0);
 		if (hit && opt->status_only)
@@ -2604,16 +2675,20 @@ int cmd_grep(int argc,
 				  untracked, "--untracked",
 				  cached, "--cached");
 
-	if (!use_index || untracked) {
+	if (!use_index) {
 		int use_exclude = (opt_exclude < 0) ? use_index : !!opt_exclude;
-		hit = grep_directory(&opt, &pathspec, use_exclude, use_index);
+		hit = grep_directory(&opt, &pathspec, use_exclude, use_index,
+				     opt.repo->index);
+	} else if (untracked) {
+		int use_exclude = (opt_exclude < 0) ? use_index : !!opt_exclude;
+		hit = grep_cache(&opt, &pathspec, 0, 1, use_exclude);
 	} else if (0 <= opt_exclude) {
 		die(_("--[no-]exclude-standard cannot be used for tracked contents"));
 	} else if (!list.nr) {
 		if (!cached)
 			setup_work_tree(the_repository);
 
-		hit = grep_cache(&opt, &pathspec, cached);
+		hit = grep_cache(&opt, &pathspec, cached, 0, 0);
 	} else {
 		if (cached)
 			die(_("both --cached and trees are given"));

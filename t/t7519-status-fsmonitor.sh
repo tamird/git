@@ -897,14 +897,14 @@ test_expect_success UNTRACKED_CACHE 'set up full untracked pruning' '
 		cd full-untracked &&
 		mkdir -p clean/a ignored-only/sub quiet/b results &&
 		echo ignored-only/ >.gitignore &&
-		: >clean/a/tracked &&
+		echo needle >clean/a/tracked &&
 		: >ignored-only/sub/ignored &&
 		: >ignored-only/sub/one &&
 		: >quiet/b/tracked &&
 		git add . &&
 		git commit -m initial &&
-		: >results/one &&
-		: >results/two &&
+		echo needle >results/one &&
+		echo needle >results/two &&
 		test_hook --setup fsmonitor-test <<-\EOF &&
 			if test -f .git/fsmonitor-fail
 			then
@@ -999,6 +999,22 @@ test_expect_success UNTRACKED_CACHE 'prune ls-files from normal cache' '
 	test_cmp expect actual &&
 	test_grep "subtrees-pruned:[1-9]" trace-ls-files-full &&
 	test_grep "directories-visited:[1-9]" trace-ls-files-full
+'
+
+test_expect_success UNTRACKED_CACHE 'prune grep --untracked from normal cache' '
+	(
+		cd full-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-grep-untracked" \
+			git grep --untracked -l needle >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	clean/a/tracked
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-grep-untracked &&
+	test_grep "directories-visited:[1-9]" trace-grep-untracked
 '
 
 test_expect_success UNTRACKED_CACHE 'ls-files without excludes scans all' '
