@@ -431,10 +431,20 @@ test_expect_success 'write shared content index' '
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
 '
 
-test_expect_success 'write commit edge index' '
+test_expect_success 'write commit edge and endpoint content indexes' '
+	cp .git/objects/info/grep-index/chain commit-chain.before &&
+	cp .git/objects/info/grep-index/chain-transposed \
+		commit-chain-transposed.before &&
+	test_when_finished "mv commit-chain.before \
+		.git/objects/info/grep-index/chain &&
+		mv commit-chain-transposed.before \
+		.git/objects/info/grep-index/chain-transposed" &&
+	rm .git/objects/info/grep-index/chain-transposed &&
+
 	old_oid=$(git rev-parse :pickaxe-old) &&
 	new_oid=$(git rev-parse :pickaxe-new) &&
-	other_oid=$(git rev-parse :ordinary) &&
+	other_oid=$(echo "pickaxe sidecar endpoint" |
+		git hash-object -w --stdin) &&
 	old_tree=$(printf "100644 blob %s\tprobe\n" "$old_oid" |
 		git mktree) &&
 	new_tree=$(printf "100644 blob %s\tprobe\n" "$new_oid" |
@@ -455,7 +465,18 @@ test_expect_success 'write commit edge index' '
 	git grep-index --commit-edges \
 		refs/grep-index-test/old..refs/grep-index-test/middle \
 		refs/grep-index-test/old..refs/grep-index-test/sibling &&
-	test_path_is_file .git/objects/info/grep-index/commit-edges
+	test_path_is_file .git/objects/info/grep-index/commit-edges &&
+	test_line_count = 2 .git/objects/info/grep-index/chain &&
+	test_line_count = 1 .git/objects/info/grep-index/chain-transposed &&
+
+	other_object=.git/objects/$(test_oid_to_path "$other_oid") &&
+	mv "$other_object" "$other_object.save" &&
+	test_when_finished "mv \"$other_object.save\" \"$other_object\"" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/sibling >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err
 '
 
 test_expect_success 'commit index prunes pickaxe tree diff' '

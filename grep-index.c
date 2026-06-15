@@ -3143,19 +3143,81 @@ cleanup:
 	return result;
 }
 
-static int replace_grep_index_chain(struct repository *repo,
-				    const char *chain_name,
-				    const struct strbuf *chain)
+static int merge_grep_index_chain(struct repository *repo,
+				  const char *chain_name,
+				  const struct strbuf *chain)
 {
 	struct lock_file lock = LOCK_INIT;
+	struct object_id oid;
+	struct strbuf current = STRBUF_INIT;
+	struct strbuf merged = STRBUF_INIT;
 	struct strbuf path = STRBUF_INIT;
+	struct string_list keys = STRING_LIST_INIT_DUP;
+	size_t hexsz = repo->hash_algo->hexsz;
+	size_t pos = 0;
+	int current_valid = 1;
 	int result = -1;
 
 	grep_index_path(repo, &path, chain_name);
 	hold_lock_file_for_update_mode(&lock, path.buf,
 				       LOCK_DIE_ON_ERROR, 0444);
-	if (write_in_full(get_lock_file_fd(&lock), chain->buf,
-			  chain->len) < 0)
+	if (strbuf_read_file(&current, path.buf, 0) < 0 && errno != ENOENT)
+		goto cleanup;
+	while (pos < current.len) {
+		const char *line = current.buf + pos;
+		const char *end = memchr(line, '\n', current.len - pos);
+		size_t len = end ? (size_t)(end - line) : current.len - pos;
+		struct strbuf key = STRBUF_INIT;
+
+		if (len != 2 * hexsz + 1 || line[hexsz] != ' ' ||
+		    get_oid_hex_algop(line, &oid, repo->hash_algo) ||
+		    get_oid_hex_algop(line + hexsz + 1, &oid,
+				      repo->hash_algo)) {
+			current_valid = 0;
+			strbuf_release(&key);
+			break;
+		}
+		strbuf_add(&key, line, hexsz);
+		if (unsorted_string_list_has_string(&keys, key.buf)) {
+			current_valid = 0;
+			strbuf_release(&key);
+			break;
+		}
+		string_list_insert(&keys, key.buf);
+		strbuf_release(&key);
+		pos += len + !!end;
+	}
+	/* Preserve mappings published after the transposition snapshot. */
+	if (current_valid && current.len) {
+		strbuf_addbuf(&merged, &current);
+		strbuf_complete_line(&merged);
+	} else {
+		string_list_clear(&keys, 0);
+		string_list_init_dup(&keys);
+	}
+
+	pos = 0;
+	while (pos < chain->len) {
+		const char *line = chain->buf + pos;
+		const char *end = memchr(line, '\n', chain->len - pos);
+		size_t len = end ? (size_t)(end - line) : chain->len - pos;
+		struct strbuf key = STRBUF_INIT;
+
+		if (!len) {
+			pos += !!end;
+			continue;
+		}
+		strbuf_add(&key, line, hexsz);
+		if (!unsorted_string_list_has_string(&keys, key.buf)) {
+			strbuf_add(&merged, line, len);
+			strbuf_addch(&merged, '\n');
+			string_list_insert(&keys, key.buf);
+		}
+		strbuf_release(&key);
+		pos += len + !!end;
+	}
+	if (write_in_full(get_lock_file_fd(&lock), merged.buf,
+			  merged.len) < 0)
 		goto cleanup;
 	if (commit_lock_file(&lock) < 0)
 		goto cleanup;
@@ -3163,22 +3225,39 @@ static int replace_grep_index_chain(struct repository *repo,
 
 cleanup:
 	rollback_lock_file(&lock);
+	string_list_clear(&keys, 0);
+	strbuf_release(&current);
+	strbuf_release(&merged);
 	strbuf_release(&path);
 	return result;
 }
 
-int write_transposed_grep_index(struct repository *repo)
+static int write_transposed_grep_index_segment(struct repository *repo,
+					       const char *only_legacy_hex)
 {
-	struct grep_index *index = grep_index_load_legacy(repo);
+	struct grep_index *index;
 	struct string_list mappings = STRING_LIST_INIT_DUP;
 	struct strbuf existing_manifest = STRBUF_INIT;
 	struct strbuf manifest = STRBUF_INIT;
 	size_t manifest_pos = 0;
 	size_t hexsz = repo->hash_algo->hexsz;
 	int result = 0;
+	int found = 0;
 
+	if (only_legacy_hex) {
+		CALLOC_ARRAY(index, 1);
+		index->repo = repo;
+		if (!add_grep_index_segment(index, only_legacy_hex)) {
+			grep_index_free(index);
+			index = NULL;
+		}
+	} else {
+		index = grep_index_load_legacy(repo);
+	}
 	if (!index)
-		return 0;
+		return only_legacy_hex ?
+			       error("unable to load new grep index segment") :
+			       0;
 	if (!read_grep_index_chain(
 		    repo, "chain-transposed", &existing_manifest)) {
 		while (manifest_pos < existing_manifest.len) {
@@ -3243,6 +3322,9 @@ int write_transposed_grep_index(struct repository *repo)
 			BUG("legacy grep index contains non-legacy segment");
 		hash_to_hex_algop_r(legacy_hex, segment->checksum.hash,
 				    repo->hash_algo);
+		if (only_legacy_hex && strcmp(legacy_hex, only_legacy_hex))
+			continue;
+		found = 1;
 		mapping = string_list_lookup(&mappings, legacy_hex);
 		if (mapping) {
 			strbuf_addf(&manifest, "%s %s\n", legacy_hex,
@@ -3552,9 +3634,18 @@ int write_transposed_grep_index(struct repository *repo)
 		strbuf_release(&temp_path);
 		strbuf_release(&final_path);
 	}
-	if (replace_grep_index_chain(repo, "chain-transposed",
-				     &manifest))
+	if (only_legacy_hex) {
+		strbuf_complete_line(&manifest);
+		strbuf_rtrim(&manifest);
+		if (!found || !manifest.len)
+			result = error("unable to transpose new grep index segment");
+		else if (update_grep_index_chain(repo, "chain-transposed",
+						 manifest.buf))
+			die_errno(_("unable to update grep index chain"));
+	} else if (merge_grep_index_chain(repo, "chain-transposed",
+					  &manifest)) {
 		die_errno(_("unable to update grep index chain"));
+	}
 	grep_index_free(index);
 	string_list_clear(&mappings, 1);
 	strbuf_release(&existing_manifest);
@@ -3562,11 +3653,17 @@ int write_transposed_grep_index(struct repository *repo)
 	return result;
 }
 
-int write_grep_index(struct repository *repo, int show_progress,
-		     struct rev_info *revs)
+int write_transposed_grep_index(struct repository *repo)
 {
-	struct grep_index *existing = grep_index_load(repo);
-	struct oid_array oids = OID_ARRAY_INIT;
+	return write_transposed_grep_index_segment(repo, NULL);
+}
+
+int write_grep_index_oids(struct repository *repo, int show_progress,
+			  struct oid_array *oids, int transpose_existing)
+{
+	struct grep_index *existing = transpose_existing ?
+					      grep_index_load(repo) :
+					      grep_index_load_transposed(repo);
 	struct progress *progress = NULL;
 	struct tempfile *temp = NULL;
 	struct tempfile *filter_temp = NULL;
@@ -3582,26 +3679,21 @@ int write_grep_index(struct repository *repo, int show_progress,
 	uint64_t offset = 0;
 	size_t dst = 0;
 	int result = -1;
+	int wrote_segment = 0;
 
-	if (revs) {
-		struct path_walk_info info = PATH_WALK_INFO_INIT;
-
-		info.revs = revs;
-		info.path_fn = collect_reachable_blob_oids;
-		info.path_fn_data = &oids;
-		info.commits = info.trees = info.tags = 0;
-		info.strict_types = 1;
-		if (walk_objects_by_path(&info)) {
-			path_walk_info_clear(&info);
-			goto cleanup;
-		}
-		path_walk_info_clear(&info);
-	} else {
-		collect_worktree_oids(repo, &oids);
+	if (!oids)
+		BUG("missing grep index object IDs");
+	oid_array_sort(oids);
+	for (size_t i = 0; i < oids->nr;
+	     i = oid_array_next_unique(oids, i)) {
+		if (dst != i)
+			oidcpy(&oids->oid[dst], &oids->oid[i]);
+		dst++;
 	}
-	oid_array_sort(&oids);
-	CALLOC_ARRAY(filter_sizes, oids.nr);
-	CALLOC_ARRAY(blob_sizes, oids.nr);
+	oids->nr = dst;
+	dst = 0;
+	CALLOC_ARRAY(filter_sizes, oids->nr);
+	CALLOC_ARRAY(blob_sizes, oids->nr);
 	ALLOC_ARRAY(filter, 2 * GREP_INDEX_MAX_FILTER_SIZE);
 
 	grep_index_path(repo, &filter_temp_path,
@@ -3614,8 +3706,8 @@ int write_grep_index(struct repository *repo, int show_progress,
 
 	if (show_progress)
 		progress = start_delayed_progress(repo, _("Scanning blob objects"),
-						  oids.nr);
-	for (size_t i = 0; i < oids.nr; i = oid_array_next_unique(&oids, i)) {
+						  oids->nr);
+	for (size_t i = 0; i < oids->nr; i++) {
 		struct object_info oi = OBJECT_INFO_INIT;
 		enum object_type type;
 		unsigned long size;
@@ -3623,13 +3715,13 @@ int write_grep_index(struct repository *repo, int show_progress,
 		uint32_t filter_size;
 
 		display_progress(progress, i + 1);
-		if (grep_index_contains_oid(existing, &oids.oid[i]))
+		if (grep_index_contains_oid(existing, &oids->oid[i]))
 			continue;
 		oi.typep = &type;
 		oi.sizep = &size;
 		oi.contentp = &content;
 		if (odb_read_object_info_extended(
-			    repo->objects, &oids.oid[i], &oi,
+			    repo->objects, &oids->oid[i], &oi,
 			    OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK) ||
 		    type != OBJ_BLOB) {
 			free(content);
@@ -3642,18 +3734,18 @@ int write_grep_index(struct repository *repo, int show_progress,
 		if (write_in_full(get_tempfile_fd(filter_temp), filter,
 				  2 * filter_size) < 0)
 			die_errno(_("unable to write temporary grep filters"));
-		oidcpy(&oids.oid[dst], &oids.oid[i]);
+		oidcpy(&oids->oid[dst], &oids->oid[i]);
 		blob_sizes[dst] = size;
 		filter_sizes[dst] = 2 * filter_size;
 		dst++;
 	}
 	stop_progress(&progress);
-	oids.nr = dst;
-	if (!oids.nr) {
-		result = write_transposed_grep_index(repo);
+	oids->nr = dst;
+	if (!oids->nr) {
+		result = 0;
 		goto cleanup;
 	}
-	if (oids.nr > UINT32_MAX)
+	if (oids->nr > UINT32_MAX)
 		die(_("too many blobs to write grep index"));
 
 	grep_index_path(repo, &temp_path, "tmp_grep_index_XXXXXX");
@@ -3668,18 +3760,18 @@ int write_grep_index(struct repository *repo, int show_progress,
 	hashwrite_be32(hashfile, GREP_INDEX_SIGNATURE);
 	hashwrite_be32(hashfile, GREP_INDEX_VERSION);
 	hashwrite_be32(hashfile, repo->hash_algo->format_id);
-	hashwrite_be32(hashfile, oids.nr);
+	hashwrite_be32(hashfile, oids->nr);
 	for (size_t i = 0, pos = 0; i < 256; i++) {
-		while (pos < oids.nr && oids.oid[pos].hash[0] <= i)
+		while (pos < oids->nr && oids->oid[pos].hash[0] <= i)
 			pos++;
 		hashwrite_be32(hashfile, pos);
 	}
-	for (size_t i = 0; i < oids.nr; i++)
-		hashwrite(hashfile, oids.oid[i].hash, repo->hash_algo->rawsz);
-	for (size_t i = 0; i < oids.nr; i++)
+	for (size_t i = 0; i < oids->nr; i++)
+		hashwrite(hashfile, oids->oid[i].hash, repo->hash_algo->rawsz);
+	for (size_t i = 0; i < oids->nr; i++)
 		hashwrite_be64(hashfile, blob_sizes[i]);
 	hashwrite_be64(hashfile, 0);
-	for (size_t i = 0; i < oids.nr; i++) {
+	for (size_t i = 0; i < oids->nr; i++) {
 		if (UINT64_MAX - offset < filter_sizes[i])
 			die(_("grep index is too large"));
 		offset += filter_sizes[i];
@@ -3709,7 +3801,8 @@ int write_grep_index(struct repository *repo, int show_progress,
 		die_errno(_("unable to rename new grep index"));
 	if (update_grep_index_chain(repo, "chain", hex))
 		die_errno(_("unable to update grep index chain"));
-	result = write_transposed_grep_index(repo);
+	result = 0;
+	wrote_segment = 1;
 
 cleanup:
 	stop_progress(&progress);
@@ -3720,10 +3813,43 @@ cleanup:
 	free(filter);
 	free(blob_sizes);
 	free(filter_sizes);
-	oid_array_clear(&oids);
+	oid_array_clear(oids);
 	grep_index_free(existing);
 	strbuf_release(&temp_path);
 	strbuf_release(&filter_temp_path);
 	strbuf_release(&final_path);
+	if (!result && transpose_existing)
+		result = write_transposed_grep_index(repo);
+	else if (!result && wrote_segment)
+		result = write_transposed_grep_index_segment(repo, hex);
+	return result;
+}
+
+int write_grep_index(struct repository *repo, int show_progress,
+		     struct rev_info *revs)
+{
+	struct oid_array oids = OID_ARRAY_INIT;
+	int result = -1;
+
+	if (revs) {
+		struct path_walk_info info = PATH_WALK_INFO_INIT;
+
+		info.revs = revs;
+		info.path_fn = collect_reachable_blob_oids;
+		info.path_fn_data = &oids;
+		info.commits = info.trees = info.tags = 0;
+		info.strict_types = 1;
+		if (walk_objects_by_path(&info)) {
+			path_walk_info_clear(&info);
+			goto cleanup;
+		}
+		path_walk_info_clear(&info);
+	} else {
+		collect_worktree_oids(repo, &oids);
+	}
+	result = write_grep_index_oids(repo, show_progress, &oids, 1);
+
+cleanup:
+	oid_array_clear(&oids);
 	return result;
 }

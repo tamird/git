@@ -5,7 +5,6 @@
 #include "grep-commit-index.h"
 #include "grep-index.h"
 #include "parse-options.h"
-#include "progress.h"
 #include "replace-object.h"
 #include "revision.h"
 
@@ -27,7 +26,6 @@ int cmd_grep_index(int argc, const char **argv, const char *prefix,
 	int reachable = 0;
 	int transpose_existing = 0;
 	int result;
-	struct progress *progress = NULL;
 	struct rev_info revs = REV_INFO_INIT;
 	struct option options[] = {
 		OPT_BOOL(0, "commit-edges", &commit_edges,
@@ -72,11 +70,7 @@ int cmd_grep_index(int argc, const char **argv, const char *prefix,
 			die(_("unrecognized argument: %s"), argv[1]);
 	}
 	if (commit_edges) {
-		if (show_progress)
-			progress = start_delayed_progress(
-				repo, _("Indexing commit edges"), 0);
-		result = write_grep_commit_index(repo, &revs, progress);
-		stop_progress(&progress);
+		result = write_grep_commit_index(repo, &revs, show_progress);
 	} else
 		result = write_grep_index(repo, show_progress,
 					  reachable ? &revs : NULL);
