@@ -2,6 +2,7 @@
 #define GREP_INDEX_H
 
 struct object_id;
+struct oid_array;
 struct grep_opt;
 struct repository;
 struct rev_info;
@@ -70,6 +71,12 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 
 int write_grep_index(struct repository *repo, int show_progress,
 		     struct rev_info *revs);
+/*
+ * Consume oids and reset it to OID_ARRAY_INIT on every return path. Transpose
+ * only the new segment unless transpose_existing requests a full catch-up.
+ */
+int write_grep_index_oids(struct repository *repo, int show_progress,
+			  struct oid_array *oids, int transpose_existing);
 int write_transposed_grep_index(struct repository *repo);
 
 #endif

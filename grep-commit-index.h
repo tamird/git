@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 struct object_id;
-struct progress;
 struct repository;
 struct rev_info;
 
@@ -38,6 +37,6 @@ void grep_commit_index_free(struct grep_commit_index *index);
 
 /* Replacements must be disabled before revisions are initialized. */
 int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
-			    struct progress *progress);
+			    int show_progress);
 
 #endif
