@@ -1734,6 +1734,32 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				if (j + 1 < scan_end &&
 				    strchr("*+?", p->pattern[j + 1]))
 					separator_len++;
+			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+				   ch == '(' && i + 2 < scan_end &&
+				   p->pattern[i + 1] == '?' &&
+				   p->pattern[i + 2] == ':') {
+				size_t j;
+
+				for (j = i + 3; j < scan_end; j++) {
+					unsigned char group_ch = p->pattern[j];
+
+					if (group_ch == '\\') {
+						if (++j == scan_end ||
+						    p->pattern[j] == 'Q')
+							goto unsupported;
+					} else if (group_ch == '[' ||
+						   group_ch == '(') {
+						goto unsupported;
+					} else if (group_ch == ')') {
+						break;
+					}
+				}
+				if (j == scan_end)
+					goto unsupported;
+				separator_len = j - i + 1;
+				if (j + 1 < scan_end &&
+				    strchr("*+?", p->pattern[j + 1]))
+					separator_len++;
 			} else if ((pattern_type == GREP_PATTERN_TYPE_BRE ||
 				    pattern_type == GREP_PATTERN_TYPE_ERE) &&
 				   ch == '[') {
@@ -1789,11 +1815,14 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				    pattern_type == GREP_PATTERN_TYPE_ERE ||
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				     (is_regex_special(p->pattern[i + 1]) ||
-				      p->pattern[i + 1] == '}')))) {
+				      p->pattern[i + 1] == '}' ||
+				      p->pattern[i + 1] == 's' ||
+				      p->pattern[i + 1] == 'S')))) {
 				unsigned char next = p->pattern[i + 1];
 
 				separator_len = 2;
-				if (pattern_type == GREP_PATTERN_TYPE_ERE &&
+				if ((pattern_type == GREP_PATTERN_TYPE_ERE ||
+				     pattern_type == GREP_PATTERN_TYPE_PCRE) &&
 				    i + 2 < scan_end &&
 				    strchr("*+?", p->pattern[i + 2]))
 					separator_len++;
