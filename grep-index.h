@@ -48,6 +48,10 @@ int grep_index_resolve_location(
 	struct grep_index *index,
 	const struct object_id *oid,
 	struct grep_index_location *location);
+int grep_index_location_maybe_contains(
+	struct grep_index *index,
+	const struct grep_index_location *location,
+	const struct grep_index_query *query);
 int grep_index_prepared_location_maybe_contains(
 	struct grep_index_prepared *prepared,
 	const struct grep_index_location *location);
