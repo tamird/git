@@ -2264,6 +2264,7 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		.git/fsmonitor-equal .git/index.grep-worktree \
 		.git/index.grep-worktree-generation \
 		.git/index.grep-worktree-recovery \
+		.git/index.grep-worktree-recovery-next \
 		.git/index.grep-worktree.lock \
 		.git/index.grep-worktree.save \
 		grep-worktree-trace-* &&
@@ -2271,6 +2272,9 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		git update-index --no-fsmonitor &&
 		git rm -f --ignore-unmatch .gitattributes grep-worktree-equal \
 			grep-worktree-converted grep-worktree-index-change \
+			grep-worktree-refresh-a grep-worktree-refresh-b \
+			grep-worktree-refresh-c grep-worktree-refresh-d \
+			grep-worktree-refresh-negative \
 			grep-worktree-rewrite" &&
 	{
 		echo "grep-worktree-converted text" &&
@@ -2742,7 +2746,57 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_cmp expected actual &&
 	test_must_be_empty err &&
 	test_trace2_data grep worktree_blob/hits 0 \
-		<grep-worktree-trace-other
+		<grep-worktree-trace-other &&
+
+	if test -z "$(git rev-parse --shared-index-path)"
+	then
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-recovery \
+			.git/index.grep-worktree-recovery-next &&
+		echo "recovery entry a" >grep-worktree-refresh-a &&
+		echo "recovery entry b" >grep-worktree-refresh-b &&
+		git add grep-worktree-refresh-a grep-worktree-refresh-b &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep "absent worktree blob" -- \
+			grep-worktree-refresh-a &&
+		test_path_is_file .git/index.grep-worktree-recovery &&
+		echo "recovery entry c" >grep-worktree-refresh-c &&
+		echo "recovery negative index" \
+			>grep-worktree-refresh-negative &&
+		git add grep-worktree-refresh-c \
+			grep-worktree-refresh-negative &&
+		git status --porcelain >/dev/null &&
+		echo "recovery negative worktree" \
+			>grep-worktree-refresh-negative &&
+		git update-index --fsmonitor-valid \
+			grep-worktree-refresh-negative &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=1 \
+			GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-refresh" \
+			git grep "absent worktree blob" -- \
+				grep-worktree-refresh-b \
+				grep-worktree-refresh-negative &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<grep-worktree-trace-refresh &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<grep-worktree-trace-refresh &&
+		test_path_is_file .git/index.grep-worktree-recovery-next &&
+		echo "recovery entry d" >grep-worktree-refresh-d &&
+		git add grep-worktree-refresh-d &&
+		git status --porcelain >/dev/null &&
+		git update-index --fsmonitor-valid \
+			grep-worktree-refresh-negative &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-refreshed" \
+			git grep "absent worktree blob" -- \
+				grep-worktree-refresh-a \
+				grep-worktree-refresh-b \
+				grep-worktree-refresh-negative &&
+		test_trace2_data grep worktree_blob/recovered_identity 2 \
+			<grep-worktree-trace-refreshed &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<grep-worktree-trace-refreshed
+	fi
 '
 
 test_expect_success 'grep handles cache after index replacement' '
@@ -2924,6 +2978,8 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 
 		cp .git/index.grep-worktree-recovery \
 			.git/index.grep-worktree-recovery.save &&
+		cp .git/index.grep-worktree-recovery \
+			.git/index.grep-worktree-recovery-next &&
 		echo "recovery generation" >bbb &&
 		test-tool chmtime =-5 bbb &&
 		git add bbb &&
@@ -2943,6 +2999,18 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		} >.git/index.grep-worktree-recovery.corrupt &&
 		mv .git/index.grep-worktree-recovery.corrupt \
 			.git/index.grep-worktree-recovery &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=3 \
+			GIT_TRACE2_EVENT="$PWD/trace-recovery-fallback" \
+			git grep --no-content-index \
+				"absent recovery" -- target sentinel &&
+		test_trace2_data grep worktree_blob/recovered_identity 2 \
+			<trace-recovery-fallback &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<trace-recovery-fallback &&
+		test_trace2_data grep worktree_blob/recovery_invalid 0 \
+			<trace-recovery-fallback &&
+		rm .git/index.grep-worktree-recovery-next &&
 		test_expect_code 1 env \
 			GIT_TRACE2_EVENT="$PWD/trace-corrupt-recovery" \
 			git grep --no-content-index \

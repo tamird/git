@@ -102,10 +102,10 @@ enum grep_worktree_cache_section {
  * which remains useful across unrelated index changes while fsmonitor reports
  * no later worktree change.
  *
- * The compact sidecar authorizes exactly one immutable recovery file by its
- * checksum. The recovery file is published first, so an interrupted update
- * leaves an unauthorized file that readers ignore. A validated recovery hit
- * may be promoted into the ordinary equal bitmap, which binds it to the exact
+ * The compact sidecar authorizes exactly one of two immutable recovery slots
+ * by its checksum. Updates publish the inactive slot first, so interruption
+ * leaves the previously authorized slot intact. A validated recovery hit may
+ * be promoted into the ordinary equal bitmap, which binds it to the exact
  * index state. Malformed or missing recovery data causes misses; clearing its
  * authorization is only a best-effort optimization.
  */
@@ -122,6 +122,7 @@ struct grep_worktree_cache {
 	const unsigned char *recovery_map;
 	const uint32_t *recovery_fanout;
 	const unsigned char *recovery_entries;
+	uint32_t recovery_entries_nr;
 	struct oid_array negative_entries;
 	unsigned char *equal;
 	unsigned char *different;
@@ -145,6 +146,8 @@ struct grep_worktree_cache {
 	int recovery_checksum_checked;
 	int recovery_checksum_valid;
 	int recovery_load_attempted;
+	unsigned int recovery_rejected_slots;
+	int recovery_slot;
 	int recovery_invalid;
 	int recovery_revoked;
 	int compact_loaded;
@@ -158,11 +161,13 @@ static void grep_worktree_cache_path(struct repository *repo,
 	strbuf_addf(path, "%s.grep-worktree", repo_get_index_file(repo));
 }
 
-static void grep_worktree_recovery_path(struct repository *repo,
+static void grep_worktree_recovery_path(struct repository *repo, int slot,
 					struct strbuf *path)
 {
 	strbuf_addf(path, "%s.grep-worktree-recovery",
 		    repo_get_index_file(repo));
+	if (slot)
+		strbuf_addstr(path, "-next");
 }
 
 static void grep_worktree_observation_generation_path(
@@ -489,60 +494,72 @@ static int load_recovery(struct grep_worktree_cache *cache)
 	if (cache->split_index ||
 	    is_null_oid(&cache->recovery_checksum))
 		return 0;
-	grep_worktree_recovery_path(cache->repo, &path);
-	map = map_file(path.buf, &map_size);
-	if (!map) {
-		cache->recovery_invalid = 1;
+	for (int slot = 0; slot < 2; slot++) {
+		if (cache->recovery_rejected_slots & (1u << slot))
+			continue;
+		strbuf_reset(&path);
+		grep_worktree_recovery_path(cache->repo, slot, &path);
+		map = map_file(path.buf, &map_size);
+		if (!map)
+			continue;
+		if (map_size < rawsz ||
+		    !hasheq(map + map_size - rawsz,
+			    cache->recovery_checksum.hash,
+			    cache->repo->hash_algo)) {
+			munmap((void *)map, map_size);
+			continue;
+		}
+		if (map_size < GREP_WORKTREE_RECOVERY_HEADER_SIZE +
+				       GREP_WORKTREE_RECOVERY_FANOUT_SIZE +
+				       2 * rawsz ||
+		    get_be32(map) != GREP_WORKTREE_RECOVERY_SIGNATURE ||
+		    get_be32(map + 4) != GREP_WORKTREE_RECOVERY_VERSION ||
+		    get_be32(map + 8) != cache->repo->hash_algo->format_id)
+			goto reject;
+		count = get_be32(map + 12);
+		overhead = GREP_WORKTREE_RECOVERY_HEADER_SIZE +
+			   GREP_WORKTREE_RECOVERY_FANOUT_SIZE + 2 * rawsz;
+		if (count > (map_size - overhead) / entry_rawsz)
+			goto reject;
+		expected = overhead + count * entry_rawsz;
+		if (map_size != expected)
+			goto reject;
+		oidread(&scope, map + GREP_WORKTREE_RECOVERY_HEADER_SIZE,
+			cache->repo->hash_algo);
+		if (!oideq(&scope, &cache->worktree_scope))
+			goto reject;
+
+		fanout = (const uint32_t *)(map +
+					    GREP_WORKTREE_RECOVERY_HEADER_SIZE +
+					    rawsz);
+		entries = (const unsigned char *)fanout +
+			  GREP_WORKTREE_RECOVERY_FANOUT_SIZE;
+		for (size_t i = 0, previous = 0;
+		     i < GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES; i++) {
+			uint32_t value = get_be32(
+				(const unsigned char *)fanout +
+				i * sizeof(uint32_t));
+
+			if (value < previous || value > count)
+				goto reject;
+			previous = value;
+			if (i == GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES - 1 &&
+			    value != count)
+				goto reject;
+		}
+		cache->recovery_map = map;
+		cache->recovery_map_size = map_size;
+		cache->recovery_fanout = fanout;
+		cache->recovery_entries = entries;
+		cache->recovery_entries_nr = count;
+		cache->recovery_slot = slot;
+		result = 1;
 		goto done;
+
+	reject:
+		munmap((void *)map, map_size);
+		cache->recovery_rejected_slots |= 1u << slot;
 	}
-	if (map_size < GREP_WORKTREE_RECOVERY_HEADER_SIZE +
-			       GREP_WORKTREE_RECOVERY_FANOUT_SIZE +
-			       2 * rawsz ||
-	    get_be32(map) != GREP_WORKTREE_RECOVERY_SIGNATURE ||
-	    get_be32(map + 4) != GREP_WORKTREE_RECOVERY_VERSION ||
-	    get_be32(map + 8) != cache->repo->hash_algo->format_id)
-		goto unmap;
-	count = get_be32(map + 12);
-	overhead = GREP_WORKTREE_RECOVERY_HEADER_SIZE +
-		   GREP_WORKTREE_RECOVERY_FANOUT_SIZE + 2 * rawsz;
-	if (count > (map_size - overhead) / entry_rawsz)
-		goto unmap;
-	expected = overhead + count * entry_rawsz;
-	if (map_size != expected ||
-	    !hasheq(map + map_size - rawsz,
-		    cache->recovery_checksum.hash,
-		    cache->repo->hash_algo))
-		goto unmap;
-	oidread(&scope, map + GREP_WORKTREE_RECOVERY_HEADER_SIZE,
-		cache->repo->hash_algo);
-	if (!oideq(&scope, &cache->worktree_scope))
-		goto unmap;
-
-	fanout = (const uint32_t *)(map +
-				    GREP_WORKTREE_RECOVERY_HEADER_SIZE + rawsz);
-	entries = (const unsigned char *)fanout +
-		  GREP_WORKTREE_RECOVERY_FANOUT_SIZE;
-	for (size_t i = 0, previous = 0;
-	     i < GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES; i++) {
-		uint32_t value = get_be32((const unsigned char *)fanout +
-					  i * sizeof(uint32_t));
-
-		if (value < previous || value > count)
-			goto unmap;
-		previous = value;
-		if (i == GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES - 1 &&
-		    value != count)
-			goto unmap;
-	}
-	cache->recovery_map = map;
-	cache->recovery_map_size = map_size;
-	cache->recovery_fanout = fanout;
-	cache->recovery_entries = entries;
-	result = 1;
-	goto done;
-
-unmap:
-	munmap((void *)map, map_size);
 	cache->recovery_invalid = 1;
 done:
 	strbuf_release(&path);
@@ -557,8 +574,22 @@ static int recovery_checksum_valid(struct grep_worktree_cache *cache)
 						cache->recovery_map,
 						cache->recovery_map_size);
 		cache->recovery_checksum_checked = 1;
-		if (!cache->recovery_checksum_valid)
-			cache->recovery_invalid = 1;
+		if (!cache->recovery_checksum_valid) {
+			cache->recovery_rejected_slots |=
+				1u << cache->recovery_slot;
+			munmap((void *)cache->recovery_map,
+			       cache->recovery_map_size);
+			cache->recovery_map = NULL;
+			cache->recovery_map_size = 0;
+			cache->recovery_fanout = NULL;
+			cache->recovery_entries = NULL;
+			cache->recovery_entries_nr = 0;
+			cache->recovery_checksum_checked = 0;
+			cache->recovery_checksum_valid = 0;
+			cache->recovery_load_attempted = 0;
+			return load_recovery(cache) &&
+			       recovery_checksum_valid(cache);
+		}
 	}
 	return cache->recovery_checksum_valid;
 }
@@ -572,12 +603,14 @@ static int recovery_contains_oid(struct grep_worktree_cache *cache,
 	uint32_t bucket;
 	uint32_t hi;
 	uint32_t lo;
+	int slot;
 
 	if (cache->recovery_invalid ||
 	    is_null_oid(&cache->recovery_checksum))
 		return 0;
 	if (!cache->recovery_map && !load_recovery(cache))
 		return 0;
+	slot = cache->recovery_slot;
 	entries = cache->recovery_entries;
 	bucket = get_be16(hash);
 	hi = get_be32((const unsigned char *)cache->recovery_fanout +
@@ -589,8 +622,13 @@ static int recovery_contains_oid(struct grep_worktree_cache *cache,
 	for (uint32_t i = lo; i < hi; i++) {
 		int cmp = memcmp(entries + i * rawsz, hash, rawsz);
 
-		if (!cmp)
-			return recovery_checksum_valid(cache);
+		if (!cmp) {
+			if (!recovery_checksum_valid(cache))
+				return 0;
+			if (slot != cache->recovery_slot)
+				return recovery_contains_oid(cache, entry_oid);
+			return 1;
+		}
 		if (cmp > 0)
 			break;
 	}
@@ -888,37 +926,62 @@ static void wait_for_test_write_phase(const char *phase)
 
 static int prepare_recovery(struct grep_worktree_cache *cache,
 			    struct lock_file *lock,
+			    int slot,
 			    struct object_id *recovery_checksum,
 			    unsigned char **prepared_equal)
 {
 	unsigned char *included = NULL;
 	struct object_id entry_oid;
 	struct oid_array entries = OID_ARRAY_INIT;
+	const unsigned char *compact_map = NULL;
 	uint32_t *fanout = NULL;
 	struct hashfile *f = NULL;
+	struct strbuf compact_path = STRBUF_INIT;
 	struct strbuf path = STRBUF_INIT;
+	size_t compact_size = 0;
 	int fd;
 	int result = -1;
 
 	oidclr(recovery_checksum, cache->repo->hash_algo);
 	*prepared_equal = NULL;
-	grep_worktree_recovery_path(cache->repo, &path);
+	grep_worktree_recovery_path(cache->repo, slot, &path);
 	fd = hold_lock_file_for_update_mode(lock, path.buf, 0, 0444);
 	if (fd < 0)
 		goto done;
+	if (!is_null_oid(&cache->recovery_checksum)) {
+		size_t rawsz = cache->repo->hash_algo->rawsz;
+
+		grep_worktree_cache_path(cache->repo, &compact_path);
+		compact_map = map_file(compact_path.buf, &compact_size);
+		if (!compact_map || compact_size < rawsz ||
+		    !hasheq(compact_map + compact_size - rawsz,
+			    cache->compact_checksum.hash,
+			    cache->repo->hash_algo))
+			goto done;
+		munmap((void *)compact_map, compact_size);
+		compact_map = NULL;
+	}
 	CALLOC_ARRAY(included, cache->bitmap_size);
 	CALLOC_ARRAY(fanout, GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES);
+	if (!is_null_oid(&cache->recovery_checksum) &&
+	    (!load_recovery(cache) || !recovery_checksum_valid(cache)))
+		goto done;
 	for (size_t i = 0; i < cache->istate->cache_nr; i++) {
-		if (!(cache->equal[i >> 3] & (1u << (i & 7))) ||
-		    !grep_worktree_cache_entry_eligible(
-			    cache->istate->cache[i]))
+		unsigned char mask = 1u << (i & 7);
+		const struct cache_entry *ce = cache->istate->cache[i];
+
+		if (!grep_worktree_cache_entry_eligible(ce))
 			continue;
 		if (grep_worktree_entry_identity_hash(
-			    &cache->entry_identity,
-			    cache->istate->cache[i], &entry_oid))
+			    &cache->entry_identity, ce, &entry_oid))
 			goto done;
+		if (cache->different[i >> 3] & mask)
+			continue;
+		if (!(cache->equal[i >> 3] & mask) &&
+		    !recovery_contains_oid(cache, &entry_oid))
+			continue;
 		oid_array_append(&entries, &entry_oid);
-		included[i >> 3] |= 1u << (i & 7);
+		included[i >> 3] |= mask;
 	}
 	if (entries.nr > UINT32_MAX)
 		goto done;
@@ -953,6 +1016,8 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	result = 0;
 
 done:
+	if (compact_map)
+		munmap((void *)compact_map, compact_size);
 	if (f)
 		discard_hashfile(f);
 	if (result)
@@ -960,6 +1025,7 @@ done:
 	free(fanout);
 	free(included);
 	oid_array_clear(&entries);
+	strbuf_release(&compact_path);
 	strbuf_release(&path);
 	return result;
 }
@@ -980,7 +1046,9 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	struct lock_file lock = LOCK_INIT;
 	struct lock_file recovery_lock = LOCK_INIT;
 	struct strbuf path = STRBUF_INIT;
-	int bootstrap_recovery;
+	uint64_t recovery_refresh_min;
+	int prepared_recovery_slot = 0;
+	int update_recovery;
 	int direct_current = 0;
 	int exact_matches;
 	int fd;
@@ -998,31 +1066,49 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 
 	if (!cache || !use_optional_locks())
 		return;
-	bootstrap_recovery =
+	update_recovery =
 		!cache->split_index &&
 		is_null_oid(&cache->recovery_checksum) &&
 		recovery_bootstrap_threshold_met(cache);
+	recovery_refresh_min = git_env_ulong(
+		"GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES",
+		GREP_WORKTREE_RECOVERY_MIN_ENTRIES);
+	if (!cache->split_index &&
+	    !is_null_oid(&cache->recovery_checksum) &&
+	    cache->recorded_equal >= recovery_refresh_min &&
+	    load_recovery(cache)) {
+		if (DIV_ROUND_UP(cache->recovery_entries_nr, 8) >
+		    recovery_refresh_min)
+			recovery_refresh_min =
+				DIV_ROUND_UP(cache->recovery_entries_nr, 8);
+		if (cache->recorded_equal >= recovery_refresh_min &&
+		    recovery_checksum_valid(cache)) {
+			prepared_recovery_slot = !cache->recovery_slot;
+			update_recovery = 1;
+		}
+	}
 	persist_recovered =
 		recovery_promotion_threshold_met(cache);
 	negative_safe = !cache->recorded_different;
 	if (!cache->exact_changed && !persist_recovered &&
-	    !cache->split_base_changed && !bootstrap_recovery &&
+	    !cache->split_base_changed && !update_recovery &&
 	    !cache->recovery_invalid && !cache->recorded_different)
 		return;
 	wait_for_test_write_phase("prelock");
-	if (bootstrap_recovery &&
+	if (update_recovery &&
 	    prepare_recovery(cache, &recovery_lock,
+			     prepared_recovery_slot,
 			     &prepared_recovery_checksum,
 			     &prepared_recovery_equal))
-		bootstrap_recovery = 0;
+		update_recovery = 0;
 	if (!cache->exact_changed && !persist_recovered &&
-	    !cache->split_base_changed && !bootstrap_recovery &&
+	    !cache->split_base_changed && !update_recovery &&
 	    !cache->recovery_invalid && !cache->recorded_different)
 		goto done;
 	repeated_negatives_only =
 		cache->recorded_different &&
 		!cache->exact_changed && !persist_recovered &&
-		!cache->split_base_changed && !bootstrap_recovery &&
+		!cache->split_base_changed && !update_recovery &&
 		!cache->recovery_invalid;
 	wait_for_test_write_phase("recovery");
 
@@ -1095,7 +1181,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		cache->negative_noop++;
 		goto done;
 	}
-	if (same_index && !bootstrap_recovery) {
+	if (same_index && !update_recovery) {
 		current.repo = cache->repo;
 		current.istate = cache->istate;
 		current.entry_identity = cache->entry_identity;
@@ -1356,6 +1442,11 @@ merge_current:
 			}
 		}
 	}
+	if (update_recovery &&
+	    !is_null_oid(&current.recovery_checksum) &&
+	    (!load_recovery(&current) ||
+	     !recovery_checksum_valid(&current)))
+		current.recovery_invalid = 1;
 	if (current.split_index &&
 	    !is_null_oid(&current.recovery_checksum)) {
 		oidclr(&current.recovery_checksum,
@@ -1395,8 +1486,11 @@ merge_current:
 			equal[i] = merged;
 		}
 	}
-	if (!current.split_index && exact_matches && bootstrap_recovery &&
-	    is_null_oid(&current.recovery_checksum)) {
+	if (!current.split_index && exact_matches && update_recovery &&
+	    oideq(&current.recovery_checksum,
+		  &cache->recovery_checksum) &&
+	    (is_null_oid(&cache->recovery_checksum) ||
+	     current.recovery_slot == cache->recovery_slot)) {
 		int recovery_still_valid = 1;
 
 		/*
@@ -1404,9 +1498,15 @@ merge_current:
 		 * let it restore an equality observation cleared by a concurrent
 		 * writer before we acquired that lock.
 		 */
-		for (size_t i = 0; i < current.bitmap_size; i++) {
-			if (prepared_recovery_equal[i] &
-			    (~equal[i] | different[i])) {
+		for (size_t i = 0; i < current.istate->cache_nr; i++) {
+			unsigned char mask = 1u << (i & 7);
+
+			if (!(prepared_recovery_equal[i >> 3] & mask))
+				continue;
+			if (different[i >> 3] & mask ||
+			    (!(equal[i >> 3] & mask) &&
+			     !recovery_contains(
+				     &current, current.istate->cache[i]))) {
 				recovery_still_valid = 0;
 				break;
 			}
@@ -1415,6 +1515,7 @@ merge_current:
 		    !commit_lock_file(&recovery_lock)) {
 			oidcpy(&current.recovery_checksum,
 			       &prepared_recovery_checksum);
+			current.recovery_slot = prepared_recovery_slot;
 			output_changed = 1;
 		}
 	}
