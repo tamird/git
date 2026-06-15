@@ -1812,13 +1812,16 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					   p->pattern[i + 1] == '?') {
 					if (i + 2 == scan_end)
 						goto unsupported;
-					if (p->pattern[i + 2] == '!') {
-						/* Literals outside the assertion remain required. */
-						allow_nested = 1;
-					} else if (p->pattern[i + 2] != ':') {
-						goto unsupported;
-					}
 					j = i + 3;
+					/* Literals outside either assertion remain required. */
+					if (p->pattern[i + 2] == '!')
+						allow_nested = 1;
+					else if (p->pattern[i + 2] == '<' &&
+						 i + 3 < scan_end &&
+						 p->pattern[i + 3] == '!')
+						j++;
+					else if (p->pattern[i + 2] != ':')
+						goto unsupported;
 				} else {
 					j = i + 1;
 				}
