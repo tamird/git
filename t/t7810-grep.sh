@@ -141,6 +141,40 @@ test_expect_success setup '
 	git commit -m initial
 '
 
+test_expect_success ENHANCED_BRE,LIBPCRE2 \
+	'BRE wildcard alternatives preserve matches' '
+	test_when_finished "rm -f bre-lookahead" &&
+	cat >bre-lookahead <<-\EOF &&
+	sync_hash_applied_global
+	.applied_manage/generated-requirements
+	service_requirements
+	test_requirements
+	build_requirements
+	EOF
+	cat >expect <<-\EOF &&
+	bre-lookahead:1:sync_hash_applied_global
+	bre-lookahead:2:.applied_manage/generated-requirements
+	bre-lookahead:3:service_requirements
+	bre-lookahead:4:test_requirements
+	bre-lookahead:5:build_requirements
+	EOF
+	git grep --no-index -n \
+		"sync_hash_applied_global\\|\\.applied_manage/.*requirements\\|service_requirements\\|test_requirements\\|build_requirements" \
+		-- bre-lookahead >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success ENHANCED_BRE,LIBPCRE2 \
+	'BRE candidate finder requires complete pattern' '
+	test_when_finished "rm -f bre-lookahead" &&
+	echo baz >bre-lookahead &&
+	echo bre-lookahead:1:baz >expect &&
+	git grep --no-index -n \
+		"missing\\|b.z\\|absent.*needle" \
+		-- bre-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
@@ -1303,7 +1337,7 @@ test_expect_success REGEX_MATCH_ERROR \
 	'grep does not cache regex errors' '
 	test_must_fail env LC_ALL=en_US.UTF-8 \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error.trace" \
-		git -C result-cache grep --threads=1 -E "foo|bar" \
+		git -C result-cache grep --threads=1 -E "foo.*bar|absent" \
 		cache-base cache-tip -- regex-error >actual &&
 	test_must_be_empty actual &&
 	test_trace2_data grep result_cache/entries 0 \
@@ -1316,7 +1350,7 @@ test_expect_success PTHREADS,REGEX_MATCH_ERROR \
 	'threaded grep does not cache regex errors' '
 	test_must_fail env LC_ALL=en_US.UTF-8 \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error-threaded.trace" \
-		git -C result-cache grep --threads=8 -E "foo|bar" \
+		git -C result-cache grep --threads=8 -E "foo.*bar|absent" \
 		cache-base cache-tip -- regex-error >actual &&
 	test_must_be_empty actual &&
 	test_trace2_data grep result_cache/entries 0 \

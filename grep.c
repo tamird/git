@@ -648,37 +648,55 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	int have_alternation = 0;
 	int have_literal = 0;
 	int have_wildcard = 0;
+	struct strbuf lookahead_pattern = STRBUF_INIT;
 
 	/*
 	 * TRE can be very slow on long buffers with alternation. Compile the
-	 * subset with identical PCRE2 syntax for use as a candidate finder;
-	 * the POSIX matcher still decides whether each candidate line matches.
+	 * supported subset as PCRE2 for use as a candidate finder; the POSIX
+	 * matcher still decides whether each candidate line matches.
 	 */
-	if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE) {
+	if (p->token == GREP_PATTERN &&
+	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
+	     opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)) {
 		for (size_t i = 0; i < p->patternlen; i++) {
 			unsigned char ch = p->pattern[i];
 
 			if (ch < 0x80 &&
 			    (isalnum(ch) || strchr("_ =-/", ch))) {
 				have_literal = 1;
+				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			if (ch == '\\' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '.') {
 				have_literal = 1;
+				strbuf_add(&lookahead_pattern, p->pattern + i, 2);
+				i++;
+				continue;
+			}
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE &&
+			    ch == '\\' && i + 1 < p->patternlen &&
+			    p->pattern[i + 1] == '|' && have_literal &&
+			    i + 2 < p->patternlen) {
+				have_alternation = 1;
+				have_literal = 0;
+				strbuf_addch(&lookahead_pattern, '|');
 				i++;
 				continue;
 			}
 			if (ch == '.' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '*') {
 				have_wildcard = 1;
+				strbuf_add(&lookahead_pattern, p->pattern + i, 2);
 				i++;
 				continue;
 			}
-			if (ch == '|' && have_literal &&
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
+			    ch == '|' && have_literal &&
 			    i + 1 < p->patternlen) {
 				have_alternation = 1;
 				have_literal = 0;
+				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			have_literal = 0;
@@ -686,11 +704,16 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		}
 	}
 	if (have_alternation && have_literal && have_wildcard) {
+		struct grep_opt lookahead_opt = *opt;
+
 		CALLOC_ARRAY(p->pcre2_lookahead, 1);
-		p->pcre2_lookahead->pattern = p->pattern;
-		p->pcre2_lookahead->patternlen = p->patternlen;
-		compile_pcre2_pattern(p->pcre2_lookahead, opt);
+		p->pcre2_lookahead->pattern = strbuf_detach(&lookahead_pattern,
+							    &p->pcre2_lookahead->patternlen);
+		/* Non-ASCII lines are sent to the POSIX matcher below. */
+		lookahead_opt.ignore_locale = 1;
+		compile_pcre2_pattern(p->pcre2_lookahead, &lookahead_opt);
 	}
+	strbuf_release(&lookahead_pattern);
 #endif
 }
 
@@ -968,6 +991,7 @@ static void free_grep_pat(struct grep_pat *pattern)
 				kwsfree(p->kws);
 			if (p->pcre2_lookahead) {
 				free_pcre2_pattern(p->pcre2_lookahead);
+				free(p->pcre2_lookahead->pattern);
 				free(p->pcre2_lookahead);
 			}
 			if (p->pcre2_pattern)
@@ -1631,7 +1655,8 @@ static int look_ahead(struct grep_opt *opt,
 			 * cannot change POSIX matches or suppress matcher errors.
 			 */
 			while (non_ascii < limit &&
-			       !((unsigned char)*non_ascii & 0x80))
+			       !((unsigned char)*non_ascii & 0x80) &&
+			       *non_ascii != '\033')
 				non_ascii++;
 			if (non_ascii < limit) {
 				while (non_ascii > bol && non_ascii[-1] != '\n')
