@@ -474,6 +474,8 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 		return error("commit edge index requires replacement refs disabled");
 	repo_diff_setup(repo, &diffopt);
 	diffopt.flags.recursive = 1;
+	diffopt.flags.override_submodule_config = 1;
+	diffopt.flags.ignore_submodules = 0;
 	diffopt.detect_rename = 0;
 	diff_setup_done(&diffopt);
 

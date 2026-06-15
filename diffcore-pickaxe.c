@@ -683,23 +683,7 @@ int diff_pickaxe_edge_maybe_contains(
 	if (!index || !index->query || index->commit_index_disabled ||
 	    o->flags.follow_renames)
 		return 1;
-	if (o->pathspec.nr) {
-		int matches_all = 0;
-
-		/* Complete edge records cannot accelerate a narrow tree walk. */
-		for (int i = 0; i < o->pathspec.nr; i++) {
-			const struct pathspec_item *item = &o->pathspec.items[i];
-
-			if (!(item->magic & (PATHSPEC_EXCLUDE | PATHSPEC_ATTR |
-					     PATHSPEC_MAXDEPTH)) &&
-			    !item->len) {
-				matches_all = 1;
-				break;
-			}
-		}
-		if (!matches_all)
-			return 1;
-	}
+	/* Full-tree edge records are conservative for path-limited diffs. */
 	/* Copy detection may use an unchanged source omitted from the edge. */
 	if (o->flags.find_copies_harder)
 		return 1;
