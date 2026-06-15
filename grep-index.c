@@ -1878,8 +1878,15 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						if (j + 1 == scan_end)
 							goto unsupported;
 						j++;
-					} else if (p->pattern[j] == '\\' ||
-						   p->pattern[j] == '[') {
+					} else if (p->pattern[j] == '\\') {
+						if (pattern_type !=
+							    GREP_PATTERN_TYPE_ERE ||
+						    j + 1 == scan_end ||
+						    p->pattern[j + 1] == '[' ||
+						    p->pattern[j + 1] == ']')
+							goto unsupported;
+						j++;
+					} else if (p->pattern[j] == '[') {
 						goto unsupported;
 					}
 				}
