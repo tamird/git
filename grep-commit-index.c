@@ -1,14 +1,12 @@
 #include "git-compat-util.h"
 #include "grep-commit-index.h"
 #include "commit.h"
-#include "copy.h"
 #include "csum-file.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "environment.h"
 #include "grep-index.h"
 #include "hex.h"
-#include "lockfile.h"
 #include "oid-array.h"
 #include "oidset.h"
 #include "path.h"
@@ -41,7 +39,7 @@
  * OID, flags, raw changed-filepair count, endpoint OID count, and sorted unique
  * endpoint OIDs. The all-zero parent identifies a root-versus-empty edge.
  */
-struct grep_commit_index {
+struct grep_commit_index_segment {
 	void *map;
 	size_t map_size;
 	const struct git_hash_algo *hash_algo;
@@ -51,6 +49,12 @@ struct grep_commit_index {
 	const unsigned char *offsets;
 	const unsigned char *data;
 	size_t data_len;
+};
+
+struct grep_commit_index {
+	struct grep_commit_index_segment *segments;
+	size_t segments_nr;
+	size_t segments_alloc;
 };
 
 struct grep_commit_edge_record {
@@ -67,10 +71,11 @@ struct grep_commit_record {
 	size_t edges_nr;
 };
 
-static void grep_commit_index_path(struct repository *repo, struct strbuf *path)
+static void grep_commit_index_path(struct repository *repo, struct strbuf *path,
+				   const char *name)
 {
-	strbuf_addf(path, "%s/info/grep-index/commit-edges",
-		    repo_get_object_directory(repo));
+	strbuf_addf(path, "%s/info/grep-index/%s",
+		    repo_get_object_directory(repo), name);
 }
 
 static int grep_commit_edge_record_cmp(const void *va, const void *vb)
@@ -93,7 +98,7 @@ static int grep_commit_record_cmp(const void *va, const void *vb)
  * Validate one variable-length commit record. When parent_oid is non-NULL,
  * return one only for a matching complete edge and populate result.
  */
-static int parse_commit_record(struct grep_commit_index *index,
+static int parse_commit_record(struct grep_commit_index_segment *segment,
 			       const unsigned char *record,
 			       const unsigned char *record_end,
 			       const struct object_id *parent_oid,
@@ -101,7 +106,7 @@ static int parse_commit_record(struct grep_commit_index *index,
 {
 	const unsigned char *p = record;
 	const unsigned char *previous_parent = NULL;
-	size_t rawsz = index->hash_algo->rawsz;
+	size_t rawsz = segment->hash_algo->rawsz;
 	uint32_t edges_nr;
 	int found = 0;
 
@@ -128,7 +133,7 @@ static int parse_commit_record(struct grep_commit_index *index,
 		parent = p;
 		p += rawsz;
 		if (previous_parent &&
-		    hashcmp(previous_parent, parent, index->hash_algo) >= 0)
+		    hashcmp(previous_parent, parent, segment->hash_algo) >= 0)
 			return -1;
 		previous_parent = parent;
 
@@ -148,11 +153,11 @@ static int parse_commit_record(struct grep_commit_index *index,
 		for (uint32_t j = 1; j < oids_nr; j++)
 			if (hashcmp(oids + (size_t)(j - 1) * rawsz,
 				    oids + (size_t)j * rawsz,
-				    index->hash_algo) >= 0)
+				    segment->hash_algo) >= 0)
 				return -1;
 
 		if (parent_oid &&
-		    !hashcmp(parent, parent_oid->hash, index->hash_algo) &&
+		    !hashcmp(parent, parent_oid->hash, segment->hash_algo) &&
 		    flags & GREP_COMMIT_INDEX_EDGE_COMPLETE) {
 			result->oids = oids;
 			result->nr = oids_nr;
@@ -165,9 +170,12 @@ static int parse_commit_record(struct grep_commit_index *index,
 	return p == record_end ? found : -1;
 }
 
-struct grep_commit_index *grep_commit_index_load(struct repository *repo)
+static int load_grep_commit_index_segment(struct repository *repo,
+					  struct grep_commit_index *index,
+					  const char *hex)
 {
-	struct grep_commit_index *index = NULL;
+	struct grep_commit_index_segment segment = { 0 };
+	struct object_id filename_checksum;
 	struct strbuf path = STRBUF_INIT;
 	const unsigned char *map;
 	const unsigned char *payload_end;
@@ -182,53 +190,49 @@ struct grep_commit_index *grep_commit_index_load(struct repository *repo)
 	int fd = -1;
 	struct stat st;
 
-	if (!repo || !repo->gitdir)
-		return NULL;
-	if (replace_refs_enabled(repo)) {
-		prepare_replace_object(repo);
-		if (oidmap_get_size(&repo->objects->replace_map))
-			return NULL;
-	}
+	if (strlen(hex) != repo->hash_algo->hexsz ||
+	    get_oid_hex_algop(hex, &filename_checksum, repo->hash_algo))
+		return 0;
 	rawsz = repo->hash_algo->rawsz;
-	grep_commit_index_path(repo, &path);
+	grep_commit_index_path(repo, &path, "");
+	strbuf_addf(&path, "commit-edges-%s.idx", hex);
 	fd = git_open(path.buf);
 	if (fd < 0 || fstat(fd, &st) || st.st_size < 0)
 		goto cleanup;
 
-	CALLOC_ARRAY(index, 1);
-	index->map_size = xsize_t(st.st_size);
-	if (index->map_size < GREP_COMMIT_INDEX_HEADER_SIZE +
-				      GREP_COMMIT_INDEX_FANOUT_SIZE +
-				      sizeof(uint64_t) + rawsz)
+	segment.map_size = xsize_t(st.st_size);
+	if (segment.map_size < GREP_COMMIT_INDEX_HEADER_SIZE +
+				       GREP_COMMIT_INDEX_FANOUT_SIZE +
+				       sizeof(uint64_t) + rawsz)
 		goto invalid;
-	index->map = xmmap_gently(NULL, index->map_size, PROT_READ,
-				  MAP_PRIVATE, fd, 0);
-	if (index->map == MAP_FAILED) {
-		index->map = NULL;
+	segment.map = xmmap_gently(NULL, segment.map_size, PROT_READ,
+				   MAP_PRIVATE, fd, 0);
+	if (segment.map == MAP_FAILED) {
+		segment.map = NULL;
 		goto invalid;
 	}
 	close(fd);
 	fd = -1;
 
-	map = index->map;
-	payload_size = index->map_size - rawsz;
+	map = segment.map;
+	payload_size = segment.map_size - rawsz;
 	payload_end = map + payload_size;
 	if (get_be32(map) != GREP_COMMIT_INDEX_SIGNATURE ||
 	    get_be32(map + 4) != GREP_COMMIT_INDEX_VERSION ||
 	    get_be32(map + 8) != repo->hash_algo->format_id)
 		goto invalid;
 
-	index->hash_algo = repo->hash_algo;
-	index->nr = get_be32(map + 12);
+	segment.hash_algo = repo->hash_algo;
+	segment.nr = get_be32(map + 12);
 	if (payload_size < GREP_COMMIT_INDEX_HEADER_SIZE +
 				   GREP_COMMIT_INDEX_FANOUT_SIZE + sizeof(uint64_t) ||
-	    index->nr >
+	    segment.nr >
 		    (payload_size - GREP_COMMIT_INDEX_HEADER_SIZE -
 		     GREP_COMMIT_INDEX_FANOUT_SIZE - sizeof(uint64_t)) /
 			    (rawsz + sizeof(uint64_t)))
 		goto invalid;
-	oid_bytes = (size_t)index->nr * rawsz;
-	offset_bytes = ((size_t)index->nr + 1) * sizeof(uint64_t);
+	oid_bytes = (size_t)segment.nr * rawsz;
+	offset_bytes = ((size_t)segment.nr + 1) * sizeof(uint64_t);
 	metadata_size = GREP_COMMIT_INDEX_HEADER_SIZE +
 			GREP_COMMIT_INDEX_FANOUT_SIZE + oid_bytes +
 			offset_bytes;
@@ -240,57 +244,94 @@ struct grep_commit_index *grep_commit_index_load(struct repository *repo)
 	if (!hasheq(metadata_checksum.hash, payload_end, repo->hash_algo))
 		goto invalid;
 
-	index->fanout = map + GREP_COMMIT_INDEX_HEADER_SIZE;
-	index->commits = index->fanout + GREP_COMMIT_INDEX_FANOUT_SIZE;
-	index->offsets = index->commits + oid_bytes;
-	index->data = index->offsets + offset_bytes;
-	index->data_len = payload_end - index->data;
+	segment.fanout = map + GREP_COMMIT_INDEX_HEADER_SIZE;
+	segment.commits = segment.fanout + GREP_COMMIT_INDEX_FANOUT_SIZE;
+	segment.offsets = segment.commits + oid_bytes;
+	segment.data = segment.offsets + offset_bytes;
+	segment.data_len = payload_end - segment.data;
 
 	for (size_t i = 0, pos = 0; i < 256; i++) {
-		uint32_t value = get_be32(index->fanout +
+		uint32_t value = get_be32(segment.fanout +
 					  i * sizeof(uint32_t));
 
-		while (pos < index->nr &&
-		       index->commits[pos * rawsz] <= i)
+		while (pos < segment.nr &&
+		       segment.commits[pos * rawsz] <= i)
 			pos++;
-		if (value < previous_fanout || value > index->nr ||
+		if (value < previous_fanout || value > segment.nr ||
 		    value != pos)
 			goto invalid;
 		previous_fanout = value;
 	}
-	if (previous_fanout != index->nr)
+	if (previous_fanout != segment.nr)
 		goto invalid;
-	for (size_t i = 1; i < index->nr; i++)
-		if (hashcmp(index->commits + (i - 1) * rawsz,
-			    index->commits + i * rawsz,
-			    index->hash_algo) >= 0)
+	for (size_t i = 1; i < segment.nr; i++)
+		if (hashcmp(segment.commits + (i - 1) * rawsz,
+			    segment.commits + i * rawsz,
+			    segment.hash_algo) >= 0)
 			goto invalid;
 
-	for (size_t i = 0; i <= index->nr; i++) {
-		uint64_t offset = get_be64(index->offsets +
+	for (size_t i = 0; i <= segment.nr; i++) {
+		uint64_t offset = get_be64(segment.offsets +
 					   i * sizeof(uint64_t));
 		uint64_t previous = i ?
-					    get_be64(index->offsets +
+					    get_be64(segment.offsets +
 						     (i - 1) * sizeof(uint64_t)) :
 					    0;
 
 		if ((!i && offset) || offset < previous ||
-		    offset > index->data_len)
+		    offset > segment.data_len)
 			goto invalid;
 	}
-	if (get_be64(index->offsets +
-		     (size_t)index->nr * sizeof(uint64_t)) != index->data_len)
+	if (get_be64(segment.offsets +
+		     (size_t)segment.nr * sizeof(uint64_t)) != segment.data_len)
 		goto invalid;
 
+	ALLOC_GROW(index->segments, index->segments_nr + 1,
+		   index->segments_alloc);
+	index->segments[index->segments_nr++] = segment;
 	strbuf_release(&path);
-	return index;
+	return 1;
 
 invalid:
-	grep_commit_index_free(index);
-	index = NULL;
+	if (segment.map)
+		munmap(segment.map, segment.map_size);
 cleanup:
 	if (fd >= 0)
 		close(fd);
+	strbuf_release(&path);
+	return 0;
+}
+
+struct grep_commit_index *grep_commit_index_load(struct repository *repo)
+{
+	struct grep_commit_index *index = NULL;
+	struct strbuf line = STRBUF_INIT;
+	struct strbuf path = STRBUF_INIT;
+	FILE *chain = NULL;
+
+	if (!repo || !repo->gitdir)
+		return NULL;
+	if (replace_refs_enabled(repo)) {
+		prepare_replace_object(repo);
+		if (oidmap_get_size(&repo->objects->replace_map))
+			return NULL;
+	}
+	grep_commit_index_path(repo, &path, "commit-edges-chain");
+	chain = fopen(path.buf, "r");
+	if (!chain)
+		goto cleanup;
+	CALLOC_ARRAY(index, 1);
+	while (strbuf_getline(&line, chain) != EOF)
+		load_grep_commit_index_segment(repo, index, line.buf);
+	if (!index->segments_nr) {
+		grep_commit_index_free(index);
+		index = NULL;
+	}
+
+cleanup:
+	if (chain)
+		fclose(chain);
+	strbuf_release(&line);
 	strbuf_release(&path);
 	return index;
 }
@@ -300,70 +341,83 @@ int grep_commit_index_lookup(struct grep_commit_index *index,
 			     const struct object_id *parent_oid,
 			     struct grep_commit_index_edge *edge)
 {
-	struct git_hash_ctx record_ctx;
-	struct object_id record_checksum;
-	uint32_t hi;
-	uint32_t lo;
-	uint32_t pos = UINT32_MAX;
-	uint64_t start;
-	uint64_t end;
-	size_t record_size;
-
 	if (edge)
 		memset(edge, 0, sizeof(*edge));
 	if (!index || !commit_oid || !parent_oid || !edge)
 		return -1;
-	hi = get_be32(index->fanout +
-		      (size_t)commit_oid->hash[0] * sizeof(uint32_t));
-	lo = commit_oid->hash[0] ?
-		     get_be32(index->fanout +
-			      ((size_t)commit_oid->hash[0] - 1) * sizeof(uint32_t)) :
-		     0;
-	while (lo < hi) {
-		uint32_t mid = lo + (hi - lo) / 2;
-		int cmp = hashcmp(index->commits +
-					  (size_t)mid * index->hash_algo->rawsz,
-				  commit_oid->hash, index->hash_algo);
+	for (size_t i = index->segments_nr; i; i--) {
+		struct grep_commit_index_segment *segment =
+			&index->segments[i - 1];
+		struct grep_commit_index_edge candidate = { 0 };
+		struct git_hash_ctx record_ctx;
+		struct object_id record_checksum;
+		uint32_t hi;
+		uint32_t lo;
+		uint32_t pos = UINT32_MAX;
+		uint64_t start;
+		uint64_t end;
+		size_t record_size;
 
-		if (!cmp) {
-			pos = mid;
-			break;
+		hi = get_be32(segment->fanout +
+			      (size_t)commit_oid->hash[0] * sizeof(uint32_t));
+		lo = commit_oid->hash[0] ?
+			     get_be32(segment->fanout +
+				      ((size_t)commit_oid->hash[0] - 1) *
+					      sizeof(uint32_t)) :
+			     0;
+		while (lo < hi) {
+			uint32_t mid = lo + (hi - lo) / 2;
+			int cmp = hashcmp(
+				segment->commits +
+					(size_t)mid * segment->hash_algo->rawsz,
+				commit_oid->hash, segment->hash_algo);
+
+			if (!cmp) {
+				pos = mid;
+				break;
+			}
+			if (cmp > 0)
+				hi = mid;
+			else
+				lo = mid + 1;
 		}
-		if (cmp > 0)
-			hi = mid;
-		else
-			lo = mid + 1;
+		if (pos == UINT32_MAX)
+			continue;
+		start = get_be64(segment->offsets +
+				 (size_t)pos * sizeof(uint64_t));
+		end = get_be64(segment->offsets +
+			       ((size_t)pos + 1) * sizeof(uint64_t));
+		if (start > end || end > segment->data_len ||
+		    end - start < segment->hash_algo->rawsz)
+			continue;
+		record_size = end - start - segment->hash_algo->rawsz;
+		segment->hash_algo->init_fn(&record_ctx);
+		git_hash_update(&record_ctx, commit_oid->hash,
+				segment->hash_algo->rawsz);
+		git_hash_update(&record_ctx, segment->data + start,
+				record_size);
+		git_hash_final_oid(&record_checksum, &record_ctx);
+		if (!hasheq(record_checksum.hash,
+			    segment->data + start + record_size,
+			    segment->hash_algo))
+			continue;
+		if (parse_commit_record(segment, segment->data + start,
+					segment->data + start + record_size,
+					parent_oid, &candidate) != 1)
+			continue;
+		*edge = candidate;
+		return 0;
 	}
-	if (pos == UINT32_MAX)
-		return -1;
-	start = get_be64(index->offsets + (size_t)pos * sizeof(uint64_t));
-	end = get_be64(index->offsets +
-		       ((size_t)pos + 1) * sizeof(uint64_t));
-	if (start > end || end > index->data_len ||
-	    end - start < index->hash_algo->rawsz)
-		return -1;
-	record_size = end - start - index->hash_algo->rawsz;
-	index->hash_algo->init_fn(&record_ctx);
-	git_hash_update(&record_ctx, commit_oid->hash,
-			index->hash_algo->rawsz);
-	git_hash_update(&record_ctx, index->data + start, record_size);
-	git_hash_final_oid(&record_checksum, &record_ctx);
-	if (!hasheq(record_checksum.hash,
-		    index->data + start + record_size, index->hash_algo))
-		return -1;
-	if (parse_commit_record(index, index->data + start,
-				index->data + start + record_size,
-				parent_oid, edge) != 1)
-		return -1;
-	return 0;
+	return -1;
 }
 
 void grep_commit_index_free(struct grep_commit_index *index)
 {
 	if (!index)
 		return;
-	if (index->map)
-		munmap(index->map, index->map_size);
+	for (size_t i = 0; i < index->segments_nr; i++)
+		munmap(index->segments[i].map, index->segments[i].map_size);
+	free(index->segments);
 	free(index);
 }
 
@@ -451,21 +505,22 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	struct oid_array scratch = OID_ARRAY_INIT;
 	struct oidset seen_commits = OIDSET_INIT;
 	struct diff_options diffopt;
-	struct lock_file lock = LOCK_INIT;
 	struct hashfile *hashfile = NULL;
 	struct hashfile_checkpoint metadata_checkpoint;
 	struct object_id metadata_checksum;
+	struct object_id segment_checksum;
 	struct progress *progress = NULL;
 	struct tempfile *temp = NULL;
 	struct strbuf path = STRBUF_INIT;
 	struct strbuf record_buf = STRBUF_INIT;
 	struct strbuf temp_path = STRBUF_INIT;
+	unsigned char file_buf[8192];
+	char hex[GIT_MAX_HEXSZ + 1];
 	uint64_t *offsets = NULL;
 	size_t records_nr = 0;
 	size_t records_alloc = 0;
 	uint64_t progress_nr = 0;
 	int result = -1;
-	int fd;
 	int temp_fd;
 
 	if (!repo || !revs)
@@ -569,10 +624,10 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 		offsets[i + 1] = offsets[i] + size;
 	}
 
-	grep_commit_index_path(repo, &path);
-	if (safe_create_leading_directories(repo, path.buf))
+	grep_commit_index_path(repo, &temp_path,
+			       "tmp_commit_edges_XXXXXX");
+	if (safe_create_leading_directories(repo, temp_path.buf))
 		goto cleanup;
-	strbuf_addf(&temp_path, "%s.tmp_XXXXXX", path.buf);
 	temp = mks_tempfile_m(temp_path.buf, 0444);
 	if (!temp)
 		goto cleanup;
@@ -652,6 +707,25 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	temp_fd = finalize_hashfile(hashfile, NULL,
 				    FSYNC_COMPONENT_PACK_METADATA, CSUM_FSYNC);
 	hashfile = NULL;
+	if (lseek(temp_fd, 0, SEEK_SET) < 0)
+		goto cleanup;
+	{
+		struct git_hash_ctx segment_ctx;
+
+		repo->hash_algo->init_fn(&segment_ctx);
+		for (;;) {
+			ssize_t bytes = xread(temp_fd, file_buf,
+					      sizeof(file_buf));
+
+			if (bytes < 0)
+				goto cleanup;
+			if (!bytes)
+				break;
+			git_hash_update(&segment_ctx, file_buf, bytes);
+		}
+		git_hash_final_oid(&segment_checksum, &segment_ctx);
+	}
+	hash_to_hex_algop_r(hex, segment_checksum.hash, repo->hash_algo);
 	for (size_t i = 0; i < records_nr; i++)
 		free(records[i].edges);
 	FREE_AND_NULL(records);
@@ -664,14 +738,11 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	if (write_grep_index_oids(repo, show_progress, &hydration_oids, 0))
 		goto cleanup;
 
-	if (lseek(temp_fd, 0, SEEK_SET) < 0)
+	grep_commit_index_path(repo, &path, "");
+	strbuf_addf(&path, "commit-edges-%s.idx", hex);
+	if (rename_tempfile(&temp, path.buf) < 0)
 		goto cleanup;
-	fd = hold_lock_file_for_update_mode(&lock, path.buf, 0, 0444);
-	if (fd < 0 || copy_fd(temp_fd, fd))
-		goto cleanup;
-	fsync_component_or_die(FSYNC_COMPONENT_PACK_METADATA, fd,
-			       get_lock_file_path(&lock));
-	if (commit_lock_file(&lock))
+	if (append_grep_index_chain_entry(repo, "commit-edges-chain", hex))
 		goto cleanup;
 	result = 0;
 
@@ -680,7 +751,6 @@ cleanup:
 	if (hashfile)
 		discard_hashfile(hashfile);
 	delete_tempfile(&temp);
-	rollback_lock_file(&lock);
 	diff_queue_clear(&diff_queued_diff);
 	diff_free(&diffopt);
 	for (size_t i = 0; i < records_nr; i++)

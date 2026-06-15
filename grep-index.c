@@ -48,6 +48,7 @@
 #define GREP_INDEX_MEMORY_MAX_BLOB_SIZE	  (64 * 1024 * 1024)
 #define GREP_INDEX_MEMORY_FILTER_CLASSES	  18
 #define GREP_INDEX_MEMORY_MAX_MISSES		  (64 * 1024)
+#define GREP_INDEX_CHAIN_LOCK_TIMEOUT_MS	  10000
 
 struct grep_index_segment {
 	void *map;
@@ -3241,10 +3242,11 @@ static int collect_reachable_blob_oids(const char *path UNUSED,
 	return 0;
 }
 
-static int update_grep_index_chain(struct repository *repo,
-				   const char *chain_name,
-				   const char *hex)
+int append_grep_index_chain_entry(struct repository *repo,
+				  const char *chain_name,
+				  const char *entry)
 {
+	const char *ready = getenv("GIT_TEST_GREP_INDEX_CHAIN_LOCK_READY");
 	struct lock_file lock = LOCK_INIT;
 	struct strbuf chain = STRBUF_INIT;
 	struct strbuf chain_path = STRBUF_INIT;
@@ -3253,13 +3255,16 @@ static int update_grep_index_chain(struct repository *repo,
 	int result = -1;
 
 	grep_index_path(repo, &chain_path, chain_name);
-	hold_lock_file_for_update_mode(&lock, chain_path.buf,
-				       LOCK_DIE_ON_ERROR, 0444);
+	if (ready)
+		write_file(ready, "%s", chain_name);
+	hold_lock_file_for_update_timeout_mode(&lock, chain_path.buf,
+					       LOCK_DIE_ON_ERROR,
+					       GREP_INDEX_CHAIN_LOCK_TIMEOUT_MS, 0444);
 	if (strbuf_read_file(&chain, chain_path.buf, 0) < 0 && errno != ENOENT)
 		goto cleanup;
 	if (chain.len) {
 		string_list_split(&entries, chain.buf, "\n", -1);
-		if (unsorted_string_list_has_string(&entries, hex)) {
+		if (unsorted_string_list_has_string(&entries, entry)) {
 			result = 0;
 			goto cleanup;
 		}
@@ -3273,7 +3278,7 @@ static int update_grep_index_chain(struct repository *repo,
 		if (chain.buf[chain.len - 1] != '\n' && fputc('\n', out) == EOF)
 			goto cleanup;
 	}
-	if (fprintf(out, "%s\n", hex) < 0)
+	if (fprintf(out, "%s\n", entry) < 0)
 		goto cleanup;
 	if (commit_lock_file(&lock) < 0)
 		goto cleanup;
@@ -3783,8 +3788,8 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 		strbuf_rtrim(&manifest);
 		if (!found || !manifest.len)
 			result = error("unable to transpose new grep index segment");
-		else if (update_grep_index_chain(repo, "chain-transposed",
-						 manifest.buf))
+		else if (append_grep_index_chain_entry(repo, "chain-transposed",
+						       manifest.buf))
 			die_errno(_("unable to update grep index chain"));
 	} else if (merge_grep_index_chain(repo, "chain-transposed",
 					  &manifest)) {
@@ -3943,7 +3948,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 	strbuf_addf(&final_path, "grep-%s.idx", hex);
 	if (rename_tempfile(&temp, final_path.buf) < 0)
 		die_errno(_("unable to rename new grep index"));
-	if (update_grep_index_chain(repo, "chain", hex))
+	if (append_grep_index_chain_entry(repo, "chain", hex))
 		die_errno(_("unable to update grep index chain"));
 	result = 0;
 	wrote_segment = 1;

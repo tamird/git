@@ -465,7 +465,12 @@ test_expect_success 'write commit edge and endpoint content indexes' '
 	git grep-index --commit-edges \
 		refs/grep-index-test/old..refs/grep-index-test/middle \
 		refs/grep-index-test/old..refs/grep-index-test/sibling &&
-	test_path_is_file .git/objects/info/grep-index/commit-edges &&
+	test_path_is_file .git/objects/info/grep-index/commit-edges-chain &&
+	test_line_count = 1 \
+		.git/objects/info/grep-index/commit-edges-chain &&
+	segment=$(cat .git/objects/info/grep-index/commit-edges-chain) &&
+	test_path_is_file \
+		.git/objects/info/grep-index/commit-edges-$segment.idx &&
 	test_line_count = 2 .git/objects/info/grep-index/chain &&
 	test_line_count = 1 .git/objects/info/grep-index/chain-transposed &&
 
@@ -531,7 +536,8 @@ test_expect_success 'commit index bypasses harder copies' '
 
 test_expect_success 'commit index binds records to commits' '
 	test_when_finished "rm -f pickaxe-corrupt.trace" &&
-	index=.git/objects/info/grep-index/commit-edges &&
+	segment=$(cat .git/objects/info/grep-index/commit-edges-chain) &&
+	index=.git/objects/info/grep-index/commit-edges-$segment.idx &&
 	mv "$index" "$index.save" &&
 	test_when_finished "mv \"$index.save\" \"$index\"" &&
 	rawsz=$(test_oid rawsz) &&
@@ -560,10 +566,75 @@ test_expect_success 'commit index binds records to commits' '
 		pickaxe-corrupt.trace
 '
 
+test_expect_success 'commit index falls back from a corrupt record' '
+	cp .git/objects/info/grep-index/chain fallback-chain.before &&
+	cp .git/objects/info/grep-index/chain-transposed \
+		fallback-chain-transposed.before &&
+	test_when_finished "mv fallback-chain.before \
+		.git/objects/info/grep-index/chain &&
+		mv fallback-chain-transposed.before \
+		.git/objects/info/grep-index/chain-transposed" &&
+	git grep-index --commit-edges \
+		refs/grep-index-test/old..refs/grep-index-test/new &&
+	git grep-index --commit-edges \
+		refs/grep-index-test/old..refs/grep-index-test/new \
+		refs/grep-index-test/old..refs/grep-index-test/sibling &&
+	test_line_count = 3 \
+		.git/objects/info/grep-index/commit-edges-chain &&
+	segment=$(tail -n 1 \
+		.git/objects/info/grep-index/commit-edges-chain) &&
+	index=.git/objects/info/grep-index/commit-edges-$segment.idx &&
+	mv "$index" "$index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\" &&
+		rm -f pickaxe-fallback.trace" &&
+	rawsz=$(test_oid rawsz) &&
+	metadata_size=$((16 + 256 * 4 + 3 * rawsz + 4 * 8)) &&
+	file_size=$(wc -c <"$index.save") &&
+	data_size=$((file_size - metadata_size - rawsz)) &&
+	test $data_size = $((3 * (data_size / 3))) &&
+	record_size=$((data_size / 3)) &&
+	test_copy_bytes "$metadata_size" <"$index.save" >"$index" &&
+	dd if="$index.save" bs=1 skip=$((metadata_size + record_size)) \
+		count=$((2 * record_size)) >>"$index" 2>/dev/null &&
+	dd if="$index.save" bs=1 skip="$metadata_size" \
+		count="$record_size" >>"$index" 2>/dev/null &&
+	dd if="$index.save" bs=1 skip=$((metadata_size + data_size)) \
+		>>"$index" 2>/dev/null &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-fallback.trace" \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/new >actual-fallback &&
+	test_must_be_empty actual-fallback &&
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
+		pickaxe-fallback.trace
+'
+
+test_expect_success 'commit index ignores invalid manifest entries' '
+	chain=.git/objects/info/grep-index/commit-edges-chain &&
+	missing=$(test_oid zero) &&
+	malformed=1${missing#?} &&
+	cp "$chain" "$chain.save" &&
+	test_when_finished "mv \"$chain.save\" \"$chain\" &&
+		rm -f pickaxe-invalid-chain.trace \
+		.git/objects/info/grep-index/commit-edges-$malformed.idx" &&
+	test-tool genzeros 2048 \
+		>.git/objects/info/grep-index/commit-edges-$malformed.idx &&
+	chmod +w "$chain" &&
+	echo invalid >>"$chain" &&
+	echo "$missing" >>"$chain" &&
+	echo "$malformed" >>"$chain" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-invalid-chain.trace" \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/new >actual-invalid-chain &&
+	test_must_be_empty actual-invalid-chain &&
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
+		pickaxe-invalid-chain.trace
+'
+
 test_expect_success 'commit index writer includes ignored gitlinks' '
-	index=.git/objects/info/grep-index/commit-edges &&
-	cp "$index" "$index.save" &&
-	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	test_when_finished "rm -f pickaxe-missing-record.trace" &&
 	old_commit=$(git rev-parse refs/grep-index-test/old) &&
 	new_commit=$(git rev-parse refs/grep-index-test/middle) &&
 	old_tree=$(printf "160000 commit %s\tsub\n" "$old_commit" |
@@ -576,6 +647,15 @@ test_expect_success 'commit index writer includes ignored gitlinks' '
 	git update-ref refs/grep-index-test/gitlink "$new_tip" &&
 	test_config diff.ignoreSubmodules all &&
 	git grep-index --commit-edges refs/grep-index-test/gitlink &&
+	test_line_count = 4 \
+		.git/objects/info/grep-index/commit-edges-chain &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-missing-record.trace" \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/new >actual-missing-record &&
+	test_must_be_empty actual-missing-record &&
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
+		pickaxe-missing-record.trace &&
 	gitlink_oid=$(git rev-parse refs/grep-index-test/gitlink^:sub) &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --ignore-submodules=none --format=%s -S"$gitlink_oid" \
@@ -585,6 +665,61 @@ test_expect_success 'commit index writer includes ignored gitlinks' '
 		refs/grep-index-test/gitlink >expect-gitlink &&
 	test_file_not_empty expect-gitlink &&
 	test_cmp expect-gitlink actual-gitlink
+'
+
+test_expect_success 'concurrent commit index writers preserve both segments' '
+	test_create_repo concurrent-commit-index &&
+	(
+		cd concurrent-commit-index &&
+		echo one >one &&
+		git add one &&
+		git commit -m one &&
+		git branch one &&
+		git switch --orphan two &&
+		echo two >two &&
+		git add two &&
+		git commit -m two &&
+		mkdir -p .git/objects/info/grep-index &&
+		lock=.git/objects/info/grep-index/commit-edges-chain.lock &&
+		>"$lock" &&
+
+		{
+			env GIT_TEST_GREP_INDEX_CHAIN_LOCK_READY="$PWD/ready.one" \
+				git grep-index --no-progress --commit-edges refs/heads/one \
+				>out.one 2>err.one &
+		} &&
+		pid_one=$! &&
+		{
+			env GIT_TEST_GREP_INDEX_CHAIN_LOCK_READY="$PWD/ready.two" \
+				git grep-index --no-progress --commit-edges refs/heads/two \
+				>out.two 2>err.two &
+		} &&
+		pid_two=$! &&
+		trap "kill $pid_one $pid_two 2>/dev/null || : &&
+			wait $pid_one $pid_two 2>/dev/null || :" 0 &&
+		wait_for_file_value ready.one commit-edges-chain &&
+		wait_for_file_value ready.two commit-edges-chain &&
+		rm "$lock" &&
+		wait "$pid_one"
+		status_one=$? &&
+		wait "$pid_two"
+		status_two=$? &&
+		trap - 0 &&
+		test "$status_one" = 0 &&
+		test "$status_two" = 0 &&
+		test_must_be_empty out.one &&
+		test_must_be_empty err.one &&
+		test_must_be_empty out.two &&
+		test_must_be_empty err.two &&
+		test_line_count = 2 \
+			.git/objects/info/grep-index/commit-edges-chain &&
+		while read segment
+		do
+			test_path_is_file \
+				.git/objects/info/grep-index/commit-edges-$segment.idx ||
+			exit 1
+		done <.git/objects/info/grep-index/commit-edges-chain
+	)
 '
 
 test_expect_success 'content index prunes pickaxe blob reads' '
