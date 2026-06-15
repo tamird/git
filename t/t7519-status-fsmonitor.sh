@@ -921,8 +921,8 @@ test_expect_success UNTRACKED_CACHE 'set up cross-mode untracked pruning' '
 		: >quiet/b/tracked &&
 		git add . &&
 		git commit -m initial &&
-		: >results/one &&
-		: >results/two &&
+		echo needle >results/one &&
+		echo needle >results/two &&
 		test_hook --setup fsmonitor-test <<-\EOF &&
 			printf "last_update_token\0"
 		EOF
@@ -1011,6 +1011,22 @@ test_expect_success UNTRACKED_CACHE 'ls-files replays all-mode cache' '
 	test_cmp expect actual &&
 	test_grep "subtrees-pruned:[1-9]" trace-ls-files-all &&
 	test_grep "opendir:0" trace-ls-files-all
+'
+
+test_expect_success UNTRACKED_CACHE 'prune grep --untracked from normal cache' '
+	(
+		cd cross-mode-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-grep-untracked" \
+			git grep --untracked -l needle >../actual
+	) &&
+	cat >expect <<-\EOF &&
+	clean/a/tracked
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:[1-9]" trace-grep-untracked &&
+	test_grep "directories-visited:[1-9]" trace-grep-untracked
 '
 
 test_expect_success UNTRACKED_CACHE 'ls-files prunes normal cache' '
