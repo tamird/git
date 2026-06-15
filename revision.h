@@ -133,7 +133,6 @@ struct rev_info {
 	/*
 	 * Work queue of commits, stored as either a linked list or a
 	 * priority queue, but never both at the same time.
-	 * rev_info_commit_list_to_queue() converts list to queue.
 	 */
 	struct commit_list *commits;
 	struct prio_queue commit_queue;
@@ -519,9 +518,6 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 void revision_follow_finish_diff(struct rev_info *revs,
 				 enum revision_bloom_filter_result result,
 				 int diff_is_empty);
-
-/* Drain the commits linked list into the priority queue. */
-void rev_info_commit_list_to_queue(struct rev_info *revs);
 
 /**
  * Takes a pointer to a `rev_info` structure and iterates over it, returning a

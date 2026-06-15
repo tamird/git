@@ -232,6 +232,11 @@ test_expect_success 'git log --no-walk=sorted <commits> sorts by commit time' '
 	test_cmp expect actual
 '
 
+test_expect_success 'git log --no-walk overrides unsorted mode' '
+	git log --no-walk=unsorted --no-walk --oneline $last_three >actual &&
+	test_cmp expect actual
+'
+
 cat > expect << EOF
 === $(git rev-parse --short :/sixth ) sixth
 === $(git rev-parse --short :/fifth ) fifth

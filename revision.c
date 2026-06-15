@@ -292,6 +292,12 @@ void mark_parents_uninteresting(struct rev_info *revs, struct commit *commit)
 	commit_stack_clear(&pending);
 }
 
+static void enable_walk(struct rev_info *revs)
+{
+	revs->no_walk = 0;
+	revs->unsorted_input = 0;
+}
+
 static void add_pending_object_with_path(struct rev_info *revs,
 					 struct object *obj,
 					 const char *name, unsigned mode,
@@ -301,7 +307,7 @@ static void add_pending_object_with_path(struct rev_info *revs,
 	if (!obj)
 		return;
 	if (revs->no_walk && (obj->flags & UNINTERESTING))
-		revs->no_walk = 0;
+		enable_walk(revs);
 	if (revs->reflog_info && obj->type == OBJ_COMMIT) {
 		struct strbuf buf = STRBUF_INIT;
 		size_t namelen = strlen(name);
@@ -2715,7 +2721,7 @@ static int handle_revision_opt(struct rev_info *revs, int argc, const char **arg
 
 	if ((argcount = parse_long_opt("max-count", argv, &optarg))) {
 		revs->max_count = parse_count(optarg);
-		revs->no_walk = 0;
+		enable_walk(revs);
 		return argcount;
 	} else if ((argcount = parse_long_opt("skip", argv, &optarg))) {
 		revs->skip_count = parse_count(optarg);
@@ -2723,16 +2729,16 @@ static int handle_revision_opt(struct rev_info *revs, int argc, const char **arg
 	} else if ((*arg == '-') && isdigit(arg[1])) {
 		/* accept -<digit>, like traditional "head" */
 		revs->max_count = parse_count(arg + 1);
-		revs->no_walk = 0;
+		enable_walk(revs);
 	} else if (!strcmp(arg, "-n")) {
 		if (argc <= 1)
 			return error("-n requires an argument");
 		revs->max_count = parse_count(argv[1]);
-		revs->no_walk = 0;
+		enable_walk(revs);
 		return 2;
 	} else if (skip_prefix(arg, "-n", &optarg)) {
 		revs->max_count = parse_count(optarg);
-		revs->no_walk = 0;
+		enable_walk(revs);
 	} else if ((argcount = parse_long_opt("max-age", argv, &optarg))) {
 		revs->max_age = parse_age(optarg);
 		return argcount;
@@ -3264,6 +3270,7 @@ static int handle_revision_pseudo_opt(struct rev_info *revs,
 		*flags ^= UNINTERESTING | BOTTOM;
 	} else if (!strcmp(arg, "--no-walk")) {
 		revs->no_walk = 1;
+		revs->unsorted_input = 0;
 	} else if (skip_prefix(arg, "--no-walk=", &optarg)) {
 		/*
 		 * Detached form ("--no-walk X" as opposed to "--no-walk=X")
@@ -3277,7 +3284,7 @@ static int handle_revision_pseudo_opt(struct rev_info *revs,
 		else
 			return error("invalid argument to --no-walk");
 	} else if (!strcmp(arg, "--do-walk")) {
-		revs->no_walk = 0;
+		enable_walk(revs);
 	} else if (!strcmp(arg, "--single-worktree")) {
 		revs->single_worktree = 1;
 	} else if (skip_prefix(arg, ("--filter="), &arg)) {
@@ -4329,13 +4336,6 @@ static void expand_topo_walk(struct rev_info *revs, struct commit *commit)
 	}
 }
 
-void rev_info_commit_list_to_queue(struct rev_info *revs)
-{
-	while (revs->commits)
-		prio_queue_put(&revs->commit_queue, pop_commit(&revs->commits));
-}
-
-
 int prepare_revision_walk(struct rev_info *revs)
 {
 	int i;
@@ -4823,8 +4823,11 @@ static struct commit *get_revision_1(struct rev_info *revs)
 {
 	enum rev_walk_mode mode = get_walk_mode(revs);
 
-	if (mode == REV_WALK_STREAMING && revs->commits)
-		rev_info_commit_list_to_queue(revs);
+	if (mode == REV_WALK_STREAMING && revs->commits) {
+		while (revs->commits)
+			prio_queue_put(&revs->commit_queue,
+				       pop_commit(&revs->commits));
+	}
 
 	while (1) {
 		struct commit *commit;
@@ -4922,13 +4925,13 @@ static void create_boundary_commit_list(struct rev_info *revs)
 	struct object_array_entry *objects = array->objects;
 
 	/*
-	 * If revs->commits is non-NULL at this point, an error occurred in
-	 * get_revision_1().  Ignore the error and continue printing the
-	 * boundary commits anyway.  (This is what the code has always
-	 * done.)
+	 * Discard an unfinished walk before repurposing revs->commits for
+	 * boundary output.  A frontier can remain when max_count stops the
+	 * walk early.
 	 */
 	commit_list_free(revs->commits);
 	revs->commits = NULL;
+	clear_prio_queue(&revs->commit_queue);
 
 	/*
 	 * Put all of the actual boundary commits from revs->boundary_commits
@@ -5050,6 +5053,7 @@ struct commit *get_revision(struct rev_info *revs)
 		while ((c = get_revision_internal(revs)))
 			commit_list_insert(c, &reversed);
 		commit_list_free(revs->commits);
+		clear_prio_queue(&revs->commit_queue);
 		revs->commits = reversed;
 		revs->reverse = 0;
 		revs->reverse_output_stage = 1;

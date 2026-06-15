@@ -169,6 +169,18 @@ test_expect_success 'rev-list --count --objects' '
 	test_line_count = $count actual
 '
 
+test_expect_success '--do-walk clears unsorted no-walk mode' '
+	test_when_finished "rm -rf walk" &&
+	git init walk &&
+	test_commit_bulk -C walk 10 &&
+
+	git -C walk rev-list HEAD~9 HEAD --not HEAD~ HEAD~2 HEAD~3 HEAD~4 \
+		HEAD~5 HEAD~6 >expect &&
+	git -C walk rev-list --no-walk=unsorted --do-walk HEAD~9 HEAD --not \
+		HEAD~ HEAD~2 HEAD~3 HEAD~4 HEAD~5 HEAD~6 >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'rev-list --unpacked' '
 	git repack -ad &&
 	test_commit unpacked &&
