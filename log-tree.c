@@ -1210,7 +1210,13 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 	/* Root commit? */
 	if (!parents) {
 		if (opt->show_root_diff) {
-			diff_root_tree_oid(oid, "", &opt->diffopt);
+			struct object_id empty_parent;
+
+			oidclr(&empty_parent, opt->repo->hash_algo);
+			if (diff_pickaxe_edge_maybe_contains(
+				    &opt->diffopt, &commit->object.oid,
+				    &empty_parent))
+				diff_root_tree_oid(oid, "", &opt->diffopt);
 			log_tree_diff_flush(opt);
 		}
 		return !opt->loginfo;
@@ -1250,7 +1256,10 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 		bloom_ret =
 			revision_bloom_filter_query_diff(opt, commit, parent);
 
-		if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT)
+		if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT &&
+		    diff_pickaxe_edge_maybe_contains(
+			    &opt->diffopt, &commit->object.oid,
+			    &parent->object.oid))
 			diff_tree_oid(get_commit_tree_oid(parent),
 				      oid, "", &opt->diffopt);
 

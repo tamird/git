@@ -356,6 +356,7 @@ libgit_sources = [
   'git-zlib.c',
   'gpg-interface.c',
   'graph.c',
+  'grep-commit-index.c',
   'grep-index.c',
   'grep-index-identity.c',
   'grep-index-ipc.c',

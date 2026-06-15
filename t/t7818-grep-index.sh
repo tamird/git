@@ -431,6 +431,103 @@ test_expect_success 'write shared content index' '
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
 '
 
+test_expect_success 'write commit edge index' '
+	old_oid=$(git rev-parse :pickaxe-old) &&
+	new_oid=$(git rev-parse :pickaxe-new) &&
+	other_oid=$(git rev-parse :ordinary) &&
+	old_tree=$(printf "100644 blob %s\tprobe\n" "$old_oid" |
+		git mktree) &&
+	new_tree=$(printf "100644 blob %s\tprobe\n" "$new_oid" |
+		git mktree) &&
+	other_tree=$(printf "100644 blob %s\tprobe\n" "$other_oid" |
+		git mktree) &&
+	old_commit=$(echo old | git commit-tree "$old_tree") &&
+	middle_commit=$(echo middle |
+		git commit-tree "$new_tree" -p "$old_commit") &&
+	sibling_commit=$(echo sibling |
+		git commit-tree "$other_tree" -p "$old_commit") &&
+	new_commit=$(echo new |
+		git commit-tree "$old_tree" -p "$middle_commit") &&
+	git update-ref refs/grep-index-test/old "$old_commit" &&
+	git update-ref refs/grep-index-test/middle "$middle_commit" &&
+	git update-ref refs/grep-index-test/sibling "$sibling_commit" &&
+	git update-ref refs/grep-index-test/new "$new_commit" &&
+	git grep-index --commit-edges \
+		refs/grep-index-test/old..refs/grep-index-test/middle \
+		refs/grep-index-test/old..refs/grep-index-test/sibling &&
+	test_path_is_file .git/objects/info/grep-index/commit-edges
+'
+
+test_expect_success 'commit index prunes pickaxe tree diff' '
+	test_when_finished "rm -f pickaxe-commit-index.trace" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sneedle \
+		refs/grep-index-test/new >actual-fixed &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -Sneedle \
+		refs/grep-index-test/new >expect-fixed &&
+	test_cmp expect-fixed actual-fixed &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-commit-index.trace" \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/new >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err &&
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
+		pickaxe-commit-index.trace
+'
+
+test_expect_success 'commit index bypasses broader diff semantics' '
+	test_when_finished "rm -f pickaxe-scoped.trace pickaxe-copies.trace" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-scoped.trace" \
+		git log --format=%s -Sabsent refs/grep-index-test/new \
+		-- probe >actual-scoped &&
+	test_must_be_empty actual-scoped &&
+	test_grep "\"key\":\"commit_index/tested\",\"value\":\"0\"" \
+		pickaxe-scoped.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-copies.trace" \
+		git log --find-copies-harder --format=%s -Sabsent \
+		refs/grep-index-test/new >actual-copies &&
+	test_must_be_empty actual-copies &&
+	test_grep "\"key\":\"commit_index/tested\",\"value\":\"0\"" \
+		pickaxe-copies.trace
+'
+
+test_expect_success 'commit index binds records to commits' '
+	test_when_finished "rm -f pickaxe-corrupt.trace" &&
+	index=.git/objects/info/grep-index/commit-edges &&
+	mv "$index" "$index.save" &&
+	test_when_finished "mv \"$index.save\" \"$index\"" &&
+	rawsz=$(test_oid rawsz) &&
+	metadata_size=$((16 + 256 * 4 + 2 * rawsz + 3 * 8)) &&
+	file_size=$(wc -c <"$index.save") &&
+	data_size=$((file_size - metadata_size - rawsz)) &&
+	test $data_size = $((2 * (data_size / 2))) &&
+	record_size=$((data_size / 2)) &&
+	test_copy_bytes "$metadata_size" <"$index.save" >"$index" &&
+	dd if="$index.save" bs=1 skip=$((metadata_size + record_size)) \
+		count="$record_size" >>"$index" 2>/dev/null &&
+	dd if="$index.save" bs=1 skip="$metadata_size" \
+		count="$record_size" >>"$index" 2>/dev/null &&
+	dd if="$index.save" bs=1 skip=$((metadata_size + data_size)) \
+		>>"$index" 2>/dev/null &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-corrupt.trace" \
+		git log --format=%s -Sneedle \
+		refs/grep-index-test/new >actual-corrupt &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
+		git log --format=%s -Sneedle \
+		refs/grep-index-test/new >expect-corrupt &&
+	test_cmp expect-corrupt actual-corrupt &&
+	test_grep "\"key\":\"commit_index/tested\",\"value\":\"0\"" \
+		pickaxe-corrupt.trace
+'
+
 test_expect_success 'content index prunes pickaxe blob reads' '
 	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
 	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
