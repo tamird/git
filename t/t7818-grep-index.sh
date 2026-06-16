@@ -1269,6 +1269,34 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
+	'daemon learns multi-pattern fixed negatives' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    rm -f negative-fixed-list-*.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/negative-fixed-list-learn.trace" \
+		git grep --cached -F -e foo -e "absent|two" \
+		-- ordinary &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<negative-fixed-list-learn.trace &&
+
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/negative-fixed-list-hit.trace" \
+		git grep --cached -F -e foo -e "absent|two" \
+		-- ordinary 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<negative-fixed-list-hit.trace
+'
+
+test_expect_success FSMONITOR_DAEMON \
 	'daemon learns ERE negatives from required literals' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
