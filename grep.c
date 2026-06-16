@@ -732,15 +732,13 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	}
 #ifdef USE_LIBPCRE2
 	int group_depth = 0;
-	int have_alternation = 0;
 	int have_literal = 0;
-	int have_wildcard = 0;
 	struct strbuf lookahead_pattern = STRBUF_INIT;
 
 	/*
-	 * TRE can be very slow on long buffers with wildcards. Compile the
-	 * supported subset as PCRE2 for use as a candidate finder; the POSIX
-	 * matcher still decides whether each candidate line matches.
+	 * POSIX matching can be slow on long buffers. Compile the supported
+	 * subset as PCRE2 for use as a candidate finder; the POSIX matcher still
+	 * decides whether each candidate line matches.
 	 */
 	if (p->token == GREP_PATTERN &&
 	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
@@ -755,7 +753,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			 */
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    starts_with(p->pattern + i, "[^\\n]*")) {
-				have_wildcard = 1;
 				strbuf_addstr(&lookahead_pattern, ".*");
 				i += strlen("[^\\n]*") - 1;
 				continue;
@@ -785,7 +782,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			if (ch == '\\' && i + 1 < p->patternlen &&
 			    strchr("bB<>", p->pattern[i + 1])) {
 				/* Word-boundary escapes vary; POSIX verifies candidates. */
-				have_wildcard = 1;
 				strbuf_addstr(&lookahead_pattern, ".*");
 				i++;
 				continue;
@@ -794,7 +790,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			    ch == '\\' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '|' && have_literal &&
 			    i + 2 < p->patternlen) {
-				have_alternation = 1;
 				have_literal = 0;
 				strbuf_addch(&lookahead_pattern, '|');
 				i++;
@@ -802,7 +797,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			}
 			if (ch == '.' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '*') {
-				have_wildcard = 1;
 				strbuf_add(&lookahead_pattern, p->pattern + i, 2);
 				i++;
 				continue;
@@ -850,7 +844,6 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '|' && have_literal &&
 			    i + 1 < p->patternlen) {
-				have_alternation = 1;
 				have_literal = 0;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
@@ -859,8 +852,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			break;
 		}
 	}
-	if (have_literal && !group_depth &&
-	    (have_wildcard || have_alternation)) {
+	if (have_literal && !group_depth) {
 		struct grep_opt lookahead_opt = *opt;
 
 		CALLOC_ARRAY(p->pcre2_lookahead, 1);
