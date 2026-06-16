@@ -1,0 +1,168 @@
+Frankengit configuration
+========================
+
+Frankengit accelerates large repositories without requiring every feature to
+be configured. The settings below enable the filesystem and history metadata
+used by its fastest paths.
+
+Recommended configuration
+-------------------------
+
+Set the recommended defaults for all repositories:
+
+----
+git config --global core.fsmonitor true
+git config --global feature.manyFiles true
+git config --global index.threads true
+git config --global status.aheadBehind false
+git config --global commitGraph.changedPaths true
+git config --global commitGraph.changedPathsVersion 3
+----
+
+Use a repository-local override for an exceptional checkout, such as one on a
+filesystem unsupported by the built-in fsmonitor or one shared with a Git
+version that cannot read changed-path Bloom filter version 3.
+
+`core.fsmonitor=true`::
+	Starts the built-in filesystem monitor when needed. This avoids repeated
+	worktree scans and is required by frankengit's shared grep daemon,
+	worktree blob cache, untracked-cache pruning, and fsmonitor-aware
+	`ls-files` paths.
+
+`feature.manyFiles=true`::
+	Selects `index.skipHash`, index version 4, and the untracked cache as
+	defaults, and enables path-walk pack generation. These reduce index write
+	work, index size, worktree traversal, and some pack-generation costs in
+	repositories with many tracked and untracked paths. The untracked cache
+	requires reliable filesystem mtimes.
+
+`status.aheadBehind=false`::
+	Avoids computing exact ahead and behind counts during ordinary human
+	`git status` output. Use `git status --ahead-behind` when those counts are
+	needed.
+
+`commitGraph.changedPaths=true`::
+	Makes future commit-graph writes include changed-path Bloom filters. These
+	accelerate path history, `--follow`, blame, and other history operations.
+
+`commitGraph.changedPathsVersion=3`::
+	Uses frankengit's basename-aware Bloom filters, allowing a leading
+	`**/literal` pathspec to prune history. Every Git version that writes the
+	commit graph must support version 3; an older writer can create an
+	incompatible layer that frankengit must ignore.
+
+`index.threads=true`::
+	Selects the index-loading thread count from the available CPUs. Setting it
+	explicitly also makes future index writes include the EOIE and IEOT
+	extensions needed to load index entries and extensions in parallel. The
+	setting takes effect fully after an index rewrite; this is why the explicit
+	value matters even though linkgit:git-config[1] describes `true` as the
+	default. Each Git process chooses its index-loading threads independently;
+	this is separate from frankengit's shared grep worker allocation.
+
+Frankengit defaults
+-------------------
+
+Do not set these unless overriding the default:
+
+`grep.useContentIndex=true`::
+	The shared content index is enabled by default. Set this to `false` only
+	for diagnosis or comparison.
+
+`grep.worktreeBlobCache=true`::
+	The worktree blob cache is enabled by default. It requires fsmonitor and
+	may increase memory use by redirecting unchanged-file reads through the
+	object database. `auto` limits it to non-quiet searches covering at least
+	1 GiB of eligible files; `false` disables it.
+
+`grep.threads`::
+	Leave this unset, or set it to `0`. Automatic mode lets concurrent grep
+	processes share the daemon's worker budget and lets small candidate sets
+	avoid unnecessary threads. An explicit positive value bypasses that
+	coordination.
+
+`fsmonitor.ipcThreads`::
+	Leave this unset. The daemon defaults to eight IPC workers. Increasing it
+	can improve isolated request throughput but also increases contention
+	between simultaneous Git processes.
+
+Conditional settings
+--------------------
+
+`index.sparse=true`::
+	Enable this only for a cone-mode sparse checkout. It has no effect unless
+	`core.sparseCheckout` and `core.sparseCheckoutCone` are also enabled.
+
+`pack.useAggressiveShallowEdges=false`::
+	This can reduce pack-generation CPU in shallow repositories at the cost
+	of sending more objects. It is not an interactive-worktree optimization.
+
+`writeTree.persistCacheTree=false`::
+	This avoids an optional index rewrite after `git write-tree`, but a later
+	cache-tree consumer may have to repeat the work. Set it only for a
+	measured workload dominated by standalone `git write-tree` calls.
+
+Command guidance
+----------------
+
+Configuration cannot compensate for avoidable traversal work. Human and
+automated callers should follow these rules:
+
+* Combine related predicates into one traversal instead of launching
+  concurrent whole-repository scans.
+* Push path, revision, and output limits into Git rather than filtering an
+  unbounded result afterward.
+* Use `git grep -F` for literal patterns. Pass independent alternatives as
+  separate `-e` arguments so the content index can evaluate them directly.
+* Use `git grep -P` instead of `-E` when the pattern has equivalent PCRE
+  semantics; PCRE is optimized for repeated matching over large inputs.
+* Scope `git log -S` and `git log -G` to likely paths and revisions before
+  broadening the search. Do not add `--all` unless all refs are required.
+* Leave `grep.threads` automatic so concurrent searches share the daemon's
+  worker budget.
+* Request only the names, counts, existence result, or bounded history that
+  the caller will consume.
+
+Populate derived data
+---------------------
+
+Configuration affects future writes; it does not rebuild existing indexes.
+Rewrite each worktree's index once to select index version 4 and record the
+extensions used by `index.threads`:
+
+----
+git update-index --index-version 4 --force-write-index
+----
+
+After setting changed-path version 3, replace existing commit-graph layers so
+commands do not encounter a mixture of Bloom-filter versions:
+
+----
+git commit-graph write --reachable --changed-paths --max-new-filters=-1 \
+    --split=replace
+----
+
+This can be expensive in a large repository. Subsequent incremental
+maintenance preserves the filters when `commitGraph.changedPaths=true` is
+set. `git maintenance register` registers the repository, while
+`git maintenance start` installs the background schedule.
+
+Build the content index for blobs in all linked-worktree indexes:
+
+----
+git grep-index
+----
+
+Tree searches and historical pickaxe searches benefit from broader coverage.
+Build only the history that matters, because indexing every reachable blob can
+consume substantial time and disk space:
+
+----
+git grep-index --reachable HEAD
+git grep-index --commit-edges HEAD~20000..HEAD
+----
+
+`--reachable` adds missing blobs to the content index. `--commit-edges`
+prepares history edges so `git log -S` can reject commits before constructing
+their tree diffs, but it recomputes the requested range and hydrates content
+filters for its changed endpoint blobs. Keep that range bounded.
