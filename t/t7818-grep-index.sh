@@ -1105,11 +1105,83 @@ test_expect_success FSMONITOR_DAEMON \
 		.git/objects/info/grep-index/chain-transposed
 '
 
+test_expect_success FSMONITOR_DAEMON \
+	'pickaxe caches exact counts for uncovered history' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git update-ref -d refs/heads/pickaxe-uncovered &&
+			    rm -f pickaxe-uncovered-*.trace" &&
+	git branch pickaxe-uncovered HEAD &&
+	test_commit_bulk --ref=refs/heads/pickaxe-uncovered \
+		--filename=pickaxe-uncovered --contents="needle %s" \
+		--notick 8 &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-absent.trace" \
+		git log --no-renames --format=%s -Sabsent \
+		pickaxe-uncovered~7..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_must_be_empty actual &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"7\"" \
+		pickaxe-uncovered-absent.trace &&
+	test_grep \
+		"\"key\":\"content_index/count_cache_hits\",\"value\":\"0\"" \
+		pickaxe-uncovered-absent.trace &&
+	test_grep \
+		"\"key\":\"content_index/count_cache_updates\",\"value\":\"0\"" \
+		pickaxe-uncovered-absent.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-positive.trace" \
+		git log --no-renames --format=%s -Sneedle \
+		pickaxe-uncovered~7..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_must_be_empty actual &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"7\"" \
+		pickaxe-uncovered-positive.trace &&
+	test_grep \
+		"\"key\":\"content_index/count_cache_hits\",\"value\":\"6\"" \
+		pickaxe-uncovered-positive.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-regex.trace" \
+		git log --no-renames --format=%s --pickaxe-regex \
+		-S"needle.[0-9]" pickaxe-uncovered~7..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_must_be_empty actual &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"7\"" \
+		pickaxe-uncovered-regex.trace &&
+	test_grep \
+		"\"key\":\"content_index/count_cache_hits\",\"value\":\"6\"" \
+		pickaxe-uncovered-regex.trace &&
+
+	test_commit_bulk --ref=refs/heads/pickaxe-uncovered --start=9 \
+		--filename=pickaxe-uncovered --contents="needle needle %s" \
+		--notick 1 &&
+	echo "commit 9" >expect &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-change.trace" \
+		git log --no-renames --format=%s -Sneedle \
+		pickaxe-uncovered~8..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_cmp expect actual &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"8\"" \
+		pickaxe-uncovered-change.trace &&
+	test_grep \
+		"\"key\":\"content_index/count_cache_hits\",\"value\":\"7\"" \
+		pickaxe-uncovered-change.trace
+'
+
 test_expect_success 'possible pickaxe blobs use normal reads' '
+	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
 	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
+	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
 	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
 	mv "$new_object" "$new_object.save" &&
-	test_when_finished "mv \"$new_object.save\" \"$new_object\"" &&
+	test_when_finished "test ! -e \"$new_object.save\" ||
+			    mv \"$new_object.save\" \"$new_object\"" &&
 
 	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sneedle HEAD^..HEAD \
@@ -1122,7 +1194,15 @@ test_expect_success 'possible pickaxe blobs use normal reads' '
 	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s --pickaxe-regex -S"replac.ment" \
 		HEAD^..HEAD -- pickaxe-history 2>err-regex &&
-	test_grep "unable to read" err-regex
+	test_grep "unable to read" err-regex &&
+
+	mv "$new_object.save" "$new_object" &&
+	mv "$old_object" "$old_object.save" &&
+	test_when_finished "mv \"$old_object.save\" \"$old_object\"" &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sreplacement HEAD^..HEAD \
+		-- pickaxe-history 2>err-impossible &&
+	test_grep "unable to read" err-impossible
 '
 
 test_expect_success 'pickaxe content index preserves textconv' '
