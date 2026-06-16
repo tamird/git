@@ -257,6 +257,79 @@ test_expect_success LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 \
+	'ERE optional bracket classes preserve matches' '
+	test_when_finished "rm -f ere-class-lookahead" &&
+	cat >ere-class-lookahead <<-\EOF &&
+	maximum file size
+	MAX-BLOB_SIZE
+	large blob
+	maximumXfileYsize
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:maximum file size
+	ere-class-lookahead:2:MAX-BLOB_SIZE
+	ere-class-lookahead:3:large blob
+	EOF
+	git grep --no-index -n -i -E \
+		"(maximum|max)[ _-]?(file|blob)[ _-]?size|large.*blob" \
+		-- ere-class-lookahead >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success LIBPCRE2 'ERE bracket classes preserve matches' '
+	test_when_finished "rm -f ere-class-lookahead" &&
+	cat >ere-class-lookahead <<-\EOF &&
+	constraints_file(a
+	constraints_file()
+	xconstraints_file(z
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:constraints_file(a
+	ere-class-lookahead:3:xconstraints_file(z
+	EOF
+	git grep --no-index -n -E "constraints_file\\([^)]" \
+		-- ere-class-lookahead >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success LIBPCRE2 'ERE word-boundary escapes preserve matches' '
+	test_when_finished "rm -f ere-boundary-lookahead" &&
+	cat >ere-boundary-lookahead <<-\EOF &&
+	.context_rootb
+	.repository_rootb
+	.context_root
+	.context_root_extra
+	EOF
+	git grep --no-index -n -E \
+		"^.*\\.(context_root|repository_root)\\b" \
+		-- ere-boundary-lookahead >expect &&
+	test_file_not_empty expect &&
+	git grep --no-index -n -E \
+		"\\.(context_root|repository_root)\\b" \
+		-- ere-boundary-lookahead >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success LIBPCRE2 'BRE word-boundary escapes preserve matches' '
+	test_when_finished "rm -f bre-boundary-lookahead" &&
+	cat >bre-boundary-lookahead <<-\EOF &&
+	constraints_file(
+	notconstraints_file(
+	bconstraints_file(
+	EOF
+	git grep --no-index -n \
+		"^.*\\bconstraints_file(" \
+		-- bre-boundary-lookahead >expect &&
+	test_file_not_empty expect &&
+	git grep --no-index -n \
+		"\\bconstraints_file(" \
+		-- bre-boundary-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
