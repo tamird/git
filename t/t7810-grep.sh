@@ -288,6 +288,24 @@ test_expect_success LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 'ERE word-boundary escapes preserve matches' '
+	test_when_finished "rm -f ere-boundary-lookahead" &&
+	cat >ere-boundary-lookahead <<-\EOF &&
+	.context_rootb
+	.repository_rootb
+	.context_root
+	.context_root_extra
+	EOF
+	git grep --no-index -n -E \
+		"^.*\\.(context_root|repository_root)\\b" \
+		-- ere-boundary-lookahead >expect &&
+	test_file_not_empty expect &&
+	git grep --no-index -n -E \
+		"\\.(context_root|repository_root)\\b" \
+		-- ere-boundary-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
