@@ -1185,6 +1185,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	size_t enrichment_trigrams_nr = 0;
 	struct strbuf required_literal = STRBUF_INIT;
 	int required_literal_valid = 1;
+	int cacheable_options;
 	size_t patterns_nr = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
@@ -2342,13 +2343,38 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	/*
 	 * Cache only searches whose no-match result can be proved from the raw
 	 * bytes. Default binary handling and --text both search those bytes;
-	 * -I, folding, and word boundaries do not share that invariant. Fixed
-	 * patterns and plain ASCII BRE and ERE literals are checked against the
-	 * bytes before their negative result is reported. A more complex ERE can
-	 * use an unquantified top-level literal that every match must contain.
+	 * -I, folding, and word boundaries do not share that invariant. A
+	 * case-sensitive fixed-string OR list can trust the matcher's successful
+	 * no-match result. Single fixed patterns and plain ASCII BRE and ERE
+	 * literals are also checked against the bytes before their negative result
+	 * is reported. A more complex ERE can use an unquantified top-level literal
+	 * that every match must contain.
 	 */
-	if (!opt->ignore_case && !opt->word_regexp &&
-	    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match &&
+	cacheable_options = !opt->ignore_case && !opt->word_regexp &&
+			    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match;
+
+	if (cacheable_options && !opt->all_match && patterns_nr > 1 &&
+	    pattern_type == GREP_PATTERN_TYPE_FIXED) {
+		static const char fixed_list_domain[] =
+			"grep-index-negative-fixed-list-v1";
+		struct git_hash_ctx ctx;
+		const struct grep_pat *pattern = opt->pattern_list;
+
+		opt->repo->hash_algo->init_fn(&ctx);
+		git_hash_update(&ctx, fixed_list_domain,
+				sizeof(fixed_list_domain));
+		for (; pattern; pattern = pattern->next) {
+			unsigned char length[sizeof(uint64_t)];
+
+			put_be64(length, pattern->patternlen);
+			git_hash_update(&ctx, length, sizeof(length));
+			git_hash_update(&ctx, pattern->pattern,
+					pattern->patternlen);
+		}
+		git_hash_final_oid(&query->cache_key, &ctx);
+		query->cacheable = 1;
+	}
+	if (cacheable_options &&
 	    patterns_nr == 1 && pattern_type != GREP_PATTERN_TYPE_PCRE) {
 		const struct grep_pat *pattern = opt->pattern_list;
 		int fixed = pattern_type == GREP_PATTERN_TYPE_FIXED;
