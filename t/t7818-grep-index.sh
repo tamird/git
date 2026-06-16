@@ -102,6 +102,9 @@ test_expect_success 'setup' '
 	echo "present needle" >present &&
 	echo "import sample_ext.vendor_internal" >agent-regex &&
 	echo "ordinary contents" >ordinary &&
+	echo "abc bcd cde def efg fgh gh(" >negative-required-ere &&
+	echo "abcdefgh(" >positive-required-ere &&
+	echo "Xabcdefgh(" >negative-context-ere &&
 	echo "import sample_ext.__private" >escaped-dot &&
 	echo "present.needle" >escaped-dot-ere &&
 	echo ".a" >escaped-dot-quantified &&
@@ -166,7 +169,9 @@ test_expect_success 'setup' '
 		return 1
 	done &&
 	echo "literal mixed candidate needle" >literal-candidate-z-40 &&
-	git add short fixed-pcre present agent-regex ordinary escaped-dot \
+	git add short fixed-pcre present agent-regex ordinary \
+		negative-required-ere positive-required-ere negative-context-ere \
+		escaped-dot \
 		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
 		escaped-call-negative escaped-call-positive \
 		escaped-call-optional escaped-call-right-quantified \
@@ -1261,6 +1266,49 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	echo "ordinary:foo contents" >expect &&
 	git grep --cached foo -- ordinary >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'daemon learns ERE negatives from required literals' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git reset --hard HEAD &&
+			    rm -f negative-required-ere-*.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	pattern="(^|[^A-Z])abcdefgh\\(" &&
+	echo "positive-required-ere:abcdefgh(" >expect &&
+	env GIT_TRACE2_EVENT="$PWD/negative-required-ere-learn.trace" \
+		git grep --cached -E "$pattern" -- \
+		negative-required-ere positive-required-ere >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<negative-required-ere-learn.trace &&
+
+	oid=$(git rev-parse :negative-required-ere) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/negative-required-ere-hit.trace" \
+		git grep --cached -E "$pattern" -- negative-required-ere \
+		2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<negative-required-ere-hit.trace &&
+	mv "$object.save" "$object" &&
+
+	test_must_fail git grep --cached -E "$pattern" -- \
+		negative-context-ere &&
+	oid=$(git rev-parse :negative-context-ere) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" -- \
+		negative-context-ere 2>err &&
+	test_grep "unable to read" err
 '
 
 test_expect_success FSMONITOR_DAEMON,REGEX_MATCH_ERROR \
