@@ -184,6 +184,34 @@ test_expect_success LIBPCRE2 \
 	git grep --no-index -q "copy.*UvIndex" -- bre-lookahead
 '
 
+test_expect_success LIBPCRE2 \
+	'ERE negated class wildcard preserves matches' '
+	test_when_finished "rm -f ere-lookahead" &&
+	cat >ere-lookahead <<-\EOF &&
+	Project(foo_repo_root
+	_project_index
+	_repo_root
+	_get_project_index(
+	Project(foo
+	Project(bar
+	_repo_root
+	unrelated
+	EOF
+	printf "Project(foo\r_repo_root\n" >>ere-lookahead &&
+	cat >expect <<-\EOF &&
+	ere-lookahead:1:Project(foo_repo_root
+	ere-lookahead:2:_project_index
+	ere-lookahead:3:_repo_root
+	ere-lookahead:4:_get_project_index(
+	ere-lookahead:7:_repo_root
+	EOF
+	printf "ere-lookahead:9:Project(foo\r_repo_root\n" >>expect &&
+	git grep --no-index -n -E \
+		"Project\\([^\\n]*_repo_root|_project_index|_repo_root|_get_project_index\\(" \
+		-- ere-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success ENHANCED_BRE,LIBPCRE2 \
 	'BRE candidate finder requires complete pattern' '
 	test_when_finished "rm -f bre-lookahead" &&
@@ -1403,7 +1431,7 @@ test_expect_success REGEX_MATCH_ERROR \
 	'grep does not cache regex errors' '
 	test_must_fail env LC_ALL=en_US.UTF-8 \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-regex-error.trace" \
-		git -C result-cache grep --threads=1 -E "foo.*bar" \
+		git -C result-cache grep --threads=1 -E "foo[^\\n]*bar" \
 		cache-base cache-tip -- regex-error >actual &&
 	test_must_be_empty actual &&
 	test_trace2_data grep result_cache/entries 0 \

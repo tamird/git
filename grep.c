@@ -672,6 +672,18 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		for (size_t i = 0; i < p->patternlen; i++) {
 			unsigned char ch = p->pattern[i];
 
+			/*
+			 * POSIX and PCRE2 interpret bracket escapes differently. Under
+			 * REG_NEWLINE this spelling is bounded by LF, so widen it to .*
+			 * and let POSIX verify the candidate.
+			 */
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
+			    starts_with(p->pattern + i, "[^\\n]*")) {
+				have_wildcard = 1;
+				strbuf_addstr(&lookahead_pattern, ".*");
+				i += strlen("[^\\n]*") - 1;
+				continue;
+			}
 			if (ch < 0x80 &&
 			    (isalnum(ch) || strchr("_ =-/", ch))) {
 				have_literal = 1;
