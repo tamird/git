@@ -184,6 +184,21 @@ test_expect_success LIBPCRE2 \
 	git grep --no-index -q "copy.*UvIndex" -- bre-lookahead
 '
 
+test_expect_success LIBPCRE2 'escaped literal preserves matches' '
+	test_when_finished "rm -f escaped-literal-lookahead" &&
+	cat >escaped-literal-lookahead <<-\EOF &&
+	.repo_root
+	x.repo_root
+	repo_root
+	EOF
+	git grep --no-index -n "^.*\\.repo_root" \
+		-- escaped-literal-lookahead >expect &&
+	test_file_not_empty expect &&
+	git grep --no-index -n "\\.repo_root" \
+		-- escaped-literal-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success LIBPCRE2 \
 	'ERE negated class wildcard preserves matches' '
 	test_when_finished "rm -f ere-lookahead" &&
