@@ -1963,6 +1963,25 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 								p->pattern
 									[i + 3]));
 				}
+			} else if (ch < 0x80 && i + 1 < scan_end &&
+				   ((pattern_type == GREP_PATTERN_TYPE_BRE &&
+				     !strchr(".[\\*^$", ch) &&
+				     p->pattern[i + 1] == '*') ||
+				    ((pattern_type == GREP_PATTERN_TYPE_ERE ||
+				      pattern_type == GREP_PATTERN_TYPE_PCRE) &&
+				     !is_regex_special(ch) && ch != '}' &&
+				     strchr("*+?", p->pattern[i + 1])))) {
+				/*
+				 * A repeated atom does not join required literals on
+				 * either side. Limiting this to ASCII avoids retaining
+				 * part of an optional multibyte atom.
+				 */
+				separator_len = 1;
+				if (pattern_type == GREP_PATTERN_TYPE_PCRE)
+					separator_len += grep_index_pcre_quantifier_len(
+						p->pattern, i + 1, scan_end);
+				else
+					separator_len++;
 			} else if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				   ch == '.') {
 				separator_len = 1;

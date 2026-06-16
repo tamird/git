@@ -149,6 +149,9 @@ test_expect_success 'setup' '
 	echo "prefoo.suf" >ere-concat-foo &&
 	echo "prebarsuf" >ere-concat-bar &&
 	echo "xfoobary" >ere-concat-repeat &&
+	echo "NAME = require_monorepo()" >quantified-ordinary-assignment &&
+	echo "prefixsuffix" >quantified-ordinary-zero &&
+	echo "prefixxsuffix" >quantified-ordinary-one &&
 	printf "%s\n" "literal|()[]\\suffix" >escaped-ere &&
 	for i in $(test_seq 1 40)
 	do
@@ -174,7 +177,9 @@ test_expect_success 'setup' '
 		structured-middle-from structured-middle-import \
 		structured-optional ere-concat ere-concat-test ere-concat-dev \
 		ere-mixed-plain ere-concat-foo ere-concat-bar \
-		ere-concat-repeat escaped-ere literal-candidate-* &&
+		ere-concat-repeat quantified-ordinary-assignment \
+		quantified-ordinary-zero quantified-ordinary-one escaped-ere \
+		literal-candidate-* &&
 	git commit -m initial
 '
 
@@ -2253,8 +2258,6 @@ test_expect_success 'unsupported searches use normal blob reads' '
 	test_grep "unable to read" err &&
 	test_must_fail git grep --cached -E "^(a\\.|b\\*)$" -- short 2>err &&
 	test_grep "unable to read" err &&
-	test_must_fail git grep --cached "absent alpha*" 2>err &&
-	test_grep "unable to read" err &&
 	git grep --cached -L "absent pattern" >/dev/null 2>err &&
 	test_grep "unable to read" err &&
 	test_must_fail git grep --cached x -- short 2>err &&
@@ -2836,6 +2839,62 @@ test_expect_success 'quantified singleton ERE classes read blobs' '
 	test_must_fail git grep --cached -E \
 		"(present[x]{0}|absent)" -- present 2>err &&
 	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified ordinary atoms retain later literals' '
+	git grep --cached -E \
+		"^[_A-Z][A-Z0-9_]* *= *require_monorepo\\(\\)$" \
+		-- quantified-ordinary-assignment &&
+	git grep --cached "^prefixx*suffix$" \
+		-- quantified-ordinary-zero &&
+	git grep --cached -E "^prefixx+suffix$" \
+		-- quantified-ordinary-one &&
+	git grep --cached -E "^prefixx?suffix$" \
+		-- quantified-ordinary-zero &&
+	if test_have_prereq LIBPCRE2
+	then
+		git grep --cached -P "^prefixx*?suffix$" \
+			-- quantified-ordinary-zero &&
+		git grep --cached -P "^prefixx*+suffix$" \
+			-- quantified-ordinary-zero
+	fi &&
+
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached "x*absent suffix" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"x?absent suffix" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"x+absent suffix" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"^[_A-Z][A-Z0-9_]* *= *absent_monorepo\\(\\)$" \
+		-- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -E \
+		"x*|absent suffix" -- short 2>err &&
+	test_grep "unable to read" err &&
+	if test_have_prereq LIBPCRE2
+	then
+		test_must_fail git grep --cached -P \
+			"x*?absent suffix" -- short 2>err &&
+		test_must_be_empty err &&
+		test_must_fail git grep --cached -P \
+			"x*+absent suffix" -- short 2>err &&
+		test_must_be_empty err
+	fi &&
+	if test_have_prereq PCRE2_UTF8_LOCALE
+	then
+		multibyte=$(printf "\\342\\204\\252") &&
+		test_must_fail env LC_ALL=en_US.UTF-8 git grep --cached -P \
+			"ab${multibyte}*absent suffix" -- short 2>err &&
+		test_grep "unable to read" err
+	fi
 '
 
 test_expect_success 'whole ERE group matches use normal blob reads' '
