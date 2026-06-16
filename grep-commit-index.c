@@ -190,12 +190,17 @@ static int load_grep_commit_index_segment(struct repository *repo,
 	int fd = -1;
 	struct stat st;
 
-	if (strlen(hex) != repo->hash_algo->hexsz ||
-	    get_oid_hex_algop(hex, &filename_checksum, repo->hash_algo))
+	if (hex && (strlen(hex) != repo->hash_algo->hexsz ||
+		    get_oid_hex_algop(hex, &filename_checksum,
+				      repo->hash_algo)))
 		return 0;
 	rawsz = repo->hash_algo->rawsz;
-	grep_commit_index_path(repo, &path, "");
-	strbuf_addf(&path, "commit-edges-%s.idx", hex);
+	if (hex) {
+		grep_commit_index_path(repo, &path, "");
+		strbuf_addf(&path, "commit-edges-%s.idx", hex);
+	} else {
+		grep_commit_index_path(repo, &path, "commit-edges");
+	}
 	fd = git_open(path.buf);
 	if (fd < 0 || fstat(fd, &st) || st.st_size < 0)
 		goto cleanup;
@@ -318,17 +323,17 @@ struct grep_commit_index *grep_commit_index_load(struct repository *repo)
 	}
 	grep_commit_index_path(repo, &path, "commit-edges-chain");
 	chain = fopen(path.buf, "r");
-	if (!chain)
-		goto cleanup;
 	CALLOC_ARRAY(index, 1);
-	while (strbuf_getline(&line, chain) != EOF)
-		load_grep_commit_index_segment(repo, index, line.buf);
+	if (chain)
+		while (strbuf_getline(&line, chain) != EOF)
+			load_grep_commit_index_segment(repo, index, line.buf);
+	if (!index->segments_nr)
+		load_grep_commit_index_segment(repo, index, NULL);
 	if (!index->segments_nr) {
 		grep_commit_index_free(index);
 		index = NULL;
 	}
 
-cleanup:
 	if (chain)
 		fclose(chain);
 	strbuf_release(&line);

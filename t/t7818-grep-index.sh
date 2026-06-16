@@ -509,6 +509,26 @@ test_expect_success 'commit index prunes pickaxe tree diff' '
 		pickaxe-commit-index.trace
 '
 
+test_expect_success 'commit index reads legacy sidecar' '
+	chain=.git/objects/info/grep-index/commit-edges-chain &&
+	segment=$(cat "$chain") &&
+	index=.git/objects/info/grep-index/commit-edges-$segment.idx &&
+	legacy=.git/objects/info/grep-index/commit-edges &&
+	mv "$chain" "$chain.save" &&
+	mv "$index" "$legacy" &&
+	test_when_finished "mv \"$legacy\" \"$index\" &&
+		mv \"$chain.save\" \"$chain\" &&
+		rm -f pickaxe-legacy.trace" &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-legacy.trace" \
+		git log --format=%s -Sabsent \
+		refs/grep-index-test/new >actual-legacy &&
+	test_must_be_empty actual-legacy &&
+	test_grep "\"key\":\"commit_index/pruned\",\"value\":\"1\"" \
+		pickaxe-legacy.trace
+'
+
 test_expect_success 'commit index safely prunes scoped pickaxe' '
 	test_when_finished "rm -f pickaxe-scoped.trace" &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
