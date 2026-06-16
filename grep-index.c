@@ -790,6 +790,23 @@ static int grep_index_query_clause_add_literal(
 	return 0;
 }
 
+static void grep_index_query_consider_required_literal(
+	struct strbuf *best, const char *literal, size_t len,
+	unsigned char suffix)
+{
+	size_t candidate_len = len + !!suffix;
+
+	if (candidate_len <= best->len)
+		return;
+	for (size_t i = 0; i < len; i++)
+		if ((unsigned char)literal[i] & 0x80)
+			return;
+	strbuf_reset(best);
+	strbuf_add(best, literal, len);
+	if (suffix)
+		strbuf_addch(best, suffix);
+}
+
 static int grep_index_query_branch_add_clause(
 	struct grep_index_query_branch *branch,
 	struct grep_index_query *query,
@@ -1166,6 +1183,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	size_t enrichments_nr = 0;
 	size_t enrichments_alloc = 0;
 	size_t enrichment_trigrams_nr = 0;
+	struct strbuf required_literal = STRBUF_INIT;
+	int required_literal_valid = 1;
 	size_t patterns_nr = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
@@ -1192,6 +1211,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		if (p->token != GREP_PATTERN)
 			goto unsupported;
 		patterns_nr++;
+		if (patterns_nr > 1)
+			required_literal_valid = 0;
 		if (opt->ignore_case) {
 			for (size_t i = 0; i < p->patternlen; i++) {
 				if ((unsigned char)p->pattern[i] & 0x80)
@@ -2004,6 +2025,21 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			if (separator_len) {
 				size_t termlen = i - term_start;
 
+				if (pattern_type == GREP_PATTERN_TYPE_ERE &&
+				    required_literal_valid) {
+					if (alternation) {
+						required_literal_valid = 0;
+						strbuf_reset(&required_literal);
+					} else
+						grep_index_query_consider_required_literal(
+							&required_literal,
+							p->pattern + term_start,
+							termlen,
+							escaped_literal_quantified ?
+								0 :
+								escaped_literal);
+				}
+
 				if (termlen >= 3) {
 					size_t trigrams_nr = termlen - 2;
 
@@ -2192,7 +2228,14 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			i++;
 		}
 		if (scan_end - term_start >= 3) {
-			size_t trigrams_nr = scan_end - term_start - 2;
+			size_t termlen = scan_end - term_start;
+			size_t trigrams_nr = termlen - 2;
+
+			if (pattern_type == GREP_PATTERN_TYPE_ERE &&
+			    required_literal_valid)
+				grep_index_query_consider_required_literal(
+					&required_literal,
+					p->pattern + term_start, termlen, 0);
 
 			if (trigrams_nr > GREP_INDEX_MAX_QUERY_TRIGRAMS -
 						  query->trigrams_nr)
@@ -2301,7 +2344,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	 * bytes. Default binary handling and --text both search those bytes;
 	 * -I, folding, and word boundaries do not share that invariant. Fixed
 	 * patterns and plain ASCII BRE and ERE literals are checked against the
-	 * bytes before their negative result is reported.
+	 * bytes before their negative result is reported. A more complex ERE can
+	 * use an unquantified top-level literal that every match must contain.
 	 */
 	if (!opt->ignore_case && !opt->word_regexp &&
 	    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match &&
@@ -2309,6 +2353,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		const struct grep_pat *pattern = opt->pattern_list;
 		int fixed = pattern_type == GREP_PATTERN_TYPE_FIXED;
 		int literal_regex = 0;
+		int required_literal_regex;
 
 		if (!fixed && (pattern_type == GREP_PATTERN_TYPE_BRE ||
 			       pattern_type == GREP_PATTERN_TYPE_ERE)) {
@@ -2338,7 +2383,10 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			if (!literal_len)
 				literal_regex = 0;
 		}
-		if (fixed || literal_regex) {
+		required_literal_regex =
+			!literal_regex && pattern_type == GREP_PATTERN_TYPE_ERE &&
+			required_literal_valid && required_literal.len >= 3;
+		if (fixed || literal_regex || required_literal_regex) {
 			static const char fixed_domain[] =
 				"grep-index-negative-v2";
 			static const char regex_domain[] =
@@ -2347,7 +2395,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			unsigned char type = pattern_type;
 
 			opt->repo->hash_algo->init_fn(&ctx);
-			if (literal_regex) {
+			if (literal_regex || required_literal_regex) {
 				git_hash_update(&ctx, regex_domain,
 						sizeof(regex_domain));
 				git_hash_update(&ctx, &type, sizeof(type));
@@ -2355,9 +2403,15 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				git_hash_update(&ctx, fixed_domain,
 						sizeof(fixed_domain));
 			}
-			query->cache_pattern =
-				xmemdupz(pattern->pattern, pattern->patternlen);
-			query->cache_patternlen = pattern->patternlen;
+			if (required_literal_regex) {
+				query->cache_pattern =
+					strbuf_detach(&required_literal,
+						      &query->cache_patternlen);
+			} else {
+				query->cache_pattern = xmemdupz(
+					pattern->pattern, pattern->patternlen);
+				query->cache_patternlen = pattern->patternlen;
+			}
 			query->cache_pattern_alternation =
 				literal_regex &&
 				pattern_type == GREP_PATTERN_TYPE_ERE &&
@@ -2368,11 +2422,13 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			query->cacheable = 1;
 		}
 	}
+	strbuf_release(&required_literal);
 	free(enrichments);
 	free(boundaries);
 	return query;
 
 unsupported:
+	strbuf_release(&required_literal);
 	free(enrichments);
 	free(boundaries);
 	free(clause.trigrams);
