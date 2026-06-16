@@ -737,15 +737,20 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				while (end < p->patternlen &&
 				       p->pattern[end] != ']' &&
 				       (unsigned char)p->pattern[end] < 0x80 &&
+				       p->pattern[end] != '\n' &&
 				       p->pattern[end] != '[' &&
 				       p->pattern[end] != '\\')
 					end++;
-				if (end > start && end + 1 < p->patternlen &&
-				    p->pattern[end] == ']' &&
-				    p->pattern[end + 1] == '?') {
+				if (end > start && end < p->patternlen &&
+				    p->pattern[end] == ']') {
 					/* Widen the class; POSIX verifies the candidate. */
-					strbuf_addstr(&lookahead_pattern, ".?");
-					i = end + 1;
+					strbuf_addch(&lookahead_pattern, '.');
+					i = end;
+					if (i + 1 < p->patternlen &&
+					    p->pattern[i + 1] == '?') {
+						strbuf_addch(&lookahead_pattern, '?');
+						i++;
+					}
 					continue;
 				}
 			}

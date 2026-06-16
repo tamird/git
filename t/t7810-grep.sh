@@ -303,6 +303,23 @@ test_expect_success LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 'ERE bracket classes preserve matches' '
+	test_when_finished "rm -f ere-class-lookahead" &&
+	cat >ere-class-lookahead <<-\EOF &&
+	constraints_file(a
+	constraints_file()
+	xconstraints_file(z
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:constraints_file(a
+	ere-class-lookahead:3:xconstraints_file(z
+	EOF
+	git grep --no-index -n -E "constraints_file\\([^)]" \
+		-- ere-class-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success LIBPCRE2 'ERE word-boundary escapes preserve matches' '
 	test_when_finished "rm -f ere-boundary-lookahead" &&
 	cat >ere-boundary-lookahead <<-\EOF &&
