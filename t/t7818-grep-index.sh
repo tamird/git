@@ -2292,6 +2292,7 @@ test_expect_success LIBPCRE2 'content index prunes impossible PCRE literal' '
 
 	test_must_fail git grep --cached -P "absent pattern" 2>err &&
 	test_must_fail git grep --cached -P "^absent\\.pattern$" 2>err &&
+	test_must_fail git grep --cached -P "absent \\w+" 2>err &&
 	test_must_be_empty err
 '
 

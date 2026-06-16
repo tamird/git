@@ -1928,10 +1928,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 				     (is_regex_special(p->pattern[i + 1]) ||
 				      p->pattern[i + 1] == '}' ||
-				      p->pattern[i + 1] == 'b' ||
-				      p->pattern[i + 1] == 'B' ||
-				      p->pattern[i + 1] == 's' ||
-				      p->pattern[i + 1] == 'S')))) {
+				      strchr("bBsSwW",
+					     p->pattern[i + 1]))))) {
 				unsigned char next = p->pattern[i + 1];
 
 				separator_len = 2;
