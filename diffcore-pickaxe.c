@@ -30,7 +30,9 @@
 
 struct diff_pickaxe_index_entry {
 	struct oidmap_entry entry;
+	unsigned int count;
 	int maybe;
+	int count_valid;
 };
 
 struct diff_pickaxe_index {
@@ -60,6 +62,8 @@ struct diff_pickaxe_index {
 	int textconv_checked;
 	int textconv_possible;
 	uint64_t cache_hits;
+	uint64_t count_cache_hits;
+	uint64_t count_cache_updates;
 	uint64_t batch_result_entries;
 	uint64_t tested;
 	uint64_t impossible_pairs;
@@ -248,6 +252,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	struct userdiff_driver *textconv_two = NULL;
 	struct diff_pickaxe_index *index =
 		o->pickaxe_index_state ? *o->pickaxe_index_state : NULL;
+	struct diff_pickaxe_index_entry *count_entries[2] = { NULL, NULL };
 	mmfile_t mf1, mf2;
 	int ret;
 
@@ -286,6 +291,24 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 		index->impossible_pairs++;
 		return 0;
 	}
+	if (index && index->query &&
+	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
+	    !textconv_one && !textconv_two) {
+		struct diff_filespec *specs[] = { p->one, p->two };
+
+		for (size_t i = 0; i < ARRAY_SIZE(specs); i++) {
+			struct diff_filespec *spec = specs[i];
+
+			if (!DIFF_FILE_VALID(spec) || !spec->oid_valid ||
+			    !S_ISREG(spec->mode))
+				continue;
+			count_entries[i] = oidmap_get(
+				&index->results, &spec->oid);
+			if (!count_entries[i])
+				count_entries[i] = oidmap_get(
+					&index->batch_results, &spec->oid);
+		}
+	}
 
 	if ((o->pickaxe_opts & DIFF_PICKAXE_KIND_G) &&
 	    !o->flags.text &&
@@ -293,10 +316,54 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	     (!textconv_two && diff_filespec_is_binary(o->repo, p->two))))
 		return 0;
 
-	mf1.size = fill_textconv(o->repo, textconv_one, p->one, &mf1.ptr);
-	mf2.size = fill_textconv(o->repo, textconv_two, p->two, &mf2.ptr);
+	if ((o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
+	    (count_entries[0] || count_entries[1])) {
+		unsigned int counts[2] = { 0, 0 };
+		int count_valid[2] = {
+			!DIFF_FILE_VALID(p->one),
+			!DIFF_FILE_VALID(p->two)
+		};
+		unsigned int limit;
 
-	ret = fn(&mf1, &mf2, o, regexp, kws);
+		for (size_t i = 0; i < ARRAY_SIZE(count_entries); i++) {
+			if (!count_entries[i] || !count_entries[i]->count_valid)
+				continue;
+			counts[i] = count_entries[i]->count;
+			count_valid[i] = 1;
+			index->count_cache_hits++;
+		}
+		if (!count_valid[0]) {
+			mf1.size = fill_textconv(
+				o->repo, textconv_one, p->one, &mf1.ptr);
+			counts[0] = contains(&mf1, regexp, kws, 0);
+			count_valid[0] = 1;
+			if (count_entries[0]) {
+				count_entries[0]->count = counts[0];
+				count_entries[0]->count_valid = 1;
+				count_entries[0]->maybe = !!counts[0];
+				index->count_cache_updates++;
+			}
+		}
+		if (!count_valid[1]) {
+			mf2.size = fill_textconv(
+				o->repo, textconv_two, p->two, &mf2.ptr);
+			limit = counts[0] + 1;
+			counts[1] = contains(&mf2, regexp, kws, limit);
+			if ((!limit || counts[1] < limit) && count_entries[1]) {
+				count_entries[1]->count = counts[1];
+				count_entries[1]->count_valid = 1;
+				count_entries[1]->maybe = !!counts[1];
+				index->count_cache_updates++;
+			}
+		}
+		ret = counts[0] != counts[1];
+	} else {
+		mf1.size = fill_textconv(
+			o->repo, textconv_one, p->one, &mf1.ptr);
+		mf2.size = fill_textconv(
+			o->repo, textconv_two, p->two, &mf2.ptr);
+		ret = fn(&mf1, &mf2, o, regexp, kws);
+	}
 
 	if (textconv_one)
 		free(mf1.ptr);
@@ -596,12 +663,12 @@ void diffcore_pickaxe(struct diff_options *o)
 				entry->maybe =
 					maybe[i] !=
 					GREP_INDEX_IPC_IMPOSSIBLE;
-					if (index->results_nr < index->max_results) {
-						results = &index->results;
-						index->results_nr++;
-					} else {
-						/* Retain overflow only for this diff. */
-						results = &index->batch_results;
+				if (index->results_nr < index->max_results) {
+					results = &index->results;
+					index->results_nr++;
+				} else {
+					/* Retain overflow only for this diff. */
+					results = &index->batch_results;
 					index->batch_result_entries++;
 				}
 				oidmap_put(results, entry);
@@ -849,6 +916,12 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 			   index->commit_oids_unknown);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/cache_hits",
 			   index->cache_hits);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/count_cache_hits",
+			   index->count_cache_hits);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/count_cache_updates",
+			   index->count_cache_updates);
 	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/batch_result_entries",
 			   index->batch_result_entries);
