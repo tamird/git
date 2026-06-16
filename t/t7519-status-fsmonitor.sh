@@ -108,6 +108,54 @@ test_expect_success 'setup' '
 	EOF
 '
 
+test_expect_success '--no-fsmonitor-hook rejects hook config' '
+	test_when_finished "rm -f err marker .git/hooks/fsmonitor-test &&
+		git -c core.fsmonitor=false update-index --no-fsmonitor &&
+		git config core.fsmonitor .git/hooks/fsmonitor-test" &&
+	write_script .git/hooks/fsmonitor-test <<-\EOF &&
+	: >marker
+	printf "last_update_token\0"
+	EOF
+
+	git status >/dev/null &&
+	test_path_is_file marker &&
+	rm marker &&
+
+	test_must_fail git --no-fsmonitor-hook status 2>err &&
+	test_grep "bad boolean config value .* for '\''core.fsmonitor'\''" err &&
+	test_path_is_missing marker &&
+
+	git --no-fsmonitor-hook -c core.fsmonitor=false status &&
+	test_path_is_missing marker &&
+
+	git config --unset core.fsmonitor &&
+	git --no-fsmonitor-hook status &&
+	test_path_is_missing marker &&
+	GIT_TEST_FSMONITOR=.git/hooks/fsmonitor-test \
+		git --no-fsmonitor-hook status &&
+	test_path_is_missing marker
+'
+
+test_expect_success '--no-fsmonitor-hook applies to child repositories' '
+	test_when_finished "rm -rf child err" &&
+	test_when_finished "git config core.fsmonitor .git/hooks/fsmonitor-test" &&
+	git init child &&
+	git -C child -c core.fsmonitor=false update-index --fsmonitor &&
+	write_script child/.git/hooks/fsmonitor-test <<-\EOF &&
+	: >marker
+	printf "last_update_token\0"
+	EOF
+	git -C child config core.fsmonitor .git/hooks/fsmonitor-test &&
+	git config core.fsmonitor false &&
+
+	git --no-fsmonitor-hook status >/dev/null &&
+	test_must_fail git --no-fsmonitor-hook \
+		-c alias.child-status="!git -C child status" \
+		child-status 2>err &&
+	test_grep "bad boolean config value .* for '\''core.fsmonitor'\''" err &&
+	test_path_is_missing child/marker
+'
+
 # test that the fsmonitor extension is off by default
 test_expect_success 'fsmonitor extension is off by default' '
 	test-tool dump-fsmonitor >actual &&

@@ -1,5 +1,6 @@
 #include "git-compat-util.h"
 #include "config.h"
+#include "environment.h"
 #include "gettext.h"
 #include "repository.h"
 #include "fsmonitor-ipc.h"
@@ -105,6 +106,8 @@ static void lookup_fsmonitor_settings(struct repository *r)
 	const char *const_str;
 	char *to_free = NULL;
 	int bool_value;
+	int config_result;
+	int no_fsmonitor_hook;
 
 	if (r->settings.fsmonitor)
 		return;
@@ -116,8 +119,15 @@ static void lookup_fsmonitor_settings(struct repository *r)
 	 * or to turn everything off.  (This does imply that you can't
 	 * use a hook script named "true" or "false", but that's OK.)
 	 */
-	switch (repo_config_get_maybe_bool(r, "core.fsmonitor", &bool_value)) {
+	no_fsmonitor_hook = git_env_bool(NO_FSMONITOR_HOOK_ENVIRONMENT, 0);
+	if (no_fsmonitor_hook)
+		config_result = repo_config_get_bool(r, "core.fsmonitor",
+						     &bool_value);
+	else
+		config_result = repo_config_get_maybe_bool(r, "core.fsmonitor",
+							   &bool_value);
 
+	switch (config_result) {
 	case 0: /* config value was set to <bool> */
 		if (bool_value)
 			fsm_settings__set_ipc(r);
@@ -126,6 +136,10 @@ static void lookup_fsmonitor_settings(struct repository *r)
 		return;
 
 	case 1: /* config value was unset */
+		if (no_fsmonitor_hook) {
+			fsm_settings__set_disabled(r);
+			return;
+		}
 		const_str = getenv("GIT_TEST_FSMONITOR");
 		break;
 

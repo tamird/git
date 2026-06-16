@@ -53,6 +53,12 @@
 #define GIT_ADVICE_ENVIRONMENT "GIT_ADVICE"
 
 /*
+ * Environment variable used to propagate --no-fsmonitor-hook to child Git
+ * processes. This is an internal variable that should not be set by the user.
+ */
+#define NO_FSMONITOR_HOOK_ENVIRONMENT "GIT_NO_FSMONITOR_HOOK"
+
+/*
  * Environment variable used in handshaking the wire protocol.
  * Contains a colon ':' separated list of keys with optional values
  * 'key[=value]'.  Presence of unknown keys and values must be

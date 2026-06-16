@@ -403,6 +403,14 @@ test_expect_success 'status implicitly starts daemon' '
 	test_subcommand git fsmonitor--daemon start <.git/trace_implicit_2
 '
 
+test_expect_success 'status with --no-fsmonitor-hook starts daemon' '
+	test_when_finished redundant_stop_daemon &&
+
+	test_must_fail git fsmonitor--daemon status &&
+	git --no-fsmonitor-hook status >actual &&
+	git fsmonitor--daemon status
+'
+
 edit_files () {
 	echo 1 >modified &&
 	echo 2 >dir1/modified &&

@@ -12,7 +12,8 @@ SYNOPSIS
 'git' [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]
     [--exec-path[=<path>]] [--html-path] [--man-path] [--info-path]
     [-p | --paginate | -P | --no-pager] [--no-replace-objects] [--no-lazy-fetch]
-    [--no-optional-locks] [--no-advice] [--bare] [--git-dir=<path>]
+    [--no-fsmonitor-hook] [--no-optional-locks] [--no-advice]
+    [--bare] [--git-dir=<path>]
     [--work-tree=<path>] [--namespace=<name>] [--config-env=<name>=<envvar>]
     <command> [<args>]
 
@@ -186,6 +187,14 @@ If you just want to run git as if it was started in `<path>` then use
 	see if the object is locally available.
 	This is equivalent to setting the `GIT_NO_LAZY_FETCH`
 	environment variable to `1`.
+
+--no-fsmonitor-hook::
+	Do not run an fsmonitor hook command named by `core.fsmonitor`.
+	A non-Boolean value is rejected with the usual configuration error.
+	Boolean `true` still selects the built-in file system monitor; Boolean
+	`false` or an unset value disables fsmonitor.  Git subprocesses inherit
+	the restriction, but it does not persist for independent invocations.
+	This does not restrict commands selected by other configuration variables.
 
 --no-optional-locks::
 	Do not perform optional operations that require locks. This is

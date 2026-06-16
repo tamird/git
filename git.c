@@ -40,7 +40,8 @@ const char git_usage_string[] =
 	N_("git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]\n"
 	   "           [--exec-path[=<path>]] [--html-path] [--man-path] [--info-path]\n"
 	   "           [-p | --paginate | -P | --no-pager] [--no-replace-objects] [--no-lazy-fetch]\n"
-	   "           [--no-optional-locks] [--no-advice] [--bare] [--git-dir=<path>]\n"
+	   "           [--no-fsmonitor-hook] [--no-optional-locks] [--no-advice]\n"
+	   "           [--bare] [--git-dir=<path>]\n"
 	   "           [--work-tree=<path>] [--namespace=<name>] [--config-env=<name>=<envvar>]\n"
 	   "           <command> [<args>]");
 
@@ -204,6 +205,10 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 		} else if (!strcmp(cmd, "--no-lazy-fetch")) {
 			fetch_if_missing = 0;
 			setenv(NO_LAZY_FETCH_ENVIRONMENT, "1", 1);
+			if (envchanged)
+				*envchanged = 1;
+		} else if (!strcmp(cmd, "--no-fsmonitor-hook")) {
+			setenv(NO_FSMONITOR_HOOK_ENVIRONMENT, "1", 1);
 			if (envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "--no-replace-objects")) {
