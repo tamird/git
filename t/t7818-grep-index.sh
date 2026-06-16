@@ -2403,6 +2403,39 @@ test_expect_success LIBPCRE2 'content index prunes PCRE negative lookbehinds' '
 	test_grep "unable to read" err
 '
 
+test_expect_success LIBPCRE2 'content index bridges escaped PCRE punctuation' '
+	oid=$(git rev-parse :escaped-call-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"resolve_reference\\(" -- escaped-call-negative 2>err &&
+	test_must_be_empty err &&
+
+	oid=$(git rev-parse :escaped-call-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -P \
+		"resolve_reference\\(" -- escaped-call-positive 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 'quantified escaped PCRE punctuation reads blob' '
+	oid=$(git rev-parse :escaped-call-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+
+	test_must_fail git grep --cached -P \
+		"foo\\(?bar" -- escaped-call-optional 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"foo\\({0}bar" -- escaped-call-optional 2>err &&
+	test_grep "unable to read" err
+'
+
 test_expect_success 'content index prunes escaped ERE classes' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -E \
