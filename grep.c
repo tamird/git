@@ -700,8 +700,14 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				i++;
 				continue;
 			}
-			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
-			    ch == '\\' && i + 1 < p->patternlen &&
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE &&
+			    strchr("()", ch)) {
+				have_literal = 1;
+				strbuf_addch(&lookahead_pattern, '\\');
+				strbuf_addch(&lookahead_pattern, ch);
+				continue;
+			}
+			if (ch == '\\' && i + 1 < p->patternlen &&
 			    strchr("bB<>", p->pattern[i + 1])) {
 				/* Word-boundary escapes vary; POSIX verifies candidates. */
 				have_wildcard = 1;
