@@ -249,6 +249,24 @@ test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 \
+	'ERE grouped literal alternatives preserve matches' '
+	test_when_finished "rm -f ere-group-lookahead" &&
+	cat >ere-group-lookahead <<-\EOF &&
+	load_graph(
+	direct_dependencies(
+	unrelated(
+	EOF
+	cat >expect <<-\EOF &&
+	ere-group-lookahead:1:load_graph(
+	ere-group-lookahead:2:direct_dependencies(
+	EOF
+	git grep --no-index -n -E \
+		"(load_graph|direct_dependencies)\\(" \
+		-- ere-group-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '

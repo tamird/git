@@ -656,6 +656,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		}
 	}
 #ifdef USE_LIBPCRE2
+	int group_depth = 0;
 	int have_alternation = 0;
 	int have_literal = 0;
 	int have_wildcard = 0;
@@ -717,6 +718,18 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
+			    ch == '(') {
+				group_depth++;
+				strbuf_addch(&lookahead_pattern, ch);
+				continue;
+			}
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
+			    ch == ')' && group_depth && have_literal) {
+				group_depth--;
+				strbuf_addch(&lookahead_pattern, ch);
+				continue;
+			}
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '|' && have_literal &&
 			    i + 1 < p->patternlen) {
 				have_alternation = 1;
@@ -728,7 +741,8 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			break;
 		}
 	}
-	if (have_literal && (have_wildcard || have_alternation)) {
+	if (have_literal && !group_depth &&
+	    (have_wildcard || have_alternation)) {
 		struct grep_opt lookahead_opt = *opt;
 
 		CALLOC_ARRAY(p->pcre2_lookahead, 1);
