@@ -29,7 +29,7 @@
 #include "submodule.h"
 #include "odb.h"
 #include "hex.h"
-
+#include "lockfile.h"
 
 static int abbrev;
 static int show_deleted;
@@ -604,6 +604,7 @@ int cmd_ls_files(int argc,
 	int require_work_tree = 0, show_tag = 0, i;
 	char *max_prefix;
 	struct dir_struct dir = DIR_INIT;
+	struct lock_file index_lock = LOCK_INIT;
 	struct pattern_list *pl;
 	struct string_list exclude_list = STRING_LIST_INIT_NODUP;
 	struct option builtin_ls_files_options[] = {
@@ -796,6 +797,9 @@ int cmd_ls_files(int argc,
 	}
 
 	show_files(repo, &dir);
+	if (dir.internal.repaired_subtrees && use_optional_locks() &&
+	    repo_hold_locked_index(repo, &index_lock, 0) >= 0)
+		repo_update_index_if_able(repo, &index_lock);
 
 	if (show_resolve_undo)
 		show_ru_info(repo, repo->index);

@@ -367,6 +367,7 @@ struct dir_struct {
 		unsigned visited_paths;
 		unsigned visited_directories;
 		unsigned pruned_subtrees;
+		unsigned repaired_subtrees;
 	} internal;
 };
 

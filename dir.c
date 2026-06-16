@@ -3054,6 +3054,24 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 						    pathspec, state);
 	}
 	close_cached_dir(&cdir);
+	if (!check_only && dir->internal.can_prune_replay &&
+	    (!pathspec || !pathspec->nr) && untracked_prune &&
+	    dir_state < path_untracked &&
+	    (!untracked_prune->valid || untracked_prune->untracked_nr ||
+	     !untracked_prune->can_skip_replay ||
+	     untracked_prune->check_only)) {
+		for (size_t i = 0; i < untracked_prune->untracked_nr; i++)
+			free(untracked_prune->untracked[i]);
+		untracked_prune->untracked_nr = 0;
+		/* Force a stat-based reader to verify this fsmonitor result. */
+		memset(&untracked_prune->stat_data, 0,
+		       sizeof(untracked_prune->stat_data));
+		untracked_prune->check_only = 0;
+		untracked_prune->valid = 1;
+		untracked_prune->recurse = 1;
+		untracked_prune->can_skip_replay = 1;
+		dir->internal.repaired_subtrees++;
+	}
  out:
 	strbuf_release(&path);
 
@@ -3402,6 +3420,8 @@ static void emit_traversal_statistics(struct dir_struct *dir,
 			   "paths-visited", dir->internal.visited_paths);
 	trace2_data_intmax("read_directory", repo,
 			   "subtrees-pruned", dir->internal.pruned_subtrees);
+	trace2_data_intmax("read_directory", repo,
+			   "subtrees-repaired", dir->internal.repaired_subtrees);
 
 	if (!dir->untracked)
 		return;
@@ -3429,6 +3449,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.visited_paths = 0;
 	dir->internal.visited_directories = 0;
 	dir->internal.pruned_subtrees = 0;
+	dir->internal.repaired_subtrees = 0;
 	dir->internal.can_prune_replay = 0;
 	dir->internal.icase_scan_budget_used = 0;
 
@@ -3483,6 +3504,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))
 		read_directory_recursive(dir, istate, path, len, untracked,
 					 untracked_prune, 0, 0, pathspec);
+	if (dir->internal.repaired_subtrees) {
+		istate->untracked->can_skip_empty =
+			istate->untracked->root->can_skip_replay;
+		istate->cache_changed |= UNTRACKED_CHANGED;
+	}
 done:
 	QSORT(dir->entries, dir->nr, cmp_dir_entry);
 	QSORT(dir->ignored, dir->ignored_nr, cmp_dir_entry);

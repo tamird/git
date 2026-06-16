@@ -897,6 +897,7 @@ test_expect_success UNTRACKED_CACHE 'set up full untracked pruning' '
 		cd full-untracked &&
 		mkdir -p clean/a ignored-only/sub quiet/b results &&
 		echo ignored-only/ >.gitignore &&
+		echo old-hidden >quiet/b/.gitignore &&
 		echo needle >clean/a/tracked &&
 		: >ignored-only/sub/ignored &&
 		: >ignored-only/sub/one &&
@@ -1064,6 +1065,32 @@ test_expect_success UNTRACKED_CACHE 'ls-files honors fsmonitor invalidation' '
 	test_cmp expect actual &&
 	test_grep "subtrees-pruned:[1-9]" trace-ls-files-dirty &&
 	test_grep "directories-visited:[1-9]" trace-ls-files-dirty
+'
+
+test_expect_success UNTRACKED_CACHE 'ls-files persists repaired empty subtree' '
+	(
+		cd full-untracked &&
+		echo hidden >quiet/b/.gitignore &&
+		: >quiet/b/hidden &&
+		touch quiet/b/tracked &&
+		printf "%s\n" clean/a/new quiet/b/.gitignore \
+			quiet/b/hidden quiet/b/tracked >.git/fsmonitor-dirty &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-repair" \
+			git ls-files --others --exclude-standard >../actual &&
+		rm .git/fsmonitor-dirty &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ls-files-repaired" \
+			git ls-files --others --exclude-standard >../actual-repaired
+	) &&
+	cat >expect <<-\EOF &&
+	clean/a/new
+	results/one
+	results/two
+	EOF
+	test_cmp expect actual &&
+	test_cmp expect actual-repaired &&
+	test_grep "subtrees-repaired:[1-9]" trace-ls-files-repair &&
+	test_grep "subtrees-pruned:[1-9]" trace-ls-files-repaired &&
+	test_grep ! quiet/b/hidden actual-repaired
 '
 
 test_expect_success UNTRACKED_CACHE 'ls-files falls back after fsmonitor failure' '
