@@ -1940,15 +1940,18 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					separator_len++;
 				if ((pattern_type == GREP_PATTERN_TYPE_BRE &&
 				     strchr(".[\\*^$", next)) ||
-				    (pattern_type == GREP_PATTERN_TYPE_ERE &&
-				     is_regex_special(next)))
+				    ((pattern_type == GREP_PATTERN_TYPE_ERE ||
+				      pattern_type == GREP_PATTERN_TYPE_PCRE) &&
+				     is_regex_special(next)) ||
+				    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+				     next == '}'))
 					escaped_literal = next;
 				if (escaped_literal && i + 2 < scan_end) {
 					unsigned char after =
 						p->pattern[i + 2];
 
-					if (pattern_type ==
-					    GREP_PATTERN_TYPE_ERE)
+					if (pattern_type !=
+					    GREP_PATTERN_TYPE_BRE)
 						escaped_literal_quantified =
 							!!strchr("*+?{",
 								 after);
@@ -2048,8 +2051,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						int ordinary;
 						int quantified;
 
-						if (pattern_type ==
-						    GREP_PATTERN_TYPE_ERE)
+						if (pattern_type !=
+						    GREP_PATTERN_TYPE_BRE)
 							ordinary =
 								!is_regex_special(
 									right) &&
@@ -2061,8 +2064,8 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 									right);
 						if (!ordinary)
 							break;
-						if (pattern_type ==
-						    GREP_PATTERN_TYPE_ERE)
+						if (pattern_type !=
+						    GREP_PATTERN_TYPE_BRE)
 							quantified =
 								after <
 									scan_end &&
