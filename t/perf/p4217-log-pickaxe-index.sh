@@ -49,6 +49,22 @@ test_perf 'possible diff grep across small diff queues' '
 		HEAD~256..HEAD -- >/dev/null
 '
 
+test_expect_success 'setup uncovered history' '
+	test_commit_bulk --filename=uncovered --notick 4096
+'
+
+test_perf 'pickaxe across uncovered small diff queues' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --no-renames --format=%H \
+		-S__git_perf_absent_pickaxe__ HEAD~4096..HEAD -- >/dev/null
+'
+
+test_perf 'positive pickaxe across uncovered small diff queues' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --no-renames --format=%H -Scontent \
+		HEAD~4096..HEAD -- >/dev/null
+'
+
 test_expect_success 'stop fsmonitor daemon' '
 	git fsmonitor--daemon stop
 '
