@@ -718,6 +718,30 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
+			    ch == '[') {
+				size_t end = i + 1;
+				size_t start;
+
+				if (end < p->patternlen && p->pattern[end] == '^')
+					end++;
+				start = end;
+				while (end < p->patternlen &&
+				       p->pattern[end] != ']' &&
+				       (unsigned char)p->pattern[end] < 0x80 &&
+				       p->pattern[end] != '[' &&
+				       p->pattern[end] != '\\')
+					end++;
+				if (end > start && end + 1 < p->patternlen &&
+				    p->pattern[end] == ']' &&
+				    p->pattern[end + 1] == '?') {
+					/* Widen the class; POSIX verifies the candidate. */
+					have_wildcard = 1;
+					strbuf_addstr(&lookahead_pattern, ".?");
+					i = end + 1;
+					continue;
+				}
+			}
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '(') {
 				group_depth++;
 				strbuf_addch(&lookahead_pattern, ch);

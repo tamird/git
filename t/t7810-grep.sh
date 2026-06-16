@@ -267,6 +267,27 @@ test_expect_success LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 \
+	'ERE optional bracket classes preserve matches' '
+	test_when_finished "rm -f ere-class-lookahead" &&
+	cat >ere-class-lookahead <<-\EOF &&
+	maximum file size
+	MAX-BLOB_SIZE
+	large blob
+	maximumXfileYsize
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:maximum file size
+	ere-class-lookahead:2:MAX-BLOB_SIZE
+	ere-class-lookahead:3:large blob
+	EOF
+	git grep --no-index -n -i -E \
+		"(maximum|max)[ _-]?(file|blob)[ _-]?size|large.*blob" \
+		-- ere-class-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
 '
