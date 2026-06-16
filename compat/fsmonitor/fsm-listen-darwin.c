@@ -133,8 +133,7 @@ static int ef_is_root_renamed(const FSEventStreamEventFlags ef)
 
 static int ef_is_dropped(const FSEventStreamEventFlags ef)
 {
-	return (ef & kFSEventStreamEventFlagMustScanSubDirs ||
-		ef & kFSEventStreamEventFlagKernelDropped ||
+	return (ef & kFSEventStreamEventFlagKernelDropped ||
 		ef & kFSEventStreamEventFlagUserDropped);
 }
 
@@ -208,6 +207,8 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 	const char *slash;
 	char *resolved = NULL;
 	struct strbuf tmp = STRBUF_INIT;
+	enum fsmonitor_path_type path_type;
+	const char *worktree_rel;
 
 	/*
 	 * Build a list of all filesystem changes into a private/local
@@ -224,6 +225,14 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		else
 			path_k = paths[k];
 
+		path_type = fsmonitor_classify_path_absolute(state, path_k);
+		worktree_rel = NULL;
+		if (path_type == IS_WORKDIR_PATH) {
+			worktree_rel = path_k + state->path_worktree_watch.len;
+			if (*worktree_rel == '/')
+				worktree_rel++;
+		}
+
 		/*
 		 * If you want to debug FSEvents, log them to GIT_TRACE_FSMONITOR.
 		 * Please don't log them to Trace2.
@@ -232,9 +241,11 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		 */
 
 		/*
-		 * If event[k] is marked as dropped, we assume that we have
-		 * lost sync with the filesystem and should flush our cached
-		 * data.  We need to:
+		 * If events were dropped, or a recursive scan cannot be
+		 * represented as an interior worktree cone, flush our cached
+		 * data.  The worktree root may contain the cookie directory,
+		 * so publishing it as a cone could leave clients waiting for a
+		 * coalesced cookie event.  We need to:
 		 *
 		 * [1] Abort/wake any client threads waiting for a cookie and
 		 *     flush the cached state data (the current token), and
@@ -244,7 +255,9 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		 *     they are conceptually relative to the just flushed
 		 *     token).
 		 */
-		if (ef_is_dropped(event_flags[k])) {
+		if (ef_is_dropped(event_flags[k]) ||
+		    (event_flags[k] & kFSEventStreamEventFlagMustScanSubDirs &&
+		     (!worktree_rel || !*worktree_rel))) {
 			if (trace_pass_fl(&trace_fsmonitor))
 				log_flags_set(path_k, event_flags[k]);
 
@@ -255,11 +268,30 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 
 			/*
 			 * We assume that any events that we received
-			 * in this callback after this dropped event
+			 * in this callback after this resync event
 			 * may still be valid, so we continue rather
 			 * than break.  (And just in case there is a
 			 * delete of ".git" hiding in there.)
 			 */
+			continue;
+		}
+
+		/*
+		 * Without a user or kernel drop, MustScanSubDirs means that
+		 * FSEvents coalesced changes below this path.  Publish the path
+		 * as a directory so clients invalidate that cone recursively.
+		 */
+		if (event_flags[k] & kFSEventStreamEventFlagMustScanSubDirs) {
+			if (trace_pass_fl(&trace_fsmonitor))
+				log_flags_set(path_k, event_flags[k]);
+
+			strbuf_reset(&tmp);
+			strbuf_addstr(&tmp, worktree_rel);
+			strbuf_addch(&tmp, '/');
+
+			if (!batch)
+				batch = fsmonitor_batch__new();
+			my_add_path(batch, tmp.buf);
 			continue;
 		}
 
@@ -290,8 +322,7 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 			continue;
 		}
 
-		switch (fsmonitor_classify_path_absolute(state, path_k)) {
-
+		switch (path_type) {
 		case IS_INSIDE_DOT_GIT_WITH_COOKIE_PREFIX:
 		case IS_INSIDE_GITDIR_WITH_COOKIE_PREFIX:
 			/* special case cookie files within .git or gitdir */
