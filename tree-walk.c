@@ -77,7 +77,7 @@ int init_tree_desc_gently(struct tree_desc *desc, const struct object_id *oid,
 {
 	struct strbuf err = STRBUF_INIT;
 	int result = init_tree_desc_internal(desc, oid, buffer, size, &err, flags);
-	if (result)
+	if (result && !(flags & TREE_DESC_SILENT_ERRORS))
 		error("%s", err.buf);
 	strbuf_release(&err);
 	return result;
@@ -139,7 +139,8 @@ int update_tree_entry_gently(struct tree_desc *desc)
 {
 	struct strbuf err = STRBUF_INIT;
 	if (update_tree_entry_internal(desc, &err)) {
-		error("%s", err.buf);
+		if (!(desc->flags & TREE_DESC_SILENT_ERRORS))
+			error("%s", err.buf);
 		strbuf_release(&err);
 		/* Stop processing this tree after error */
 		desc->size = 0;
