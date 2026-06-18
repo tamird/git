@@ -40,6 +40,7 @@ struct tree_desc {
 	/* option flags passed via init_tree_desc_gently() */
 	enum tree_desc_flags {
 		TREE_DESC_RAW_MODES = (1 << 0),
+		TREE_DESC_SILENT_ERRORS = (1 << 1),
 	} flags;
 };
 
@@ -67,8 +68,9 @@ static inline int tree_entry_len(const struct name_entry *ne)
 }
 
 /*
- * The _gently versions of these functions warn and return false on a
- * corrupt tree entry rather than dying,
+ * The _gently versions of these functions report corrupt tree entries and
+ * return false rather than dying. TREE_DESC_SILENT_ERRORS suppresses the
+ * report.
  */
 
 /**
