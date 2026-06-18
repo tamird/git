@@ -1262,7 +1262,14 @@ test_expect_success 'content index does not skip regex validation' '
 
 test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_when_finished "git fsmonitor--daemon stop &&
-			    git config --unset core.fsmonitor" &&
+			    git config --unset core.fsmonitor &&
+			    rm -f tree.trace tree-positive.trace \
+				  tree-bypass.trace tree-fallback.trace \
+				  tree-byte-fallback.trace \
+				  tree-missing.trace \
+				  tree-attributes.trace \
+				  tree-corrupt.trace \
+				  tree-corrupt-trailing.trace" &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
 
@@ -1276,7 +1283,181 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 
 	test_must_fail git grep --cached "absent pattern" 2>err &&
-	test_must_be_empty err
+	test_must_be_empty err &&
+
+	test_must_fail env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
+		GIT_TRACE2_EVENT="$PWD/tree.trace" \
+		git grep "absent pattern" HEAD HEAD^ -- \
+			short ordinary present 2>err-tree &&
+	test_must_be_empty err-tree &&
+	test_trace2_data grep content_index_tree_objects 6 <tree.trace &&
+	test_trace2_data grep content_index_tree_queried 3 <tree.trace &&
+	test_trace2_data grep content_index_tree_rejected 6 <tree.trace &&
+	test_trace2_data grep content_index_tree_batches 2 <tree.trace &&
+
+	git grep --no-content-index "present needle" HEAD HEAD^ -- present \
+		>expect-tree-positive &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
+		GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+		git grep "present needle" HEAD HEAD^ -- present \
+		>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_objects 2 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_queried 1 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_rejected 0 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_batches 1 \
+		<tree-positive.trace &&
+
+	git grep --no-content-index -F -e "import sample_ext.__private" \
+		-e "ordinary contents" -e "present needle" HEAD HEAD^ -- \
+		escaped-dot ordinary present \
+		>expect-tree-bypass &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
+		GIT_TRACE2_EVENT="$PWD/tree-bypass.trace" \
+		git grep -F -e "import sample_ext.__private" \
+			-e "ordinary contents" -e "present needle" \
+			HEAD HEAD^ -- escaped-dot ordinary present \
+			>actual-tree-bypass &&
+	test_cmp expect-tree-bypass actual-tree-bypass &&
+	test_trace2_data grep content_index_tree_objects 2 \
+		<tree-bypass.trace &&
+	test_trace2_data grep content_index_tree_queried 2 \
+		<tree-bypass.trace &&
+	test_trace2_data grep content_index_tree_rejected 0 \
+		<tree-bypass.trace &&
+	test_trace2_data grep content_index_tree_batches 1 \
+		<tree-bypass.trace &&
+	test_trace2_data grep content_index_tree_bypassed 1 \
+		<tree-bypass.trace &&
+
+	replaced_oid=$(git rev-parse :ordinary) &&
+	replacement_oid=$(git rev-parse :present) &&
+	git replace "$replaced_oid" "$replacement_oid" &&
+	test_when_finished "test_might_fail git replace -d \"$replaced_oid\"" &&
+	git grep --no-content-index -F \
+		-e "import sample_ext.__private" -e "ordinary contents" \
+		-e "present needle" HEAD -- escaped-dot ordinary present \
+		>expect-tree-byte-fallback &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_MAX_BYTES=20 \
+		GIT_TRACE2_EVENT="$PWD/tree-byte-fallback.trace" \
+		git grep -F -e "import sample_ext.__private" \
+			-e "ordinary contents" -e "present needle" \
+			HEAD -- escaped-dot ordinary present \
+			>actual-tree-byte-fallback &&
+	test_cmp expect-tree-byte-fallback actual-tree-byte-fallback &&
+	test_trace2_data grep content_index_tree_objects 1 \
+		<tree-byte-fallback.trace &&
+	test_trace2_data grep content_index_tree_queried 0 \
+		<tree-byte-fallback.trace &&
+	test_trace2_data grep content_index_tree_batches 0 \
+		<tree-byte-fallback.trace &&
+	git grep --no-content-index "present needle" HEAD -- ordinary \
+		>expect-tree-fallback &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=1 \
+		GIT_TRACE2_EVENT="$PWD/tree-fallback.trace" \
+		git grep "present needle" HEAD -- ordinary \
+		>actual-tree-fallback &&
+	test_cmp expect-tree-fallback actual-tree-fallback &&
+	test_trace2_data grep content_index_tree_objects 1 \
+		<tree-fallback.trace &&
+	test_trace2_data grep content_index_tree_queried 0 \
+		<tree-fallback.trace &&
+	test_trace2_data grep content_index_tree_batches 0 \
+		<tree-fallback.trace &&
+	git replace -d "$replaced_oid" &&
+
+	printf "nested/binary -diff\nnested/text diff\n" >.gitattributes &&
+	test_when_finished "rm -f .gitattributes" &&
+	nested_tree=$({
+		printf "100644 blob %s\tbinary\n" "$replacement_oid" &&
+		printf "100644 blob %s\ttext\n" "$replacement_oid"
+	} | git mktree) &&
+	attributes_tree=$(printf "040000 tree %s\tnested\n" "$nested_tree" |
+		git mktree) &&
+	attributes_commit=$(echo attributes |
+		git commit-tree "$attributes_tree") &&
+	git grep --no-content-index "present needle" "$attributes_commit" -- \
+		nested >expect-tree-attributes &&
+	env GIT_TRACE2_EVENT="$PWD/tree-attributes.trace" \
+		git grep "present needle" "$attributes_commit" -- nested \
+		>actual-tree-attributes &&
+	test_cmp expect-tree-attributes actual-tree-attributes &&
+	test_grep "Binary file .*:nested/binary matches" \
+		expect-tree-attributes &&
+	test_grep ":nested/text:present needle" expect-tree-attributes &&
+	test_trace2_data grep content_index_tree_objects 2 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_queried 1 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_rejected 0 \
+		<tree-attributes.trace &&
+
+	positive_oid=$(git rev-parse :present) &&
+	positive_object=.git/objects/$(test_oid_to_path "$positive_oid") &&
+	mv "$positive_object" "$positive_object.save" &&
+	test_when_finished "mv \"$positive_object.save\" \
+				\"$positive_object\"" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/tree-missing.trace" \
+		git grep "present needle" HEAD -- present \
+		>actual-tree-missing 2>err-tree-missing &&
+	test_must_be_empty actual-tree-missing &&
+	test_grep "unable to read" err-tree-missing &&
+	test_trace2_data grep content_index_tree_objects 1 \
+		<tree-missing.trace &&
+	test_trace2_data grep content_index_tree_queried 1 \
+		<tree-missing.trace &&
+	test_trace2_data grep content_index_tree_rejected 0 \
+		<tree-missing.trace &&
+	test_trace2_data grep content_index_tree_batches 1 \
+		<tree-missing.trace &&
+
+	corrupt_blob=$(echo "corrupt tree marker" | \
+		git hash-object -w --stdin) &&
+	corrupt_tree=$(echo broken | \
+		git hash-object --literally -w -t tree --stdin) &&
+	top_tree=$({
+		printf "100644 blob %s\ta\n" "$corrupt_blob" &&
+		printf "040000 tree %s\tz\n" "$corrupt_tree"
+	} | git mktree --missing) &&
+	corrupt_commit=$(echo corrupt | git commit-tree "$top_tree") &&
+	test_must_fail git -c grep.threads=1 grep --no-content-index \
+		"tree marker" "$corrupt_commit" -- \
+		>expect-corrupt 2>expect-err-corrupt &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/tree-corrupt.trace" \
+		git -c grep.threads=2 grep "tree marker" "$corrupt_commit" -- \
+		>actual-corrupt 2>err-corrupt &&
+	test_cmp expect-corrupt actual-corrupt &&
+	test_cmp expect-err-corrupt err-corrupt &&
+	test_grep "too-short tree object" err-corrupt \
+		>err-corrupt-match &&
+	test_line_count = 1 err-corrupt-match &&
+
+	valid_corrupt_tree=$({
+		printf "100644 blob %s\ta\n" "$corrupt_blob" &&
+		printf "100644 blob %s\tb\n" "$corrupt_blob"
+	} | git mktree) &&
+	git cat-file tree "$valid_corrupt_tree" >corrupt-tree.raw &&
+	printf broken >>corrupt-tree.raw &&
+	corrupt_trailing_tree=$(git hash-object --literally -w -t tree \
+		corrupt-tree.raw) &&
+	corrupt_trailing_commit=$(echo corrupt-trailing | \
+		git commit-tree "$corrupt_trailing_tree") &&
+	test_must_fail git -c grep.threads=1 grep --no-content-index \
+		"tree marker" "$corrupt_trailing_commit" -- \
+		>expect-corrupt-trailing 2>expect-err-corrupt-trailing &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/tree-corrupt-trailing.trace" \
+		git -c grep.threads=2 grep "tree marker" \
+			"$corrupt_trailing_commit" -- \
+		>actual-corrupt-trailing 2>err-corrupt-trailing &&
+	test_cmp expect-corrupt-trailing actual-corrupt-trailing &&
+	test_cmp expect-err-corrupt-trailing err-corrupt-trailing &&
+	test_grep "too-short tree object" err-corrupt-trailing \
+		>err-corrupt-trailing-match &&
+	test_line_count = 1 err-corrupt-trailing-match
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '

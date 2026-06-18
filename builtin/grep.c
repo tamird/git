@@ -88,6 +88,10 @@ static uint64_t worker_lease_id;
 static struct grep_opt *worker_template;
 
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
+#define GREP_TREE_INDEX_CACHE_MAX_ENTRIES (1U << 20)
+#define GREP_TREE_INDEX_BATCH_SIZE	  (1U << 16)
+#define GREP_TREE_INDEX_BATCH_MAX_BYTES	  (16U * 1024 * 1024)
+#define GREP_TREE_INDEX_MAX_REQUESTS	  2
 #define GREP_MIN_FILES_FOR_THREADS 32
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
 
@@ -920,9 +924,10 @@ static int grep_cache(struct grep_opt *opt,
 static int grep_directory(struct grep_opt *opt,
 			  const struct pathspec *pathspec, int exc_std,
 			  int use_index, struct index_state *istate);
+struct grep_tree_batch;
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr);
+		     int check_attr, struct grep_tree_batch *batch);
 
 static int grep_submodule(struct grep_opt *opt,
 			  const struct pathspec *pathspec,
@@ -1016,7 +1021,7 @@ static int grep_submodule(struct grep_opt *opt,
 
 		init_tree_desc(&tree, oid, data, size);
 		hit = grep_tree(&subopt, pathspec, &tree, &base, base.len,
-				object_type == OBJ_COMMIT);
+				object_type == OBJ_COMMIT, NULL);
 		strbuf_release(&base);
 		free(data);
 	} else {
@@ -1816,7 +1821,8 @@ static int grep_cache(struct grep_opt *opt,
 				die(_("unable to read tree %s"), oid_to_hex(&ce->oid));
 			init_tree_desc(&tree, &ce->oid, data, size);
 
-			hit |= grep_tree(opt, pathspec, &tree, &name, 0, 0);
+			hit |= grep_tree(opt, pathspec, &tree, &name, 0, 0,
+					 NULL);
 			strbuf_setlen(&name, name_base_len);
 			strbuf_addstr(&name, ce->name);
 			free(data);
@@ -1907,9 +1913,148 @@ static int grep_cache(struct grep_opt *opt,
 	return hit;
 }
 
+struct grep_tree_batch_item {
+	struct object_id oid;
+	char *filename;
+};
+
+/*
+ * The repository and query are fixed for this command. Submodule recursion is
+ * excluded, so object IDs alone identify reusable content-index answers.
+ */
+struct grep_tree_query_context {
+	struct oidset impossible;
+	struct oidset maybe;
+	int ipc_available;
+	size_t batch_size;
+	size_t batch_max_bytes;
+	uint64_t objects;
+	uint64_t queried;
+	uint64_t rejected;
+	uint64_t batches;
+	uint64_t bypassed;
+};
+
+struct grep_tree_batch {
+	struct grep_opt *opt;
+	struct grep_tree_query_context *query;
+	struct grep_tree_batch_item *items;
+	size_t nr;
+	size_t alloc;
+	size_t filename_bytes;
+	int tree_name_len;
+	int check_attr;
+	int enabled;
+};
+
+static int flush_grep_tree_batch(struct grep_tree_batch *batch)
+{
+	struct grep_tree_query_context *query = batch->query;
+	struct oid_array oids = OID_ARRAY_INIT;
+	unsigned char *results = NULL;
+	size_t rejected = 0;
+	int queried = 0;
+	int hit = 0;
+
+	if (!batch->nr)
+		return 0;
+	for (size_t i = 0; i < batch->nr; i++) {
+		const struct object_id *oid = &batch->items[i].oid;
+
+		if (oidset_contains(&query->impossible, oid) ||
+		    oidset_contains(&query->maybe, oid))
+			continue;
+		oid_array_append(&oids, oid);
+	}
+	oid_array_sort(&oids);
+	if (oids.nr) {
+		size_t dst = 0;
+
+		for (size_t i = 0; i < oids.nr;
+		     i = oid_array_next_unique(&oids, i)) {
+			if (dst != i)
+				oidcpy(&oids.oid[dst], &oids.oid[i]);
+			dst++;
+		}
+		oids.nr = dst;
+		CALLOC_ARRAY(results, oids.nr);
+	}
+	query->objects += batch->nr;
+	if (oids.nr &&
+	    !grep_index_ipc_query_with_max_parallel_requests(
+		    batch->opt->repo, content_index_query, oids.oid, oids.nr,
+		    results, GREP_TREE_INDEX_MAX_REQUESTS)) {
+		query->queried += oids.nr;
+		query->batches++;
+		queried = 1;
+	} else if (oids.nr) {
+		batch->enabled = 0;
+		query->ipc_available = 0;
+	}
+
+	for (size_t i = 0; i < batch->nr; i++) {
+		struct grep_tree_batch_item *item = &batch->items[i];
+		unsigned char result = GREP_INDEX_IPC_UNKNOWN;
+
+		if (oidset_contains(&query->impossible, &item->oid)) {
+			result = GREP_INDEX_IPC_IMPOSSIBLE;
+		} else if (oidset_contains(&query->maybe, &item->oid)) {
+			result = GREP_INDEX_IPC_MAYBE;
+		} else if (queried) {
+			int pos = oid_array_lookup(&oids, &item->oid);
+
+			if (pos < 0)
+				BUG("grep tree batch lost an object ID");
+			result = results[pos];
+		}
+
+		if (result == GREP_INDEX_IPC_IMPOSSIBLE) {
+			query->rejected++;
+			rejected++;
+			if (oidset_size(&query->impossible) +
+				    oidset_size(&query->maybe) <
+			    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
+				oidset_insert(&query->impossible, &item->oid);
+		} else {
+			if (result == GREP_INDEX_IPC_MAYBE &&
+			    oidset_size(&query->impossible) +
+					    oidset_size(&query->maybe) <
+				    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
+				oidset_insert(&query->maybe, &item->oid);
+			hit |= grep_oid(batch->opt, &item->oid, item->filename,
+					batch->tree_name_len,
+					batch->check_attr ?
+						item->filename + batch->tree_name_len :
+						NULL,
+					0, SIZE_MAX,
+					result == GREP_INDEX_IPC_MAYBE);
+		}
+		free(item->filename);
+	}
+	/* Stop daemon queries for this command when one full batch rejects little. */
+	if (batch->enabled && batch->nr == query->batch_size &&
+	    rejected * 8 < batch->nr) {
+		batch->enabled = 0;
+		query->bypassed = 1;
+	}
+	batch->nr = 0;
+	batch->filename_bytes = 0;
+	free(results);
+	oid_array_clear(&oids);
+	return hit;
+}
+
+static void flush_grep_tree_batch_before_die(struct grep_tree_batch *batch)
+{
+	/* Batch output is deferred, so drain it before replaying a fatal parse. */
+	flush_grep_tree_batch(batch);
+	if (threads_started)
+		wait_all();
+}
+
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr)
+		     int check_attr, struct grep_tree_batch *batch)
 {
 	struct repository *repo = opt->repo;
 	int hit = 0;
@@ -1923,8 +2068,23 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		name_base_len = name.len;
 	}
 
-	while (tree_entry(tree, &entry)) {
-		int te_len = tree_entry_len(&entry);
+	while (tree->size) {
+		int te_len;
+
+		if (batch) {
+			struct tree_desc next = *tree;
+
+			next.flags |= TREE_DESC_SILENT_ERRORS;
+			if (!tree_entry_gently(&next, &entry)) {
+				flush_grep_tree_batch_before_die(batch);
+				tree_entry(tree, &entry);
+				BUG("tree_entry() returned after a gentle failure");
+			}
+			*tree = next;
+		} else if (!tree_entry(tree, &entry)) {
+			break;
+		}
+		te_len = tree_entry_len(&entry);
 
 		if (match != all_entries_interesting) {
 			strbuf_addstr(&name, base->buf + tn_len);
@@ -1943,9 +2103,45 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (S_ISREG(entry.mode)) {
 			/* Tree entries have no position in a sparse index. */
-			hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
-					check_attr ? base->buf + tn_len : NULL,
-					0, SIZE_MAX, 0);
+			if (batch && batch->enabled) {
+				struct grep_tree_batch_item *item;
+				size_t filename_bytes = strlen(base->buf) + 1;
+				size_t batch_max_bytes =
+					batch->query->batch_max_bytes;
+
+				if (filename_bytes > batch_max_bytes ||
+				    (batch->nr &&
+				     filename_bytes >
+					     batch_max_bytes -
+						     batch->filename_bytes))
+					hit |= flush_grep_tree_batch(batch);
+				if (!batch->enabled ||
+				    filename_bytes > batch_max_bytes) {
+					hit |= grep_oid(
+						opt, &entry.oid, base->buf, tn_len,
+						check_attr ?
+							base->buf + tn_len :
+							NULL,
+						0, SIZE_MAX, 0);
+				} else {
+					ALLOC_GROW(batch->items, batch->nr + 1,
+						   batch->alloc);
+					item = &batch->items[batch->nr++];
+					oidcpy(&item->oid, &entry.oid);
+					item->filename = xstrdup(base->buf);
+					batch->filename_bytes += filename_bytes;
+					if (batch->nr ==
+						    batch->query->batch_size ||
+					    batch->filename_bytes >=
+						    batch_max_bytes)
+						hit |=
+							flush_grep_tree_batch(batch);
+				}
+			} else {
+				hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
+						check_attr ? base->buf + tn_len : NULL,
+						0, SIZE_MAX, 0);
+			}
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
 			struct tree_desc sub;
@@ -1954,14 +2150,25 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 			data = odb_read_object(the_repository->objects,
 					       &entry.oid, &type, &size);
-			if (!data)
+			if (!data) {
+				if (batch)
+					flush_grep_tree_batch_before_die(batch);
 				die(_("unable to read tree (%s)"),
 				    oid_to_hex(&entry.oid));
+			}
 
 			strbuf_addch(base, '/');
-			init_tree_desc(&sub, &entry.oid, data, size);
+			if (batch &&
+			    init_tree_desc_gently(&sub, &entry.oid, data, size,
+						  TREE_DESC_SILENT_ERRORS)) {
+				flush_grep_tree_batch_before_die(batch);
+				init_tree_desc(&sub, &entry.oid, data, size);
+				BUG("init_tree_desc() returned after a gentle failure");
+			} else if (!batch) {
+				init_tree_desc(&sub, &entry.oid, data, size);
+			}
 			hit |= grep_tree(opt, pathspec, &sub, base, tn_len,
-					 check_attr);
+					 check_attr, batch);
 			free(data);
 		} else if (recurse_submodules && S_ISGITLINK(entry.mode)) {
 			hit |= grep_submodule(opt, pathspec, &entry.oid,
@@ -2118,11 +2325,17 @@ static void prefetch_grep_blobs(struct grep_opt *opt,
 }
 
 static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
-		       struct object *obj, const char *name, const char *path)
+		       struct object *obj, const char *name, const char *path,
+		       struct grep_tree_query_context *query)
 {
 	if (obj->type == OBJ_BLOB)
 		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0, 0);
 	if (obj->type == OBJ_COMMIT || obj->type == OBJ_TREE) {
+		struct grep_tree_batch batch = {
+			.opt = opt,
+			.query = query,
+		};
+		struct grep_tree_batch *batch_ptr = NULL;
 		struct tree_desc tree;
 		void *data;
 		unsigned long size;
@@ -2131,8 +2344,11 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		data = odb_read_object_peeled(opt->repo->objects, &obj->oid,
 					      OBJ_TREE, &size, NULL);
-		if (!data)
+		if (!data) {
+			if (threads_started)
+				wait_all();
 			die(_("unable to read tree (%s)"), oid_to_hex(&obj->oid));
+		}
 
 		len = name ? strlen(name) : 0;
 		strbuf_init(&base, PATH_MAX + len + 1);
@@ -2140,23 +2356,70 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 			strbuf_add(&base, name, len);
 			strbuf_addch(&base, ':');
 		}
-		init_tree_desc(&tree, &obj->oid, data, size);
+		batch.tree_name_len = base.len;
+		batch.check_attr = obj->type == OBJ_COMMIT;
+		if (content_index_query && !query->bypassed &&
+		    !opt->status_only && opt->repo == the_repository &&
+		    !recurse_submodules &&
+		    fsm_settings__get_mode(opt->repo) == FSMONITOR_MODE_IPC) {
+			if (query->ipc_available < 0)
+				query->ipc_available =
+					grep_index_ipc_is_available(opt->repo);
+			if (query->ipc_available > 0) {
+				batch.enabled = 1;
+				batch_ptr = &batch;
+			}
+		}
+		if (batch_ptr || threads_started) {
+			if (init_tree_desc_gently(&tree, &obj->oid, data, size,
+						  TREE_DESC_SILENT_ERRORS)) {
+				if (threads_started)
+					wait_all();
+				init_tree_desc(&tree, &obj->oid, data, size);
+				BUG("init_tree_desc() returned after a gentle failure");
+			}
+		} else {
+			init_tree_desc(&tree, &obj->oid, data, size);
+		}
 		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
-				obj->type == OBJ_COMMIT);
+				obj->type == OBJ_COMMIT, batch_ptr);
+		if (batch_ptr) {
+			hit |= flush_grep_tree_batch(batch_ptr);
+			free(batch.items);
+		}
 		strbuf_release(&base);
 		free(data);
 		return hit;
 	}
+	if (threads_started)
+		wait_all();
 	die(_("unable to grep from object of type %s"), type_name(obj->type));
 }
 
 static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			const struct object_array *list)
 {
+	struct grep_tree_query_context query = {
+		.impossible = OIDSET_INIT,
+		.maybe = OIDSET_INIT,
+		.ipc_available = -1,
+		.batch_size = git_env_ulong("GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE",
+					    GREP_TREE_INDEX_BATCH_SIZE),
+		.batch_max_bytes = git_env_ulong(
+			"GIT_TEST_GREP_TREE_INDEX_BATCH_MAX_BYTES",
+			GREP_TREE_INDEX_BATCH_MAX_BYTES),
+	};
 	unsigned int i;
 	int hit = 0;
 	const unsigned int nr = list->nr;
 
+	if (!query.batch_size)
+		query.batch_size = GREP_TREE_INDEX_BATCH_SIZE;
+	else if (query.batch_size > GREP_TREE_INDEX_BATCH_SIZE)
+		query.batch_size = GREP_TREE_INDEX_BATCH_SIZE;
+	if (!query.batch_max_bytes ||
+	    query.batch_max_bytes > GREP_TREE_INDEX_BATCH_MAX_BYTES)
+		query.batch_max_bytes = GREP_TREE_INDEX_BATCH_MAX_BYTES;
 	prefetch_grep_blobs(opt, pathspec, list);
 
 	for (i = 0; i < nr; i++) {
@@ -2171,6 +2434,8 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			char hex[GIT_MAX_HEXSZ + 1];
 			const char *name = list->objects[i].name;
 
+			if (threads_started)
+				wait_all();
 			if (!name) {
 				oid_to_hex_r(hex, &list->objects[i].item->oid);
 				name = hex;
@@ -2186,12 +2451,26 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			obj_read_unlock();
 		}
 		if (grep_object(opt, pathspec, real_obj, list->objects[i].name,
-				list->objects[i].path)) {
+				list->objects[i].path, &query)) {
 			hit = 1;
 			if (opt->status_only)
 				break;
 		}
 	}
+	if (query.objects) {
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_objects", query.objects);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_queried", query.queried);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_rejected", query.rejected);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_batches", query.batches);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_bypassed", query.bypassed);
+	}
+	oidset_clear(&query.impossible);
+	oidset_clear(&query.maybe);
 	return hit;
 }
 

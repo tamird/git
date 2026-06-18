@@ -154,6 +154,23 @@ test_expect_success 'basic grep tree' '
 	test_cmp expect actual
 '
 
+test_expect_success FSMONITOR_DAEMON \
+	'content index bypasses recursive submodule trees' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    rm -rf .git/objects/info/grep-index &&
+			    rm -f recurse-content-index.trace" &&
+	git grep-index --no-progress &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	git grep --no-content-index -F -e "(3|4)" \
+		--recurse-submodules HEAD >expect &&
+	env GIT_TRACE2_EVENT="$PWD/recurse-content-index.trace" \
+		git grep -F -e "(3|4)" --recurse-submodules HEAD >actual &&
+	test_cmp expect actual &&
+	! test_grep content_index_tree recurse-content-index.trace
+'
+
 test_expect_success 'grep result cache uses stable repository identity' '
 	test_must_fail env \
 		GIT_TRACE2_EVENT="$(pwd)/result-cache-repositories.trace" \

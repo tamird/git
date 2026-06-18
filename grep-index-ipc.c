@@ -36,6 +36,15 @@ int grep_index_ipc_query(struct repository *repo UNUSED,
 	return -1;
 }
 
+int grep_index_ipc_query_with_max_parallel_requests(
+	struct repository *repo UNUSED,
+	const struct grep_index_query *query UNUSED,
+	const struct object_id *oids UNUSED, size_t nr UNUSED,
+	unsigned char *maybe UNUSED, size_t max_parallel_requests UNUSED)
+{
+	return -1;
+}
+
 int grep_index_ipc_query_index(struct repository *repo UNUSED,
 			       const struct grep_index_query *query UNUSED,
 			       unsigned char *maybe UNUSED,
@@ -1620,10 +1629,10 @@ cleanup:
 	return NULL;
 }
 
-int grep_index_ipc_query(struct repository *repo,
-			 const struct grep_index_query *query,
-			 const struct object_id *oids, size_t nr,
-			 unsigned char *maybe)
+int grep_index_ipc_query_with_max_parallel_requests(
+	struct repository *repo, const struct grep_index_query *query,
+	const struct object_id *oids, size_t nr, unsigned char *maybe,
+	size_t max_parallel_requests)
 {
 	struct strbuf serialized = STRBUF_INIT;
 	char *path = NULL;
@@ -1655,6 +1664,9 @@ int grep_index_ipc_query(struct repository *repo,
 		cpus = online_cpus();
 		if (cpus > 0 && threads_nr > (size_t)cpus)
 			threads_nr = cpus;
+		if (max_parallel_requests &&
+		    threads_nr > max_parallel_requests)
+			threads_nr = max_parallel_requests;
 	}
 	CALLOC_ARRAY(tasks, threads_nr);
 	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
@@ -1700,6 +1712,15 @@ cleanup:
 	free(path);
 	strbuf_release(&serialized);
 	return result;
+}
+
+int grep_index_ipc_query(struct repository *repo,
+			 const struct grep_index_query *query,
+			 const struct object_id *oids, size_t nr,
+			 unsigned char *maybe)
+{
+	return grep_index_ipc_query_with_max_parallel_requests(
+		repo, query, oids, nr, maybe, 0);
 }
 
 static int grep_index_ipc_negative_report(

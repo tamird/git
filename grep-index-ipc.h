@@ -23,6 +23,10 @@ int grep_index_ipc_query(struct repository *repo,
 			 const struct grep_index_query *query,
 			 const struct object_id *oids, size_t nr,
 			 unsigned char *maybe);
+int grep_index_ipc_query_with_max_parallel_requests(
+	struct repository *repo, const struct grep_index_query *query,
+	const struct object_id *oids, size_t nr, unsigned char *maybe,
+	size_t max_parallel_requests);
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
 			       unsigned char *maybe,
