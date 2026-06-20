@@ -448,10 +448,15 @@ static int pcre2match(struct grep_pat *p, const char *line, const char *eol,
 		    errbuf);
 	}
 	if (ret > 0) {
+		PCRE2_SIZE max_regoff =
+			maximum_signed_value_of_type(match->rm_so);
+
 		ovector = pcre2_get_ovector_pointer(p->pcre2_match_data);
+		if (ovector[0] > max_regoff || ovector[1] > max_regoff)
+			die(_("PCRE2 match offset is too large"));
 		ret = 0;
-		match->rm_so = (int)ovector[0];
-		match->rm_eo = (int)ovector[1];
+		match->rm_so = ovector[0];
+		match->rm_eo = ovector[1];
 	}
 
 	return ret;
@@ -860,11 +865,16 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	if (have_literal && !group_depth) {
 		struct grep_opt lookahead_opt = *opt;
 
+		/*
+		 * Add high-bit and ESC bytes to this byte-mode matcher. POSIX
+		 * must verify multibyte and ISO-2022 lines; finding them here
+		 * avoids repeatedly searching past them.
+		 */
+		strbuf_addstr(&lookahead_pattern, "|[\\x1b\\x80-\\xff]");
 		CALLOC_ARRAY(p->pcre2_lookahead, 1);
 		p->pcre2_lookahead->pattern = strbuf_detach(&lookahead_pattern,
 							    &p->pcre2_lookahead->patternlen);
 		p->pcre2_lookahead->pcre2_newline_lf = 1;
-		/* Non-ASCII lines are sent to the POSIX matcher below. */
 		lookahead_opt.ignore_locale = 1;
 		compile_pcre2_pattern(p->pcre2_lookahead, &lookahead_opt);
 	}
@@ -1823,26 +1833,6 @@ static int look_ahead(struct grep_opt *opt,
 			hit = patmatch(lookahead, bol, bol + *left_p, &m, 0);
 		if (hit < 0)
 			return -1;
-		if (p->pcre2_lookahead) {
-			const char *limit = hit ? bol + m.rm_so : bol + *left_p;
-			const char *non_ascii = bol;
-
-			/*
-			 * PCRE2 may fold or reject non-ASCII input differently from
-			 * regexec(). Make every such line a candidate so a PCRE2 miss
-			 * cannot change POSIX matches or suppress matcher errors.
-			 */
-			while (non_ascii < limit &&
-			       !((unsigned char)*non_ascii & 0x80) &&
-			       *non_ascii != '\033')
-				non_ascii++;
-			if (non_ascii < limit) {
-				while (non_ascii > bol && non_ascii[-1] != '\n')
-					non_ascii--;
-				m.rm_so = m.rm_eo = non_ascii - bol;
-				hit = 1;
-			}
-		}
 		if (!hit || m.rm_so < 0 || m.rm_eo < 0)
 			continue;
 		if (earliest < 0 || m.rm_so < earliest)
