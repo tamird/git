@@ -174,6 +174,51 @@ test_expect_success LIBPCRE2 \
 	git grep --no-index -q "copy.*UvIndex" -- bre-lookahead
 '
 
+test_expect_success LIBPCRE2 'POSIX anchors preserve matches' '
+	test_when_finished "rm -f anchor-lookahead anchor-literal anchor-crlf" &&
+	printf "partial\npartial suffix\nprefix partial\n" >anchor-lookahead &&
+	printf "prefix partial suffix\npartial" >>anchor-lookahead &&
+	cat >expect-start <<-\EOF &&
+	anchor-lookahead:1:partial
+	anchor-lookahead:2:partial suffix
+	anchor-lookahead:5:partial
+	EOF
+	cat >expect-end <<-\EOF &&
+	anchor-lookahead:1:partial
+	anchor-lookahead:3:prefix partial
+	anchor-lookahead:5:partial
+	EOF
+	cat >expect-both <<-\EOF &&
+	anchor-lookahead:1:partial
+	anchor-lookahead:5:partial
+	EOF
+	git grep --no-index -n "^partial" -- anchor-lookahead >actual &&
+	test_cmp expect-start actual &&
+	git grep --no-index -n "partial$" -- anchor-lookahead >actual &&
+	test_cmp expect-end actual &&
+	git grep --no-index -n "^partial$" -- anchor-lookahead >actual &&
+	test_cmp expect-both actual &&
+	git grep --no-index -n -E "^partial" -- anchor-lookahead >actual &&
+	test_cmp expect-start actual &&
+	git grep --no-index -n -E "partial$" -- anchor-lookahead >actual &&
+	test_cmp expect-end actual &&
+	git grep --no-index -n -E "^partial$" -- anchor-lookahead >actual &&
+	test_cmp expect-both actual &&
+	cat >anchor-literal <<-\EOF &&
+	literal^anchor
+	literal$anchor
+	literal anchor
+	EOF
+	git grep --no-index -n -F -e "literal^anchor" \
+		-e "literal\$anchor" -- anchor-literal >expect-literal &&
+	git grep --no-index -n -e "literal^anchor" \
+		-e "literal\$anchor" -- anchor-literal >actual &&
+	test_cmp expect-literal actual &&
+	printf "partial\r\n" >anchor-crlf &&
+	test_must_fail git grep --no-index -q "partial$" -- anchor-crlf &&
+	test_must_fail git grep --no-index -q -E "partial$" -- anchor-crlf
+'
+
 test_expect_success LIBPCRE2 'escaped literal preserves matches' '
 	test_when_finished "rm -f escaped-literal-lookahead" &&
 	cat >escaped-literal-lookahead <<-\EOF &&
