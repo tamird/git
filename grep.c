@@ -763,6 +763,11 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
+			if (ch == '^' || ch == '$') {
+				/* Anchor syntax is contextual; let POSIX verify it. */
+				strbuf_addstr(&lookahead_pattern, ".*");
+				continue;
+			}
 			if (ch == '\\' && i + 1 < p->patternlen &&
 			    (p->pattern[i + 1] == '.' ||
 			     (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
