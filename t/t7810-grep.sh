@@ -3536,6 +3536,94 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 '
 
 test_expect_success NO_FORCED_SPLIT_INDEX \
+	'worktree recovery refreshes cumulative exact entries' '
+	test_when_finished "rm -rf grep-worktree-recovery-cumulative" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		git init grep-worktree-recovery-cumulative &&
+		cd grep-worktree-recovery-cumulative &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		export GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+		echo "cumulative recovery a" >a &&
+		echo "cumulative recovery b" >b &&
+		echo "cumulative recovery c" >c &&
+		echo "cumulative recovery stale a" >stale-a &&
+		echo "cumulative recovery stale b" >stale-b &&
+		echo "cumulative recovery fresh" >fresh &&
+		test-tool chmtime =-5 a b c stale-a stale-b fresh &&
+		git add a b c stale-a stale-b fresh &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-a" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- a &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-a &&
+		test_path_is_file .git/index.grep-worktree-recovery &&
+		test_path_is_missing .git/index.grep-worktree-recovery-next &&
+
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=2 \
+			GIT_TRACE2_EVENT="$PWD/trace-b" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- b &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-b &&
+		test_path_is_missing .git/index.grep-worktree-recovery-next &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=2 \
+			GIT_TRACE2_EVENT="$PWD/trace-c" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- c &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-c &&
+		test_path_is_file .git/index.grep-worktree-recovery-next &&
+
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=3 \
+			GIT_TRACE2_EVENT="$PWD/trace-stale" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- stale-a stale-b &&
+		test_trace2_data grep worktree_blob/recorded_equal 2 \
+			<trace-stale &&
+		git update-index --no-fsmonitor-valid stale-a stale-b &&
+		cp .git/index.grep-worktree-recovery \
+			.git/index.grep-worktree-recovery.save &&
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=3 \
+			GIT_TRACE2_EVENT="$PWD/trace-fresh" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- fresh &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<trace-fresh &&
+		test_cmp .git/index.grep-worktree-recovery.save \
+			.git/index.grep-worktree-recovery &&
+
+		echo "cumulative recovery shift" >shift &&
+		test-tool chmtime =-5 shift &&
+		git add shift &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-rewritten" \
+			git grep --no-content-index \
+				"absent cumulative recovery" -- a b c &&
+		test_trace2_data grep worktree_blob/recovered_identity 3 \
+			<trace-rewritten &&
+		test_trace2_data grep worktree_blob/recorded_equal 0 \
+			<trace-rewritten
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
 	'worktree recovery compares full SHA-256 identities' '
 	test_when_finished "rm -rf grep-worktree-recovery-identity" &&
 	(
