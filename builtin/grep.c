@@ -1048,6 +1048,11 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 	return use_oid;
 }
 
+static int grep_pathspec_covers_worktree(const struct pathspec *pathspec)
+{
+	return !pathspec->nr && !(pathspec->magic & PATHSPEC_MAXDEPTH);
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1058,6 +1063,7 @@ static int grep_cache(struct grep_opt *opt,
 	int hit = 0;
 	int nr;
 	size_t untracked_pos = 0;
+	uint64_t ipc_worktree_blob_rejected_after_pathspec = 0;
 	int *selected = NULL;
 	size_t selected_nr = 0;
 	size_t selected_alloc = 0;
@@ -1067,6 +1073,8 @@ static int grep_cache(struct grep_opt *opt,
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
 	int worktree_sidecar_loaded = 0;
+	int prepare_index_query;
+	int full_worktree = grep_pathspec_covers_worktree(pathspec);
 	const char *recursive_basename = NULL;
 	size_t recursive_basename_len = 0;
 	struct strbuf name = STRBUF_INIT;
@@ -1304,8 +1312,8 @@ static int grep_cache(struct grep_opt *opt,
 		free(selected_map);
 		strbuf_release(&dir);
 	}
-	if (!include_untracked && !skip_cache_setup &&
-	    repo == the_repository && !cached &&
+	if ((!include_untracked || full_worktree) &&
+	    !skip_cache_setup && repo == the_repository && !cached &&
 	    !opt->allow_textconv &&
 	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
 	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
@@ -1320,7 +1328,8 @@ static int grep_cache(struct grep_opt *opt,
 		size_t pos;
 
 		if (!literal_selected)
-			use_selected = min_bytes && !recurse_submodules;
+			use_selected = !include_untracked && min_bytes &&
+				       !recurse_submodules;
 		for (pos = 0;
 		     min_bytes &&
 		     pos < (literal_selected ? selected_nr :
@@ -1406,9 +1415,17 @@ static int grep_cache(struct grep_opt *opt,
 			}
 		}
 	}
+	/*
+	 * Without observed worktree identities, an index-wide query cannot
+	 * reject worktree paths. Let the first full-worktree scan populate the
+	 * sidecar instead.
+	 */
+	prepare_index_query =
+		content_index_query &&
+		(!include_untracked || worktree_sidecar_loaded);
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
-	    content_index_query &&
+	    prepare_index_query &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
 	    grep_index_ipc_is_available(repo)) {
@@ -1541,7 +1558,7 @@ static int grep_cache(struct grep_opt *opt,
 					    GREP_MIN_FILES_FOR_THREADS &&
 				    num_threads > 1 && threads_auto)
 					num_threads = 1;
-			} else if (!cached && worktree_cache &&
+			} else if (!include_untracked && !cached && worktree_cache &&
 				   (!literal_selected ||
 				    worktree_sidecar_loaded) &&
 				   (literal_selected ||
@@ -1655,7 +1672,7 @@ static int grep_cache(struct grep_opt *opt,
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
-	    content_index_query &&
+	    prepare_index_query &&
 	    !used_index_ipc && !content_index) {
 		trace2_region_enter("grep", "load_content_index", repo);
 		content_index = grep_index_load(repo);
@@ -1695,7 +1712,7 @@ static int grep_cache(struct grep_opt *opt,
 		trace2_region_leave("grep", "select_content_index", repo);
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
-	    repo == the_repository && content_index_query &&
+	    repo == the_repository && prepare_index_query &&
 	    !used_index_ipc && !content_index_prepared &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
@@ -1844,7 +1861,7 @@ static int grep_cache(struct grep_opt *opt,
 				GREP_WORKTREE_CACHE_UNKNOWN;
 			const struct cache_entry *cache_candidate = NULL;
 			int can_cache =
-				!include_untracked && repo == the_repository && !cached &&
+				repo == the_repository && !cached &&
 				!opt->allow_textconv &&
 				grep_worktree_cache_entry_eligible(ce) &&
 				worktree_cache;
@@ -1863,22 +1880,25 @@ static int grep_cache(struct grep_opt *opt,
 				cache_candidate = ce;
 
 			/*
-			 * If CE_VALID is on, we assume worktree file and its
-			 * cache entry are identical, even if worktree file has
-			 * been modified, so use cache version instead. We can
-			 * also use it when a previous scan observed identical
-			 * worktree and blob bytes and fsmonitor reports no
-			 * subsequent change.
+			 * Normal worktree grep treats CE_VALID as proof that the
+			 * index and worktree match. --untracked still searches the
+			 * worktree so local changes to these paths remain visible. It
+			 * may use the blob only when a previous scan observed equality
+			 * and fsmonitor reports no subsequent change.
 			 */
-			if (!include_untracked &&
-			    (cached || (ce->ce_flags & CE_VALID) ||
-			     use_worktree_blob)) {
+			if (use_worktree_blob ||
+			    (!include_untracked &&
+			     (cached || (ce->ce_flags & CE_VALID)))) {
 				if (ce_stage(ce) || ce_intent_to_add(ce))
 					continue;
 				if (content_index_ipc_result &&
 				    pos < content_index_ipc_nr &&
-				    content_index_ipc_result[pos] == 1)
+				    content_index_ipc_result[pos] ==
+					    GREP_INDEX_IPC_IMPOSSIBLE) {
+					if (use_worktree_blob)
+						ipc_worktree_blob_rejected_after_pathspec++;
 					continue;
+				}
 				hit |= grep_oid(opt, &ce->oid, name.buf,
 						0, name.buf, use_worktree_blob, pos,
 						used_index_ipc ||
@@ -1909,6 +1929,10 @@ static int grep_cache(struct grep_opt *opt,
 			break;
 	}
 
+	if (content_index_ipc_result)
+		trace2_data_intmax("grep", repo,
+				   "content_index_ipc_worktree_blob_rejected_after_pathspec",
+				   ipc_worktree_blob_rejected_after_pathspec);
 	free(selected);
 	dir_clear(&untracked_dir);
 	strbuf_release(&name);
@@ -2887,7 +2911,8 @@ int cmd_grep(int argc,
 	if (recurse_submodules && untracked)
 		die(_("--untracked not supported with --recurse-submodules"));
 
-	if (use_content_index && use_index && !untracked && !opt.allow_textconv)
+	if (use_content_index && use_index && !opt.allow_textconv &&
+	    (!untracked || grep_pathspec_covers_worktree(&pathspec)))
 		content_index_query = grep_index_query_create(&opt);
 
 	/*

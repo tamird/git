@@ -1943,12 +1943,14 @@ test_expect_success 'grep --untracked merges worktree paths in order' '
 		echo b-tracked >.gitignore &&
 		echo j-ignored >>.gitignore &&
 		echo needle >b-tracked &&
-		echo needle >d-tracked &&
+		echo no-match >d-tracked &&
 		test_ln_s_add missing g-type &&
 		echo needle >h-sparse &&
 		echo needle >i-absent &&
 		git add -f .gitignore b-tracked d-tracked h-sparse i-absent &&
 		git commit -m initial &&
+		git update-index --assume-unchanged d-tracked &&
+		echo needle >d-tracked &&
 		git update-index --add --cacheinfo 160000,$(git rev-parse HEAD),k-gitlink &&
 		echo needle >a-untracked &&
 		echo needle >c-untracked &&
