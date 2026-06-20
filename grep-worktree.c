@@ -1077,13 +1077,47 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		GREP_WORKTREE_RECOVERY_MIN_ENTRIES);
 	if (!cache->split_index &&
 	    !is_null_oid(&cache->recovery_checksum) &&
-	    cache->recorded_equal >= recovery_refresh_min &&
+	    cache->recorded_equal &&
 	    load_recovery(cache)) {
+		uint64_t exact_equal = 0;
+		int recovery_lagging = 0;
+
 		if (DIV_ROUND_UP(cache->recovery_entries_nr, 8) >
 		    recovery_refresh_min)
 			recovery_refresh_min =
 				DIV_ROUND_UP(cache->recovery_entries_nr, 8);
-		if (cache->recorded_equal >= recovery_refresh_min &&
+		if (cache->recorded_equal < recovery_refresh_min) {
+			for (size_t i = 0; i < cache->bitmap_size; i++) {
+				unsigned char bits = cache->equal[i];
+
+				while (bits) {
+					exact_equal++;
+					bits &= bits - 1;
+				}
+			}
+			if (exact_equal > cache->recovery_entries_nr &&
+			    exact_equal - cache->recovery_entries_nr >=
+				    recovery_refresh_min) {
+				exact_equal = 0;
+				for (size_t i = 0;
+				     i < cache->istate->cache_nr; i++)
+					if (cache->equal[i >> 3] &
+						    (1u << (i & 7)) &&
+					    grep_worktree_cache_entry_eligible(
+						    cache->istate->cache[i]))
+						exact_equal++;
+				/*
+				 * The cardinality gap lower-bounds exact identities
+				 * absent from recovery, regardless of overlap.
+				 */
+				recovery_lagging =
+					exact_equal > cache->recovery_entries_nr &&
+					exact_equal - cache->recovery_entries_nr >=
+						recovery_refresh_min;
+			}
+		}
+		if ((cache->recorded_equal >= recovery_refresh_min ||
+		     recovery_lagging) &&
 		    recovery_checksum_valid(cache)) {
 			prepared_recovery_slot = !cache->recovery_slot;
 			update_recovery = 1;
