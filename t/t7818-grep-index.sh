@@ -1141,6 +1141,7 @@ test_expect_success FSMONITOR_DAEMON \
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git update-ref -d refs/heads/pickaxe-uncovered &&
+			    git update-ref -d refs/heads/pickaxe-deferred-missing &&
 			    rm -f pickaxe-uncovered-*.trace" &&
 	git branch pickaxe-uncovered HEAD &&
 	test_commit_bulk --ref=refs/heads/pickaxe-uncovered \
@@ -1165,6 +1166,20 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-uncovered-absent.trace &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=2 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-deferred.trace" \
+		git log --no-renames --format=%s -Sabsent \
+		pickaxe-uncovered~7..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_must_be_empty actual &&
+	test_grep \
+		"\"key\":\"content_index/singleton_ipc_queries\",\"value\":\"2\"" \
+		pickaxe-uncovered-deferred.trace &&
+	test_grep \
+		"\"key\":\"content_index/deferred_singletons\",\"value\":\"4\"" \
+		pickaxe-uncovered-deferred.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-positive.trace" \
 		git log --no-renames --format=%s -Sneedle \
 		pickaxe-uncovered~7..pickaxe-uncovered \
@@ -1177,6 +1192,18 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-uncovered-positive.trace &&
 
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-positive-deferred.trace" \
+		git log --no-renames --format=%s -Sneedle \
+		pickaxe-uncovered~7..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_must_be_empty actual &&
+	test_grep \
+		"\"key\":\"content_index/deferred_singletons\",\"value\":\"6\"" \
+		pickaxe-uncovered-positive-deferred.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-regex.trace" \
 		git log --no-renames --format=%s --pickaxe-regex \
 		-S"needle.[0-9]" pickaxe-uncovered~7..pickaxe-uncovered \
@@ -1202,7 +1229,65 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-uncovered-change.trace &&
 	test_grep \
 		"\"key\":\"content_index/count_cache_hits\",\"value\":\"7\"" \
-		pickaxe-uncovered-change.trace
+		pickaxe-uncovered-change.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-change-deferred.trace" \
+		git log --no-renames --format=%s -Sneedle \
+		pickaxe-uncovered~8..pickaxe-uncovered \
+		-- pickaxe-uncovered >actual &&
+	test_cmp expect actual &&
+	test_grep \
+		"\"key\":\"content_index/deferred_singletons\",\"value\":\"7\"" \
+		pickaxe-uncovered-change-deferred.trace &&
+
+	missing_oid=$(printf "old deferred blob\n" |
+		git hash-object -w --stdin) &&
+	next_oid=$(printf "next deferred blob\n" |
+		git hash-object -w --stdin) &&
+	tip_oid=$(printf "tip deferred blob\n" |
+		git hash-object -w --stdin) &&
+	missing_tree=$(printf "100644 blob %s\tpickaxe-deferred-missing\n" \
+		"$missing_oid" | git mktree) &&
+	next_tree=$(printf "100644 blob %s\tpickaxe-deferred-missing\n" \
+		"$next_oid" | git mktree) &&
+	tip_tree=$(printf "100644 blob %s\tpickaxe-deferred-missing\n" \
+		"$tip_oid" | git mktree) &&
+	missing_commit=$(echo missing |
+		git commit-tree "$missing_tree" -p HEAD) &&
+	next_commit=$(echo next |
+		git commit-tree "$next_tree" -p "$missing_commit") &&
+	tip_commit=$(echo tip |
+		git commit-tree "$tip_tree" -p "$next_commit") &&
+	git update-ref refs/heads/pickaxe-deferred-missing "$tip_commit" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
+		git log --no-renames --format=%s -Sabsent \
+		"$missing_commit..$tip_commit" -- pickaxe-deferred-missing \
+		>actual &&
+	test_must_be_empty actual &&
+	missing_object=.git/objects/$(test_oid_to_path "$missing_oid") &&
+	mv "$missing_object" "$missing_object.save" &&
+	test_when_finished "test ! -e \"$missing_object.save\" ||
+			    mv \"$missing_object.save\" \"$missing_object\"" &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
+		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-missing.trace" \
+		git log --no-renames --format=%s -Sabsent \
+		"$missing_commit..$tip_commit" -- pickaxe-deferred-missing \
+		>actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err &&
+	test_grep \
+		"\"key\":\"content_index/deferred_singletons\",\"value\":\"1\"" \
+		pickaxe-uncovered-missing.trace &&
+	test_grep \
+		"\"key\":\"content_index/fallback_ipc_queries\",\"value\":\"1\"" \
+		pickaxe-uncovered-missing.trace &&
+	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"2\"" \
+		pickaxe-uncovered-missing.trace &&
+	mv "$missing_object.save" "$missing_object"
 '
 
 test_expect_success 'possible pickaxe blobs use normal reads' '

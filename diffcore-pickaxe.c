@@ -14,11 +14,13 @@
 #include "grep-index-ipc.h"
 #include "xdiff-interface.h"
 #include "kwset.h"
+#include "odb.h"
 #include "oidmap.h"
 #include "oidset.h"
 #include "parse.h"
 #include "pretty.h"
 #include "quote.h"
+#include "replace-object.h"
 #include "repository.h"
 #include "trace2.h"
 #include "userdiff.h"
@@ -26,6 +28,7 @@
 #define PICKAXE_INDEX_MAX_ENTRIES (1U << 20)
 #define PICKAXE_INDEX_MIN_PAIRS	  4096
 #define PICKAXE_INDEX_DIRECT_MAX_OIDS 64
+#define PICKAXE_INDEX_MAX_SINGLETON_IPC_QUERIES 64
 #define PICKAXE_INDEX_MAX_UNCOVERED_EDGES 64
 
 struct diff_pickaxe_index_entry {
@@ -33,6 +36,7 @@ struct diff_pickaxe_index_entry {
 	unsigned int count;
 	int maybe;
 	int count_valid;
+	int deferred_ipc;
 };
 
 struct diff_pickaxe_index {
@@ -69,7 +73,10 @@ struct diff_pickaxe_index {
 	uint64_t impossible_pairs;
 	uint64_t direct_batches;
 	uint64_t ipc_batches;
+	uint64_t deferred_singletons;
+	uint64_t fallback_ipc_queries;
 	uint64_t ipc_failures;
+	uint64_t singleton_ipc_queries;
 	uint64_t commit_edges_tested;
 	uint64_t commit_edges_pruned;
 	uint64_t commit_oids_impossible;
@@ -283,15 +290,6 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 		return 0;
 
 	if (index && index->query &&
-	    !textconv_one && !textconv_two &&
-	    !pickaxe_index_maybe_contains(
-		    index, o->repo, p->one) &&
-	    !pickaxe_index_maybe_contains(
-		    index, o->repo, p->two)) {
-		index->impossible_pairs++;
-		return 0;
-	}
-	if (index && index->query &&
 	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
 	    !textconv_one && !textconv_two) {
 		struct diff_filespec *specs[] = { p->one, p->two };
@@ -307,7 +305,56 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			if (!count_entries[i])
 				count_entries[i] = oidmap_get(
 					&index->batch_results, &spec->oid);
+			if (count_entries[i] &&
+			    count_entries[i]->deferred_ipc) {
+				void *content = NULL;
+				unsigned long size;
+				struct object_info info = {
+					.sizep = &size,
+					.contentp = &content,
+				};
+				unsigned char maybe;
+
+				if (spec->data ||
+				    !odb_read_object_info_extended(
+					    o->repo->objects, &spec->oid, &info,
+					    OBJECT_INFO_LOOKUP_REPLACE |
+						    OBJECT_INFO_SKIP_FETCH_OBJECT |
+						    OBJECT_INFO_QUICK)) {
+					if (!spec->data) {
+						spec->data = content;
+						spec->size = xsize_t(size);
+						spec->should_free = 1;
+					}
+					count_entries[i]->maybe = 1;
+					count_entries[i]->deferred_ipc = 0;
+				} else if (index->ipc &&
+					   !grep_index_ipc_query(
+						   o->repo, index->query,
+						   &spec->oid, 1, &maybe)) {
+					count_entries[i]->maybe =
+						maybe != GREP_INDEX_IPC_IMPOSSIBLE;
+					count_entries[i]->deferred_ipc = 0;
+					index->fallback_ipc_queries++;
+					index->ipc_batches++;
+					index->tested++;
+				} else if (index->ipc) {
+					index->ipc = 0;
+					index->ipc_failures++;
+					count_entries[i]->deferred_ipc = 0;
+				}
+			}
 		}
+	}
+
+	if (index && index->query &&
+	    !textconv_one && !textconv_two &&
+	    !pickaxe_index_maybe_contains(
+		    index, o->repo, p->one) &&
+	    !pickaxe_index_maybe_contains(
+		    index, o->repo, p->two)) {
+		index->impossible_pairs++;
+		return 0;
 	}
 
 	if ((o->pickaxe_opts & DIFF_PICKAXE_KIND_G) &&
@@ -340,6 +387,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			if (count_entries[0]) {
 				count_entries[0]->count = counts[0];
 				count_entries[0]->count_valid = 1;
+				count_entries[0]->deferred_ipc = 0;
 				count_entries[0]->maybe = !!counts[0];
 				index->count_cache_updates++;
 			}
@@ -352,6 +400,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			if ((!limit || counts[1] < limit) && count_entries[1]) {
 				count_entries[1]->count = counts[1];
 				count_entries[1]->count_valid = 1;
+				count_entries[1]->deferred_ipc = 0;
 				count_entries[1]->maybe = !!counts[1];
 				index->count_cache_updates++;
 			}
@@ -432,6 +481,9 @@ void diffcore_pickaxe(struct diff_options *o)
 	size_t max_direct_oids = git_env_ulong(
 		"GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS",
 		PICKAXE_INDEX_DIRECT_MAX_OIDS);
+	size_t max_singleton_ipc_queries = git_env_ulong(
+		"GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES",
+		PICKAXE_INDEX_MAX_SINGLETON_IPC_QUERIES);
 	unsigned query_opts =
 		opts & (DIFF_PICKAXE_KINDS_G_REGEX_MASK |
 			DIFF_PICKAXE_IGNORE_CASE);
@@ -564,6 +616,7 @@ void diffcore_pickaxe(struct diff_options *o)
 		unsigned char *maybe = NULL;
 		size_t oids_nr = 0;
 		size_t oids_alloc = 0;
+		int defer_singleton = 0;
 		int queried = 0;
 
 		for (int i = 0; i < diff_queued_diff.nr; i++) {
@@ -600,11 +653,9 @@ void diffcore_pickaxe(struct diff_options *o)
 		if (oids_nr && oids_nr <= max_direct_oids) {
 			/*
 			 * Small history diffs would otherwise pay for one
-			 * IPC connection and client thread per commit. Query the
+			 * IPC connection and request per commit. Query the
 			 * local transposed index when it covers every object in
-			 * the batch. The daemon remains responsible for historical
-			 * objects missing from the persistent index and larger
-			 * batches.
+			 * the batch before asking the daemon.
 			 */
 			if (!index->direct_tried) {
 				index->direct_tried = 1;
@@ -635,22 +686,40 @@ void diffcore_pickaxe(struct diff_options *o)
 							GREP_INDEX_IPC_IMPOSSIBLE;
 					}
 					index->direct_batches++;
+					index->tested += oids_nr;
 					queried = 1;
 				}
 			}
 		}
 		if (oids_nr && !queried) {
-			if (!maybe)
+			defer_singleton =
+				oids_nr == 1 && kws && index->direct_tried &&
+				index->singleton_ipc_queries >=
+					max_singleton_ipc_queries;
+			if (defer_singleton && replace_refs_enabled(o->repo) &&
+			    oidmap_get_size(&o->repo->objects->replace_map))
+				defer_singleton = 0;
+			if (defer_singleton) {
+				/* Pair evaluation reads local misses only if needed. */
 				ALLOC_ARRAY(maybe, oids_nr);
-			if (!grep_index_ipc_query(
-				    o->repo,
-				    index->query,
-				    oids, oids_nr, maybe)) {
-				index->ipc_batches++;
+				maybe[0] = GREP_INDEX_IPC_MAYBE;
+				index->deferred_singletons++;
 				queried = 1;
 			} else {
-				index->ipc = 0;
-				index->ipc_failures++;
+				if (!maybe)
+					ALLOC_ARRAY(maybe, oids_nr);
+				if (!grep_index_ipc_query(
+					    o->repo, index->query,
+					    oids, oids_nr, maybe)) {
+					index->ipc_batches++;
+					if (oids_nr == 1)
+						index->singleton_ipc_queries++;
+					index->tested += oids_nr;
+					queried = 1;
+				} else {
+					index->ipc = 0;
+					index->ipc_failures++;
+				}
 			}
 		}
 		if (queried) {
@@ -663,6 +732,7 @@ void diffcore_pickaxe(struct diff_options *o)
 				entry->maybe =
 					maybe[i] !=
 					GREP_INDEX_IPC_IMPOSSIBLE;
+				entry->deferred_ipc = defer_singleton;
 				if (index->results_nr < index->max_results) {
 					results = &index->results;
 					index->results_nr++;
@@ -673,7 +743,6 @@ void diffcore_pickaxe(struct diff_options *o)
 				}
 				oidmap_put(results, entry);
 			}
-			index->tested += oids_nr;
 		}
 		free(locations);
 		free(maybe);
@@ -885,8 +954,17 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc_batches",
 			   index->ipc_batches);
 	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/deferred_singletons",
+			   index->deferred_singletons);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/fallback_ipc_queries",
+			   index->fallback_ipc_queries);
+	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/ipc_failures",
 			   index->ipc_failures);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/singleton_ipc_queries",
+			   index->singleton_ipc_queries);
 	trace2_data_intmax("pickaxe", index->repo,
 			   "commit_index/tested",
 			   index->commit_edges_tested);
