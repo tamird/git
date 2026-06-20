@@ -2113,12 +2113,16 @@ test_expect_success FSMONITOR_DAEMON \
 	'content index prunes worktree candidates' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git checkout -- ordinary present &&
+			    git update-index --force-remove \
+				candidate-clean candidate-depth/deep &&
 			    rm -f .git/index.grep-worktree \
 				.git/index.grep-worktree-generation \
 				.git/index.grep-worktree-recovery \
+				candidate-clean \
 				candidate-untracked \
 				candidate-*.trace \
-				.git/candidate-untracked-*" &&
+				.git/candidate-untracked-* &&
+			    rm -rf candidate-depth" &&
 	test_config grep.worktreeBlobCache true &&
 	test_config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
@@ -2216,6 +2220,10 @@ test_expect_success FSMONITOR_DAEMON \
 
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
+	echo "untracked acceleration needle" >candidate-clean &&
+	mkdir candidate-depth &&
+	echo "untracked acceleration needle" >candidate-depth/deep &&
+	git add candidate-clean candidate-depth/deep &&
 	echo "untracked acceleration needle" >candidate-untracked &&
 	echo "untracked acceleration needle" >present &&
 	git status --porcelain >/dev/null &&
@@ -2223,10 +2231,14 @@ test_expect_success FSMONITOR_DAEMON \
 		.git/index.grep-worktree-generation \
 		.git/index.grep-worktree-recovery &&
 	cat >.git/candidate-untracked-expect <<-\EOF &&
+	candidate-clean
+	candidate-depth/deep
 	candidate-untracked
 	present
 	EOF
 	rejection_key=content_index_ipc_worktree_blob_rejected_after_pathspec &&
+	entries_key=untracked_scope/census_entries_examined &&
+	scope_key=untracked_scope/census_qualified &&
 	worktree_key=worktree_blob/hits &&
 	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-cold.trace" \
 		git grep --untracked -l "untracked acceleration needle" \
@@ -2246,7 +2258,8 @@ test_expect_success FSMONITOR_DAEMON \
 		.git/candidate-untracked-cached.trace &&
 	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-scoped.trace" \
 		git grep --untracked -l "untracked acceleration needle" \
-		-- candidate-untracked present short \
+		-- candidate-clean candidate-depth/deep candidate-untracked \
+		present short \
 		>.git/candidate-untracked-actual &&
 	test_cmp .git/candidate-untracked-expect \
 		.git/candidate-untracked-actual &&
@@ -2254,16 +2267,118 @@ test_expect_success FSMONITOR_DAEMON \
 		.git/candidate-untracked-scoped.trace &&
 	test_grep ! "\"key\":\"$rejection_key\"" \
 		.git/candidate-untracked-scoped.trace &&
+	test_trace2_data grep "$scope_key" 0 \
+		<.git/candidate-untracked-scoped.trace &&
+	echo candidate-clean >.git/candidate-untracked-narrow-expect &&
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-narrow.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "candidate-cl?an" >.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-narrow-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 0 \
+		<.git/candidate-untracked-narrow.trace &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=2 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-excluded.trace" \
+		git grep --untracked -l "untracked acceleration needle" -- \
+		"candidate-*" \
+		":(exclude)candidate-depth" \
+		":(exclude)candidate-untracked" \
+		>.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-narrow-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 0 \
+		<.git/candidate-untracked-excluded.trace &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES=2 \
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MATCH_BUDGET=999999 \
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=999999 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-sample.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "*" >.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$entries_key" 2 \
+		<.git/candidate-untracked-sample.trace &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES=999999 \
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MATCH_BUDGET=2 \
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=999999 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-budget.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "*" ":(exclude)ordinary" \
+		>.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$entries_key" 1 \
+		<.git/candidate-untracked-budget.trace &&
+	git config grep.worktreeBlobCache auto &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-auto.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "*" >.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-expect \
+		.git/candidate-untracked-actual &&
+	test_grep ! "\"key\":\"$scope_key\"" \
+		.git/candidate-untracked-auto.trace &&
+	test_grep ! "\"key\":\"$worktree_key\"" \
+		.git/candidate-untracked-auto.trace &&
+	git config grep.worktreeBlobCache true &&
+	rm -f .git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery &&
+	echo "untracked acceleration needle" >ordinary &&
+	git status --porcelain >/dev/null &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-broad-cold.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "*" ":(exclude)ordinary" \
+		>.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 1 \
+		<.git/candidate-untracked-broad-cold.trace &&
+	test_grep ! '"label":"load_content_index"' \
+		.git/candidate-untracked-broad-cold.trace &&
+	test_grep ! "\"key\":\"$rejection_key\"" \
+		.git/candidate-untracked-broad-cold.trace &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-broad.trace" \
+		git grep --untracked -l "untracked acceleration needle" \
+		-- "*" ":(exclude)ordinary" \
+		>.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 1 \
+		<.git/candidate-untracked-broad.trace &&
+	test_grep "\"key\":\"$rejection_key\",\"value\":\"[1-9]" \
+		.git/candidate-untracked-broad.trace &&
+	git checkout -- ordinary &&
+	git status --porcelain >/dev/null &&
+	cat >.git/candidate-untracked-depth-expect <<-\EOF &&
+	candidate-clean
+	candidate-untracked
+	present
+	EOF
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
+		git grep --untracked --max-depth=0 -l \
+		"untracked acceleration needle" >/dev/null &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
 	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-depth.trace" \
 		git grep --untracked --max-depth=0 -l \
 		"untracked acceleration needle" \
 		>.git/candidate-untracked-actual &&
-	test_cmp .git/candidate-untracked-expect \
+	test_cmp .git/candidate-untracked-depth-expect \
 		.git/candidate-untracked-actual &&
-	test_grep ! "\"key\":\"$worktree_key\"" \
+	test_trace2_data grep "$scope_key" 1 \
+		<.git/candidate-untracked-depth.trace &&
+	test_grep "\"key\":\"$rejection_key\",\"value\":\"[1-9]" \
 		.git/candidate-untracked-depth.trace &&
-	test_grep ! "\"key\":\"$rejection_key\"" \
-		.git/candidate-untracked-depth.trace
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-unsupported.trace" \
+		git grep --untracked -L "untracked acceleration needle" \
+		-- "*" >/dev/null &&
+	test_grep ! "\"key\":\"$scope_key\"" \
+		.git/candidate-untracked-unsupported.trace &&
+	test_grep ! "\"key\":\"$worktree_key\"" \
+		.git/candidate-untracked-unsupported.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \

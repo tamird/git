@@ -95,6 +95,10 @@ static struct grep_opt *worker_template;
 #define GREP_MIN_FILES_FOR_THREADS 32
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
 
+#define GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES (1U << 14)
+#define GREP_UNTRACKED_SCOPE_MATCH_BUDGET   (1U << 16)
+#define GREP_UNTRACKED_SCOPE_MIN_PATHS	    (1U << 12)
+
 struct grep_result_cache_entry {
 	struct hashmap_entry ent;
 	struct object_id oid;
@@ -1048,11 +1052,6 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 	return use_oid;
 }
 
-static int grep_pathspec_covers_worktree(const struct pathspec *pathspec)
-{
-	return !pathspec->nr && !(pathspec->magic & PATHSPEC_MAXDEPTH);
-}
-
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1074,7 +1073,9 @@ static int grep_cache(struct grep_opt *opt,
 	int used_index_ipc = 0;
 	int worktree_sidecar_loaded = 0;
 	int prepare_index_query;
-	int full_worktree = grep_pathspec_covers_worktree(pathspec);
+	int full_worktree = !pathspec->nr &&
+			    !(pathspec->magic & PATHSPEC_MAXDEPTH);
+	int untracked_scope_qualified = full_worktree;
 	const char *recursive_basename = NULL;
 	size_t recursive_basename_len = 0;
 	struct strbuf name = STRBUF_INIT;
@@ -1121,6 +1122,71 @@ static int grep_cache(struct grep_opt *opt,
 		}
 		/* Merge these sorted paths with the index traversal below. */
 		fill_directory(&untracked_dir, repo->index, pathspec);
+	}
+	if (include_untracked && use_content_index && !opt->allow_textconv &&
+	    (full_worktree ||
+	     (!opt->status_only &&
+	      worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS &&
+	      repo == the_repository &&
+	      fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
+	      repo->index->sparse_index == INDEX_EXPANDED &&
+	      !(pathspec->magic & PATHSPEC_ATTR))))
+		content_index_query = grep_index_query_create(opt);
+	if (include_untracked && !full_worktree && content_index_query) {
+		/*
+		 * Avoid sidecar setup for narrow scopes. Sample evenly across
+		 * the index, qualify only from work observed here, and bound the
+		 * number of pathspec comparisons performed by this preflight.
+		 */
+		uint64_t sample_limit = git_env_ulong(
+			"GIT_TEST_GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES",
+			GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES);
+		uint64_t match_budget = git_env_ulong(
+			"GIT_TEST_GREP_UNTRACKED_SCOPE_MATCH_BUDGET",
+			GREP_UNTRACKED_SCOPE_MATCH_BUDGET);
+		uint64_t min_paths = git_env_ulong(
+			"GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS",
+			GREP_UNTRACKED_SCOPE_MIN_PATHS);
+		uint64_t eligible_paths = 0;
+		size_t entries_examined = 0;
+		size_t sample_nr = repo->index->cache_nr;
+		size_t pathspec_cost = pathspec->nr ? pathspec->nr : 1;
+
+		if (sample_nr > sample_limit)
+			sample_nr = sample_limit;
+		if (pathspec_cost > match_budget)
+			sample_nr = 0;
+		else if (sample_nr > match_budget / pathspec_cost)
+			sample_nr = match_budget / pathspec_cost;
+		for (size_t i = 0; i < sample_nr; i++) {
+			size_t pos = (uint64_t)i * repo->index->cache_nr /
+				     sample_nr;
+			const struct cache_entry *ce = repo->index->cache[pos];
+
+			entries_examined++;
+			if (!grep_worktree_cache_entry_eligible(ce) ||
+			    !match_pathspec(repo->index, pathspec, ce->name,
+					    ce_namelen(ce), 0, NULL, 0))
+				continue;
+			eligible_paths++;
+			if (eligible_paths >= min_paths) {
+				untracked_scope_qualified = 1;
+				break;
+			}
+		}
+		trace2_data_intmax("grep", repo,
+				   "untracked_scope/census_entries_examined",
+				   entries_examined);
+		trace2_data_intmax("grep", repo,
+				   "untracked_scope/census_eligible_paths",
+				   eligible_paths);
+		trace2_data_intmax("grep", repo,
+				   "untracked_scope/census_qualified",
+				   untracked_scope_qualified);
+	}
+	if (include_untracked && !untracked_scope_qualified) {
+		grep_index_query_free(content_index_query);
+		content_index_query = NULL;
 	}
 	if (pathspec->nr == 1) {
 		const struct pathspec_item *item = &pathspec->items[0];
@@ -1312,20 +1378,26 @@ static int grep_cache(struct grep_opt *opt,
 		free(selected_map);
 		strbuf_release(&dir);
 	}
-	if ((!include_untracked || full_worktree) &&
+	if ((!include_untracked ||
+	     full_worktree ||
+	     (untracked_scope_qualified && content_index_query)) &&
 	    !skip_cache_setup && repo == the_repository && !cached &&
 	    !opt->allow_textconv &&
 	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_NEVER &&
 	    (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS ||
 	     !opt->status_only)) {
-		uint64_t min_bytes = worktree_blob_cache_mode ==
-					     WORKTREE_BLOB_CACHE_ALWAYS ?
-					     0 :
-						     git_env_ulong(
-							     "GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
-							     GREP_WORKTREE_CACHE_MIN_BYTES);
+		uint64_t min_bytes;
 		uint64_t worktree_bytes = 0;
 		size_t pos;
+
+		if (include_untracked && !full_worktree)
+			min_bytes = 0;
+		else if (worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS)
+			min_bytes = 0;
+		else
+			min_bytes = git_env_ulong(
+				"GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES",
+				GREP_WORKTREE_CACHE_MIN_BYTES);
 
 		if (!literal_selected)
 			use_selected = !include_untracked && min_bytes &&
@@ -1417,7 +1489,7 @@ static int grep_cache(struct grep_opt *opt,
 	}
 	/*
 	 * Without observed worktree identities, an index-wide query cannot
-	 * reject worktree paths. Let the first full-worktree scan populate the
+	 * reject worktree paths. Let the first qualifying scan populate the
 	 * sidecar instead.
 	 */
 	prepare_index_query =
@@ -2911,8 +2983,8 @@ int cmd_grep(int argc,
 	if (recurse_submodules && untracked)
 		die(_("--untracked not supported with --recurse-submodules"));
 
-	if (use_content_index && use_index && !opt.allow_textconv &&
-	    (!untracked || grep_pathspec_covers_worktree(&pathspec)))
+	if (use_content_index && use_index && !untracked &&
+	    !opt.allow_textconv)
 		content_index_query = grep_index_query_create(&opt);
 
 	/*
