@@ -767,7 +767,7 @@ static int read_tree_trivial(struct object_id *common, struct object_id *head,
 	if (!trees[nr_trees++])
 		return -1;
 	opts.fn = threeway_merge;
-	cache_tree_free(&the_repository->index->cache_tree);
+	cache_tree_discard(the_repository->index);
 	for (i = 0; i < nr_trees; i++) {
 		repo_parse_tree(the_repository, trees[i]);
 		init_tree_desc(t+i, &trees[i]->object.oid,

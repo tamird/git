@@ -64,15 +64,17 @@ int cmd__dump_cache_tree(int ac UNUSED, const char **av UNUSED)
 {
 	struct index_state istate;
 	struct cache_tree *another = cache_tree();
+	struct cache_tree *loaded_cache_tree;
 	int ret;
 
 	setup_git_directory(the_repository);
 	if (repo_read_index(the_repository) < 0)
 		die("unable to read index file");
+	loaded_cache_tree = cache_tree_get(the_repository->index);
 	istate = *the_repository->index;
 	istate.cache_tree = another;
 	cache_tree_update(&istate, WRITE_TREE_DRY_RUN);
-	ret = dump_cache_tree(the_repository->index->cache_tree, another, "");
+	ret = dump_cache_tree(loaded_cache_tree, another, "");
 	cache_tree_free(&another);
 
 	return ret;
