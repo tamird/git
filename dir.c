@@ -77,6 +77,18 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 	int check_only, int stop_at_first_file, const struct pathspec *pathspec);
 static int resolve_dtype(int dtype, struct index_state *istate,
 			 const char *path, int len);
+
+static void update_can_skip_replay(struct untracked_cache_dir *dir)
+{
+	int i;
+
+	dir->can_skip_replay = dir->valid && !dir->untracked_nr;
+	for (i = 0; dir->can_skip_replay && i < dir->dirs_nr; i++)
+		if (dir->dirs[i]->recurse &&
+		    !dir->dirs[i]->can_skip_replay)
+			dir->can_skip_replay = 0;
+}
+
 struct dirent *readdir_skip_dot_and_dotdot(DIR *dirp)
 {
 	struct dirent *e;
@@ -1085,6 +1097,7 @@ static struct untracked_cache_dir *lookup_untracked(struct untracked_cache *uc,
 
 	uc->dir_created++;
 	FLEX_ALLOC_MEM(d, name, name, len);
+	dir->can_skip_replay = 0;
 
 	ALLOC_GROW(dir->dirs, dir->dirs_nr + 1, dir->dirs_alloc);
 	MOVE_ARRAY(dir->dirs + first + 1, dir->dirs + first,
@@ -1098,6 +1111,7 @@ static void do_invalidate_gitignore(struct untracked_cache_dir *dir)
 {
 	int i;
 	dir->valid = 0;
+	dir->can_skip_replay = 0;
 	for (size_t i = 0; i < dir->untracked_nr; i++)
 		free(dir->untracked[i]);
 	dir->untracked_nr = 0;
@@ -1126,6 +1140,7 @@ static void invalidate_directory(struct untracked_cache *uc,
 	if (dir->valid)
 		uc->dir_invalidated++;
 
+	dir->can_skip_replay = 0;
 	dir->valid = 0;
 	for (size_t i = 0; i < dir->untracked_nr; i++)
 		free(dir->untracked[i]);
@@ -2515,6 +2530,7 @@ static void add_untracked(struct untracked_cache_dir *dir, const char *name)
 {
 	if (!dir)
 		return;
+	dir->can_skip_replay = 0;
 	ALLOC_GROW(dir->untracked, dir->untracked_nr + 1,
 		   dir->untracked_alloc);
 	dir->untracked[dir->untracked_nr++] = xstrdup(name);
@@ -2632,13 +2648,11 @@ static void close_cached_dir(struct cached_dir *cdir)
 {
 	if (cdir->fdir)
 		closedir(cdir->fdir);
-	/*
-	 * We have gone through this directory and found no untracked
-	 * entries. Mark it valid.
-	 */
+	/* We have gone through this directory. Mark it valid. */
 	if (cdir->untracked) {
 		cdir->untracked->valid = 1;
 		cdir->untracked->recurse = 1;
+		update_can_skip_replay(cdir->untracked);
 	}
 }
 
@@ -2710,6 +2724,19 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 	struct strbuf path = STRBUF_INIT;
 
 	strbuf_add(&path, base, baselen);
+
+	if (dir->internal.can_prune_replay &&
+	    untracked && untracked->can_skip_replay &&
+	    untracked->check_only == !!check_only) {
+		/*
+		 * Ignored-output modes do not use the untracked cache, so a
+		 * subtree without untracked results contributes no output.
+		 * Reactivate it because this bypasses close_cached_dir().
+		 */
+		untracked->recurse = 1;
+		dir->internal.pruned_subtrees++;
+		goto out;
+	}
 
 	if (open_cached_dir(&cdir, dir, untracked, istate, &path, check_only))
 		goto out;
@@ -3117,6 +3144,8 @@ static void emit_traversal_statistics(struct dir_struct *dir,
 			   "directories-visited", dir->internal.visited_directories);
 	trace2_data_intmax("read_directory", repo,
 			   "paths-visited", dir->internal.visited_paths);
+	trace2_data_intmax("read_directory", repo,
+			   "subtrees-pruned", dir->internal.pruned_subtrees);
 
 	if (!dir->untracked)
 		return;
@@ -3140,6 +3169,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;
 	dir->internal.visited_directories = 0;
+	dir->internal.pruned_subtrees = 0;
+	dir->internal.can_prune_replay = 0;
 
 	if (has_symlink_leading_path(path, len)) {
 		trace2_region_leave("dir", "read_directory", istate->repo);
@@ -3153,8 +3184,30 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		 * e.g. prep_exclude()
 		 */
 		dir->untracked = NULL;
+	if (untracked) {
+		unsigned int i;
+
+		/*
+		 * A missing skip-worktree .gitignore may be read from the
+		 * index, whose changes are not reported by fsmonitor.
+		 */
+		for (i = 0; i < istate->cache_nr; i++)
+			if (ce_skip_worktree(istate->cache[i]))
+				break;
+		if (i == istate->cache_nr) {
+			refresh_fsmonitor(istate);
+			if (dir->untracked->use_fsmonitor) {
+				if (dir->untracked->root->can_skip_replay) {
+					dir->internal.pruned_subtrees++;
+					goto done;
+				}
+				dir->internal.can_prune_replay = 1;
+			}
+		}
+	}
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))
 		read_directory_recursive(dir, istate, path, len, untracked, 0, 0, pathspec);
+done:
 	QSORT(dir->entries, dir->nr, cmp_dir_entry);
 	QSORT(dir->ignored, dir->ignored_nr, cmp_dir_entry);
 
@@ -3872,6 +3925,7 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	uint64_t ident_len;
 	uint64_t varint_len;
 	ssize_t len;
+	int i;
 	const char *exclude_per_dir;
 	const unsigned hashsz = the_hash_algo->rawsz;
 	const unsigned offset = sizeof(struct ondisk_untracked_cache);
@@ -3942,6 +3996,8 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	ewah_each_bit(rd.valid, read_stat, &rd);
 	ewah_each_bit(rd.sha1_valid, read_oid, &rd);
 	next = rd.data;
+	for (i = rd.index - 1; i >= 0; i--)
+		update_can_skip_replay(rd.ucd[i]);
 
 done:
 	free(rd.ucd);
@@ -3963,6 +4019,7 @@ static void invalidate_one_directory(struct untracked_cache *uc,
 	size_t i;
 
 	uc->dir_invalidated++;
+	ucd->can_skip_replay = 0;
 	ucd->valid = 0;
 	for (i = 0; i < ucd->untracked_nr; i++)
 		free(ucd->untracked[i]);
@@ -4011,6 +4068,7 @@ static int invalidate_one_component(struct untracked_cache *uc,
 			invalidate_one_component(uc, d, rest + 1,
 						 len - (component_len + 1),
 						 invalidate_descendants);
+		dir->can_skip_replay = 0;
 		if (ret)
 			invalidate_one_directory(uc, dir, 0);
 		return ret;
