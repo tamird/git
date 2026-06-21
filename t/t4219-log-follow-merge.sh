@@ -143,4 +143,43 @@ test_expect_success '--follow refreshes Bloom keys for each history line' '
 	test_cmp expect actual
 '
 
+test_expect_success 'setup repeated commit across a rename' '
+	git init repeated &&
+	test_commit -C repeated A old &&
+	git -C repeated mv old new &&
+	git -C repeated commit --message=B &&
+	git -C repeated tag B &&
+	test_commit -C repeated C new &&
+	test_commit -C repeated D unrelated &&
+
+	git -C repeated update-ref --create-reflog -m C \
+		refs/heads/revisit C &&
+	git -C repeated update-ref -m B refs/heads/revisit B &&
+	git -C repeated update-ref -m C-again refs/heads/revisit C &&
+	git -C repeated update-ref -m D refs/heads/revisit D
+'
+
+test_expect_success '--follow restores paths when a reflog revisits a commit' '
+	cat >expect <<-\EOF &&
+	C
+	B
+	C
+	EOF
+	git -C repeated log --walk-reflogs --follow --format=%s \
+		refs/heads/revisit -- new >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--follow restores paths when diff-tree --stdin revisits a commit' '
+	cat >expect <<-\EOF &&
+	C
+	B
+	C
+	EOF
+	git -C repeated rev-parse D C B C >input &&
+	git -C repeated diff-tree --stdin --format=%s --no-patch \
+		--follow -- new <input >actual &&
+	test_cmp expect actual
+'
+
 test_done
