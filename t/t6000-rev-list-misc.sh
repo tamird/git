@@ -169,6 +169,39 @@ test_expect_success 'rev-list --count --objects' '
 	test_line_count = $count actual
 '
 
+test_expect_success 'setup no-walk transition history' '
+	git init walk &&
+	test_commit -C walk base &&
+	git -C walk switch -c side1 &&
+	test_commit -C walk oldest &&
+	git -C walk switch -c side2 base &&
+	test_commit -C walk middle &&
+	git -C walk switch -c side3 base &&
+	test_commit -C walk newer &&
+	git -C walk rev-parse newer middle oldest >expect
+'
+
+test_expect_success 'negative revisions clear unsorted no-walk mode' '
+	git -C walk rev-list --no-walk=unsorted oldest middle newer \
+		--not base --no-walk >actual &&
+	test_cmp expect actual
+'
+
+for option in \
+	"--do-walk" \
+	"--max-count=3" \
+	"--max-count-oldest=3" \
+	"-3" \
+	"-n 3" \
+	"-n3"
+do
+	test_expect_success "$option clears unsorted no-walk mode" '
+		git -C walk rev-list --no-walk=unsorted $option --no-walk \
+			oldest middle newer >actual &&
+		test_cmp expect actual
+	'
+done
+
 test_expect_success 'rev-list --unpacked' '
 	git repack -ad &&
 	test_commit unpacked &&
