@@ -48,12 +48,21 @@ void cache_tree_free(struct cache_tree **it_p)
 
 struct cache_tree *cache_tree_get(struct index_state *istate)
 {
+	if (!istate->cache_tree && istate->cache_tree_data) {
+		istate->cache_tree = cache_tree_read(
+			istate->cache_tree_data,
+			istate->cache_tree_data_size);
+		FREE_AND_NULL(istate->cache_tree_data);
+		istate->cache_tree_data_size = 0;
+	}
 	return istate->cache_tree;
 }
 
 void cache_tree_discard(struct index_state *istate)
 {
 	cache_tree_free(&istate->cache_tree);
+	FREE_AND_NULL(istate->cache_tree_data);
+	istate->cache_tree_data_size = 0;
 }
 
 static int subtree_name_cmp(const char *one, int onelen,

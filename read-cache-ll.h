@@ -169,14 +169,18 @@ struct index_state {
 	unsigned int cache_nr, cache_alloc, cache_changed;
 	struct string_list *resolve_undo;
 	struct cache_tree *cache_tree;
+	/* Owned copy of a TREE extension pending cache_tree_get(). */
+	char *cache_tree_data;
+	size_t cache_tree_data_size;
 	struct split_index *split_index;
 	struct cache_time timestamp;
-	unsigned name_hash_initialized : 1,
-		 initialized : 1,
-		 drop_cache_tree : 1,
-		 updated_workdir : 1,
-		 updated_skipworktree : 1,
-		 fsmonitor_has_run_once : 1;
+	unsigned name_hash_initialized:1,
+		initialized:1,
+		drop_cache_tree:1,
+		updated_workdir:1,
+		updated_skipworktree:1,
+		fsmonitor_has_run_once:1,
+		lazy_cache_tree:1;
 	enum sparse_index_mode sparse_index;
 	struct hashmap name_hash;
 	struct hashmap dir_hash;
