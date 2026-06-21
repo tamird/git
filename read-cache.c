@@ -2437,7 +2437,7 @@ void release_index(struct index_state *istate)
 
 	resolve_undo_clear_index(istate);
 	free_name_hash(istate);
-	cache_tree_free(&(istate->cache_tree));
+	cache_tree_discard(istate);
 	free(istate->fsmonitor_last_update);
 	free(istate->cache);
 	discard_split_index(istate);
@@ -2824,6 +2824,7 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	int ieot_entries = 1;
 	struct index_entry_offset_table *ieot = NULL;
 	struct repository *r = istate->repo;
+	struct cache_tree *cache_tree;
 	struct strbuf sb = STRBUF_INIT;
 	int nr, nr_threads, ret;
 
@@ -2997,15 +2998,19 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 		}
 	}
 	if (write_extensions & WRITE_CACHE_TREE_EXTENSION &&
-	    !drop_cache_tree && istate->cache_tree) {
-		strbuf_reset(&sb);
+	    !drop_cache_tree) {
+		cache_tree = cache_tree_get(istate);
+		if (cache_tree) {
+			strbuf_reset(&sb);
 
-		cache_tree_write(&sb, istate->cache_tree);
-		err = write_index_ext_header(f, eoie_c, CACHE_EXT_TREE, sb.len) < 0;
-		hashwrite(f, sb.buf, sb.len);
-		if (err) {
-			ret = -1;
-			goto out;
+			cache_tree_write(&sb, cache_tree);
+			err = write_index_ext_header(f, eoie_c, CACHE_EXT_TREE,
+						     sb.len) < 0;
+			hashwrite(f, sb.buf, sb.len);
+			if (err) {
+				ret = -1;
+				goto out;
+			}
 		}
 	}
 	if (write_extensions & WRITE_RESOLVE_UNDO_EXTENSION &&
@@ -3855,7 +3860,7 @@ void overlay_tree_on_index(struct index_state *istate,
 	 * Sort the cache entry -- we need to nuke the cache tree, though.
 	 */
 	if (fn == read_one_entry_quick) {
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 		QSORT(istate->cache, istate->cache_nr, cmp_cache_name_compare);
 	}
 

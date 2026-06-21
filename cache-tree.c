@@ -46,6 +46,16 @@ void cache_tree_free(struct cache_tree **it_p)
 	*it_p = NULL;
 }
 
+struct cache_tree *cache_tree_get(struct index_state *istate)
+{
+	return istate->cache_tree;
+}
+
+void cache_tree_discard(struct index_state *istate)
+{
+	cache_tree_free(&istate->cache_tree);
+}
+
 static int subtree_name_cmp(const char *one, int onelen,
 			    const char *two, int twolen)
 {
@@ -158,7 +168,7 @@ static int do_invalidate_path(struct cache_tree *it, const char *path)
 
 void cache_tree_invalidate_path(struct index_state *istate, const char *path)
 {
-	if (do_invalidate_path(istate->cache_tree, path))
+	if (do_invalidate_path(cache_tree_get(istate), path))
 		istate->cache_changed |= CACHE_TREE_CHANGED;
 }
 
@@ -516,6 +526,7 @@ static int update_one(struct cache_tree *it,
 
 int cache_tree_update(struct index_state *istate, int flags)
 {
+	struct cache_tree *root;
 	struct odb_transaction *transaction;
 	int skip, i;
 
@@ -524,8 +535,11 @@ int cache_tree_update(struct index_state *istate, int flags)
 	if (i)
 		return i;
 
-	if (!istate->cache_tree)
-		istate->cache_tree = cache_tree();
+	root = cache_tree_get(istate);
+	if (!root) {
+		root = cache_tree();
+		istate->cache_tree = root;
+	}
 
 	if (!(flags & WRITE_TREE_MISSING_OK) && repo_has_promisor_remote(the_repository))
 		prefetch_cache_entries(istate, must_check_existence);
@@ -533,7 +547,7 @@ int cache_tree_update(struct index_state *istate, int flags)
 	trace_performance_enter();
 	trace2_region_enter("cache_tree", "update", istate->repo);
 	transaction = odb_transaction_begin(the_repository->objects);
-	i = update_one(istate->cache_tree, istate->cache, istate->cache_nr,
+	i = update_one(root, istate->cache, istate->cache_nr,
 		       "", 0, &skip, flags);
 	odb_transaction_commit(transaction);
 	trace2_region_leave("cache_tree", "update", istate->repo);
@@ -745,23 +759,26 @@ static int write_index_as_tree_internal(struct object_id *oid,
 					int flags,
 					const char *prefix)
 {
+	struct cache_tree *root;
+
 	if (flags & WRITE_TREE_IGNORE_CACHE_TREE) {
-		cache_tree_free(&index_state->cache_tree);
+		cache_tree_discard(index_state);
 		cache_tree_valid = 0;
 	}
 
 	if (!cache_tree_valid && cache_tree_update(index_state, flags) < 0)
 		return WRITE_TREE_UNMERGED_INDEX;
 
+	root = cache_tree_get(index_state);
 	if (prefix) {
 		struct cache_tree *subtree;
-		subtree = cache_tree_find(index_state->cache_tree, prefix);
+		subtree = cache_tree_find(root, prefix);
 		if (!subtree)
 			return WRITE_TREE_PREFIX_ERROR;
 		oidcpy(oid, &subtree->oid);
 	}
 	else
-		oidcpy(oid, &index_state->cache_tree->oid);
+		oidcpy(oid, &root->oid);
 
 	return 0;
 }
@@ -771,8 +788,7 @@ struct tree *write_in_core_index_as_tree(struct repository *repo,
 	struct object_id o;
 	int was_valid, ret;
 
-	was_valid = index_state->cache_tree &&
-		    cache_tree_fully_valid(index_state->cache_tree);
+	was_valid = cache_tree_fully_valid(cache_tree_get(index_state));
 
 	ret = write_index_as_tree_internal(&o, index_state, was_valid, 0, NULL);
 	if (ret == WRITE_TREE_UNMERGED_INDEX) {
@@ -787,7 +803,7 @@ struct tree *write_in_core_index_as_tree(struct repository *repo,
 		BUG("unmerged index entries when writing in-core index");
 	}
 
-	return lookup_tree(repo, &index_state->cache_tree->oid);
+	return lookup_tree(repo, &o);
 }
 
 
@@ -810,8 +826,7 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	}
 
 	was_valid = !(flags & WRITE_TREE_IGNORE_CACHE_TREE) &&
-		    index_state->cache_tree &&
-		    cache_tree_fully_valid(index_state->cache_tree);
+		    cache_tree_fully_valid(cache_tree_get(index_state));
 
 	ret = write_index_as_tree_internal(oid, index_state, was_valid, flags,
 					   prefix);
@@ -901,7 +916,7 @@ void prime_cache_tree(struct repository *r,
 	struct strbuf tree_path = STRBUF_INIT;
 
 	trace2_region_enter("cache-tree", "prime_cache_tree", r);
-	cache_tree_free(&istate->cache_tree);
+	cache_tree_discard(istate);
 	istate->cache_tree = cache_tree();
 
 	prime_cache_tree_rec(r, istate->cache_tree, tree, &tree_path);
@@ -1074,21 +1089,24 @@ out:
 
 int cache_tree_verify(struct repository *r, struct index_state *istate)
 {
+	struct cache_tree *root;
 	struct strbuf path = STRBUF_INIT;
 	int ret;
 
-	if (!istate->cache_tree) {
+	root = cache_tree_get(istate);
+	if (!root) {
 		ret = 0;
 		goto out;
 	}
 
-	ret = verify_one(r, istate, istate->cache_tree, &path);
+	ret = verify_one(r, istate, root, &path);
 	if (ret < 0)
 		goto out;
 	if (ret > 0) {
 		strbuf_reset(&path);
+		root = cache_tree_get(istate);
 
-		ret = verify_one(r, istate, istate->cache_tree, &path);
+		ret = verify_one(r, istate, root, &path);
 		if (ret < 0)
 			goto out;
 		if (ret > 0)

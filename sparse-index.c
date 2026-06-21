@@ -200,6 +200,8 @@ int is_sparse_index_allowed(struct index_state *istate, int flags)
 
 int convert_to_sparse(struct index_state *istate, int flags)
 {
+	struct cache_tree *cache_tree;
+
 	/*
 	 * If the index is already sparse, empty, or otherwise
 	 * cannot be converted to sparse, do not convert.
@@ -221,9 +223,10 @@ int convert_to_sparse(struct index_state *istate, int flags)
 	if (index_has_unmerged_entries(istate))
 		return 0;
 
-	if (!cache_tree_fully_valid(istate->cache_tree)) {
+	cache_tree = cache_tree_get(istate);
+	if (!cache_tree_fully_valid(cache_tree)) {
 		/* Clear and recompute the cache-tree */
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 
 		/*
 		 * Silently return if there is a problem with the cache tree update,
@@ -234,6 +237,7 @@ int convert_to_sparse(struct index_state *istate, int flags)
 		 */
 		if (cache_tree_update(istate, WRITE_TREE_MISSING_OK))
 			return 0;
+		cache_tree = cache_tree_get(istate);
 	}
 
 	remove_fsmonitor(istate);
@@ -241,10 +245,10 @@ int convert_to_sparse(struct index_state *istate, int flags)
 	trace2_region_enter("index", "convert_to_sparse", istate->repo);
 	istate->cache_nr = convert_to_sparse_rec(istate,
 						 0, 0, istate->cache_nr,
-						 "", 0, istate->cache_tree);
+						 "", 0, cache_tree);
 
 	/* Clear and recompute the cache-tree */
-	cache_tree_free(&istate->cache_tree);
+	cache_tree_discard(istate);
 	cache_tree_update(istate, 0);
 
 	istate->fsmonitor_has_run_once = 0;
@@ -349,7 +353,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 		 * entries, and for that we will need the cache tree to
 		 * be recomputed.
 		 */
-		cache_tree_free(&istate->cache_tree);
+		cache_tree_discard(istate);
 
 		/*
 		 * If there is a problem creating the cache tree, then we
@@ -453,7 +457,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 	free(full);
 
 	/* Clear and recompute the cache-tree */
-	cache_tree_free(&istate->cache_tree);
+	cache_tree_discard(istate);
 	cache_tree_update(istate, 0);
 
 	trace2_region_leave("index", tr_region, istate->repo);

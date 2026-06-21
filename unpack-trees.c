@@ -767,7 +767,8 @@ static int all_trees_same_as_cache_tree(int n, unsigned long dirmask,
 		if (!are_same_oid(names, names + i))
 			return 0;
 
-	return cache_tree_matches_traversal(o->src_index->cache_tree, names, info);
+	return cache_tree_matches_traversal(cache_tree_get(o->src_index),
+					    names, info);
 }
 
 static int index_pos_by_traverse_info(struct name_entry *names,
@@ -1568,8 +1569,8 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 		if (o->diff_index_cached &&
 		    n == 1 && dirmask == 1 && S_ISDIR(names->mode)) {
 			int matches;
-			matches = cache_tree_matches_traversal(o->src_index->cache_tree,
-							       names, info);
+			matches = cache_tree_matches_traversal(
+				cache_tree_get(o->src_index), names, info);
 			/*
 			 * Everything under the name matches; skip the
 			 * entire hierarchy.  diff_index_cached codepath
@@ -2086,7 +2087,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 			}
 
 			if (!o->skip_cache_tree_update &&
-			    !cache_tree_fully_valid(o->internal.result.cache_tree))
+			    !cache_tree_fully_valid(cache_tree_get(&o->internal.result)))
 				cache_tree_update(&o->internal.result,
 						  WRITE_TREE_SILENT |
 						  WRITE_TREE_REPAIR);
