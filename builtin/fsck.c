@@ -879,6 +879,7 @@ static int fsck_resolve_undo(struct index_state *istate,
 static void fsck_index(struct index_state *istate, const char *index_path,
 		       int is_current_worktree)
 {
+	struct cache_tree *cache_tree;
 	unsigned int i;
 
 	/* TODO: audit for interaction with sparse-index. */
@@ -903,8 +904,9 @@ static void fsck_index(struct index_state *istate, const char *index_path,
 				     istate->cache[i]->name);
 		mark_object_reachable(obj);
 	}
-	if (istate->cache_tree)
-		fsck_cache_tree(istate->repo, istate->cache_tree, index_path);
+	cache_tree = cache_tree_get(istate);
+	if (cache_tree)
+		fsck_cache_tree(istate->repo, cache_tree, index_path);
 	fsck_resolve_undo(istate, index_path);
 }
 
