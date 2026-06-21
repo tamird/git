@@ -68,6 +68,7 @@ int cmd__dump_cache_tree(int ac UNUSED, const char **av UNUSED)
 	int ret;
 
 	setup_git_directory(the_repository);
+	the_repository->index->lazy_cache_tree = 1;
 	if (repo_read_index(the_repository) < 0)
 		die("unable to read index file");
 	loaded_cache_tree = cache_tree_get(the_repository->index);

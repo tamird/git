@@ -14,6 +14,7 @@ int cmd__scrap_cache_tree(int ac UNUSED, const char **av UNUSED)
 
 	setup_git_directory(the_repository);
 	repo_hold_locked_index(the_repository, &index_lock, LOCK_DIE_ON_ERROR);
+	the_repository->index->lazy_cache_tree = 1;
 	if (repo_read_index(the_repository) < 0)
 		die("unable to read index file");
 	cache_tree_discard(the_repository->index);
