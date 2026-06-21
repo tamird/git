@@ -501,6 +501,27 @@ void reset_revision_walk(void);
  */
 int prepare_revision_walk(struct rev_info *revs);
 
+/* Rebuild the changed-path Bloom keys after the --follow path changes. */
+void revision_bloom_filter_refresh(struct rev_info *revs);
+
+/*
+ * Query whether the diff for the current --follow path may be non-empty.
+ * The changed-path filter describes only the commit's original first-parent
+ * edge, so other parent relationships return an inconclusive answer.
+ */
+enum revision_bloom_filter_result
+revision_bloom_filter_query_diff(struct rev_info *revs,
+				 struct commit *commit,
+				 struct commit *parent);
+
+/*
+ * Record the outcome of a queried diff and refresh the key after rename
+ * detection changes the path. Call before diff flushing clears found_follow.
+ */
+void revision_bloom_filter_finish_diff(struct rev_info *revs,
+				       enum revision_bloom_filter_result result,
+				       int diff_is_empty);
+
 /* Drain the commits linked list into the priority queue. */
 void rev_info_commit_list_to_queue(struct rev_info *revs);
 /**
