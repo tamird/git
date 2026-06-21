@@ -96,11 +96,17 @@ test_bloom_filters_not_used () {
 		data="$data\"filter_not_present\":[0-9][0-9]*,"
 		data="$data\"maybe\":0,"
 		data="$data\"definitely_not\":0,"
-		data="$data\"false_positive\":0}"
+		data="$data\"false_positive\":0,"
+		data="$data\"commits_elided\":0}"
 
 		grep -q "$data" "$TRASH_DIRECTORY/trace.perf"
 	fi &&
 	test_cmp log_wo_bloom log_w_bloom
+}
+
+bloom_stat () {
+	sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p" \
+		"$TRASH_DIRECTORY/trace.perf"
 }
 
 for path in A A/B A/B/C A/file1 A/B/file2 A/B/C/file3 file4 file5 file5_renamed file_to_be_deleted
@@ -139,13 +145,37 @@ test_expect_success '--follow skips commits using Bloom filters' '
 	# Only two commits follow the rename, so a larger count proves that
 	# the refreshed key was used for commits under the old name.
 	setup "--follow -- file5_renamed" &&
-	definitely_not=$(sed -n \
-		"s/.*\"definitely_not\":\([0-9]*\).*/\1/p" \
-		"$TRASH_DIRECTORY/trace.perf") &&
+	definitely_not=$(bloom_stat definitely_not) &&
+	commits_elided=$(bloom_stat commits_elided) &&
+	maybe=$(bloom_stat maybe) &&
+	false_positive=$(bloom_stat false_positive) &&
 	test "$definitely_not" -gt 2 &&
+	test "$commits_elided" -gt 2 &&
+	test "$maybe" -eq $((false_positive + 2)) &&
 	test_cmp log_wo_bloom log_w_bloom &&
 	printf "rename\nc11" >expect &&
 	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow keeps an all-positive history' '
+	git init follow-positive &&
+	(
+		cd follow-positive &&
+		test_commit one tracked &&
+		test_commit two tracked &&
+		test_commit three tracked &&
+		git commit-graph write --reachable --changed-paths &&
+
+		rm -f "$TRASH_DIRECTORY/trace.perf" &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace.perf" \
+			git log --follow --pretty=%s -- tracked >actual &&
+
+		printf "three\ntwo\none\n" >expect &&
+		test_cmp expect actual &&
+		test "$(bloom_stat maybe)" = 2 &&
+		test "$(bloom_stat definitely_not)" = 0 &&
+		test "$(bloom_stat commits_elided)" = 0
+	)
 '
 
 test_expect_success '--follow Bloom skips preserve diff output' '
@@ -232,9 +262,32 @@ test_expect_success '--simplify-by-decoration keeps --follow side history' '
 test_expect_success '--follow Bloom skips preserve max-count' '
 	setup "--max-count=1 --follow -- file5_renamed" &&
 	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test "$(bloom_stat commits_elided)" = 0 &&
 	test_cmp log_wo_bloom log_w_bloom &&
 	printf rename >expect &&
 	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow Bloom skips preserve skip-count' '
+	setup "--skip=1 --max-count=1 --follow -- file5_renamed" &&
+	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test_cmp log_wo_bloom log_w_bloom &&
+	printf rename >expect &&
+	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow Bloom skips preserve graph output' '
+	setup "--graph --follow -- file5_renamed" &&
+	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test "$(bloom_stat commits_elided)" = 0 &&
+	test_cmp log_wo_bloom log_w_bloom
+'
+
+test_expect_success '--follow does not elide remerge-diff commits' '
+	setup "--remerge-diff --follow -- file5_renamed" &&
+	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test "$(bloom_stat commits_elided)" = 0 &&
+	test_cmp log_wo_bloom log_w_bloom
 '
 
 test_expect_success 'git log with --walk-reflogs does not use Bloom filters' '

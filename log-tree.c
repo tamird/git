@@ -1246,6 +1246,34 @@ static const char *recall_follow_pathspec(struct rev_info *opt,
 	return slot ? *slot : NULL;
 }
 
+void restore_follow_pathspec(struct rev_info *opt, struct commit *commit)
+{
+	const char *current;
+	const char *stored;
+
+	if (!opt->diffopt.flags.follow_renames)
+		return;
+
+	stored = recall_follow_pathspec(opt, commit);
+	if (!stored)
+		return;
+
+	current = pathspec_single_path(&opt->diffopt.pathspec);
+	if (!current || strcmp(current, stored)) {
+		set_pathspec_to_single_path(&opt->diffopt.pathspec, stored);
+		revision_bloom_filter_refresh(opt);
+	}
+}
+
+void record_follow_pathspec(struct rev_info *opt, struct commit *commit)
+{
+	if (!opt->diffopt.flags.follow_renames)
+		return;
+
+	remember_follow_pathspec(opt, commit,
+				 pathspec_single_path(&opt->diffopt.pathspec));
+}
+
 static void free_follow_pathspec_slot(char **slot)
 {
 	FREE_AND_NULL(*slot);
@@ -1390,17 +1418,7 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 	opt->loginfo = &log;
 	opt->diffopt.no_free = 1;
 
-	/* Any recorded path for this commit? If so, restore it */
-	if (opt->diffopt.flags.follow_renames) {
-		const char *stored = recall_follow_pathspec(opt, commit);
-		if (stored) {
-			const char *current = pathspec_single_path(&opt->diffopt.pathspec);
-			if (!current || strcmp(current, stored)) {
-				set_pathspec_to_single_path(&opt->diffopt.pathspec, stored);
-				revision_bloom_filter_refresh(opt);
-			}
-		}
-	}
+	restore_follow_pathspec(opt, commit);
 
 	if (opt->track_linear && !opt->linear && !opt->reverse_output_stage)
 		fprintf(opt->diffopt.file, "\n%s\n", opt->break_bar);
@@ -1423,10 +1441,8 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 			for (p = parents; p; p = p->next)
 				propagate_follow_pathspec_to_parent(opt, commit,
 								    p->item);
-		} else if (parents) {
-			remember_follow_pathspec(opt, parents->item,
-				pathspec_single_path(&opt->diffopt.pathspec));
-		}
+		} else if (parents)
+			record_follow_pathspec(opt, parents->item);
 	}
 
 	opt->loginfo = NULL;
