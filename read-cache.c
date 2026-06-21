@@ -1734,7 +1734,12 @@ static int read_index_extension(struct index_state *istate,
 {
 	switch (CACHE_EXT(ext)) {
 	case CACHE_EXT_TREE:
-		istate->cache_tree = cache_tree_read(data, sz);
+		if (istate->lazy_cache_tree) {
+			istate->cache_tree_data = xmemdupz(data, sz);
+			istate->cache_tree_data_size = sz;
+		} else {
+			istate->cache_tree = cache_tree_read(data, sz);
+		}
 		break;
 	case CACHE_EXT_RESOLVE_UNDO:
 		istate->resolve_undo = resolve_undo_read(data, sz, the_hash_algo);
@@ -3509,6 +3514,10 @@ void move_index_extensions(struct index_state *dst, struct index_state *src)
 	src->untracked = NULL;
 	dst->cache_tree = src->cache_tree;
 	src->cache_tree = NULL;
+	dst->cache_tree_data = src->cache_tree_data;
+	dst->cache_tree_data_size = src->cache_tree_data_size;
+	src->cache_tree_data = NULL;
+	src->cache_tree_data_size = 0;
 }
 
 struct cache_entry *dup_cache_entry(const struct cache_entry *ce,

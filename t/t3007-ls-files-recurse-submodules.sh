@@ -34,6 +34,12 @@ test_expect_success 'ls-files correctly outputs files in submodule' '
 	test_cmp expect actual
 '
 
+test_expect_success 'ls-files defers submodule cache-tree parsing' '
+	GIT_TRACE2_PERF="$(pwd)/.git/ls-files.trace" \
+		git ls-files --recurse-submodules >/dev/null &&
+	test_grep ! "cache_tree.*label:read" .git/ls-files.trace
+'
+
 test_expect_success '--stage' '
 	GITMODULES_HASH=$(git rev-parse HEAD:.gitmodules) &&
 	A_HASH=$(git rev-parse HEAD:a) &&

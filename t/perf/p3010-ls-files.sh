@@ -11,7 +11,12 @@ test_expect_success 'select a zero-prefix pathspec' '
 	tracked_file=$(git ls-files | sed -n 1p) &&
 	test -n "$tracked_file" &&
 	pathspec="?${tracked_file#?}" &&
+	test_export tracked_file &&
 	test_export pathspec
+'
+
+test_perf 'ls-files with exact path' '
+	git ls-files -- "$tracked_file" >/dev/null
 '
 
 test_perf 'ls-files --deleted with pathspec' '
