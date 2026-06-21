@@ -73,6 +73,12 @@ struct option;
 struct parse_opt_ctx_t;
 define_shared_commit_slab(revision_sources, char *);
 
+enum revision_bloom_filter_result {
+	REVISION_BLOOM_FILTER_UNAVAILABLE = -1,
+	REVISION_BLOOM_FILTER_DEFINITELY_NOT,
+	REVISION_BLOOM_FILTER_MAYBE,
+};
+
 struct rev_cmdline_info {
 	unsigned int nr;
 	unsigned int alloc;
