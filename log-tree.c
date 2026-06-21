@@ -1353,10 +1353,17 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 	showed_log = 0;
 	for (;;) {
 		struct commit *parent = parents->item;
+		enum revision_bloom_filter_result bloom_ret;
 
 		parse_commit_or_die(parent);
-		diff_tree_oid(get_commit_tree_oid(parent),
-			      oid, "", &opt->diffopt);
+		bloom_ret =
+			revision_bloom_filter_query_diff(opt, commit, parent);
+		if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT)
+			diff_tree_oid(get_commit_tree_oid(parent),
+				      oid, "", &opt->diffopt);
+
+		revision_bloom_filter_finish_diff(
+			opt, bloom_ret, diff_queue_is_empty(&opt->diffopt));
 		log_tree_diff_flush(opt);
 
 		showed_log |= !opt->loginfo;
@@ -1388,8 +1395,10 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 		const char *stored = recall_follow_pathspec(opt, commit);
 		if (stored) {
 			const char *current = pathspec_single_path(&opt->diffopt.pathspec);
-			if (!current || strcmp(current, stored))
+			if (!current || strcmp(current, stored)) {
 				set_pathspec_to_single_path(&opt->diffopt.pathspec, stored);
+				revision_bloom_filter_refresh(opt);
+			}
 		}
 	}
 

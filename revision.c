@@ -805,6 +805,42 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 	return REVISION_BLOOM_FILTER_DEFINITELY_NOT;
 }
 
+void revision_bloom_filter_refresh(struct rev_info *revs)
+{
+	if (!revs->diffopt.flags.follow_renames || revs->prune ||
+	    !revs->bloom_filter_settings)
+		return;
+
+	if (set_revisions_bloom_keyvecs(revs, &revs->diffopt.pathspec))
+		disable_revision_bloom_filter(revs);
+}
+
+enum revision_bloom_filter_result
+revision_bloom_filter_query_diff(struct rev_info *revs,
+				 struct commit *commit,
+				 struct commit *parent)
+{
+	if (!revs->diffopt.flags.follow_renames || revs->prune)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
+	if (!commit->parents || commit->parents->next ||
+	    commit->parents->item != parent)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
+	return check_maybe_different_in_bloom_filter(revs, commit);
+}
+
+void revision_bloom_filter_finish_diff(struct rev_info *revs,
+				       enum revision_bloom_filter_result result,
+				       int diff_is_empty)
+{
+	if (result == REVISION_BLOOM_FILTER_MAYBE && diff_is_empty)
+		count_bloom_filter_false_positive++;
+
+	if (revs->diffopt.found_follow)
+		revision_bloom_filter_refresh(revs);
+}
+
 static int rev_compare_tree(struct rev_info *revs,
 			    struct commit *parent, struct commit *commit, int nth_parent)
 {
