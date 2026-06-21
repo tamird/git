@@ -79,6 +79,12 @@ enum revision_bloom_filter_result {
 	REVISION_BLOOM_FILTER_MAYBE,
 };
 
+enum follow_bloom_elision_state {
+	FOLLOW_BLOOM_ELISION_DISABLED,
+	FOLLOW_BLOOM_ELISION_WAITING,
+	FOLLOW_BLOOM_ELISION_ACTIVE,
+};
+
 struct rev_cmdline_info {
 	unsigned int nr;
 	unsigned int alloc;
@@ -385,6 +391,11 @@ struct rev_info {
 	/* The bloom filter key(s) for the pathspec */
 	struct bloom_keyvec **bloom_keyvecs;
 	int bloom_keyvecs_nr;
+	enum follow_bloom_elision_state follow_bloom_elision;
+	/* Query result produced while choosing the next --follow commit. */
+	struct commit *bloom_filter_queried_commit;
+	struct commit *bloom_filter_queried_parent;
+	enum revision_bloom_filter_result bloom_filter_queried_result;
 
 	/*
 	 * The bloom filter settings used to generate the key.

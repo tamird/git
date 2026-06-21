@@ -635,6 +635,7 @@ static unsigned int count_bloom_filter_maybe;
 static unsigned int count_bloom_filter_definitely_not;
 static unsigned int count_bloom_filter_false_positive;
 static unsigned int count_bloom_filter_not_present;
+static unsigned int count_bloom_filter_commits_elided;
 
 static void trace2_bloom_filter_statistics_atexit(void)
 {
@@ -645,6 +646,7 @@ static void trace2_bloom_filter_statistics_atexit(void)
 	jw_object_intmax(&jw, "maybe", count_bloom_filter_maybe);
 	jw_object_intmax(&jw, "definitely_not", count_bloom_filter_definitely_not);
 	jw_object_intmax(&jw, "false_positive", count_bloom_filter_false_positive);
+	jw_object_intmax(&jw, "commits_elided", count_bloom_filter_commits_elided);
 	jw_end(&jw);
 
 	trace2_data_json("bloom", the_repository, "statistics", &jw);
@@ -807,6 +809,11 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 
 void revision_bloom_filter_refresh(struct rev_info *revs)
 {
+	revs->bloom_filter_queried_commit = NULL;
+	revs->bloom_filter_queried_parent = NULL;
+	if (revs->follow_bloom_elision == FOLLOW_BLOOM_ELISION_ACTIVE)
+		revs->follow_bloom_elision = FOLLOW_BLOOM_ELISION_WAITING;
+
 	if (!revs->diffopt.flags.follow_renames || revs->prune ||
 	    !revs->bloom_filter_settings)
 		return;
@@ -820,6 +827,18 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 				 struct commit *commit,
 				 struct commit *parent)
 {
+	if (revs->bloom_filter_queried_commit == commit &&
+	    revs->bloom_filter_queried_parent == parent) {
+		enum revision_bloom_filter_result result =
+			revs->bloom_filter_queried_result;
+
+		revs->bloom_filter_queried_commit = NULL;
+		revs->bloom_filter_queried_parent = NULL;
+		return result;
+	}
+	revs->bloom_filter_queried_commit = NULL;
+	revs->bloom_filter_queried_parent = NULL;
+
 	if (!revs->diffopt.flags.follow_renames || revs->prune)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
@@ -834,6 +853,13 @@ void revision_bloom_filter_finish_diff(struct rev_info *revs,
 				       enum revision_bloom_filter_result result,
 				       int diff_is_empty)
 {
+	if (result == REVISION_BLOOM_FILTER_DEFINITELY_NOT &&
+	    revs->follow_bloom_elision == FOLLOW_BLOOM_ELISION_WAITING)
+		revs->follow_bloom_elision = FOLLOW_BLOOM_ELISION_ACTIVE;
+	else if (result != REVISION_BLOOM_FILTER_DEFINITELY_NOT &&
+		 revs->follow_bloom_elision == FOLLOW_BLOOM_ELISION_ACTIVE)
+		revs->follow_bloom_elision = FOLLOW_BLOOM_ELISION_WAITING;
+
 	if (result == REVISION_BLOOM_FILTER_MAYBE && diff_is_empty)
 		count_bloom_filter_false_positive++;
 
@@ -4446,6 +4472,48 @@ static enum rev_walk_mode get_walk_mode(struct rev_info *revs)
 	return REV_WALK_STREAMING;
 }
 
+static int skip_bloom_negative_follow_commit(struct rev_info *revs,
+					     enum rev_walk_mode mode,
+					     struct commit *commit)
+{
+	struct commit_list *parents;
+	struct commit *parent;
+	enum revision_bloom_filter_result bloom_ret;
+
+	if (mode != REV_WALK_STREAMING ||
+	    !revs->diffopt.flags.follow_renames || revs->prune ||
+	    revs->always_show_header || revs->graph || revs->track_linear ||
+	    revs->boundary || revs->rewrite_parents || revs->children.name ||
+	    revs->reverse || revs->skip_count >= 0 || revs->max_count >= 0 ||
+	    revs->count || revs->full_diff || revs->remerge_diff)
+		return 0;
+
+	parents = get_saved_parents(revs, commit);
+	if (!parents || parents->next)
+		return 0;
+	parent = parents->item;
+
+	restore_follow_pathspec(revs, commit);
+	if (revs->follow_bloom_elision != FOLLOW_BLOOM_ELISION_ACTIVE)
+		return 0;
+
+	bloom_ret = revision_bloom_filter_query_diff(revs, commit, parent);
+	if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT) {
+		revs->follow_bloom_elision = FOLLOW_BLOOM_ELISION_WAITING;
+		revs->bloom_filter_queried_commit = commit;
+		revs->bloom_filter_queried_parent = parent;
+		revs->bloom_filter_queried_result = bloom_ret;
+		return 0;
+	}
+
+	record_follow_pathspec(revs, parent);
+	free_commit_buffer(revs->repo->parsed_objects, commit);
+	commit_list_free(commit->parents);
+	commit->parents = NULL;
+	count_bloom_filter_commits_elided++;
+	return 1;
+}
+
 static struct commit *get_revision_1(struct rev_info *revs)
 {
 	enum rev_walk_mode mode = get_walk_mode(revs);
@@ -4515,6 +4583,9 @@ static struct commit *get_revision_1(struct rev_info *revs)
 			die("Failed to simplify parents of commit %s",
 			    oid_to_hex(&commit->object.oid));
 		default:
+			if (revs->follow_bloom_elision == FOLLOW_BLOOM_ELISION_ACTIVE &&
+			    skip_bloom_negative_follow_commit(revs, mode, commit))
+				continue;
 			if (revs->track_linear)
 				track_linear(revs, commit);
 			return commit;

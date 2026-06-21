@@ -847,6 +847,7 @@ int cmd_log(int argc,
 	opt.revarg_opt = REVARG_COMMITTISH;
 	opt.tweak = log_setup_revisions_tweak;
 	cmd_log_init(argc, argv, prefix, &rev, &opt, &cfg);
+	rev.follow_bloom_elision = FOLLOW_BLOOM_ELISION_WAITING;
 
 	ret = cmd_log_walk(&rev);
 
