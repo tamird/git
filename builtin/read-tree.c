@@ -265,7 +265,7 @@ int cmd_read_tree(int argc,
 	if (nr_trees == 1 && !opts.prefix)
 		opts.skip_cache_tree_update = 1;
 
-	cache_tree_free(&the_repository->index->cache_tree);
+	cache_tree_discard(the_repository->index);
 	for (i = 0; i < nr_trees; i++) {
 		struct tree *tree = trees[i];
 		if (repo_parse_tree(the_repository, tree) < 0)

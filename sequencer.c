@@ -814,13 +814,17 @@ static int do_recursive_merge(struct repository *r,
 
 static struct object_id *get_cache_tree_oid(struct index_state *istate)
 {
-	if (!cache_tree_fully_valid(istate->cache_tree))
+	struct cache_tree *cache_tree = cache_tree_get(istate);
+
+	if (!cache_tree_fully_valid(cache_tree)) {
 		if (cache_tree_update(istate, 0)) {
 			error(_("unable to update cache tree"));
 			return NULL;
 		}
+		cache_tree = cache_tree_get(istate);
+	}
 
-	return &istate->cache_tree->oid;
+	return &cache_tree->oid;
 }
 
 static int is_index_unchanged(struct repository *r)
