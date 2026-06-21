@@ -598,8 +598,8 @@ int check_dir_entry_contains(const struct dir_entry *out, const struct dir_entry
 
 void untracked_cache_invalidate_path(struct index_state *, const char *, int safe_path);
 /*
- * Invalidate the untracked-cache for this path, but first strip
- * off a trailing slash, if present.
+ * Invalidate the untracked cache for this path. A trailing slash denotes a
+ * directory-cone event, so invalidate cached descendants as well.
  */
 void untracked_cache_invalidate_trimmed_path(struct index_state *,
 					     const char *path,

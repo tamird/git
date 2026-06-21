@@ -3957,13 +3957,19 @@ done2:
 }
 
 static void invalidate_one_directory(struct untracked_cache *uc,
-				     struct untracked_cache_dir *ucd)
+				     struct untracked_cache_dir *ucd,
+				     int invalidate_descendants)
 {
+	size_t i;
+
 	uc->dir_invalidated++;
 	ucd->valid = 0;
-	for (size_t i = 0; i < ucd->untracked_nr; i++)
+	for (i = 0; i < ucd->untracked_nr; i++)
 		free(ucd->untracked[i]);
 	ucd->untracked_nr = 0;
+	if (invalidate_descendants)
+		for (i = 0; i < ucd->dirs_nr; i++)
+			invalidate_one_directory(uc, ucd->dirs[i], 1);
 }
 
 /*
@@ -3992,7 +3998,8 @@ static void invalidate_one_directory(struct untracked_cache *uc,
  */
 static int invalidate_one_component(struct untracked_cache *uc,
 				    struct untracked_cache_dir *dir,
-				    const char *path, int len)
+				    const char *path, int len,
+				    int invalidate_descendants)
 {
 	const char *rest = strchr(path, '/');
 
@@ -4002,25 +4009,37 @@ static int invalidate_one_component(struct untracked_cache *uc,
 			lookup_untracked(uc, dir, path, component_len);
 		int ret =
 			invalidate_one_component(uc, d, rest + 1,
-						 len - (component_len + 1));
+						 len - (component_len + 1),
+						 invalidate_descendants);
 		if (ret)
-			invalidate_one_directory(uc, dir);
+			invalidate_one_directory(uc, dir, 0);
 		return ret;
 	}
 
-	invalidate_one_directory(uc, dir);
+	if (invalidate_descendants) {
+		struct untracked_cache_dir *d = lookup_untracked(uc, dir, path, len);
+		invalidate_one_directory(uc, d, 1);
+	}
+	invalidate_one_directory(uc, dir, 0);
 	return uc->dir_flags & DIR_SHOW_OTHER_DIRECTORIES;
 }
 
-void untracked_cache_invalidate_path(struct index_state *istate,
-				     const char *path, int safe_path)
+static void untracked_cache_invalidate_path_internal(struct index_state *istate,
+						     const char *path, int safe_path,
+						     int invalidate_descendants)
 {
 	if (!istate->untracked || !istate->untracked->root)
 		return;
 	if (!safe_path && !verify_path(path, 0))
 		return;
 	invalidate_one_component(istate->untracked, istate->untracked->root,
-				 path, strlen(path));
+				 path, strlen(path), invalidate_descendants);
+}
+
+void untracked_cache_invalidate_path(struct index_state *istate,
+				     const char *path, int safe_path)
+{
+	untracked_cache_invalidate_path_internal(istate, path, safe_path, 0);
 }
 
 void untracked_cache_invalidate_trimmed_path(struct index_state *istate,
@@ -4038,7 +4057,8 @@ void untracked_cache_invalidate_trimmed_path(struct index_state *istate,
 		struct strbuf tmp = STRBUF_INIT;
 
 		strbuf_add(&tmp, path, len - 1);
-		untracked_cache_invalidate_path(istate, tmp.buf, safe_path);
+		untracked_cache_invalidate_path_internal(istate, tmp.buf,
+							 safe_path, 1);
 		strbuf_release(&tmp);
 	}
 }
