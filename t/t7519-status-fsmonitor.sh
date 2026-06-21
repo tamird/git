@@ -394,6 +394,34 @@ test_expect_success UNTRACKED_CACHE 'ignore .git changes when invalidating UNTR'
 	test_cmp before after
 '
 
+test_expect_success UNTRACKED_CACHE 'fsmonitor invalidates directory cones' '
+	test_create_repo fsmonitor-cone &&
+	(
+		cd fsmonitor-cone &&
+		mkdir -p parent/child sibling/leaf &&
+		: >parent/child/tracked &&
+		: >sibling/leaf/tracked &&
+		git add . &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "parent/\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain &&
+		: >parent/child/untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-cone" \
+			git status --porcelain >../actual &&
+		rm parent/child/untracked &&
+		git status --porcelain >../actual-clean &&
+		test_must_be_empty ../actual-clean
+	) &&
+	echo "?? parent/child/untracked" >expect &&
+	test_cmp expect actual &&
+	test_grep "opendir:3" trace-cone
+'
+
 test_expect_success 'discard_index() also discards fsmonitor info' '
 	test_config core.fsmonitor "$TEST_DIRECTORY/t7519/fsmonitor-all" &&
 	test_might_fail git update-index --refresh &&
