@@ -89,6 +89,9 @@ test_expect_success 'setup diamond with renames on both sides of a fork' '
 	printf "line 1\nline 2\nline 3 modified by B\nline 4\nline 5\n" \
 		>diamond/path0 &&
 	git -C diamond commit -am "B: modify path0 on upper" &&
+	echo upper >diamond/upper &&
+	git -C diamond add upper &&
+	git -C diamond commit -m "upper: unrelated" &&
 	git -C diamond mv path0 path1 &&
 	git -C diamond commit -m "X: rename path0 to path1" &&
 
@@ -96,6 +99,9 @@ test_expect_success 'setup diamond with renames on both sides of a fork' '
 	printf "line 1\nline 2\nline 3 modified by C\nline 4\nline 5\n" \
 		>diamond/path0 &&
 	git -C diamond commit -am "C: modify path0 on lower" &&
+	echo lower >diamond/lower &&
+	git -C diamond add lower &&
+	git -C diamond commit -m "lower: unrelated" &&
 	git -C diamond mv path0 path2 &&
 	git -C diamond commit -m "Y: rename path0 to path2" &&
 
@@ -109,7 +115,8 @@ test_expect_success 'setup diamond with renames on both sides of a fork' '
 
 	printf "line 1\nline 2\nline 3 merged again\nline 4\nline 5\n" \
 		>diamond/path &&
-	git -C diamond commit -am "Z: modify path"
+	git -C diamond commit -am "Z: modify path" &&
+	git -C diamond commit-graph write --reachable --changed-paths
 '
 
 test_expect_success '--follow follows renames through a fork in a single history' '
@@ -124,6 +131,16 @@ test_expect_success '--follow follows renames through a fork in a single history
 	Z: modify path
 	EOF
 	test_cmp expect actual.sorted
+'
+
+test_expect_success '--follow refreshes Bloom keys for each history line' '
+	git -C diamond -c core.commitGraph=false log \
+		--follow --pretty=tformat:%s path >expect &&
+	GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace.perf" \
+		git -C diamond -c core.commitGraph=true log \
+		--follow --pretty=tformat:%s path >actual &&
+	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
+	test_cmp expect actual
 '
 
 test_done
