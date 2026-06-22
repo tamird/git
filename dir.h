@@ -196,8 +196,9 @@ struct untracked_cache {
 	char *exclude_per_dir_to_free;
 	struct strbuf ident;
 	/*
-	 * dir_struct#flags must match dir_flags or the untracked
-	 * cache is ignored.
+	 * dir_struct#flags must match dir_flags for cache replay.
+	 * Compatible scans may use negative summaries without replaying
+	 * or populating positive entries.
 	 */
 	unsigned dir_flags;
 	struct untracked_cache_dir *root;

@@ -2753,7 +2753,7 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 	    untracked_prune->check_only == !!check_only) {
 		/*
 		 * A subtree without untracked results contributes no output.
-		 * Pathspec traversal uses this fact read-only; normal replay
+		 * Pathspec traversal only prunes from this fact; normal replay
 		 * reactivates the node because close_cached_dir() is bypassed.
 		 */
 		if (untracked)
@@ -3026,8 +3026,11 @@ void remove_untracked_cache(struct index_state *istate)
 
 static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *dir,
 							    int base_len,
-							    struct index_state *istate)
+							    struct index_state *istate,
+							    int *negative_only)
 {
+	const unsigned int normal_flags =
+		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
 	static int untracked_cache_disabled = -1;
 
@@ -3050,8 +3053,8 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 
 	/*
 	 * A non-empty base needs to locate the corresponding cache node.
-	 * Root-based pathspec traversals can use the cache read-only to
-	 * prune subtrees that are known to produce no untracked output.
+	 * Root-based pathspec traversals can use negative summaries to prune
+	 * subtrees that are known to produce no untracked output.
 	 */
 	if (base_len)
 		return NULL;
@@ -3081,13 +3084,12 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 	}
 
-	/*
-	 * If the untracked structure we received does not have the same flags
-	 * as requested in this run, we're going to need to either discard the
-	 * existing structure (and potentially later recreate), or bypass the
-	 * untracked cache mechanism for this run.
-	 */
-	if (dir->flags != dir->untracked->dir_flags) {
+	if (*negative_only) {
+		if ((dir->flags && dir->flags != normal_flags) ||
+		    (dir->untracked->dir_flags &&
+		     dir->untracked->dir_flags != normal_flags))
+			return NULL;
+	} else if (dir->flags != dir->untracked->dir_flags) {
 		/*
 		 * If the untracked structure we received does not have the same flags
 		 * as configured, then we need to reset / create a new "untracked"
@@ -3126,13 +3128,21 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	}
 
 	if (!dir->untracked->root) {
+		if (*negative_only)
+			return NULL;
 		/* Untracked cache existed but is not initialized; fix that */
 		FLEX_ALLOC_STR(dir->untracked->root, name, "");
 		istate->cache_changed |= UNTRACKED_CHANGED;
 	}
 
-	/* Validate $GIT_COMMON_DIR/info/exclude and core.excludesfile */
+	/* Validate $GIT_COMMON_DIR/info/exclude and core.excludesfile. */
 	root = dir->untracked->root;
+	if (*negative_only &&
+	    (!oideq(&dir->internal.ss_info_exclude.oid,
+		    &dir->untracked->ss_info_exclude.oid) ||
+	     !oideq(&dir->internal.ss_excludes_file.oid,
+		    &dir->untracked->ss_excludes_file.oid)))
+		return NULL;
 	if (!oideq(&dir->internal.ss_info_exclude.oid,
 		   &dir->untracked->ss_info_exclude.oid)) {
 		invalidate_gitignore(dir->untracked, root);
@@ -3144,8 +3154,9 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		dir->untracked->ss_excludes_file = dir->internal.ss_excludes_file;
 	}
 
-	/* Make sure this directory is not dropped out at saving phase */
-	root->recurse = 1;
+	/* Make sure this directory is not dropped out at saving phase. */
+	if (!*negative_only)
+		root->recurse = 1;
 	return root;
 }
 
@@ -3193,6 +3204,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	struct untracked_cache_dir *untracked;
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
+	int negative_only = has_pathspec;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;
@@ -3205,7 +3217,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		return dir->nr;
 	}
 
-	untracked = validate_untracked_cache(dir, len, istate);
+	untracked = validate_untracked_cache(dir, len, istate, &negative_only);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
@@ -3217,11 +3229,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		unsigned int i;
 
 		/*
-		 * Pathspec scans must not replay or update the untracked
-		 * cache. They may use it read-only after fsmonitor validates
-		 * its empty-subtree summaries.
+		 * Negative-only scans must not replay or populate cached
+		 * entries. They may prune after fsmonitor invalidates stale
+		 * summaries.
 		 */
-		if (has_pathspec) {
+		if (negative_only) {
 			untracked = NULL;
 			dir->untracked = NULL;
 		}
@@ -3241,7 +3253,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 					goto done;
 				}
 				dir->internal.can_prune_replay = 1;
-				if (has_pathspec)
+				if (negative_only)
 					untracked_prune = untracked_cache->root;
 			}
 		}
