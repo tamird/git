@@ -963,6 +963,115 @@ test_expect_success UNTRACKED_CACHE 'ls-files falls back after fsmonitor failure
 	test_grep "directories-visited:[1-9]" trace-ls-files-fallback
 '
 
+test_expect_success UNTRACKED_CACHE 'set up pathless git add --all' '
+	(
+		cd cross-mode-untracked &&
+		rm -f clean/a/new ls-fallback &&
+		: >add-input &&
+		test_hook --clobber fsmonitor-test <<-\EOF
+			printf "last_update_token\0"
+			printf "clean/a/new\0"
+			printf "ls-fallback\0"
+			printf "add-input\0"
+		EOF
+	)
+'
+
+test_expect_success UNTRACKED_CACHE 'pathless git add --all prunes normal cache' '
+	test_when_finished "git -C cross-mode-untracked reset --quiet" &&
+	(
+		cd cross-mode-untracked &&
+		git config status.showUntrackedFiles normal &&
+		git status --porcelain >/dev/null &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		test-tool dump-untracked-cache >../add-normal-cache &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-normal" \
+			git add --all &&
+		git diff --cached --name-only >../actual-staged
+	) &&
+	cat >expect-staged <<-\EOF &&
+	add-input
+	results/one
+	results/two
+	EOF
+	test_grep "flags 00000006" add-normal-cache &&
+	test_cmp expect-staged actual-staged &&
+	test_grep "subtrees-pruned:[1-9]" trace-add-normal &&
+	test_grep "directories-visited:[1-9]" trace-add-normal
+'
+
+test_expect_success UNTRACKED_CACHE 'pathless git add --all replays all-mode cache' '
+	test_when_finished "git -C cross-mode-untracked reset --quiet" &&
+	(
+		cd cross-mode-untracked &&
+		git config status.showUntrackedFiles all &&
+		git status --porcelain >/dev/null &&
+		test-tool dump-untracked-cache >../add-all-cache &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-all" \
+			git add --all &&
+		git diff --cached --name-only >../actual-staged
+	) &&
+	cat >expect-staged <<-\EOF &&
+	add-input
+	results/one
+	results/two
+	EOF
+	test_grep "flags 00000000" add-all-cache &&
+	test_cmp expect-staged actual-staged &&
+	test_grep "opendir:0" trace-add-all
+'
+
+test_expect_success UNTRACKED_CACHE 'git add --all reports explicit ignored path' '
+	(
+		cd cross-mode-untracked &&
+		test_must_fail git add --all -- ignored-only/sub/ignored \
+			2>../err
+	) &&
+	test_grep "^ignored-only$" err &&
+	test_grep "Use -f if" err
+'
+
+test_expect_success UNTRACKED_CACHE 'git add --all falls back after fsmonitor failure' '
+	(
+		cd cross-mode-untracked &&
+		git config status.showUntrackedFiles normal &&
+		git status --porcelain >/dev/null &&
+		test-tool dump-untracked-cache >../add-normal-cache &&
+		: >add-fallback &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			exit 1
+		EOF
+		git add --all &&
+		git diff --cached --name-only >../actual-staged &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git status --porcelain >../actual-status &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-add-status" \
+			git status --porcelain >../actual-status-cached
+	) &&
+	cat >expect-staged <<-\EOF &&
+	add-fallback
+	add-input
+	results/one
+	results/two
+	EOF
+	cat >expect-status <<-\EOF &&
+	A  add-fallback
+	A  add-input
+	A  results/one
+	A  results/two
+	EOF
+	test_grep "flags 00000006" add-normal-cache &&
+	test_cmp expect-staged actual-staged &&
+	test_cmp expect-status actual-status &&
+	test_cmp expect-status actual-status-cached &&
+	test_grep "subtrees-pruned:[1-9]" trace-add-status &&
+	test_grep "opendir:0" trace-add-status
+'
+
 test_expect_success UNTRACKED_CACHE 'ls-files validates standard excludes' '
 	test_create_repo ls-files-excludes &&
 	(
