@@ -663,11 +663,13 @@ static int forbid_bloom_filters(struct pathspec *spec)
 		PATHSPEC_GLOB |
 		PATHSPEC_ATTR;
 
-	if (spec->magic & ~allowed_magic)
-		return 1;
-	for (size_t nr = 0; nr < spec->nr; nr++)
+	/* Exclusions only narrow the union of the positive pathspecs. */
+	for (size_t nr = 0; nr < spec->nr; nr++) {
+		if (spec->items[nr].magic & PATHSPEC_EXCLUDE)
+			continue;
 		if (spec->items[nr].magic & ~allowed_magic)
 			return 1;
+	}
 
 	return 0;
 }
@@ -717,15 +719,25 @@ cleanup:
 static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 				       const struct pathspec *pathspec)
 {
+	size_t keyvec_nr = 0;
+
 	release_revisions_bloom_keyvecs(revs);
 
-	revs->bloom_keyvecs_nr = pathspec->nr;
+	for (size_t nr = 0; nr < pathspec->nr; nr++)
+		if (!(pathspec->items[nr].magic & PATHSPEC_EXCLUDE))
+			revs->bloom_keyvecs_nr++;
+	if (!revs->bloom_keyvecs_nr)
+		return -1;
+
 	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
 
 	for (int i = 0; i < pathspec->nr; i++) {
-		if (convert_pathspec_to_bloom_keyvec(&revs->bloom_keyvecs[i],
-						     &pathspec->items[i],
-						     revs->bloom_filter_settings)) {
+		if (pathspec->items[i].magic & PATHSPEC_EXCLUDE)
+			continue;
+		if (convert_pathspec_to_bloom_keyvec(
+			    &revs->bloom_keyvecs[keyvec_nr++],
+			    &pathspec->items[i],
+			    revs->bloom_filter_settings)) {
 			release_revisions_bloom_keyvecs(revs);
 			return -1;
 		}
