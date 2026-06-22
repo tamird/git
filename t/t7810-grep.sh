@@ -1132,6 +1132,32 @@ do
 	"
 done
 
+test_expect_success PTHREADS 'threaded --quiet retires unclaimed work' '
+	test_when_finished "rm -rf quiet-retire" &&
+	git init quiet-retire &&
+	(
+		cd quiet-retire &&
+		write_script count-textconv <<-\EOF &&
+		>"count.$$"
+		printf "textconv:"
+		cat "$1"
+		EOF
+		git config diff.counted.textconv ./count-textconv &&
+		echo "*.txt diff=counted" >.gitattributes &&
+		needle=$(printf "needle\n" | git hash-object -w --stdin) &&
+		haystack=$(printf "haystack\n" | git hash-object -w --stdin) &&
+		{
+			printf "100644 %s\t0000.txt\n" "$needle" &&
+			test_seq -f "100644 $haystack\t%04g.txt" 1 300
+		} | git update-index --index-info &&
+		git add .gitattributes count-textconv &&
+		git grep --cached --textconv --threads=2 --quiet \
+			textconv:needle &&
+		printf "%s\n" count.* >counts &&
+		test_line_count -lt 300 counts
+	)
+'
+
 test_expect_success !PTHREADS,!FAIL_PREREQS \
 	'grep --threads=N or pack.threads=N warns when no pthreads' '
 	git grep --threads=2 Hello hello_world 2>err &&

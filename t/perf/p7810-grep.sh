@@ -97,4 +97,27 @@ test_perf 'grep worktree cache, second scan, 8 threads' \
 	test_expect_code 1 git grep --threads=8 "$grep_pattern"
 '
 
+test_expect_success 'setup threaded --quiet fixture' '
+	"$MODERN_GIT" init -q quiet &&
+	hit=$(printf "threaded-quiet-hit\n" |
+		"$MODERN_GIT" -C quiet hash-object -w --stdin) &&
+	miss=$(printf "threaded-quiet-miss\n" |
+		"$MODERN_GIT" -C quiet hash-object -w --stdin) &&
+	{
+		printf "100644 %s\t!00000-hit.txt\n" "$hit" &&
+		test_seq -f "100644 $miss\tfile%05g.txt" 1 50000
+	} | "$MODERN_GIT" -C quiet update-index --index-info
+'
+
+test_perf 'grep --cached, threaded early --quiet hit' \
+	--prereq PTHREADS '
+	git -C quiet grep --cached --threads=8 --fixed-strings --quiet \
+		threaded-quiet-hit
+'
+
+test_perf 'grep --cached, threaded --quiet miss' --prereq PTHREADS '
+	test_must_fail git -C quiet grep --cached --threads=8 \
+		--fixed-strings --quiet threaded-quiet-absent
+'
+
 test_done
