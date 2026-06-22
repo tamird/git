@@ -50,6 +50,8 @@ int cmd_write_tree(int argc,
 
 	prepare_repo_settings(the_repository);
 	the_repository->settings.command_requires_full_index = 0;
+	if (!use_optional_locks())
+		flags |= WRITE_TREE_NO_INDEX_WRITE;
 
 	ret = write_index_as_tree(&oid, the_repository->index,
 				  repo_get_index_file(the_repository),
