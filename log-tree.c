@@ -2,6 +2,7 @@
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "commit-graph.h"
 #include "commit-reach.h"
 #include "commit-slab.h"
 #include "config.h"
@@ -38,6 +39,16 @@
 static struct decoration name_decoration = { "object names" };
 static int decoration_loaded;
 static int decoration_flags;
+static size_t unchecked_decorations;
+
+/* Internal state cleared before a name list is returned to a caller. */
+#define DECORATION_OBJECT_UNCHECKED (1 << 30)
+
+struct decoration_context {
+	struct decoration_filter *filter;
+	int defer_object_lookups;
+	int saw_deferrable_ref;
+};
 
 static char decoration_colors[][COLOR_MAXLEN] = {
 	GIT_COLOR_RESET,
@@ -84,17 +95,68 @@ int parse_decorate_color_config(const char *var, const char *slot_name, const ch
 #define decorate_get_color_opt(o, ix) \
 	decorate_get_color((o)->use_color, ix)
 
-void add_name_decoration(enum decoration_type type, const char *name, struct object *obj)
+static struct name_decoration *materialize_name_decorations(const struct object *obj)
+{
+	struct name_decoration *decoration, **next;
+	int object_exists = -1;
+
+	decoration = lookup_decoration(&name_decoration, obj);
+	/*
+	 * Ignore deferred names if the object lookup skipped by the loader
+	 * would have rejected their target. Keep eager names on the same object.
+	 */
+	for (next = &decoration; *next;) {
+		struct name_decoration *item = *next;
+
+		if (!(item->type & DECORATION_OBJECT_UNCHECKED)) {
+			next = &item->next;
+			continue;
+		}
+		unchecked_decorations--;
+
+		if (object_exists < 0)
+			object_exists = odb_read_object_info(the_repository->objects,
+							     &obj->oid, NULL) >= 0;
+		if (object_exists) {
+			item->type &= ~DECORATION_OBJECT_UNCHECKED;
+			next = &item->next;
+		} else {
+			*next = item->next;
+			free(item);
+		}
+	}
+
+	if (object_exists == 0)
+		add_decoration(&name_decoration, obj, decoration);
+	return decoration;
+}
+
+static void add_name_decoration_entry(enum decoration_type type,
+				      const char *name,
+				      struct object *obj,
+				      int object_unchecked)
 {
 	struct name_decoration *res;
+
 	FLEX_ALLOC_STR(res, name, name);
 	res->type = type;
+	if (object_unchecked) {
+		res->type |= DECORATION_OBJECT_UNCHECKED;
+		unchecked_decorations++;
+	}
 	res->next = add_decoration(&name_decoration, obj, res);
+}
+
+void add_name_decoration(enum decoration_type type, const char *name, struct object *obj)
+{
+	add_name_decoration_entry(type, name, obj, 0);
 }
 
 const struct name_decoration *get_name_decoration(const struct object *obj)
 {
-	load_ref_decorations(NULL, DECORATE_SHORT_REFS);
+	load_ref_decorations(NULL, DECORATE_SHORT_REFS, 0);
+	if (unchecked_decorations)
+		return materialize_name_decorations(obj);
 	return lookup_decoration(&name_decoration, obj);
 }
 
@@ -148,13 +210,14 @@ static int ref_filter_match(const char *refname,
 	return 1;
 }
 
-static int add_ref_decoration(const struct reference *ref, void *cb_data)
+static int collect_ref_decoration(const struct reference *ref, void *cb_data)
 {
 	int i;
 	struct object *obj;
 	enum object_type objtype;
 	enum decoration_type deco_type = DECORATION_NONE;
-	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
+	struct decoration_context *context = cb_data;
+	struct decoration_filter *filter = context->filter;
 	const char *git_replace_ref_base = ref_namespace[NAMESPACE_REPLACE].ref;
 
 	if (filter && !ref_filter_match(ref->name, filter))
@@ -175,11 +238,6 @@ static int add_ref_decoration(const struct reference *ref, void *cb_data)
 		return 0;
 	}
 
-	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
-	if (objtype < 0)
-		return 0;
-	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
-
 	for (i = 0; i < ARRAY_SIZE(ref_namespace); i++) {
 		struct ref_namespace_info *info = &ref_namespace[i];
 
@@ -195,6 +253,34 @@ static int add_ref_decoration(const struct reference *ref, void *cb_data)
 			break;
 		}
 	}
+
+	if (context->defer_object_lookups && !ref->peeled_oid &&
+	    (deco_type == DECORATION_REF_LOCAL ||
+	     deco_type == DECORATION_REF_REMOTE ||
+	     deco_type == DECORATION_REF_STASH ||
+	     deco_type == DECORATION_REF_HEAD)) {
+		if (!context->saw_deferrable_ref) {
+			context->saw_deferrable_ref = 1;
+		} else if (!repo_find_oid_in_commit_graph(the_repository,
+							  ref->oid)) {
+			context->defer_object_lookups = 0;
+		} else {
+			struct commit *commit = lookup_commit(the_repository,
+							      ref->oid);
+
+			if (commit) {
+				add_name_decoration_entry(deco_type,
+							  ref->name,
+							  &commit->object, 1);
+				return 0;
+			}
+		}
+	}
+
+	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
+	if (objtype < 0)
+		return 0;
+	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
 
 	add_name_decoration(deco_type, ref->name, obj);
 	while (obj->type == OBJ_TAG) {
@@ -218,9 +304,15 @@ static int add_graft_decoration(const struct commit_graft *graft,
 	return 0;
 }
 
-void load_ref_decorations(struct decoration_filter *filter, int flags)
+void load_ref_decorations(struct decoration_filter *filter, int flags,
+			  int defer_object_lookups)
 {
 	if (!decoration_loaded) {
+		struct decoration_context context = {
+			.filter = filter,
+			.defer_object_lookups = defer_object_lookups,
+		};
+
 		if (filter) {
 			struct string_list_item *item;
 			for_each_string_list_item(item, filter->exclude_ref_pattern) {
@@ -241,10 +333,10 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 		decoration_loaded = 1;
 		decoration_flags = flags;
 		refs_for_each_ref(get_main_ref_store(the_repository),
-				  add_ref_decoration, filter);
+				  collect_ref_decoration, &context);
 		refs_head_ref(get_main_ref_store(the_repository),
-			      add_ref_decoration, filter);
-		for_each_commit_graft(add_graft_decoration, filter);
+			      collect_ref_decoration, &context);
+		for_each_commit_graft(add_graft_decoration, &context);
 	}
 }
 
@@ -261,7 +353,7 @@ void load_branch_decorations(void)
 		};
 
 		string_list_append(&decorate_refs_include, "refs/heads/");
-		load_ref_decorations(&decoration_filter, 0);
+		load_ref_decorations(&decoration_filter, 0, 0);
 
 		string_list_clear(&decorate_refs_exclude, 0);
 		string_list_clear(&decorate_refs_exclude_config, 0);

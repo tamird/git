@@ -1,6 +1,6 @@
 #!/bin/sh
 
-test_description='performance of ref-filter users'
+test_description='performance of ref iteration users'
 . ./perf-lib.sh
 
 test_perf_fresh_repo
@@ -80,10 +80,95 @@ run_tests () {
 run_tests "loose"
 test_for_each_ref "loose, direct refs" refs/heads/ refs/custom/
 
+test_perf "log --decorate with one ref (loose, no graph)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/branch_1 --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many commit refs (loose, no graph)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/ --max-count=1 >/dev/null
+	done
+"
+
+test_expect_success 'write split commit graph' '
+	git commit-graph write --split=no-merge --reachable &&
+	tip=$(git commit-tree HEAD^{tree} -p HEAD) &&
+	echo "$tip" | git commit-graph write --split=no-merge --stdin-commits &&
+	tip=$(git commit-tree HEAD^{tree} -p "$tip") &&
+	echo "$tip" | git commit-graph write --split=no-merge --stdin-commits &&
+	test_line_count = 3 \
+		.git/objects/info/commit-graphs/commit-graph-chain
+'
+
+test_perf "log --decorate with one graph commit ref (loose)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/branch_1 --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many graph commit refs (loose)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/ --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many annotated tags (loose)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/tags/ --max-count=1 >/dev/null
+	done
+"
+
 test_expect_success 'pack refs' '
 	git pack-refs --all
 '
 run_tests "packed"
+
+test_perf "log --decorate with one graph commit ref (packed)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/branch_1 --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many graph commit refs (packed)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/ --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many annotated tags (packed)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/tags/ --max-count=1 >/dev/null
+	done
+"
+
+test_perf "log --decorate with many graph commit refs (packed, full history)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/ --format=%H%x20%D >/dev/null
+	done
+"
+
+test_perf "log --decorate with one ref (packed, full history)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=HEAD --format=%H%x20%D >/dev/null
+	done
+"
+
+test_expect_success 'setup post-graph branch refs' '
+	post_graph=$(echo post-graph | git commit-tree HEAD^{tree} -p HEAD) &&
+	test_seq $ref_count_per_type |
+	sed "s,.*,update refs/heads/post-graph/branch_& $post_graph," |
+	git update-ref --stdin &&
+	git pack-refs --all
+'
+
+test_perf "log --decorate with many post-graph refs (packed)" "
+	for i in \$(test_seq $test_iteration_count); do
+		git log --decorate --decorate-refs=refs/heads/post-graph/ \
+			--max-count=1 >/dev/null
+	done
+"
 
 test_expect_success 'setup many unrelated refs' '
 	git init scoped &&

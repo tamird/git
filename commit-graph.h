@@ -63,6 +63,14 @@ struct commit_graph *repo_find_commit_pos_in_graph(struct repository *r,
 						   uint32_t *pos);
 
 /*
+ * Return non-zero if the commit graph contains `oid`. This does not allocate
+ * or parse a commit, or check whether the object is still present in the
+ * object database.
+ */
+int repo_find_oid_in_commit_graph(struct repository *r,
+				  const struct object_id *oid);
+
+/*
  * Look up the given commit ID in the commit-graph. This will only return a
  * commit if the ID exists both in the graph and in the object database such
  * that we don't return commits whose object has been pruned. Otherwise, this
