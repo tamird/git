@@ -361,6 +361,87 @@ test_expect_success 'diff does not reuse worktree files that need cleaning' '
 	test_line_count = 0 count
 '
 
+test_expect_success 'diffstat and check clean worktree files once' '
+	test_config filter.counter.clean "echo . >>count; sed s/^/clean:/" &&
+	echo "file filter=counter" >.gitattributes &&
+	echo three >file &&
+	for option in --stat --check
+	do
+		>count &&
+		git diff "$option" -- file >/dev/null &&
+		test_line_count = 1 count || return 1
+	done
+'
+
+test_expect_success 'diffstat and check clean to empty once' '
+	echo "empty-output filter=empty" >.gitattributes &&
+	echo base >empty-output &&
+	git add .gitattributes empty-output &&
+	git commit -m empty-output-base &&
+	test_config filter.empty.clean "echo . >>count; cat >/dev/null" &&
+	echo changed >empty-output &&
+	for option in --stat --check
+	do
+		>count &&
+		git diff "$option" -- empty-output >/dev/null &&
+		test_line_count = 1 count || return 1
+	done
+'
+
+test_expect_success 'diffstat classifies converted worktree data' '
+	echo "binary-file filter=binary" >.gitattributes &&
+	echo text >binary-file &&
+	git add .gitattributes binary-file &&
+	git commit -m binary-base &&
+	printf Q | q_to_nul >binary-filter-output &&
+	test_when_finished "rm -f binary-filter-output" &&
+	test_config filter.binary.clean "cat binary-filter-output" &&
+	echo Q >binary-file &&
+	git diff --stat -- binary-file >actual &&
+	test_grep "Bin" actual
+'
+
+test_expect_success 'diffstat and check run required filter above threshold' '
+	test_config filter.counter.clean false &&
+	test_config filter.counter.required true &&
+	echo "file filter=counter" >.gitattributes &&
+	echo three >file &&
+	for option in --stat --check
+	do
+		test_must_fail git -c core.bigFileThreshold=1 \
+			diff "$option" -- file 2>err &&
+		test_grep "clean filter .counter. failed" err ||
+		return 1
+	done
+'
+
+test_expect_success 'empty worktree files run required clean filters' '
+	test_config filter.counter.clean false &&
+	test_config filter.counter.required true &&
+	echo "file filter=counter" >.gitattributes &&
+	>file &&
+	test_must_fail git diff --stat -- file 2>err &&
+	test_grep "clean filter .counter. failed" err &&
+	test_must_fail git diff --check -- file 2>err &&
+	test_grep "clean filter .counter. failed" err &&
+	test_must_fail git diff-files --check -- file 2>err &&
+	test_grep "clean filter .counter. failed" err &&
+	test_must_fail git diff-index --check HEAD -- file 2>err &&
+	test_grep "clean filter .counter. failed" err
+'
+
+test_expect_success '--check runs required filter after -B prepopulation' '
+	echo "prepop filter=counter" >.gitattributes &&
+	echo base >prepop &&
+	git add .gitattributes prepop &&
+	git commit -m prepop-base &&
+	test_config filter.counter.clean false &&
+	test_config filter.counter.required true &&
+	>prepop &&
+	test_must_fail git diff -B --check -- prepop 2>err &&
+	test_grep "clean filter .counter. failed" err
+'
+
 test_expect_success 'required process filter should filter data' '
 	test_config_global filter.protocol.process "test-tool rot13-filter --log=debug.log clean smudge" &&
 	test_config_global filter.protocol.required true &&

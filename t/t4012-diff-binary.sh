@@ -130,4 +130,19 @@ test_expect_success 'diff --stat with binary files and big change count' '
 	test_cmp expect actual
 '
 
+test_expect_success 'diffstat honors core.bigFileThreshold' '
+	echo text >large-text &&
+	printf "%s\t%s\t%s\n" - - "/dev/null => large-text" >expect &&
+	test_must_fail git -c core.bigFileThreshold=1 diff \
+		--no-index --numstat /dev/null large-text >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'diff --check inspects files above bigFileThreshold' '
+	printf "text \n" >large-check &&
+	test_must_fail git -c core.bigFileThreshold=1 diff \
+		--no-index --check /dev/null large-check >actual &&
+	test_grep "trailing whitespace" actual
+'
+
 test_done
