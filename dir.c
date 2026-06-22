@@ -3085,8 +3085,8 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	}
 
 	if (*negative_only) {
-		if ((dir->flags && dir->flags != normal_flags) ||
-		    (dir->untracked->dir_flags &&
+		if ((dir->flags != 0 && dir->flags != normal_flags) ||
+		    (dir->untracked->dir_flags != 0 &&
 		     dir->untracked->dir_flags != normal_flags))
 			return NULL;
 	} else if (dir->flags != dir->untracked->dir_flags) {
@@ -3105,24 +3105,20 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		 * "all") was incompatible with untracked cache and *consistently*
 		 * caused surprisingly bad performance (with fscache and fsmonitor
 		 * enabled) on Windows.
-		 *
-		 * IMPROVEMENT OPPORTUNITY: If we reworked the untracked cache storage
-		 * to not be as bound up with the desired output in a given run,
-		 * and instead iterated through and stored enough information to
-		 * correctly serve both "modes", then users could get peak performance
-		 * with or without '-uall' regardless of their
-		 * "status.showuntrackedfiles" config.
 		 */
 		if (dir->untracked->dir_flags != new_untracked_cache_flags(istate)) {
 			free_untracked_cache(istate->untracked);
 			new_untracked_cache(istate, dir->flags);
 			dir->untracked = istate->untracked;
-		}
-		else {
+		} else if ((dir->flags == 0 || dir->flags == normal_flags) &&
+			   (dir->untracked->dir_flags == 0 ||
+			    dir->untracked->dir_flags == normal_flags)) {
 			/*
-			 * Current untracked cache data is consistent with config, but not
-			 * usable in this request/run; just bypass untracked cache.
+			 * Positive entries depend on the output mode, but negative
+			 * summaries do not.
 			 */
+			*negative_only = 1;
+		} else {
 			return NULL;
 		}
 	}
