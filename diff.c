@@ -3721,8 +3721,11 @@ int diff_filespec_is_binary(struct repository *r,
 		if (one->driver->binary != -1)
 			one->is_binary = one->driver->binary;
 		else {
-			if (!one->data && DIFF_FILE_VALID(one))
+			if ((!one->data || one->populate_failed) &&
+			    DIFF_FILE_VALID(one))
 				diff_populate_filespec(r, one, &dpf_options);
+			if (one->populate_failed)
+				return 0;
 			if (one->is_binary == -1 && one->data)
 				one->is_binary = buffer_is_binary(one->data,
 						one->size);
@@ -4500,7 +4503,7 @@ int diff_populate_filespec(struct repository *r,
 {
 	int size_only = options ? options->check_size_only : 0;
 	int check_binary = options ? options->check_binary : 0;
-	int err = 0;
+	int worktree_failed;
 	int conv_flags = global_conv_flags_eol;
 	/*
 	 * demote FAIL to WARN to allow inspecting the situation
@@ -4514,6 +4517,15 @@ int diff_populate_filespec(struct repository *r,
 	if (S_ISDIR(s->mode))
 		return -1;
 
+retry:
+	worktree_failed = s->populate_failed;
+	if (worktree_failed) {
+		s->populate_failed = 0;
+		s->data = NULL;
+		s->size = 0;
+		s->is_binary = -1;
+	}
+
 	if (s->data)
 		return 0;
 
@@ -4524,27 +4536,24 @@ int diff_populate_filespec(struct repository *r,
 		return diff_populate_gitlink(s, size_only);
 
 	if (!s->oid_valid ||
-	    reuse_worktree_file(r->index, s->path, &s->oid, 0)) {
+	    (!worktree_failed &&
+	     reuse_worktree_file(r->index, s->path, &s->oid, 0))) {
 		struct strbuf buf = STRBUF_INIT;
 		struct stat st;
 		int fd;
 
-		if (lstat(s->path, &st) < 0) {
-		err_empty:
-			err = -1;
-		empty:
-			s->data = (char *)"";
-			s->size = 0;
-			return err;
-		}
+		if (lstat(s->path, &st) < 0)
+			goto worktree_error;
 		s->size = xsize_t(st.st_size);
 		if (!s->size)
 			goto empty;
 		if (S_ISLNK(st.st_mode)) {
 			struct strbuf sb = STRBUF_INIT;
 
-			if (strbuf_readlink(&sb, s->path, s->size))
-				goto err_empty;
+			if (strbuf_readlink(&sb, s->path, s->size)) {
+				strbuf_release(&sb);
+				goto worktree_error;
+			}
 			s->size = sb.len;
 			s->data = strbuf_detach(&sb, NULL);
 			s->should_free = 1;
@@ -4577,7 +4586,7 @@ int diff_populate_filespec(struct repository *r,
 		}
 		fd = open(s->path, O_RDONLY);
 		if (fd < 0)
-			goto err_empty;
+			goto worktree_error;
 		s->data = xmmap(NULL, s->size, PROT_READ, MAP_PRIVATE, fd, 0);
 		close(fd);
 		s->should_munmap = 1;
@@ -4593,8 +4602,22 @@ int diff_populate_filespec(struct repository *r,
 			s->size = size;
 			s->should_free = 1;
 		}
-	}
-	else {
+		return 0;
+
+	empty:
+		s->data = (char *)"";
+		s->size = 0;
+		return 0;
+
+	worktree_error:
+		s->data = (char *)"";
+		s->size = 0;
+		s->is_binary = -1;
+		s->populate_failed = 1;
+		if (s->oid_valid)
+			goto retry;
+		return -1;
+	} else {
 		size_t size_st = 0;
 		struct object_info info = {
 			.sizep = &size_st
