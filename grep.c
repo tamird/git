@@ -573,8 +573,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		compile_regexp_failed(p, errbuf);
 	}
 
-	if (!p->ignore_case &&
-	    p->token == GREP_PATTERN_BODY &&
+	if (p->token == GREP_PATTERN_BODY &&
 	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
 	     opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)) {
 		const char *kwserr;
@@ -603,7 +602,9 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				if (i - start < 2)
 					break;
 				if (!p->kws)
-					p->kws = kwsalloc(NULL);
+					p->kws = kwsalloc(p->ignore_case ?
+								  tolower_trans_tbl :
+								  NULL);
 				kwserr = kwsincr(p->kws, p->pattern + start,
 						 i - start);
 				if (kwserr)
@@ -979,8 +980,19 @@ static int patmatch(struct grep_pat *p,
 {
 	if (p->kws &&
 	    kwsexec(p->kws, line, eol - line, NULL) == (size_t)-1) {
-		match->rm_so = match->rm_eo = -1;
-		return 0;
+		const char *scan = line;
+
+		/*
+		 * Locale case folding can match input containing a high-bit or
+		 * ESC byte without containing the ASCII keyword bytes.
+		 */
+		while (p->ignore_case && scan < eol &&
+		       (unsigned char)*scan < 0x80 && *scan != '\033')
+			scan++;
+		if (!p->ignore_case || scan == eol) {
+			match->rm_so = match->rm_eo = -1;
+			return 0;
+		}
 	}
 
 	if (p->pcre2_pattern)

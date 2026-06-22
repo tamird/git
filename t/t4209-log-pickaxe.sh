@@ -36,6 +36,18 @@ test_lazy_prereq SJIS_REGEX_NOMATCH '
 	test "$sjis_status" = "$nomatch_status"
 '
 
+test_lazy_prereq TURKISH_ICASE '
+	dotless_i=$(printf "\\375") &&
+	c_status=$(
+		LC_ALL=C test-tool regex --silent \
+			"Ix|absent" "${dotless_i}x" ICASE EXTENDED
+		echo $?
+	) &&
+	test "$c_status" -ne 0 &&
+	LC_ALL=tr_TR.ISO8859-9 test-tool regex --silent \
+		"Ix|absent" "${dotless_i}x" ICASE EXTENDED
+'
+
 test_log () {
 	expect=$1
 	kind=$2
@@ -94,7 +106,14 @@ test_expect_success setup '
 	git cat-file commit "$(cat log-grep-sjis)" >log-grep-sjis.commit &&
 	test_grep "^encoding SJIS\$" log-grep-sjis.commit &&
 	sed '1,/^$/d' log-grep-sjis.commit >log-grep-sjis.body &&
-	test_cmp_bin sjis-body log-grep-sjis.body
+	test_cmp_bin sjis-body log-grep-sjis.body &&
+	printf "\\375x\\n" >turkish-body &&
+	git -c i18n.commitEncoding=ISO-8859-9 commit-tree \
+		HEAD^{tree} -p HEAD <turkish-body >log-grep-turkish &&
+	git cat-file commit "$(cat log-grep-turkish)" >log-grep-turkish.commit &&
+	test_grep "^encoding ISO-8859-9\$" log-grep-turkish.commit &&
+	sed '1,/^$/d' log-grep-turkish.commit >log-grep-turkish.body &&
+	test_cmp_bin turkish-body log-grep-turkish.body
 '
 
 test_expect_success ENHANCED_BRE 'log grep with enhanced BRE alternatives' '
@@ -105,6 +124,23 @@ test_expect_success ENHANCED_BRE 'log grep with enhanced BRE alternatives' '
 test_expect_success 'log grep with literal ERE alternatives' '
 	git log -E --grep="initial|second" --format=%H >actual &&
 	test_cmp expect_both actual
+'
+
+test_expect_success ENHANCED_BRE 'log grep with ignore-case enhanced BRE' '
+	git log -i --grep="INITIAL\\|SECOND" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success 'log grep with case-insensitive EREs' '
+	git log -i -E --grep="INITIAL|SECOND" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success TURKISH_ICASE 'log grep preserves locale folding' '
+	LC_ALL=tr_TR.ISO8859-9 git log --encoding=none -1 -i -E \
+		--grep="Ix|absent" --format=%H \
+		$(cat log-grep-turkish) >actual &&
+	test_cmp log-grep-turkish actual
 '
 
 test_expect_success 'log grep falls back for one-byte alternatives' '
