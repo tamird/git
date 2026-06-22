@@ -2412,6 +2412,58 @@ test_expect_success 'log --decorate includes all levels of tag annotated tags' '
 	test_cmp expect actual
 '
 
+test_expect_success 'log --decorate preserves tag order with commit graph' '
+	test_when_finished "rm -rf decoration-order" &&
+	git init decoration-order &&
+	(
+		cd decoration-order &&
+		test_commit --no-tag base &&
+		git checkout -b branch &&
+		git commit --allow-empty -m "new commit" &&
+		git tag lightweight HEAD &&
+		git tag -m annotated annotated HEAD &&
+		git tag -m double-0 double-0 HEAD &&
+		git tag -m double-1 double-1 double-0 &&
+		git commit-graph write --reachable &&
+		cat >expect <<-\EOF &&
+		HEAD -> branch, tag: lightweight, tag: double-1, tag: double-0, tag: annotated
+		EOF
+		git log -1 --format="%D" >actual &&
+		test_cmp expect actual &&
+		if test_have_prereq REFFILES
+		then
+			git pack-refs --all &&
+			git log -1 --format="%D" >actual-packed &&
+			test_cmp expect actual-packed
+		fi
+	)
+'
+
+test_expect_success 'log decoration handles stale split commit graph entries' '
+	test_when_finished "rm -rf stale-decoration" &&
+	git init stale-decoration &&
+	(
+		cd stale-decoration &&
+		test_commit --no-tag A &&
+		test_commit --no-tag B &&
+		git branch alive HEAD^ &&
+		git branch broken HEAD &&
+		git tag --message=kept kept HEAD &&
+		git commit-graph write --split=no-merge --reachable &&
+		test_commit --no-tag C &&
+		git commit-graph write --split=no-merge --reachable &&
+		test_line_count = 2 \
+			.git/objects/info/commit-graphs/commit-graph-chain &&
+
+		b=$(git rev-parse HEAD^) &&
+		rm .git/objects/"$(test_oid_to_path "$b")" &&
+
+		echo "$b tag: kept" >expect &&
+		git log --skip=1 --max-count=1 --format="%H %D" >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'log --decorate does not include things outside filter' '
 	reflist="refs/prefetch refs/rebase-merge refs/bundle" &&
 

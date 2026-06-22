@@ -379,7 +379,10 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 		if (cfg->decoration_style)
 			rev->show_decorations = 1;
 
-		load_ref_decorations(&decoration_filter, cfg->decoration_style);
+		load_ref_decorations(&decoration_filter, cfg->decoration_style,
+				     !rev->simplify_by_decoration &&
+					     !rev->no_walk && !rev->boundary &&
+					     !rev->max_count_type && rev->max_count == 1);
 	}
 
 	if (rev->line_level_traverse)

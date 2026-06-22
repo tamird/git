@@ -35,7 +35,8 @@ void log_write_email_headers(struct rev_info *opt, struct commit *commit,
 			     char **extra_headers_p,
 			     int *need_8bit_cte_p,
 			     int maybe_multipart);
-void load_ref_decorations(struct decoration_filter *filter, int flags);
+void load_ref_decorations(struct decoration_filter *filter, int flags,
+			  int defer_object_lookups);
 void load_branch_decorations(void);
 
 void fmt_output_commit(struct strbuf *, struct commit *, struct rev_info *);
