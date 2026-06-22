@@ -447,6 +447,33 @@ test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 	test_grep "subtrees-pruned:1" trace-empty
 '
 
+test_expect_success UNTRACKED_CACHE 'keep tracked ignore identity with fsmonitor' '
+	test_create_repo ignore-identity &&
+	(
+		cd ignore-identity &&
+		echo old >.gitignore &&
+		git add .gitignore &&
+		git commit -m initial &&
+		mkdir ignored &&
+		echo ignored/ >.gitignore &&
+		: >ignored/file &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >/dev/null &&
+		test-tool dump-untracked-cache >../cache-before &&
+		git add .gitignore &&
+		git update-index --fsmonitor-valid .gitignore &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ignore-identity" \
+			git status --porcelain >/dev/null &&
+		test-tool dump-untracked-cache >../cache-after
+	) &&
+	test_cmp cache-before cache-after &&
+	test_grep "gitignore-invalidation:0" trace-ignore-identity
+'
+
 test_expect_success UNTRACKED_CACHE 'fsmonitor invalidates empty root summary' '
 	(
 		cd empty-untracked &&
