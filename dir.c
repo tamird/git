@@ -12,7 +12,6 @@
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "config.h"
-#include "convert.h"
 #include "dir.h"
 #include "environment.h"
 #include "gettext.h"
@@ -1227,26 +1226,18 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 			close(fd);
 			return -1;
 		}
-		buf[size++] = '\n';
 		close(fd);
 		if (oid_stat) {
-			int pos;
 			if (oid_stat->valid &&
 			    !match_stat_data_racy(istate, &oid_stat->stat, &st))
 				; /* no content change, oid_stat->oid still good */
-			else if (istate &&
-				 (pos = index_name_pos(istate, fname, strlen(fname))) >= 0 &&
-				 !ce_stage(istate->cache[pos]) &&
-				 ce_uptodate(istate->cache[pos]) &&
-				 !would_convert_to_git(istate, fname))
-				oidcpy(&oid_stat->oid,
-				       &istate->cache[pos]->oid);
 			else
 				hash_object_file(the_hash_algo, buf, size,
 						 OBJ_BLOB, &oid_stat->oid);
 			fill_stat_data(&oid_stat->stat, &st);
 			oid_stat->valid = 1;
 		}
+		buf[size++] = '\n';
 	}
 
 	if (size > PATTERN_MAX_FILE_SIZE) {
