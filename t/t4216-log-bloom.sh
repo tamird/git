@@ -339,6 +339,14 @@ test_expect_success 'git log with path contains various magic signatures' '
 	test_bloom_filters_used "-- \:\(attr\:text\)A"
 '
 
+test_expect_success 'git log uses Bloom filters with path exclusions' '
+	test_bloom_filters_used "-- A \:\(exclude\)A/B/C" &&
+	test_bloom_filters_used "-- A file4 \:\(exclude\)A/B/C" &&
+	test_bloom_filters_used "-- A \:\(exclude\,icase\)A/B/C" &&
+	test_bloom_filters_not_used \
+		"-- \:\(icase\)A \:\(exclude\)A/B/C"
+'
+
 test_expect_success 'setup - add commit-graph to the chain without Bloom filters' '
 	test_commit c14 A/anotherFile2 &&
 	test_commit c15 A/B/anotherFile2 &&
