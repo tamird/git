@@ -3032,6 +3032,7 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	const unsigned int normal_flags =
 		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
+	int i;
 	static int untracked_cache_disabled = -1;
 
 	if (!dir->untracked)
@@ -3073,11 +3074,13 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 
 	/*
-	 * EXC_CMDL is not considered in the cache. If people set it,
-	 * skip the cache.
+	 * Command-line exclude patterns are not considered in the cache.
+	 * ls-files creates an empty EXC_CMDL list even without --exclude,
+	 * so inspect the lists for patterns rather than counting lists.
 	 */
-	if (dir->internal.exclude_list_group[EXC_CMDL].nr)
-		return NULL;
+	for (i = 0; i < dir->internal.exclude_list_group[EXC_CMDL].nr; i++)
+		if (dir->internal.exclude_list_group[EXC_CMDL].pl[i].nr)
+			return NULL;
 
 	if (!ident_in_untracked(dir->untracked)) {
 		warning(_("untracked cache is disabled on this system or location"));
@@ -3200,7 +3203,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	struct untracked_cache_dir *untracked;
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
-	int negative_only = has_pathspec;
+	int negative_only = has_pathspec || dir->untracked_cache_negative_only;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;

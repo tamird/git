@@ -299,6 +299,12 @@ struct dir_struct {
 
 	/* Enable/update untracked file cache if set */
 	struct untracked_cache *untracked;
+	/*
+	 * Request negative summaries without positive replay. Matching
+	 * dir_flags is not sufficient when the consumer aggregates results
+	 * differently from the cache producer.
+	 */
+	unsigned int untracked_cache_negative_only:1;
 
 	/**
 	 * Deprecated: ls-files is the only allowed caller; all other callers

@@ -213,6 +213,32 @@ test_fsmonitor_suite () {
 		git ls-files --modified
 	'
 
+	test_expect_success "setup positive ls-files caches ($DESC)" '
+		mkdir ls_files_untracked &&
+		test_seq -f "ls_files_untracked/%05g" 1 10000 | xargs touch &&
+		git config status.showUntrackedFiles normal &&
+		git status --porcelain >/dev/null
+	'
+
+	test_perf_w_drop_caches "ls-files --others --exclude-standard, normal cache ($DESC)" '
+		git ls-files --others --exclude-standard >/dev/null
+	'
+
+	test_expect_success "setup all-mode ls-files replay ($DESC)" '
+		git config status.showUntrackedFiles all &&
+		git status --porcelain >/dev/null
+	'
+
+	test_perf_w_drop_caches "ls-files --others --exclude-standard, exact replay ($DESC)" '
+		git ls-files --others --exclude-standard >/dev/null
+	'
+
+	test_expect_success "cleanup positive ls-files replay ($DESC)" '
+		rm -rf ls_files_untracked &&
+		git config --unset status.showUntrackedFiles &&
+		git status --porcelain >/dev/null
+	'
+
 	# Update the mtimes on upto 100k files to make status think
 	# that they are dirty.  For simplicity, omit any files with
 	# LFs (i.e. anything that ls-files thinks it needs to dquote)
