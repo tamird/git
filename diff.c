@@ -5098,11 +5098,25 @@ static void run_diff(struct diff_filepair *p, struct diff_options *o)
 	strbuf_release(&msg);
 }
 
+static int diff_filespec_discard_unowned_empty(struct diff_filespec *spec)
+{
+	if (!spec->data || spec->size || spec->should_free ||
+	    spec->should_munmap || spec->is_stdin)
+		return 0;
+
+	spec->data = NULL;
+	spec->size = 0;
+	spec->is_binary = -1;
+	return 1;
+}
+
 static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 			 struct diffstat_t *diffstat)
 {
+	struct diff_filespec *files[] = { p->one, p->two };
 	const char *name;
 	const char *other;
+	size_t i;
 
 	if (!o->ignore_driver_algorithm) {
 		struct userdiff_driver *drv = userdiff_find_by_path(o->repo->index,
@@ -5125,8 +5139,18 @@ static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 	if (o->prefix_length)
 		strip_prefix(o->prefix_length, &name, &other);
 
-	diff_fill_oid_info(p->one, o->repo->index);
-	diff_fill_oid_info(p->two, o->repo->index);
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		struct diff_filespec *spec = files[i];
+
+		if (!DIFF_FILE_VALID(spec) || S_ISGITLINK(spec->mode)) {
+			diff_fill_oid_info(spec, o->repo->index);
+		} else if (!spec->oid_valid) {
+			diff_filespec_is_binary(o->repo, spec);
+			diff_filespec_discard_unowned_empty(spec);
+			if (!spec->data)
+				diff_fill_oid_info(spec, o->repo->index);
+		}
+	}
 
 	builtin_diffstat(name, other, p->one, p->two,
 			 diffstat, o, p);
@@ -5134,9 +5158,11 @@ static void run_diffstat(struct diff_filepair *p, struct diff_options *o,
 
 static void run_checkdiff(struct diff_filepair *p, struct diff_options *o)
 {
+	struct diff_filespec *files[] = { p->one, p->two };
 	const char *name;
 	const char *other;
 	const char *attr_path;
+	size_t i;
 
 	if (DIFF_PAIR_UNMERGED(p)) {
 		/* unmerged */
@@ -5150,8 +5176,18 @@ static void run_checkdiff(struct diff_filepair *p, struct diff_options *o)
 	if (o->prefix_length)
 		strip_prefix(o->prefix_length, &name, &other);
 
-	diff_fill_oid_info(p->one, o->repo->index);
-	diff_fill_oid_info(p->two, o->repo->index);
+	for (i = 0; i < ARRAY_SIZE(files); i++) {
+		struct diff_filespec *spec = files[i];
+
+		if (!DIFF_FILE_VALID(spec) || S_ISGITLINK(spec->mode)) {
+			diff_fill_oid_info(spec, o->repo->index);
+		} else if (!spec->oid_valid) {
+			if (!spec->data)
+				diff_filespec_size(o->repo, spec);
+			if (diff_filespec_discard_unowned_empty(spec))
+				diff_fill_oid_info(spec, o->repo->index);
+		}
+	}
 
 	builtin_checkdiff(name, other, attr_path, p->one, p->two, o);
 }
