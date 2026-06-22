@@ -1273,7 +1273,7 @@ struct blame_bloom_data {
 static int bloom_count_queries = 0;
 static int bloom_count_no = 0;
 static int maybe_changed_path(struct repository *r,
-			      struct blame_origin *origin,
+			      struct commit *commit,
 			      struct blame_bloom_data *bd)
 {
 	int i;
@@ -1282,10 +1282,10 @@ static int maybe_changed_path(struct repository *r,
 	if (!bd)
 		return 1;
 
-	if (commit_graph_generation(origin->commit) == GENERATION_NUMBER_INFINITY)
+	if (commit_graph_generation(commit) == GENERATION_NUMBER_INFINITY)
 		return 1;
 
-	filter = get_bloom_filter(r, origin->commit);
+	filter = get_bloom_filter(r, commit);
 
 	if (!filter)
 		return 1;
@@ -1325,11 +1325,14 @@ static void add_bloom_key(struct blame_bloom_data *bd,
 static struct blame_origin *find_origin(struct repository *r,
 					struct commit *parent,
 					struct blame_origin *origin,
-					struct blame_bloom_data *bd)
+					struct blame_bloom_data *bd,
+					int *bloom_negative)
 {
 	struct blame_origin *porigin;
 	struct diff_options diff_opts;
 	const char *paths[2];
+
+	*bloom_negative = 0;
 
 	/* First check any existing origins */
 	for (porigin = get_blame_suspects(parent); porigin; porigin = porigin->next)
@@ -1363,8 +1366,10 @@ static struct blame_origin *find_origin(struct repository *r,
 		int compute_diff = 1;
 		if (origin->commit->parents &&
 		    oideq(&parent->object.oid,
-			  &origin->commit->parents->item->object.oid))
-			compute_diff = maybe_changed_path(r, origin, bd);
+			  &origin->commit->parents->item->object.oid)) {
+			compute_diff = maybe_changed_path(r, origin->commit, bd);
+			*bloom_negative = !compute_diff;
+		}
 
 		if (compute_diff)
 			diff_tree_oid(get_commit_tree_oid(parent),
@@ -1422,11 +1427,14 @@ static struct blame_origin *find_origin(struct repository *r,
 static struct blame_origin *find_rename(struct repository *r,
 					struct commit *parent,
 					struct blame_origin *origin,
-					struct blame_bloom_data *bd)
+					struct blame_bloom_data *bd,
+					int *bloom_negative)
 {
 	struct blame_origin *porigin = NULL;
 	struct diff_options diff_opts;
 	int i;
+
+	*bloom_negative = 0;
 
 	repo_diff_setup(r, &diff_opts);
 	diff_opts.flags.recursive = 1;
@@ -2411,7 +2419,8 @@ static void distribute_blame(struct blame_scoreboard *sb, struct blame_entry *bl
 typedef struct blame_origin *(*blame_find_alg)(struct repository *,
 					       struct commit *,
 					       struct blame_origin *,
-					       struct blame_bloom_data *);
+					       struct blame_bloom_data *,
+					       int *);
 
 static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin, int opt)
 {
@@ -2427,7 +2436,7 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 	num_sg = num_scapegoats(revs, commit, sb->reverse);
 	if (!num_sg)
 		goto finish;
-	else if (num_sg < ARRAY_SIZE(sg_buf))
+	if (num_sg < ARRAY_SIZE(sg_buf))
 		memset(sg_buf, 0, sizeof(sg_buf));
 	else
 		CALLOC_ARRAY(sg_origin, num_sg);
@@ -2443,16 +2452,46 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 		     i < num_sg && sg;
 		     sg = sg->next, i++) {
 			struct commit *p = sg->item;
-			int j, same;
+			int bloom_negative, j, same;
 
 			if (sg_origin[i])
 				continue;
 			if (repo_parse_commit(the_repository, p))
 				continue;
-			porigin = find(sb->repo, p, origin, sb->bloom_data);
+			porigin = find(sb->repo, p, origin, sb->bloom_data,
+				       &bloom_negative);
 			if (!porigin)
 				continue;
 			if (oideq(&porigin->blob_oid, &origin->blob_oid)) {
+				if (bloom_negative) {
+					struct commit *unchanged = p;
+
+					/*
+					 * The first edge is already known unchanged.
+					 * Extend that proof before queuing a parent.
+					 */
+					while (!(unchanged->object.flags & UNINTERESTING) &&
+					       !(revs->max_age != -1 &&
+						 unchanged->date < revs->max_age) &&
+					       unchanged->parents &&
+					       !maybe_changed_path(sb->repo, unchanged,
+								   sb->bloom_data)) {
+						struct commit *parent =
+							unchanged->parents->item;
+
+						if (repo_parse_commit(sb->repo, parent))
+							break;
+						unchanged = parent;
+					}
+					if (unchanged != p) {
+						blame_origin_decref(porigin);
+						porigin = get_origin(unchanged,
+								     origin->path);
+						oidcpy(&porigin->blob_oid,
+						       &origin->blob_oid);
+						porigin->mode = origin->mode;
+					}
+				}
 				pass_whole_blame(sb, origin, porigin);
 				blame_origin_decref(porigin);
 				goto finish;
