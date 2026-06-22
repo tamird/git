@@ -117,6 +117,27 @@ test_expect_success 'write-tree establishes cache-tree' '
 	test_cache_tree
 '
 
+test_expect_success '--no-optional-locks skips cache-tree persistence' '
+	test_when_finished "rm -f .git/index.lock && git reset --hard" &&
+	echo changed >foo.t &&
+	git add foo.t &&
+	test-tool scrap-cache-tree &&
+	test_no_cache_tree &&
+	test_set_magic_mtime .git/index &&
+	>.git/index.lock &&
+	tree=$(git --no-optional-locks write-tree) &&
+	test_is_magic_mtime .git/index &&
+	test_no_cache_tree &&
+	rm .git/index.lock &&
+	git diff-index --cached --quiet "$tree" -- &&
+	default_tree=$(git write-tree) &&
+	test "$tree" = "$default_tree" &&
+	cat >expected.status <<-\EOF &&
+	M  foo.t
+	EOF
+	test_cache_tree expected.status
+'
+
 test_expect_success 'test-tool scrap-cache-tree works' '
 	git read-tree HEAD &&
 	test-tool scrap-cache-tree &&
