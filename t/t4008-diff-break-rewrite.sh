@@ -157,4 +157,61 @@ test_expect_success 'run diff with -B -C (#9)' '
 	compare_diff_raw expect current
 '
 
+test_expect_success POSIXPERM,SANITY \
+	'diffcore falls back after worktree read failure' '
+	test_create_repo unreadable &&
+	(
+		cd unreadable &&
+		git config core.autocrlf false &&
+		test_seq -f "old rewrite %04g" 1 100 >rewrite &&
+		test_seq -f "rename line %04g" 1 100 >rename-old &&
+		echo old-text >binary &&
+		git add . &&
+		git commit -m old &&
+		test_seq -f "new rewrite %04g" 1 100 >rewrite &&
+		git mv rename-old rename-new &&
+		echo edited >>rename-new &&
+		printf Q | q_to_nul >binary &&
+		git add . &&
+		git commit -m new &&
+		git diff --cached -B --stat --patch HEAD^ -- rewrite \
+			>../expect.rewrite &&
+		git diff --cached -M --raw HEAD^ -- rename-old rename-new \
+			>../expect.rename &&
+		git diff --cached --binary --stat HEAD^ -- binary \
+			>../expect.binary &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git update-index --fsmonitor
+	) &&
+	test_grep "^dissimilarity index " expect.rewrite &&
+	test_grep " R[0-9][0-9]*.*rename-old.*rename-new$" expect.rename &&
+	test_grep "^GIT binary patch$" expect.binary &&
+	test_when_finished \
+		"chmod +r unreadable/rewrite unreadable/rename-new \
+		unreadable/binary" &&
+	chmod -r unreadable/rewrite unreadable/rename-new unreadable/binary &&
+	git -C unreadable update-index --fsmonitor-valid \
+		rewrite rename-new binary &&
+	(
+		cd unreadable &&
+		git diff --cached -B --stat --patch HEAD^ -- rewrite \
+			>../actual.rewrite &&
+		git diff --cached -M --raw HEAD^ -- rename-old rename-new \
+			>../actual.rename &&
+		git diff --cached --binary --stat HEAD^ -- binary \
+			>../actual.binary
+	) &&
+	test_cmp expect.rewrite actual.rewrite &&
+	test_cmp expect.rename actual.rename &&
+	test_cmp expect.binary actual.binary &&
+	chmod +r unreadable/rename-new &&
+	git -C unreadable update-index --no-fsmonitor-valid rename-new &&
+	echo dirty >>unreadable/rename-new &&
+	chmod -r unreadable/rename-new &&
+	test_must_fail git -C unreadable diff --patch -- rename-new
+'
+
 test_done
