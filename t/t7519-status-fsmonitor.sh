@@ -769,6 +769,65 @@ test_expect_success UNTRACKED_CACHE 'pathspec falls back without fsmonitor' '
 	test_grep "subtrees-pruned:0" trace-pathspec-fallback
 '
 
+test_expect_success UNTRACKED_CACHE 'set up cross-mode untracked pruning' '
+	test_create_repo cross-mode-untracked &&
+	(
+		cd cross-mode-untracked &&
+		mkdir -p clean/a ignored-only/sub quiet/b results &&
+		echo ignored-only/ >.gitignore &&
+		: >clean/a/tracked &&
+		: >ignored-only/sub/ignored &&
+		: >quiet/b/tracked &&
+		git add . &&
+		git commit -m initial &&
+		: >results/one &&
+		: >results/two &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../actual &&
+		test-tool dump-untracked-cache >../normal-cache
+	) &&
+	echo "?? results/" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success UNTRACKED_CACHE 'normal cache prunes all status' '
+	(
+		cd cross-mode-untracked &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-normal-to-all" \
+			git status --porcelain -uall >../actual &&
+		test-tool dump-untracked-cache >../actual-cache
+	) &&
+	cat >expect <<-\EOF &&
+	?? results/one
+	?? results/two
+	EOF
+	test_cmp expect actual &&
+	test_cmp normal-cache actual-cache &&
+	test_grep "subtrees-pruned:[1-9]" trace-normal-to-all &&
+	test_grep "directories-visited:[1-9]" trace-normal-to-all
+'
+
+test_expect_success UNTRACKED_CACHE 'all cache prunes normal status' '
+	(
+		cd cross-mode-untracked &&
+		git config status.showUntrackedFiles all &&
+		git status --porcelain >/dev/null &&
+		test-tool dump-untracked-cache >../all-cache &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-all-to-normal" \
+			git status --porcelain -unormal >../actual &&
+		test-tool dump-untracked-cache >../actual-cache
+	) &&
+	echo "?? results/" >expect &&
+	test_cmp expect actual &&
+	test_cmp all-cache actual-cache &&
+	test_grep "subtrees-pruned:[1-9]" trace-all-to-normal &&
+	test_grep "directories-visited:[1-9]" trace-all-to-normal
+'
+
 test_expect_success 'discard_index() also discards fsmonitor info' '
 	test_config core.fsmonitor "$TEST_DIRECTORY/t7519/fsmonitor-all" &&
 	test_might_fail git update-index --refresh &&
