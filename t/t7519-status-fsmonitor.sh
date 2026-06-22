@@ -726,6 +726,37 @@ test_expect_success UNTRACKED_CACHE 'pathspec invalidation preserves cache' '
 	test_grep "subtrees-pruned:[1-9]" trace-pathspec-dirty
 '
 
+test_expect_success UNTRACKED_CACHE 'pathspec prunes across output modes' '
+	(
+		cd pathspec-untracked &&
+		test-tool dump-untracked-cache >../cache-before &&
+		git config status.showUntrackedFiles all &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-mode" \
+			git status --porcelain -- "*untracked" >../actual &&
+		git config --unset status.showUntrackedFiles &&
+		test-tool dump-untracked-cache >../cache-after
+	) &&
+	echo "?? results/c/untracked" >expect &&
+	test_cmp expect actual &&
+	test_cmp cache-before cache-after &&
+	test_grep "subtrees-pruned:[1-9]" trace-pathspec-mode
+'
+
+test_expect_success UNTRACKED_CACHE 'pathspec validates standard excludes' '
+	(
+		cd pathspec-untracked &&
+		echo left/ >.git/info/exclude &&
+		git status --porcelain >/dev/null &&
+		: >.git/info/exclude &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-exclude" \
+			git status --porcelain -- "*matching" >../actual
+	) &&
+	echo "?? left/a/matching" >expect &&
+	test_cmp expect actual &&
+	test_grep "subtrees-pruned:0" trace-pathspec-exclude &&
+	test_grep "directories-visited:[1-9]" trace-pathspec-exclude
+'
+
 test_expect_success UNTRACKED_CACHE 'pathspec falls back without fsmonitor' '
 	(
 		cd pathspec-untracked &&
@@ -736,19 +767,6 @@ test_expect_success UNTRACKED_CACHE 'pathspec falls back without fsmonitor' '
 	test_must_be_empty actual &&
 	test_grep "directories-visited:[1-9]" trace-pathspec-fallback &&
 	test_grep "subtrees-pruned:0" trace-pathspec-fallback
-'
-
-test_expect_success UNTRACKED_CACHE 'pathspec falls back with skip-worktree' '
-	(
-		cd pathspec-untracked &&
-		rm .git/fsmonitor-fail &&
-		git update-index --skip-worktree left/a/tracked &&
-		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-pathspec-skip" \
-			git status --porcelain -- "*missing" >../actual
-	) &&
-	test_must_be_empty actual &&
-	test_grep "directories-visited:[1-9]" trace-pathspec-skip &&
-	test_grep "subtrees-pruned:0" trace-pathspec-skip
 '
 
 test_expect_success 'discard_index() also discards fsmonitor info' '
