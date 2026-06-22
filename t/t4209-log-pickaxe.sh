@@ -4,6 +4,38 @@ test_description='log --grep/--author/--regexp-ignore-case/-S/-G'
 
 . ./test-lib.sh
 
+test_lazy_prereq ENHANCED_BRE '
+	test-tool regex --silent "a\|b" a
+'
+
+test_lazy_prereq EMPTY_ERE '
+	test-tool regex --silent "missing|" "" EXTENDED &&
+	test-tool regex --silent "missing||absent" "" EXTENDED
+'
+
+test_lazy_prereq EMPTY_ENHANCED_BRE '
+	test-tool regex --silent "missing\|" "" &&
+	test-tool regex --silent "missing\|\|absent" ""
+'
+
+test_lazy_prereq SJIS_REGEX_NOMATCH '
+	invalid=$(printf "\\202foo") &&
+	LC_ALL=C test-tool regex --silent \
+		"foo|absent" "$invalid" EXTENDED &&
+	sjis_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			"foo|absent" "$invalid" EXTENDED
+		echo $?
+	) &&
+	nomatch_status=$(
+		LC_ALL=ja_JP.SJIS test-tool regex --silent \
+			absent present EXTENDED
+		echo $?
+	) &&
+	test "$sjis_status" -ne 0 &&
+	test "$sjis_status" = "$nomatch_status"
+'
+
 test_log () {
 	expect=$1
 	kind=$2
@@ -53,7 +85,60 @@ test_expect_success setup '
 	git add file &&
 	test_tick &&
 	git commit --author="Another Person <another@example.com>" -m second &&
-	git rev-parse --verify HEAD >expect_second
+	git rev-parse --verify HEAD >expect_second &&
+
+	cat expect_second expect_initial >expect_both &&
+	printf "\\202foo\\n" >sjis-body &&
+	git -c i18n.commitEncoding=SJIS commit-tree \
+		HEAD^{tree} -p HEAD <sjis-body >log-grep-sjis &&
+	git cat-file commit "$(cat log-grep-sjis)" >log-grep-sjis.commit &&
+	test_grep "^encoding SJIS\$" log-grep-sjis.commit &&
+	sed '1,/^$/d' log-grep-sjis.commit >log-grep-sjis.body &&
+	test_cmp_bin sjis-body log-grep-sjis.body
+'
+
+test_expect_success ENHANCED_BRE 'log grep with enhanced BRE alternatives' '
+	git log --grep="initial\\|second" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success 'log grep with literal ERE alternatives' '
+	git log -E --grep="initial|second" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success 'log grep falls back for one-byte alternatives' '
+	git log -E --grep="missing|i" --format=%H >actual &&
+	test_cmp expect_initial actual
+'
+
+test_expect_success 'log grep prefilter requires complete pattern' '
+	git log -E --grep="missing|s.cond" --format=%H >actual &&
+	test_cmp expect_second actual
+'
+
+test_expect_success EMPTY_ERE 'log grep with trailing empty ERE branch' '
+	git log -E --grep="missing|" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success EMPTY_ERE 'log grep with adjacent empty ERE branches' '
+	git log -E --grep="missing||absent" --format=%H >actual &&
+	test_cmp expect_both actual
+'
+
+test_expect_success EMPTY_ENHANCED_BRE 'log grep with empty enhanced BREs' '
+	git log --grep="missing\\|" --format=%H >actual.trailing &&
+	test_cmp expect_both actual.trailing &&
+	git log --grep="missing\\|\\|absent" --format=%H >actual.adjacent &&
+	test_cmp expect_both actual.adjacent
+'
+
+test_expect_success SJIS_REGEX_NOMATCH 'SJIS keyword hits use POSIX' '
+	LC_ALL=ja_JP.SJIS git log --encoding=none -1 -E \
+		--grep="foo|absent" --format=%H \
+		$(cat log-grep-sjis) >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'usage' '

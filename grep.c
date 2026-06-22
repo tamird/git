@@ -5,6 +5,7 @@
 #include "gettext.h"
 #include "grep.h"
 #include "hex.h"
+#include "kwset.h"
 #include "object-file.h"
 #include "odb.h"
 #include "pretty.h"
@@ -571,6 +572,70 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		regerror(err, &p->regexp, errbuf, 1024);
 		compile_regexp_failed(p, errbuf);
 	}
+
+	if (!p->ignore_case &&
+	    p->token == GREP_PATTERN_BODY &&
+	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
+	     opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)) {
+		const char *kwserr;
+		size_t start = 0;
+		int alternatives = 0;
+		int complete = 0;
+
+		/*
+		 * Recognize a conservative allowlisted subset of patterns made
+		 * entirely of ASCII literal alternatives at least two bytes long.
+		 */
+		for (size_t i = 0; i <= p->patternlen; i++) {
+			int separator = 0;
+
+			if (i == p->patternlen)
+				separator = 1;
+			else if (opt->pattern_type_option ==
+				 GREP_PATTERN_TYPE_ERE)
+				separator = p->pattern[i] == '|';
+			else if (p->pattern[i] == '\\' &&
+				 i + 1 < p->patternlen &&
+				 p->pattern[i + 1] == '|')
+				separator = 1;
+
+			if (separator) {
+				if (i - start < 2)
+					break;
+				if (!p->kws)
+					p->kws = kwsalloc(NULL);
+				kwserr = kwsincr(p->kws, p->pattern + start,
+						 i - start);
+				if (kwserr)
+					die("failed to add keyword: %s", kwserr);
+				alternatives++;
+				if (i == p->patternlen) {
+					complete = 1;
+					break;
+				}
+				if (opt->pattern_type_option ==
+				    GREP_PATTERN_TYPE_BRE)
+					i++;
+				start = i + 1;
+				continue;
+			}
+
+			if ((unsigned char)p->pattern[i] >= 0x80 ||
+			    !(isalnum((unsigned char)p->pattern[i]) ||
+			      strchr("_ =-/", p->pattern[i])))
+				break;
+		}
+
+		if (complete && alternatives > 1) {
+			kwserr = kwsprep(p->kws);
+			if (kwserr)
+				die("failed to prepare keywords: %s", kwserr);
+		} else {
+			if (p->kws)
+				kwsfree(p->kws);
+			p->kws = NULL;
+		}
+	}
 }
 
 static struct grep_expr *grep_not_expr(struct grep_expr *expr)
@@ -843,6 +908,8 @@ static void free_grep_pat(struct grep_pat *pattern)
 		case GREP_PATTERN: /* atom */
 		case GREP_PATTERN_HEAD:
 		case GREP_PATTERN_BODY:
+			if (p->kws)
+				kwsfree(p->kws);
 			if (p->pcre2_pattern)
 				free_pcre2_pattern(p);
 			else
@@ -910,6 +977,12 @@ static int patmatch(struct grep_pat *p,
 		    const char *line, const char *eol,
 		    regmatch_t *match, int eflags)
 {
+	if (p->kws &&
+	    kwsexec(p->kws, line, eol - line, NULL) == (size_t)-1) {
+		match->rm_so = match->rm_eo = -1;
+		return 0;
+	}
+
 	if (p->pcre2_pattern)
 		return !pcre2match(p, line, eol, match, eflags);
 

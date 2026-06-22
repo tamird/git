@@ -20,7 +20,10 @@ for pattern in \
 	'how.to' \
 	'^how to' \
 	'[how] to' \
+	'a\|e\|i\|o\|u' \
+	'to\|of\|in\|it' \
 	'\(e.t[^ ]*\|v.ry\) rare' \
+	'generated venv sources\|generated virtualenv\|hidden virtualenv' \
 	'm\(ú\|u\)lt.b\(æ\|y\)te'
 do
 	for engine in basic extended perl
@@ -38,7 +41,9 @@ do
 		fi
 		test_perf "$engine log$GIT_PERF_4220_LOG_OPTS --grep='$pattern'" \
 			--prereq "$prereq" "
-			git -c grep.patternType=$engine log --pretty=format:%h$GIT_PERF_4220_LOG_OPTS --grep='$pattern' >'out.$engine' || :
+			git -c grep.patternType=$engine log \
+				--pretty=format:%h$GIT_PERF_4220_LOG_OPTS \
+				--grep='$pattern' >'out.$engine' || :
 		"
 	done
 
