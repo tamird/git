@@ -321,7 +321,9 @@ static int get_stat_data(const struct cache_entry *ce,
 	const struct object_id *oid = &ce->oid;
 	unsigned int mode = ce->ce_mode;
 
-	if (!cached && !ce_uptodate(ce)) {
+	/* FSMonitor itself does not mark gitlinks valid. */
+	if (!cached && !ce_uptodate(ce) &&
+	    !(ce->ce_flags & CE_FSMONITOR_VALID)) {
 		int changed;
 		struct stat st;
 		changed = check_removed(ce, &st);
