@@ -503,7 +503,10 @@ int cmd_add(int argc,
 
 		/* Set up the default git porcelain excludes */
 		if (!ignored_too) {
-			dir.flags |= DIR_COLLECT_IGNORED;
+			if (pathspec.nr)
+				dir.flags |= DIR_COLLECT_IGNORED;
+			else
+				dir.untracked = repo->index->untracked;
 			setup_standard_excludes(&dir);
 		}
 
