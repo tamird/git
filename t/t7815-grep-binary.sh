@@ -16,6 +16,12 @@ test_expect_success 'git grep ina a' '
 	test_cmp expect actual
 '
 
+test_expect_success 'git grep literal alternatives in binary file' '
+	echo Binary file a matches >expect &&
+	git grep -E "missing|file" a >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'git grep -ah ina a' '
 	git grep -ah ina a >actual &&
 	test_cmp a actual
