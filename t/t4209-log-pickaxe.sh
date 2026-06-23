@@ -177,6 +177,11 @@ test_expect_success SJIS_REGEX_NOMATCH 'SJIS keyword hits use POSIX' '
 	test_must_be_empty actual
 '
 
+test_expect_success 'log --author with literal ERE alternatives' '
+	git log -E --author="Another|Missing" --format=%H >actual &&
+	test_cmp expect_second actual
+'
+
 test_expect_success 'usage' '
 	test_expect_code 129 git log -S 2>err &&
 	test_grep "switch.*requires a value" err &&

@@ -495,6 +495,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 {
 	int err;
 	int regflags = REG_NEWLINE;
+	int literal_alternatives = 0;
 
 	if (opt->pattern_type_option == GREP_PATTERN_TYPE_UNSPECIFIED)
 		opt->pattern_type_option = (opt->extended_regexp_option
@@ -562,6 +563,83 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		return;
 	}
 
+	if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)
+		literal_alternatives = 1;
+#ifdef USE_ENHANCED_BASIC_REGULAR_EXPRESSIONS
+	else if (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE)
+		literal_alternatives = 1;
+#endif
+
+	if (!p->ignore_case && literal_alternatives &&
+	    (MB_CUR_MAX == 1 ||
+	     (!opt->ignore_locale && is_utf8_locale()))) {
+		const char *kwserr;
+		kwset_t kws = NULL;
+		size_t start = 0;
+		size_t alternatives = 0;
+		int complete = 0;
+
+		/*
+		 * kwset provides leftmost-longest matches, but compares bytes.
+		 * Use it only where an ASCII byte cannot be part of a multibyte
+		 * character. In UTF-8 locales, retain the POSIX regexp for line
+		 * matches. Keep other regexp syntax on the POSIX path.
+		 */
+		for (size_t i = 0; i <= p->patternlen; i++) {
+			int separator = 0;
+
+			if (i == p->patternlen)
+				separator = 1;
+			else if (opt->pattern_type_option ==
+				 GREP_PATTERN_TYPE_ERE)
+				separator = p->pattern[i] == '|';
+			else if (p->pattern[i] == '\\' &&
+				 i + 1 < p->patternlen &&
+				 p->pattern[i + 1] == '|')
+				separator = 1;
+
+			if (separator) {
+				if (i == start)
+					break;
+				if (!kws)
+					kws = kwsalloc(NULL);
+				kwserr = kwsincr(kws, p->pattern + start,
+						 i - start);
+				if (kwserr)
+					die("failed to add keyword: %s", kwserr);
+				alternatives++;
+				if (i == p->patternlen) {
+					complete = 1;
+					break;
+				}
+				if (opt->pattern_type_option ==
+				    GREP_PATTERN_TYPE_BRE)
+					i++;
+				start = i + 1;
+				continue;
+			}
+
+			if ((unsigned char)p->pattern[i] < 0x20 ||
+			    (unsigned char)p->pattern[i] >= 0x7f ||
+			    is_regex_special(p->pattern[i]))
+				break;
+		}
+
+		if (complete && alternatives > 1) {
+			kwserr = kwsprep(kws);
+			if (kwserr)
+				die("failed to prepare keywords: %s", kwserr);
+			p->kws = kws;
+			if (MB_CUR_MAX == 1) {
+				p->kws_final = 1;
+				return;
+			}
+			p->kws_utf8 = 1;
+		} else if (kws) {
+			kwsfree(kws);
+		}
+	}
+
 	if (p->ignore_case)
 		regflags |= REG_ICASE;
 	if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)
@@ -573,7 +651,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		compile_regexp_failed(p, errbuf);
 	}
 
-	if (p->token == GREP_PATTERN_BODY &&
+	if (!p->kws && p->token == GREP_PATTERN_BODY &&
 	    (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE ||
 	     opt->pattern_type_option == GREP_PATTERN_TYPE_ERE)) {
 		const char *kwserr;
@@ -913,7 +991,7 @@ static void free_grep_pat(struct grep_pat *pattern)
 				kwsfree(p->kws);
 			if (p->pcre2_pattern)
 				free_pcre2_pattern(p);
-			else
+			else if (!p->kws_final)
 				regfree(&p->regexp);
 			break;
 		default:
@@ -974,10 +1052,31 @@ static void show_name(struct grep_opt *opt, const char *name)
 	opt->output(opt, opt->null_following_name ? "\0" : "\n", 1);
 }
 
+static int kwset_match(struct grep_pat *p, const char *line, const char *eol,
+		       regmatch_t *match)
+{
+	struct kwsmatch kwsm;
+	size_t max_regoff = maximum_signed_value_of_type(match->rm_so);
+	size_t offset = kwsexec(p->kws, line, eol - line, &kwsm);
+
+	if (offset == (size_t)-1) {
+		match->rm_so = match->rm_eo = -1;
+		return 0;
+	}
+	if (offset > max_regoff || kwsm.size[0] > max_regoff - offset)
+		die(_("kwset match offset is too large"));
+	match->rm_so = offset;
+	match->rm_eo = offset + kwsm.size[0];
+	return 1;
+}
+
 static int patmatch(struct grep_pat *p,
 		    const char *line, const char *eol,
 		    regmatch_t *match, int eflags)
 {
+	if (p->kws_final)
+		return kwset_match(p, line, eol, match);
+
 	if (p->kws &&
 	    kwsexec(p->kws, line, eol - line, NULL) == (size_t)-1) {
 		const char *scan = line;
@@ -1554,7 +1653,10 @@ static int look_ahead(struct grep_opt *opt,
 		int hit;
 		regmatch_t m;
 
-		hit = patmatch(p, bol, bol + *left_p, &m, 0);
+		if (p->kws_utf8)
+			hit = kwset_match(p, bol, bol + *left_p, &m);
+		else
+			hit = patmatch(p, bol, bol + *left_p, &m, 0);
 		if (hit < 0)
 			return -1;
 		if (!hit || m.rm_so < 0 || m.rm_eo < 0)

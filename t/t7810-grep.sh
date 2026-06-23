@@ -22,6 +22,17 @@ test_lazy_prereq MB_REGEX '
 	LC_ALL=en_US.UTF-8 test-tool regex "^.$" "¿"
 '
 
+test_lazy_prereq ENHANCED_BRE '
+	test-tool regex --silent "a\|b" a
+'
+
+test_lazy_prereq SJIS_REGEX '
+	invalid=$(printf "\\201A") &&
+	LC_ALL=C test-tool regex --silent "A|B" "$invalid" EXTENDED &&
+	test_must_fail env LC_ALL=ja_JP.SJIS \
+		test-tool regex --silent "A|B" "$invalid" EXTENDED
+'
+
 cat >hello.c <<EOF
 #include <assert.h>
 #include <stdio.h>
@@ -105,6 +116,70 @@ test_expect_success setup '
 
 test_expect_success 'grep should not segfault with a bad input' '
 	test_must_fail git grep "("
+'
+
+test_expect_success 'ERE literal alternatives are leftmost-longest' '
+	test_when_finished "rm -f literal-alternatives" &&
+	printf "foobar foo\n" >literal-alternatives &&
+	cat >expect <<-\EOF &&
+	literal-alternatives:1:1:foobar
+	literal-alternatives:1:8:foo
+	EOF
+	git grep --no-index -n --column -o -E "foo|foobar" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual &&
+	git grep --no-index -n --column -o -E "foobar|foo" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual &&
+	printf "xfoo foobar foo\n" >literal-alternatives &&
+	cat >expect <<-\EOF &&
+	literal-alternatives:1:6:foobar
+	literal-alternatives:1:13:foo
+	EOF
+	git grep --no-index -n --column -o -w -E "foo|foobar" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success MB_REGEX \
+	'ERE literal alternatives search past invalid UTF-8 lines' '
+	test_when_finished "rm -f literal-alternatives" &&
+	printf "\\200foo\nASCII\n" >literal-alternatives &&
+	echo ASCII >expect &&
+	LC_ALL=en_US.UTF-8 git grep --no-index -h -E "foo|ASCII" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'mixed ERE alternatives use regexp matching' '
+	test_when_finished "rm -f literal-alternatives" &&
+	echo second >literal-alternatives &&
+	echo second >expect &&
+	git grep --no-index -h -E "missing|s.cond" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success SJIS_REGEX \
+	'ERE literal alternatives respect multibyte characters' '
+	test_when_finished "rm -f literal-alternatives" &&
+	printf "\\201A\n" >literal-alternatives &&
+	test_must_fail env LC_ALL=ja_JP.SJIS git grep --no-index -h -o -E \
+		"A|B" -- literal-alternatives >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success ENHANCED_BRE \
+	'BRE literal alternatives are leftmost-longest' '
+	test_when_finished "rm -f literal-alternatives" &&
+	printf "foobar foo\n" >literal-alternatives &&
+	cat >expect <<-\EOF &&
+	literal-alternatives:1:1:foobar
+	literal-alternatives:1:8:foo
+	EOF
+	git grep --no-index -n --column -o "foo\|foobar" \
+		-- literal-alternatives >actual &&
+	test_cmp expect actual
 '
 
 test_invalid_grep_expression --and -e A
@@ -1156,6 +1231,12 @@ test_expect_success PTHREADS 'threaded --quiet retires unclaimed work' '
 		printf "%s\n" count.* >counts &&
 		test_line_count -lt 300 counts
 	)
+'
+
+test_expect_success PTHREADS 'grep literal alternatives with threads' '
+	git grep --threads=1 -E "Hello|return" -- hello.c hello_world >expect &&
+	git grep --threads=8 -E "Hello|return" -- hello.c hello_world >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success !PTHREADS,!FAIL_PREREQS \

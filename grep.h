@@ -87,6 +87,8 @@ struct grep_pat {
 	unsigned fixed:1;
 	unsigned is_fixed:1;
 	unsigned ignore_case:1;
+	unsigned kws_utf8:1;
+	unsigned kws_final:1;
 	unsigned word_regexp:1;
 };
 
