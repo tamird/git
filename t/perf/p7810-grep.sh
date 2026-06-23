@@ -21,6 +21,39 @@ test_perf 'grep --cached, fixed string in one file' '
 grep_pattern="__git_perf_absent_$$"
 test_export grep_pattern
 
+test_lazy_prereq UTF8_LOCALE '
+	case "$(LC_ALL=en_US.UTF-8 locale charmap 2>/dev/null)" in
+	UTF-8|UTF8)
+		true
+		;;
+	*)
+		false
+		;;
+	esac
+'
+
+test_expect_success 'setup literal alternatives files' '
+	test-tool genrandom literal-alternatives 4m \
+		>literal-alternatives-binary &&
+	test_seq 1 262144 >literal-alternatives-numbers &&
+	sed "s/.*/static return/" <literal-alternatives-numbers \
+		>literal-alternatives-text
+'
+
+test_perf 'grep --no-index, literal alternatives, binary file' \
+	--prereq UTF8_LOCALE '
+	test_expect_code 1 env LC_ALL=en_US.UTF-8 \
+		git grep --threads=1 --no-index -E \
+		"definitely_missing_one|definitely_missing_two" \
+		-- literal-alternatives-binary >/dev/null
+'
+
+test_perf 'grep --no-index, literal alternatives, UTF-8 text' \
+	--prereq UTF8_LOCALE '
+	LC_ALL=en_US.UTF-8 git grep --threads=1 --no-index -E \
+		"return|static" -- literal-alternatives-text >/dev/null
+'
+
 test_perf 'grep worktree, cheap regex' '
 	test_expect_code 1 git -c grep.worktreeBlobCache=false \
 		grep "$grep_pattern"
