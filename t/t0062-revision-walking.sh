@@ -30,4 +30,16 @@ test_expect_success 'revision walking can be done twice' '
 	test_cmp run_twice_expected run_twice_actual
 '
 
+test_expect_success 'reverse output discards the streaming frontier' '
+	test-tool revision-walking check-frontier --all --max-count=1 --reverse
+'
+
+test_expect_success 'boundary output discards the streaming frontier' '
+	test-tool revision-walking check-frontier --all --max-count=1 --boundary
+'
+
+test_expect_success 'oldest output discards the streaming frontier' '
+	test-tool revision-walking check-frontier --all --max-count-oldest=1
+'
+
 test_done

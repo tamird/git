@@ -108,6 +108,24 @@ static int line_log_peek(const char **argv)
 	return 0;
 }
 
+static int check_frontier(int argc, const char **argv)
+{
+	struct rev_info rev;
+
+	repo_init_revisions(the_repository, &rev, NULL);
+	setup_revisions(argc, argv, &rev, NULL);
+	if (prepare_revision_walk(&rev))
+		die("revision walk setup failed");
+
+	while (get_revision(&rev))
+		;
+	if (rev.commit_queue.array)
+		return error("revision walk retained priority queue storage");
+
+	release_revisions(&rev);
+	return 0;
+}
+
 int cmd__revision_walking(int argc, const char **argv)
 {
 	if (argc < 2)
@@ -125,6 +143,8 @@ int cmd__revision_walking(int argc, const char **argv)
 
 		return 0;
 	}
+	if (!strcmp(argv[1], "check-frontier"))
+		return check_frontier(argc - 1, argv + 1);
 
 	if (!strcmp(argv[1], "line-log-peek")) {
 		if (argc != 5)
