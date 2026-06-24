@@ -4326,7 +4326,6 @@ void rev_info_commit_list_to_queue(struct rev_info *revs)
 		prio_queue_put(&revs->commit_queue, pop_commit(&revs->commits));
 }
 
-
 int prepare_revision_walk(struct rev_info *revs)
 {
 	int i;
@@ -4895,13 +4894,13 @@ static void create_boundary_commit_list(struct rev_info *revs)
 	struct object_array_entry *objects = array->objects;
 
 	/*
-	 * If revs->commits is non-NULL at this point, an error occurred in
-	 * get_revision_1().  Ignore the error and continue printing the
-	 * boundary commits anyway.  (This is what the code has always
-	 * done.)
+	 * Discard an unfinished walk before repurposing revs->commits for
+	 * boundary output.  A frontier can remain when max_count stops the
+	 * walk early.
 	 */
 	commit_list_free(revs->commits);
 	revs->commits = NULL;
+	clear_prio_queue(&revs->commit_queue);
 
 	/*
 	 * Put all of the actual boundary commits from revs->boundary_commits
@@ -5108,6 +5107,7 @@ struct commit *get_revision(struct rev_info *revs)
 	if (revs->max_count_type == 1 && !revs->max_count_stage) {
 		retrieve_oldest_commits(revs, &queue);
 		commit_list_free(revs->commits);
+		clear_prio_queue(&revs->commit_queue);
 		revs->commits = queue;
 		revs->max_count_stage = 1;
 	}
@@ -5121,6 +5121,7 @@ struct commit *get_revision(struct rev_info *revs)
 			while ((c = get_revision_internal(revs)))
 				commit_list_insert(c, &reversed);
 		commit_list_free(revs->commits);
+		clear_prio_queue(&revs->commit_queue);
 		revs->commits = reversed;
 		revs->reverse = 0;
 		revs->reverse_output_stage = 1;
