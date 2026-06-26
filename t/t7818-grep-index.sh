@@ -472,6 +472,43 @@ test_expect_success 'write shared content index' '
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
 '
 
+test_expect_success 'queries ignore legacy-only content indexes' '
+	short_oid=$(git rev-parse :short) &&
+	old_oid=$(git rev-parse HEAD^:pickaxe-history) &&
+	new_oid=$(git rev-parse HEAD:pickaxe-history) &&
+	short_object=.git/objects/$(test_oid_to_path "$short_oid") &&
+	old_object=.git/objects/$(test_oid_to_path "$old_oid") &&
+	new_object=.git/objects/$(test_oid_to_path "$new_oid") &&
+	mv "$short_object" "$short_object.save" &&
+	mv "$old_object" "$old_object.save" &&
+	mv "$new_object" "$new_object.save" &&
+	mv .git/objects/info/grep-index/chain-transposed \
+		.git/objects/info/grep-index/chain-transposed.save &&
+	test_when_finished "mv \"$short_object.save\" \"$short_object\" &&
+			    mv \"$old_object.save\" \"$old_object\" &&
+			    mv \"$new_object.save\" \"$new_object\" &&
+			    mv .git/objects/info/grep-index/chain-transposed.save \
+				.git/objects/info/grep-index/chain-transposed" &&
+
+	test_must_fail git grep --cached -F "absent pattern" \
+		-- short 2>err-grep &&
+	test_grep "unable to read" err-grep &&
+	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history 2>err-pickaxe &&
+	test_grep "unable to read" err-pickaxe &&
+
+	git grep-index --transpose-existing &&
+	test_must_fail git grep --cached -F "absent pattern" \
+		-- short 2>err-grep-transposed &&
+	test_must_be_empty err-grep-transposed &&
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+		git log --format=%s -Sabsent HEAD^..HEAD \
+		-- pickaxe-history >actual 2>err-pickaxe-transposed &&
+	test_must_be_empty actual &&
+	test_must_be_empty err-pickaxe-transposed
+'
+
 test_expect_success 'write commit edge and endpoint content indexes' '
 	cp .git/objects/info/grep-index/chain commit-chain.before &&
 	cp .git/objects/info/grep-index/chain-transposed \
@@ -820,30 +857,6 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 		git log --format=%s -G"a.*b" HEAD^..HEAD \
 		-- pickaxe-history 2>err-unsupported &&
 	test_grep "unable to read" err-unsupported &&
-	mv .git/objects/info/grep-index/chain-transposed \
-		.git/objects/info/grep-index/chain-transposed.save &&
-	test_when_finished "test ! -e \
-		.git/objects/info/grep-index/chain-transposed.save ||
-		mv .git/objects/info/grep-index/chain-transposed.save \
-			.git/objects/info/grep-index/chain-transposed" &&
-	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
-		git log --format=%s -Sabsent HEAD^..HEAD \
-		-- pickaxe-history >actual-legacy 2>err-legacy &&
-	test_must_be_empty actual-legacy &&
-	test_must_be_empty err-legacy &&
-	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
-		git log --format=%s -G"abs.nt" HEAD^..HEAD \
-		-- pickaxe-history >actual-legacy-g 2>err-legacy-g &&
-	test_must_be_empty actual-legacy-g &&
-	test_must_be_empty err-legacy-g &&
-	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
-		git log --format=%s --pickaxe-regex -S"abs.nt" \
-		HEAD^..HEAD -- pickaxe-history >actual-legacy-regex \
-		2>err-legacy-regex &&
-	test_must_be_empty actual-legacy-regex &&
-	test_must_be_empty err-legacy-regex &&
-	mv .git/objects/info/grep-index/chain-transposed.save \
-		.git/objects/info/grep-index/chain-transposed &&
 	if test_have_prereq LIBPCRE2
 	then
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
@@ -1109,31 +1122,6 @@ test_expect_success FSMONITOR_DAEMON \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-missing.trace &&
 
-	mv .git/objects/info/grep-index/chain-transposed \
-		.git/objects/info/grep-index/chain-transposed.save &&
-	test_when_finished "test ! -e \
-		.git/objects/info/grep-index/chain-transposed.save ||
-		mv .git/objects/info/grep-index/chain-transposed.save \
-			.git/objects/info/grep-index/chain-transposed" &&
-	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
-		GIT_TRACE2_EVENT="$PWD/pickaxe-fallback.trace" \
-		git log --format=%s -Sabsent HEAD^..HEAD \
-		-- pickaxe-history >actual-fallback 2>err-fallback &&
-	test_must_be_empty actual-fallback &&
-	test_must_be_empty err-fallback &&
-	test_grep "\"key\":\"content_index/prepared\",\"value\":\"0\"" \
-		pickaxe-fallback.trace &&
-	test_grep "\"key\":\"content_index/ipc\",\"value\":\"1\"" \
-		pickaxe-fallback.trace &&
-	test_grep "\"key\":\"content_index/direct_batches\",\"value\":\"0\"" \
-		pickaxe-fallback.trace &&
-	test_grep "\"key\":\"content_index/ipc_batches\",\"value\":\"1\"" \
-		pickaxe-fallback.trace &&
-	test_grep \
-		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
-		pickaxe-fallback.trace &&
-	mv .git/objects/info/grep-index/chain-transposed.save \
-		.git/objects/info/grep-index/chain-transposed
 '
 
 test_expect_success FSMONITOR_DAEMON \
@@ -1945,20 +1933,6 @@ test_expect_success 'content index prunes impossible blobs' '
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -F "absent pattern" 2>err &&
 	test_must_be_empty err &&
-	if test_have_prereq LIBPCRE2
-	then
-		mv .git/objects/info/grep-index/chain-transposed \
-			.git/objects/info/grep-index/chain-transposed.save &&
-		test_when_finished "test ! -e \
-			.git/objects/info/grep-index/chain-transposed.save ||
-			mv .git/objects/info/grep-index/chain-transposed.save \
-				.git/objects/info/grep-index/chain-transposed" &&
-		test_must_fail git grep --cached -i "ABSENT PATTERN" \
-			-- short 2>err &&
-		test_must_be_empty err &&
-		mv .git/objects/info/grep-index/chain-transposed.save \
-			.git/objects/info/grep-index/chain-transposed
-	fi &&
 	test_must_fail git grep --cached --no-content-index \
 		"absent pattern" 2>err &&
 	test_grep "unable to read" err &&

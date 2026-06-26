@@ -647,16 +647,18 @@ cleanup:
 
 struct grep_index *grep_index_load(struct repository *repo)
 {
-	struct grep_index *index;
-
 	if (replace_refs_enabled(repo)) {
 		prepare_replace_object(repo);
 		if (oidmap_get_size(&repo->objects->replace_map))
 			return NULL;
 	}
-	index = grep_index_load_transposed(repo);
 
-	return index ? index : grep_index_load_legacy(repo);
+	/*
+	 * Querying a legacy segment verifies its checksum by reading the whole
+	 * file. Keep that cost on the explicit transposition path; callers can
+	 * fall back to ordinary object reads when the transposed index is absent.
+	 */
+	return grep_index_load_transposed(repo);
 }
 
 void grep_index_free(struct grep_index *index)
@@ -3915,7 +3917,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 			  struct oid_array *oids, int transpose_existing)
 {
 	struct grep_index *existing = transpose_existing ?
-					      grep_index_load(repo) :
+					      grep_index_load_legacy(repo) :
 					      grep_index_load_transposed(repo);
 	struct progress *progress = NULL;
 	struct tempfile *temp = NULL;
