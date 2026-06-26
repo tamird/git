@@ -28,7 +28,7 @@
 #include "submodule.h"
 #include "odb.h"
 #include "hex.h"
-
+#include "lockfile.h"
 
 static int abbrev;
 static int show_deleted;
@@ -596,6 +596,7 @@ int cmd_ls_files(int argc,
 	int require_work_tree = 0, show_tag = 0, i;
 	char *max_prefix;
 	struct dir_struct dir = DIR_INIT;
+	struct lock_file index_lock = LOCK_INIT;
 	struct pattern_list *pl;
 	struct string_list exclude_list = STRING_LIST_INIT_NODUP;
 	struct option builtin_ls_files_options[] = {
@@ -683,8 +684,24 @@ int cmd_ls_files(int argc,
 	if (repo_read_index(repo) < 0)
 		die("index file corrupt");
 
+	/*
+	 * Attach before parsing so --exclude-standard records the ignore
+	 * identities needed to validate the cache.
+	 */
+	dir.untracked = repo->index->untracked;
+
 	argc = parse_options(argc, argv, prefix, builtin_ls_files_options,
 			ls_files_usage, 0);
+	if (!show_others || !dir.exclude_per_dir)
+		dir.untracked = NULL;
+	else if (dir.flags == (DIR_SHOW_OTHER_DIRECTORIES |
+			       DIR_HIDE_EMPTY_DIRECTORIES)) {
+		/*
+		 * Normal-mode status cache entries may rely on status output
+		 * deduplication, which ls-files does not perform.
+		 */
+		dir.untracked_cache_negative_only = 1;
+	}
 	pl = add_pattern_list(&dir, EXC_CMDL, "--exclude option");
 	for (i = 0; i < exclude_list.nr; i++) {
 		add_pattern(exclude_list.items[i].string, "", 0, pl, --exclude_args);
@@ -777,6 +794,9 @@ int cmd_ls_files(int argc,
 	}
 
 	show_files(repo, &dir);
+	if (dir.internal.repaired_subtrees && use_optional_locks() &&
+	    repo_hold_locked_index(repo, &index_lock, 0) >= 0)
+		repo_update_index_if_able(repo, &index_lock);
 
 	if (show_resolve_undo)
 		show_ru_info(repo, repo->index);
