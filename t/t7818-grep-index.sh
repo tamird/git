@@ -350,7 +350,6 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 			"ABSENT DAEMON PATTERN" -- short 2>err-memory &&
 		test_must_be_empty err-memory &&
 		mv "$object.memory-save" "$object" &&
-
 		non_ascii_oid=$(git rev-parse :non-ascii) &&
 		non_ascii_object=.git/objects/$(test_oid_to_path \
 			"$non_ascii_oid") &&
@@ -365,20 +364,17 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 		test_must_be_empty err-memory-non-ascii &&
 		mv "$non_ascii_object.memory-save" "$non_ascii_object"
 	fi &&
-
 	replacement=$(echo "absent daemon pattern" | git hash-object -w --stdin) &&
 	git replace "$oid" "$replacement" &&
 	echo "short:absent daemon pattern" >expect &&
 	git grep --cached "absent daemon pattern" -- short >actual &&
 	test_cmp expect actual &&
 	git replace -d "$oid" &&
-
 	git worktree add --detach daemon-wt &&
 	test_when_finished "test_might_fail git -C daemon-wt \
 				fsmonitor--daemon stop &&
 			    git worktree remove --force daemon-wt" &&
 	git -C daemon-wt fsmonitor--daemon status &&
-
 	echo "daemon unknown contents" >daemon-unknown &&
 	git add daemon-unknown &&
 	test_when_finished "git reset --hard HEAD" &&
@@ -391,17 +387,14 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_must_fail git grep --cached "absent daemon pattern" \
 		-- daemon-unknown 2>err-unknown &&
 	test_must_be_empty err-unknown &&
-
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent daemon pattern" 2>err &&
 	test_must_fail git -C daemon-wt grep --cached \
 		"absent daemon pattern" 2>err-wt &&
 	test_must_be_empty err &&
 	test_must_be_empty err-wt &&
-
 	git fsmonitor--daemon stop &&
 	test_must_fail git -C daemon-wt grep --cached \
 		"absent daemon pattern" 2>err-takeover &&
@@ -489,7 +482,6 @@ test_expect_success 'queries ignore legacy-only content indexes' '
 			    mv \"$new_object.save\" \"$new_object\" &&
 			    mv .git/objects/info/grep-index/chain-transposed.save \
 				.git/objects/info/grep-index/chain-transposed" &&
-
 	test_must_fail git grep --cached -F "absent pattern" \
 		-- short 2>err-grep &&
 	test_grep "unable to read" err-grep &&
@@ -497,7 +489,6 @@ test_expect_success 'queries ignore legacy-only content indexes' '
 		git log --format=%s -Sabsent HEAD^..HEAD \
 		-- pickaxe-history 2>err-pickaxe &&
 	test_grep "unable to read" err-pickaxe &&
-
 	git grep-index --transpose-existing &&
 	test_must_fail git grep --cached -F "absent pattern" \
 		-- short 2>err-grep-transposed &&
@@ -518,7 +509,6 @@ test_expect_success 'write commit edge and endpoint content indexes' '
 		mv commit-chain-transposed.before \
 		.git/objects/info/grep-index/chain-transposed" &&
 	rm .git/objects/info/grep-index/chain-transposed &&
-
 	old_oid=$(git rev-parse :pickaxe-old) &&
 	new_oid=$(git rev-parse :pickaxe-new) &&
 	other_oid=$(echo "pickaxe sidecar endpoint" |
@@ -551,7 +541,6 @@ test_expect_success 'write commit edge and endpoint content indexes' '
 		.git/objects/info/grep-index/commit-edges-$segment.idx &&
 	test_line_count = 2 .git/objects/info/grep-index/chain &&
 	test_line_count = 1 .git/objects/info/grep-index/chain-transposed &&
-
 	other_object=.git/objects/$(test_oid_to_path "$other_oid") &&
 	mv "$other_object" "$other_object.save" &&
 	test_when_finished "mv \"$other_object.save\" \"$other_object\"" &&
@@ -571,7 +560,6 @@ test_expect_success 'commit index prunes pickaxe tree diff' '
 		git log --format=%s -Sneedle \
 		refs/grep-index-test/new >expect-fixed &&
 	test_cmp expect-fixed actual-fixed &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-commit-index.trace" \
 		git log --format=%s -Sabsent \
@@ -592,7 +580,6 @@ test_expect_success 'commit index reads legacy sidecar' '
 	test_when_finished "mv \"$legacy\" \"$index\" &&
 		mv \"$chain.save\" \"$chain\" &&
 		rm -f pickaxe-legacy.trace" &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-legacy.trace" \
 		git log --format=%s -Sabsent \
@@ -651,7 +638,6 @@ test_expect_success 'commit index binds records to commits' '
 		count="$record_size" >>"$index" 2>/dev/null &&
 	dd if="$index.save" bs=1 skip=$((metadata_size + data_size)) \
 		>>"$index" 2>/dev/null &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-corrupt.trace" \
 		git log --format=%s -Sneedle \
@@ -698,7 +684,6 @@ test_expect_success 'commit index falls back from a corrupt record' '
 		count="$record_size" >>"$index" 2>/dev/null &&
 	dd if="$index.save" bs=1 skip=$((metadata_size + data_size)) \
 		>>"$index" 2>/dev/null &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-fallback.trace" \
 		git log --format=%s -Sabsent \
@@ -780,7 +765,6 @@ test_expect_success 'concurrent commit index writers preserve both segments' '
 		mkdir -p .git/objects/info/grep-index &&
 		lock=.git/objects/info/grep-index/commit-edges-chain.lock &&
 		>"$lock" &&
-
 		{
 			env GIT_TEST_GREP_INDEX_CHAIN_LOCK_READY="$PWD/ready.one" \
 				git grep-index --no-progress --commit-edges refs/heads/one \
@@ -829,7 +813,6 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 	mv "$new_object" "$new_object.save" &&
 	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
 			    mv \"$new_object.save\" \"$new_object\"" &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sabsent HEAD^..HEAD \
 		-- pickaxe-history >actual 2>err &&
@@ -865,7 +848,6 @@ test_expect_success 'content index prunes pickaxe blob reads' '
 		test_must_be_empty actual-icase &&
 		test_must_be_empty err-icase
 	fi &&
-
 	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX=0 \
 		git log --format=%s -Sabsent HEAD^..HEAD \
 		-- pickaxe-history 2>err-no-index &&
@@ -880,7 +862,6 @@ test_expect_success 'content index preserves regex pickaxe results' '
 		git log --format=%s -G"needle|replacement" \
 		HEAD^..HEAD -- pickaxe-history >expect-g &&
 	test_cmp expect-g actual-g &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s --pickaxe-regex \
 		-S"pickaxe|replacement" HEAD^..HEAD \
@@ -890,7 +871,6 @@ test_expect_success 'content index preserves regex pickaxe results' '
 		-S"pickaxe|replacement" HEAD^..HEAD \
 		-- pickaxe-history >expect-regex &&
 	test_cmp expect-regex actual-regex &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s --name-only --pickaxe-all \
 		-G"needle" HEAD^..HEAD >actual-all &&
@@ -908,7 +888,6 @@ test_expect_success 'content index preserves add and delete results' '
 		git log --format=%s -G"needle" HEAD~2..HEAD \
 		-- pickaxe-old pickaxe-deleted >expect-g &&
 	test_cmp expect-g actual-g &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s --pickaxe-regex -S"needle" \
 		HEAD~2..HEAD -- pickaxe-old pickaxe-deleted >actual-regex &&
@@ -927,7 +906,6 @@ test_expect_success 'content index prunes pickaxe binary reads' '
 	mv "$new_object" "$new_object.save" &&
 	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
 			    mv \"$new_object.save\" \"$new_object\"" &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s \
 		-G"__git_absent_binary_[p]attern__" HEAD^..HEAD \
@@ -941,13 +919,11 @@ test_expect_success 'content index preserves pickaxe binary behavior' '
 		git log --format=%s -G"binary" HEAD^..HEAD \
 		-- pickaxe-binary >actual &&
 	test_must_be_empty actual &&
-
 	echo "pickaxe new" >expect &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --text --format=%s -G"binary" HEAD^..HEAD \
 		-- pickaxe-binary >actual-text &&
 	test_cmp expect actual-text &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s --pickaxe-regex -S"old" \
 		HEAD^..HEAD -- pickaxe-binary >actual-regex &&
@@ -1000,7 +976,6 @@ test_expect_success FSMONITOR_DAEMON \
 	mv "$new_object" "$new_object.save" &&
 	test_when_finished "mv \"$old_object.save\" \"$old_object\" &&
 			    mv \"$new_object.save\" \"$new_object\"" &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-g-direct.trace" \
 		git log --format=%s -G"abs.nt" HEAD^..HEAD \
@@ -1021,7 +996,6 @@ test_expect_success FSMONITOR_DAEMON \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-g-direct.trace &&
 	! test_grep "\"key\":\"ipc_query/" daemon-prepared.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-direct.trace" \
 		git log --format=%s -Sabsent HEAD^..HEAD \
@@ -1043,7 +1017,6 @@ test_expect_success FSMONITOR_DAEMON \
 		git log --format=%s -Sneedle HEAD^..HEAD \
 		-- pickaxe-history 2>err-direct-positive &&
 	test_grep "unable to read" err-direct-positive &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-ipc.trace" \
@@ -1062,7 +1035,6 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-ipc.trace &&
 	test_grep "\"key\":\"ipc_query/prepared\",\"value\":\"1\"" \
 		daemon-prepared.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_ENTRIES=1 \
@@ -1077,7 +1049,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-saturated.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_DIRECT_MAX_OIDS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-g-ipc.trace" \
@@ -1096,7 +1067,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
 		pickaxe-g-ipc.trace &&
-
 	daemon_old_oid=$(git rev-parse HEAD^:pickaxe-daemon-history) &&
 	daemon_old_object=.git/objects/$(test_oid_to_path \
 		"$daemon_old_oid") &&
@@ -1120,8 +1090,7 @@ test_expect_success FSMONITOR_DAEMON \
 		pickaxe-missing.trace &&
 	test_grep \
 		"\"key\":\"content_index/impossible_pairs\",\"value\":\"1\"" \
-		pickaxe-missing.trace &&
-
+		pickaxe-missing.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \
@@ -1137,7 +1106,6 @@ test_expect_success FSMONITOR_DAEMON \
 		--notick 8 &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-absent.trace" \
 		git log --no-renames --format=%s -Sabsent \
@@ -1152,7 +1120,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/count_cache_updates\",\"value\":\"0\"" \
 		pickaxe-uncovered-absent.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=2 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-deferred.trace" \
@@ -1166,7 +1133,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/deferred_singletons\",\"value\":\"4\"" \
 		pickaxe-uncovered-deferred.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-positive.trace" \
 		git log --no-renames --format=%s -Sneedle \
@@ -1178,7 +1144,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/count_cache_hits\",\"value\":\"6\"" \
 		pickaxe-uncovered-positive.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-positive-deferred.trace" \
@@ -1189,7 +1154,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/deferred_singletons\",\"value\":\"6\"" \
 		pickaxe-uncovered-positive-deferred.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-regex.trace" \
@@ -1202,7 +1166,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/count_cache_hits\",\"value\":\"6\"" \
 		pickaxe-uncovered-regex.trace &&
-
 	test_commit_bulk --ref=refs/heads/pickaxe-uncovered --start=9 \
 		--filename=pickaxe-uncovered --contents="needle needle %s" \
 		--notick 1 &&
@@ -1218,7 +1181,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/count_cache_hits\",\"value\":\"7\"" \
 		pickaxe-uncovered-change.trace &&
-
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_SINGLETON_IPC_QUERIES=0 \
 		GIT_TRACE2_EVENT="$PWD/pickaxe-uncovered-change-deferred.trace" \
@@ -1229,7 +1191,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep \
 		"\"key\":\"content_index/deferred_singletons\",\"value\":\"7\"" \
 		pickaxe-uncovered-change-deferred.trace &&
-
 	missing_oid=$(printf "old deferred blob\n" |
 		git hash-object -w --stdin) &&
 	next_oid=$(printf "next deferred blob\n" |
@@ -1286,7 +1247,6 @@ test_expect_success 'possible pickaxe blobs use normal reads' '
 	mv "$new_object" "$new_object.save" &&
 	test_when_finished "test ! -e \"$new_object.save\" ||
 			    mv \"$new_object.save\" \"$new_object\"" &&
-
 	test_must_fail env GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sneedle HEAD^..HEAD \
 		-- pickaxe-history 2>err &&
@@ -1299,7 +1259,6 @@ test_expect_success 'possible pickaxe blobs use normal reads' '
 		git log --format=%s --pickaxe-regex -S"replac.ment" \
 		HEAD^..HEAD -- pickaxe-history 2>err-regex &&
 	test_grep "unable to read" err-regex &&
-
 	mv "$new_object.save" "$new_object" &&
 	mv "$old_object" "$old_object.save" &&
 	test_when_finished "mv \"$old_object.save\" \"$old_object\"" &&
@@ -1321,7 +1280,6 @@ test_expect_success 'pickaxe content index preserves textconv' '
 	test_when_finished "git reset -- .gitattributes &&
 			    rm -f .gitattributes pickaxe-textconv" &&
 	test_config diff.pickaxe.textconv ./pickaxe-textconv &&
-
 	echo "pickaxe new" >expect &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --textconv --format=%s \
@@ -1346,7 +1304,6 @@ test_expect_success 'pickaxe content index honors replacements' '
 		git hash-object -w --stdin) &&
 	git replace "$old_oid" "$replacement" &&
 	test_when_finished "git replace -d \"$old_oid\"" &&
-
 	echo "pickaxe new" >expect &&
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 		git log --format=%s -Sreplacement-only-marker \
@@ -1376,7 +1333,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 				  tree-corrupt-trailing.trace" &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
-
 	mv .git/objects/info/grep-index/chain \
 		.git/objects/info/grep-index/chain.save &&
 	test_when_finished "mv .git/objects/info/grep-index/chain.save \
@@ -1385,10 +1341,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_must_be_empty err &&
-
 	test_must_fail env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
 		GIT_TRACE2_EVENT="$PWD/tree.trace" \
 		git grep "absent pattern" HEAD HEAD^ -- \
@@ -1398,7 +1352,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_queried 3 <tree.trace &&
 	test_trace2_data grep content_index_tree_rejected 6 <tree.trace &&
 	test_trace2_data grep content_index_tree_batches 2 <tree.trace &&
-
 	git grep --no-content-index "present needle" HEAD HEAD^ -- present \
 		>expect-tree-positive &&
 	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
@@ -1414,7 +1367,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_batches 1 \
 		<tree-positive.trace &&
-
 	git grep --no-content-index -F -e "import sample_ext.__private" \
 		-e "ordinary contents" -e "present needle" HEAD HEAD^ -- \
 		escaped-dot ordinary present \
@@ -1436,7 +1388,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-bypass.trace &&
 	test_trace2_data grep content_index_tree_bypassed 1 \
 		<tree-bypass.trace &&
-
 	replaced_oid=$(git rev-parse :ordinary) &&
 	replacement_oid=$(git rev-parse :present) &&
 	git replace "$replaced_oid" "$replacement_oid" &&
@@ -1472,7 +1423,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_batches 0 \
 		<tree-fallback.trace &&
 	git replace -d "$replaced_oid" &&
-
 	printf "nested/binary -diff\nnested/text diff\n" >.gitattributes &&
 	test_when_finished "rm -f .gitattributes" &&
 	nested_tree=$({
@@ -1498,7 +1448,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-attributes.trace &&
 	test_trace2_data grep content_index_tree_rejected 0 \
 		<tree-attributes.trace &&
-
 	positive_oid=$(git rev-parse :present) &&
 	positive_object=.git/objects/$(test_oid_to_path "$positive_oid") &&
 	mv "$positive_object" "$positive_object.save" &&
@@ -1517,7 +1466,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-missing.trace &&
 	test_trace2_data grep content_index_tree_batches 1 \
 		<tree-missing.trace &&
-
 	corrupt_blob=$(echo "corrupt tree marker" | \
 		git hash-object -w --stdin) &&
 	corrupt_tree=$(echo broken | \
@@ -1538,7 +1486,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_grep "too-short tree object" err-corrupt \
 		>err-corrupt-match &&
 	test_line_count = 1 err-corrupt-match &&
-
 	valid_corrupt_tree=$({
 		printf "100644 blob %s\ta\n" "$corrupt_blob" &&
 		printf "100644 blob %s\tb\n" "$corrupt_blob"
@@ -1580,7 +1527,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	test_must_fail git grep --cached foo -- ordinary 2>err-before &&
 	test_grep "unable to read" err-before &&
 	mv "$object.save" "$object" &&
-
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/negative-learn.trace" \
 		git grep --cached foo -- ordinary &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
@@ -1612,7 +1558,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 		git grep --cached -F "conts|needle" -- ordinary &&
 	test_trace2_data grep content_index_negative_cache_hits 0 \
 		<negative-alt-fixed.trace &&
-
 	printf "foo\0" >negative-binary &&
 	git add negative-binary &&
 	binary_oid=$(git rev-parse :negative-binary) &&
@@ -1625,7 +1570,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 		2>err-binary &&
 	test_grep "unable to read" err-binary &&
 	mv "$binary_object.save" "$binary_object" &&
-
 	echo "foo contents" >ordinary &&
 	git add ordinary &&
 	echo "ordinary:foo contents" >expect &&
@@ -1646,7 +1590,6 @@ test_expect_success FSMONITOR_DAEMON \
 		-- ordinary &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
 		<negative-fixed-list-learn.trace &&
-
 	oid=$(git rev-parse :ordinary) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -1677,7 +1620,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expect actual &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
 		<negative-required-ere-learn.trace &&
-
 	oid=$(git rev-parse :negative-required-ere) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -1691,7 +1633,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_trace2_data grep content_index_negative_cache_hits 1 \
 		<negative-required-ere-hit.trace &&
 	mv "$object.save" "$object" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- \
 		negative-context-ere &&
 	oid=$(git rev-parse :negative-context-ere) &&
@@ -1804,7 +1745,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
 	git status --porcelain >/dev/null &&
-
 	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/overlay-absent.trace" \
 		git grep --cached "overlay absent needle 7818" \
 		-- overlay-absent &&
@@ -1827,7 +1767,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-hit.trace &&
 	! test_grep content_index_overlay_objects overlay-hit.trace &&
 	mv "$absent_object.save" "$absent_object" &&
-
 	echo "overlay-present:overlay present needle 7818" >expect &&
 	GIT_TRACE2_EVENT="$PWD/overlay-present.trace" \
 		git grep --cached "overlay present needle 7818" \
@@ -1837,7 +1776,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-present.trace &&
 	test_trace2_data grep content_index_overlay_rejected 0 \
 		<overlay-present.trace &&
-
 	missing_oid=$(git rev-parse :overlay-missing) &&
 	missing_object=.git/objects/$(test_oid_to_path "$missing_oid") &&
 	mv "$missing_object" "$missing_object.save" &&
@@ -1848,7 +1786,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		-- overlay-missing 2>err-missing &&
 	test_grep "unable to read" err-missing &&
 	mv "$missing_object.save" "$missing_object" &&
-
 	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
 		git grep --no-content-index \
 		"overlay worktree warmup needle 7818" -- overlay-worktree &&
@@ -1862,7 +1799,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-worktree.trace &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
 		<overlay-worktree.trace &&
-
 	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
 		git grep --no-content-index \
 		"overlay present warmup absent 7818" -- overlay-present &&
@@ -1882,7 +1818,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-literal.trace &&
 	test_trace2_data grep content_index_literal_path_rejected 1 \
 		<overlay-literal.trace &&
-
 	echo "overlay absent worktree needle 7818" >overlay-worktree &&
 	git status --porcelain >/dev/null &&
 	echo "overlay-worktree:overlay absent worktree needle 7818" >expect &&
@@ -1895,7 +1830,6 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-worktree-changed.trace &&
 	git checkout -- overlay-worktree &&
 	git status --porcelain >/dev/null &&
-
 	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
 		git grep --no-content-index \
 		"overlay worktree missing warmup 7818" \
@@ -1926,7 +1860,6 @@ test_expect_success 'content index prunes impossible blobs' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_must_be_empty err &&
 	test_must_fail git grep --cached "absent(pattern)" 2>err &&
@@ -1946,12 +1879,10 @@ test_expect_success LIBPCRE2 \
 	echo "present:present needle" >expect &&
 	git grep --cached -i "PRESENT NEEDLE" -- present >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i "ABSENT PATTERN" -- short 2>err &&
 	test_must_fail git grep --cached -i -E \
 		"ABSENT PATTERN" -- short 2>err-ere &&
@@ -1965,7 +1896,6 @@ test_expect_success LIBPCRE2 \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "PRESENT NEEDLE" \
 		-- present 2>err-exact &&
 	test_must_be_empty err-exact &&
@@ -1980,7 +1910,6 @@ test_expect_success PCRE2_UTF8_LOCALE \
 		"non-ascii k contents" -- non-ascii &&
 	LC_ALL=en_US.UTF-8 git grep --cached --quiet -i \
 		"long s value" -- long-s &&
-
 	oid=$(git rev-parse :non-ascii) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -1996,7 +1925,6 @@ test_expect_success LIBPCRE2 \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i -P \
 		"ABSENT PATTERN" -- short 2>err &&
 	test_must_be_empty err
@@ -2008,7 +1936,6 @@ test_expect_success LIBPCRE2 \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i "absent pattern" \
 		-- non-ascii 2>err &&
 	test_must_be_empty err
@@ -2020,7 +1947,6 @@ test_expect_success 'case-insensitive index rejects non-ASCII patterns' '
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 	pattern=$(printf "\342\204\252") &&
-
 	test_must_fail git grep --cached -i "$pattern" -- short 2>err &&
 	test_grep "unable to read" err
 '
@@ -2076,7 +2002,6 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	mv "$object" "$object.save" &&
 	test_when_finished "test ! -e \"$object.save\" ||
 			    mv \"$object.save\" \"$object\"" &&
-
 	echo "ordinary:worktree-only-needle" >expected &&
 	git grep "worktree-only-needle" -- ordinary >actual 2>err &&
 	test_cmp expected actual &&
@@ -2101,7 +2026,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
 	git status --porcelain >/dev/null &&
-
 	echo "uncached worktree candidate needle" >ordinary &&
 	git status --porcelain >/dev/null &&
 	echo "ordinary:uncached worktree candidate needle" >expected &&
@@ -2113,21 +2037,18 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-unknown.trace &&
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
-
 	echo "ordinary:ordinary contents" >expected &&
 	GIT_TRACE2_EVENT="$PWD/candidate-clean.trace" \
 		git grep "ordinary contents" -- "ord*" >actual &&
 	test_cmp expected actual &&
 	test_trace2_data grep content_index_worktree_candidates 1 \
 		<candidate-clean.trace &&
-
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-negative.trace" git grep \
 		"absent candidate-only needle" -- "ord*" 2>err &&
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 0 \
 		<candidate-negative.trace &&
-
 	git update-index --no-fsmonitor-valid ordinary &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-unrefreshed.trace" git grep \
@@ -2137,7 +2058,6 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-unrefreshed.trace &&
 	test_grep ! '"category":"index","label":"refresh"' \
 		candidate-unrefreshed.trace &&
-
 	test_expect_code 1 env \
 		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
 		GIT_TRACE2_EVENT="$PWD/candidate-refreshed.trace" git grep \
@@ -2154,7 +2074,6 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-reused-refresh.trace &&
 	test_grep ! '"category":"index","label":"refresh"' \
 		candidate-reused-refresh.trace &&
-
 	echo "unrefreshed worktree candidate needle" >ordinary &&
 	echo "ordinary:unrefreshed worktree candidate needle" >expected &&
 	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
@@ -2166,7 +2085,6 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-unrefreshed-dirty.trace &&
 	test_trace2_data grep worktree_blob/hits 0 \
 		<candidate-unrefreshed-dirty.trace &&
-
 	test_expect_code 1 env \
 		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
 		GIT_TRACE2_EVENT="$PWD/candidate-literal.trace" git grep \
@@ -2174,7 +2092,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_must_be_empty err &&
 	test_grep ! '"category":"index","label":"refresh"' \
 		candidate-literal.trace &&
-
 	echo "worktree candidate-only needle" >ordinary &&
 	git status --porcelain >/dev/null &&
 	echo "ordinary:worktree candidate-only needle" >expected &&
@@ -2183,7 +2100,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expected actual &&
 	test_trace2_data grep content_index_worktree_candidates 1 \
 		<candidate-dirty.trace &&
-
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-excluded.trace" git grep \
 		"worktree candidate-only needle" \
@@ -2191,7 +2107,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 0 \
 		<candidate-excluded.trace &&
-
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
 	echo "untracked acceleration needle" >candidate-clean &&
@@ -2368,7 +2283,6 @@ test_expect_success FSMONITOR_DAEMON \
 	test_config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
 	git status --porcelain >/dev/null &&
-
 	git ls-files "literal-candidate-*" >literal-candidate-paths &&
 	set -- &&
 	while read path
@@ -2391,7 +2305,6 @@ test_expect_success FSMONITOR_DAEMON \
 		"literal-candidate-*" \
 		":(exclude)literal-candidate-a-02" &&
 	test_path_is_file .git/index.grep-worktree &&
-
 	echo "literal mixed candidate needle" >literal-candidate-a-01 &&
 	git status --porcelain >/dev/null &&
 	cat >expected <<-\EOF &&
@@ -2415,7 +2328,6 @@ test_expect_success 'content index prunes impossible multiple patterns' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		-e "absent alpha" -e "absent beta" 2>err &&
 	test_must_be_empty err
@@ -2426,7 +2338,6 @@ test_expect_success 'content index intersects --all-match patterns' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached --all-match \
 		-e "present needle" -e "absent alpha" -- present 2>err &&
 	test_must_be_empty err
@@ -2438,7 +2349,6 @@ test_expect_success ENHANCED_BRE \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"absent alpha\|absent beta" 2>err &&
 	test_must_be_empty err &&
@@ -2461,7 +2371,6 @@ test_expect_success 'content index prunes basic bracket expressions' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"present[[:space:]]*absent" -- present 2>err &&
 	test_must_be_empty err &&
@@ -2475,7 +2384,6 @@ test_expect_success 'content index prunes agent basic bracket expression' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"import [A-Za-z0-9_.]*absent" -- agent-regex 2>err &&
 	test_must_be_empty err
@@ -2486,7 +2394,6 @@ test_expect_success 'content index bridges escaped dot literal' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
 		-- agent-regex 2>err &&
@@ -2499,7 +2406,6 @@ test_expect_success ENHANCED_BRE \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"from [A-Za-z0-9_.]* import __[A-Za-z0-9_]*\|import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
 		-- agent-regex 2>err &&
@@ -2511,7 +2417,6 @@ test_expect_success 'content index bridges escaped ERE dot literal' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^present\\.needle$" -- present 2>err &&
 	test_must_be_empty err
@@ -2522,7 +2427,6 @@ test_expect_success 'content index bridges escaped ERE punctuation' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"resolve_reference\\(" -- escaped-call-negative 2>err &&
 	test_must_be_empty err
@@ -2533,7 +2437,6 @@ test_expect_success 'content index uses an escaped literal bridge alone' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"\\.ab" -- escaped-bridge-negative 2>err &&
 	test_must_be_empty err
@@ -2544,7 +2447,6 @@ test_expect_success 'content index prunes anchored escaped regexes' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^absent alpha\\.suffix$|^absent beta\\.suffix$" 2>err &&
 	test_must_be_empty err &&
@@ -2577,7 +2479,6 @@ test_expect_success 'content index combines required ERE groups' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(present|ordinary) (absent_alpha|absent_beta) (contents|needle)$" \
 		2>err &&
@@ -2590,7 +2491,6 @@ test_expect_success 'content index combines ERE literals and groups' '
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 	pattern="from (present|ordinary)(\\.[A-Za-z0-9_]*_private|\\._|\\.internal|\\.private)|import (present|ordinary)(\\.[A-Za-z0-9_]*_private|\\._|\\.internal|\\.private)" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- present 2>err &&
 	test_must_be_empty err &&
 	git grep --cached -E "$pattern" -- structured-from >actual &&
@@ -2610,12 +2510,10 @@ test_expect_success 'content index prunes ERE group concatenations' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"global_(test|dev)_requirements" \
 		-- ere-concat 2>err &&
 	test_must_be_empty err &&
-
 	cat >expect <<-\EOF &&
 	ere-concat-dev:global_dev_requirements
 	ere-concat-test:global_test_requirements
@@ -2636,7 +2534,6 @@ test_expect_success FSMONITOR_DAEMON \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail env \
 		GIT_TRACE2_EVENT="$PWD/ere-boundary-ipc.trace" \
 		git grep --cached -E \
@@ -2653,7 +2550,6 @@ test_expect_success 'content index combines mixed ERE branches' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"global_(test|dev)_requirements|standalone_absent" \
 		-- ere-concat 2>err &&
@@ -2662,7 +2558,6 @@ test_expect_success 'content index combines mixed ERE branches' '
 		"standalone_absent|global_(test|dev)_requirements" \
 		-- ere-concat 2>err &&
 	test_must_be_empty err &&
-
 	cat >expect <<-\EOF &&
 	ere-concat-dev:global_dev_requirements
 	ere-concat-test:global_test_requirements
@@ -2686,7 +2581,6 @@ test_expect_success 'mixed ERE branches preserve the alternative limit' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
 	test_must_be_empty err
 '
@@ -2703,7 +2597,6 @@ test_expect_success 'ERE boundaries use decoded alternatives' '
 
 test_expect_success 'repeated ERE groups do not correlate alternatives' '
 	echo "ere-concat-repeat:xfoobary" >expect &&
-
 	git grep --cached -E "x(foo|bar)+y" \
 		-- ere-concat-repeat >actual &&
 	test_cmp expect actual
@@ -2716,7 +2609,6 @@ test_expect_success 'ERE boundaries preserve the query limit' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
 	test_must_be_empty err
 '
@@ -2728,7 +2620,6 @@ test_expect_success 'escaped literal boundaries preserve the query limit' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
 	test_must_be_empty err
 '
@@ -2743,11 +2634,9 @@ test_expect_success 'required bridges replace optional enrichments' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		-e "$pattern" -e "\\.ab" -- escaped-bridge-negative 2>err &&
 	test_must_be_empty err &&
-
 	oid=$(git rev-parse :escaped-bridge-positive) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -2763,7 +2652,6 @@ test_expect_success 'content index combines middle ERE literals and groups' '
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 	pattern="(from|import) libdemo_cpp([._]| import).*(_|internal|private)|(from|import) libdemo_cpp_ext([._]| import).*(_|internal|private)" &&
-
 	test_must_fail git grep --cached -E "$pattern" -- agent-regex 2>err &&
 	test_must_be_empty err &&
 	git grep --cached -E "$pattern" -- structured-middle-from >actual &&
@@ -2798,7 +2686,6 @@ test_expect_success 'content index prefers stronger ERE literals' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"(from|import)[[:space:]]+unicorn_sfi\\.eval\\.chz" \
 		-- agent-regex 2>err &&
@@ -2814,7 +2701,6 @@ test_expect_success 'content index skips escaped regex atoms' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	if test_have_prereq BRE_WORD_BOUNDARY
 	then
 		test_must_fail git grep --cached \
@@ -2834,7 +2720,6 @@ test_expect_success 'content index decodes escaped ERE groups' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(present|ordinary) (absent\\.alpha|absent\\.beta) (contents|needle)$" \
 		2>err &&
@@ -2850,7 +2735,6 @@ test_expect_success 'content index decodes singleton ERE classes' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"(^| )(impor[t]|fro[m]) (applie[d]|qsta[r])(\.| import).*(_privat[e]|interna[l]|privat[e])" \
 		-- agent-regex 2>err &&
@@ -2862,7 +2746,6 @@ test_expect_success 'content index unwraps whole ERE group' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)$" \
 		-- ordinary 2>err &&
@@ -2874,7 +2757,6 @@ test_expect_success 'unsupported searches use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i -E \
 		"ABSENT[ ]PATTERN" -- short 2>err &&
 	test_grep "unable to read" err &&
@@ -2893,7 +2775,6 @@ test_expect_success LIBPCRE2 'content index prunes impossible PCRE literal' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P "absent pattern" 2>err &&
 	test_must_fail git grep --cached -P "^absent\\.pattern$" 2>err &&
 	test_must_fail git grep --cached -P "absent \\w+" 2>err &&
@@ -2910,12 +2791,10 @@ test_expect_success LIBPCRE2 'content index prunes simple PCRE groups' '
 		"import\\s+(?:sample_ext\\.)?vendor_internal" \
 		-- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"absent\\s*=\\s*(?:optional\\.)?needle" -- short 2>err &&
 	test_must_be_empty err
@@ -2932,12 +2811,10 @@ test_expect_success LIBPCRE2 'content index prunes PCRE boundaries' '
 		"\\bimport[[:space:]]+(sample_ext\\.)?vendor_internal\\b" \
 		-- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"\\babsent[[:space:]]+(optional)?needle\\b" -- short 2>err &&
 	test_must_be_empty err &&
@@ -2951,12 +2828,10 @@ test_expect_success LIBPCRE2 'content index prunes PCRE wildcard ranges' '
 	git grep --cached -P \
 		"import.{0,20}vendor_internal" -- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"absent.{0,240}needle" -- short 2>err &&
 	test_must_be_empty err &&
@@ -2974,12 +2849,10 @@ test_expect_success LIBPCRE2 'content index prunes PCRE negative lookaheads' '
 		"^(?!\\s*(#|from ))[^\\n]*vendor_internal" \
 		-- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"^(?!\\s*(#|from |import ))[^\\n]*absent" -- short 2>err &&
 	test_must_be_empty err &&
@@ -2993,12 +2866,10 @@ test_expect_success LIBPCRE2 'content index prunes PCRE negative lookbehinds' '
 	git grep --cached -P \
 		"(?<![A-Z_])vendor_internal" -- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"(?<![A-Z_])absent" -- short 2>err &&
 	test_must_be_empty err &&
@@ -3012,11 +2883,9 @@ test_expect_success LIBPCRE2 'content index bridges escaped PCRE punctuation' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"resolve_reference\\(" -- escaped-call-negative 2>err &&
 	test_must_be_empty err &&
-
 	oid=$(git rev-parse :escaped-call-positive) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
@@ -3031,7 +2900,6 @@ test_expect_success LIBPCRE2 'quantified escaped PCRE punctuation reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"foo\\(?bar" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err &&
@@ -3045,12 +2913,10 @@ test_expect_success 'content index prunes escaped ERE classes' '
 	git grep --cached -E \
 		"import[^\\n]*vendor_internal" -- agent-regex >actual &&
 	test_cmp expect actual &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"absent[^\\n]*needle" -- short 2>err &&
 	test_must_be_empty err &&
@@ -3067,7 +2933,6 @@ test_expect_success LIBPCRE2 'complex PCRE groups use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"absent(?:nested(group))needle" -- short 2>err &&
 	test_grep "unable to read" err &&
@@ -3087,16 +2952,13 @@ test_expect_success LIBPCRE2 'content index prunes PCRE alternatives' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i -P \
 		"ABSENT ALPHA|MISSING BETA" -- short 2>err &&
 	test_must_be_empty err &&
-
 	oid=$(git rev-parse :present) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -i -P \
 		"ABSENT ALPHA|PRESENT NEEDLE" -- present 2>err &&
 	test_grep "unable to read" err &&
@@ -3110,7 +2972,6 @@ test_expect_success 'possible matches use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "present needle" 2>err &&
 	test_grep "unable to read" err
 '
@@ -3120,7 +2981,6 @@ test_expect_success 'possible basic bracket expression uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"present[[:space:]]*needle" -- present 2>err &&
 	test_grep "unable to read" err &&
@@ -3137,7 +2997,6 @@ test_expect_success 'possible agent basic bracket expression reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"import [A-Za-z0-9_.]*vendor_internal" \
 		-- agent-regex 2>err &&
@@ -3149,7 +3008,6 @@ test_expect_success 'possible escaped dot literal reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
 		-- escaped-dot 2>err &&
@@ -3162,7 +3020,6 @@ test_expect_success ENHANCED_BRE \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"from [A-Za-z0-9_.]* import __[A-Za-z0-9_]*\|import [A-Za-z0-9_.]*\\.__[A-Za-z0-9_]*" \
 		-- escaped-dot 2>err &&
@@ -3174,7 +3031,6 @@ test_expect_success 'quantified escaped dot suffix reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "\\.ab*" \
 		-- escaped-dot-quantified 2>err &&
 	test_grep "unable to read" err
@@ -3185,7 +3041,6 @@ test_expect_success LIBPCRE2 'fixed pattern follows PCRE2 matching semantics' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -F "a\\E.*b" -- fixed-pcre 2>err &&
 	test_grep "unable to read" err
 '
@@ -3195,7 +3050,6 @@ test_expect_success 'possible anchored escaped regex uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^present\\.needle$" -- escaped-dot-ere 2>err &&
 	test_grep "unable to read" err
@@ -3206,7 +3060,6 @@ test_expect_success 'possible escaped ERE punctuation reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"resolve_reference\\(" -- escaped-call-positive 2>err &&
 	test_grep "unable to read" err
@@ -3217,7 +3070,6 @@ test_expect_success 'possible escaped literal bridge alone reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"\\.ab" -- escaped-bridge-positive 2>err &&
 	test_grep "unable to read" err
@@ -3228,7 +3080,6 @@ test_expect_success 'content index prunes escaped BRE closing bracket' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"absent_left\\[absent_right\\]" \
 		-- escaped-literal-positive 2>err &&
@@ -3254,7 +3105,6 @@ test_expect_success 'escaped ERE literals preserve positive results' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	while IFS= read -r pattern
 	do
 		test_must_fail git grep --cached -E "$pattern" \
@@ -3277,7 +3127,6 @@ test_expect_success 'escaped BRE literals preserve positive results' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	while IFS= read -r pattern
 	do
 		test_must_fail git grep --cached "$pattern" \
@@ -3295,7 +3144,6 @@ test_expect_success 'escaped literal alternatives preserve their clauses' '
 	object_right=.git/objects/$(test_oid_to_path "$oid_right") &&
 	mv "$object_right" "$object_right.save" &&
 	test_when_finished "mv \"$object_right.save\" \"$object_right\"" &&
-
 	test_must_fail git grep --cached -E \
 		"resolve_reference\\(|other_call\\[" \
 		-- escaped-call-positive 2>err &&
@@ -3311,7 +3159,6 @@ test_expect_success 'quantified escaped ERE punctuation reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"foo\\(?bar" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err
@@ -3322,7 +3169,6 @@ test_expect_success 'exact-zero escaped ERE punctuation reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"foo\\({0}bar" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err
@@ -3333,7 +3179,6 @@ test_expect_success 'exact-zero escaped BRE punctuation reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"foo\\.\\{0\\}bar" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err
@@ -3344,7 +3189,6 @@ test_expect_success 'quantified ERE punctuation neighbor reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"foo\\(b*ar" -- escaped-call-right-quantified 2>err &&
 	test_grep "unable to read" err
@@ -3355,7 +3199,6 @@ test_expect_success 'escaped BRE operators remain variable' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"foo\\(bar\\)" -- escaped-call-optional 2>err &&
 	test_grep "unable to read" err
@@ -3366,7 +3209,6 @@ test_expect_success 'possible escaped ERE group uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(literal\\|\\(\\)\\[]\\\\suffix|absent)$" \
 		-- escaped-ere 2>err &&
@@ -3379,7 +3221,6 @@ test_expect_success LIBPCRE2 \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -P \
 		"^import sample_ext\\.vendor_internal$" \
 		-- agent-regex 2>err &&
@@ -3391,7 +3232,6 @@ test_expect_success 'nested ERE group uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^absent((nested)|[)]|\\))*suffix$|^ordinary contents$" \
 		-- ordinary 2>err &&
@@ -3407,7 +3247,6 @@ test_expect_success 'possible agent regex uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^from sample_ext\\.(internal|private|_[A-Za-z])|^import sample_ext\\.(vendor_internal|[[:space:]]|_[A-Za-z])|from sample_ext import (internal|private|_[A-Za-z])" \
 		-- agent-regex 2>err &&
@@ -3439,7 +3278,6 @@ test_expect_success 'stronger ERE literals preserve possible matches' '
 	mv "$gunicorn_object" "$gunicorn_object.save" &&
 	test_when_finished "mv \"$unicorn_object.save\" \"$unicorn_object\"" &&
 	test_when_finished "mv \"$gunicorn_object.save\" \"$gunicorn_object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"(from|import)[[:space:]]+unicorn_sfi\\.eval\\.chz" \
 		-- mixed-unicorn 2>err &&
@@ -3455,7 +3293,6 @@ test_expect_success 'escaped regex atoms preserve possible matches' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	if test_have_prereq BRE_WORD_BOUNDARY
 	then
 		test_must_fail git grep --cached \
@@ -3475,7 +3312,6 @@ test_expect_success 'possible singleton ERE classes use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"(^| )(impor[t]|fro[m]) (sample_ex[t]|missing)(\.| import).*(vendor_interna[l]|private)" \
 		-- agent-regex 2>err &&
@@ -3487,7 +3323,6 @@ test_expect_success 'quantified singleton ERE classes read blobs' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"(present[x]*|absent)" -- present 2>err &&
 	test_grep "unable to read" err &&
@@ -3516,12 +3351,10 @@ test_expect_success 'quantified ordinary atoms retain later literals' '
 		git grep --cached -P "^prefixx*+suffix$" \
 			-- quantified-ordinary-zero
 	fi &&
-
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "x*absent suffix" -- short 2>err &&
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -E \
@@ -3568,7 +3401,6 @@ test_expect_success 'whole ERE group matches use normal blob reads' '
 	test_when_finished "mv \"$from_object.save\" \"$from_object\"" &&
 	test_when_finished "mv \"$import_object.save\" \"$import_object\"" &&
 	test_when_finished "mv \"$boundary_object.save\" \"$boundary_object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)$" \
 		-- outer-from 2>err &&
@@ -3588,7 +3420,6 @@ test_expect_success 'quantified whole ERE group reads blob' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached -E \
 		"^(from _[A-Za-z0-9][A-Za-z0-9_]*|import _[A-Za-z0-9][A-Za-z0-9_]*)*" \
 		-- short 2>err &&
@@ -3600,7 +3431,6 @@ test_expect_success 'possible multiple pattern uses normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		-e "absent alpha" -e "present needle" 2>err &&
 	test_grep "unable to read" err
@@ -3612,7 +3442,6 @@ test_expect_success ENHANCED_BRE \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached \
 		"absent alpha\|present needle" -- present 2>err &&
 	test_grep "unable to read" err &&
@@ -3634,7 +3463,6 @@ test_expect_success 'unknown blobs use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_grep "unable to read" err
 '
@@ -3658,7 +3486,6 @@ test_expect_success 'structurally invalid segment is ignored' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_grep "unable to read" err
 '
@@ -3687,7 +3514,6 @@ test_expect_success 'segment with truncated trailer is ignored' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_grep "unable to read" err
 '
@@ -3705,7 +3531,6 @@ test_expect_success 'writer retries unreadable blobs' '
 	mv "$middle_object" "$middle_object.save" &&
 	test_when_finished "test ! -e \"$middle_object.save\" ||
 			    mv \"$middle_object.save\" \"$middle_object\"" &&
-
 	git grep-index --no-progress &&
 	test_line_count = 2 .git/objects/info/grep-index/chain &&
 	while read mode oid stage path
@@ -3723,7 +3548,6 @@ test_expect_success 'writer retries unreadable blobs' '
 	test_must_fail git grep --cached -F "absent retry needle" \
 		-- "$middle_path" 2>err &&
 	test_grep "$middle_oid" err &&
-
 	mv "$middle_object.save" "$middle_object" &&
 	git grep-index --no-progress &&
 	test_line_count = 3 .git/objects/info/grep-index/chain &&
@@ -3751,11 +3575,9 @@ test_expect_success 'write incremental segment' '
 	mv "$object" "$object.save" &&
 	test_when_finished "test ! -e \"$object.save\" ||
 			    mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git grep --cached "absent pattern" 2>err &&
 	test_must_be_empty err &&
 	mv "$object.save" "$object" &&
-
 	if test_have_prereq LIBPCRE2
 	then
 		non_ascii_oid=$(git rev-parse :incremental-non-ascii) &&
@@ -3781,7 +3603,6 @@ test_expect_success 'writer includes linked worktree indexes' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-
 	test_must_fail git -C ../grep-index-worktree grep --cached \
 		"absent pattern" 2>err &&
 	test_must_be_empty err
@@ -3799,7 +3620,6 @@ test_expect_success 'writer includes reachable historical blobs' '
 		other_oid=$(git rev-parse :other) &&
 		git rm historical other &&
 		git commit -m deleted &&
-
 		git grep-index --reachable --no-progress HEAD -- historical &&
 		historical_object=.git/objects/$(test_oid_to_path \
 			"$historical_oid") &&
