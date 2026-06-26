@@ -2840,6 +2840,24 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 						    pathspec, state);
 	}
 	close_cached_dir(&cdir);
+	if (!check_only && dir->internal.can_prune_replay &&
+	    (!pathspec || !pathspec->nr) && untracked_prune &&
+	    dir_state < path_untracked &&
+	    (!untracked_prune->valid || untracked_prune->untracked_nr ||
+	     !untracked_prune->can_skip_replay ||
+	     untracked_prune->check_only)) {
+		for (size_t i = 0; i < untracked_prune->untracked_nr; i++)
+			free(untracked_prune->untracked[i]);
+		untracked_prune->untracked_nr = 0;
+		/* Force a stat-based reader to verify this fsmonitor result. */
+		memset(&untracked_prune->stat_data, 0,
+		       sizeof(untracked_prune->stat_data));
+		untracked_prune->check_only = 0;
+		untracked_prune->valid = 1;
+		untracked_prune->recurse = 1;
+		untracked_prune->can_skip_replay = 1;
+		dir->internal.repaired_subtrees++;
+	}
  out:
 	strbuf_release(&path);
 
@@ -3032,6 +3050,7 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	const unsigned int normal_flags =
 		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
+	int i;
 	static int untracked_cache_disabled = -1;
 
 	if (!dir->untracked)
@@ -3073,11 +3092,13 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 
 	/*
-	 * EXC_CMDL is not considered in the cache. If people set it,
-	 * skip the cache.
+	 * Command-line exclude patterns are not considered in the cache.
+	 * ls-files creates an empty EXC_CMDL list even without --exclude,
+	 * so inspect the lists for patterns rather than counting lists.
 	 */
-	if (dir->internal.exclude_list_group[EXC_CMDL].nr)
-		return NULL;
+	for (i = 0; i < dir->internal.exclude_list_group[EXC_CMDL].nr; i++)
+		if (dir->internal.exclude_list_group[EXC_CMDL].pl[i].nr)
+			return NULL;
 
 	if (!ident_in_untracked(dir->untracked)) {
 		warning(_("untracked cache is disabled on this system or location"));
@@ -3179,6 +3200,8 @@ static void emit_traversal_statistics(struct dir_struct *dir,
 			   "paths-visited", dir->internal.visited_paths);
 	trace2_data_intmax("read_directory", repo,
 			   "subtrees-pruned", dir->internal.pruned_subtrees);
+	trace2_data_intmax("read_directory", repo,
+			   "subtrees-repaired", dir->internal.repaired_subtrees);
 
 	if (!dir->untracked)
 		return;
@@ -3200,12 +3223,13 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	struct untracked_cache_dir *untracked;
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
-	int negative_only = has_pathspec;
+	int negative_only = has_pathspec || dir->untracked_cache_negative_only;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;
 	dir->internal.visited_directories = 0;
 	dir->internal.pruned_subtrees = 0;
+	dir->internal.repaired_subtrees = 0;
 	dir->internal.can_prune_replay = 0;
 
 	if (has_symlink_leading_path(path, len)) {
@@ -3257,6 +3281,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))
 		read_directory_recursive(dir, istate, path, len, untracked,
 					 untracked_prune, 0, 0, pathspec);
+	if (dir->internal.repaired_subtrees)
+		istate->cache_changed |= UNTRACKED_CHANGED;
 done:
 	QSORT(dir->entries, dir->nr, cmp_dir_entry);
 	QSORT(dir->ignored, dir->ignored_nr, cmp_dir_entry);
