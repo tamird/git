@@ -5033,8 +5033,8 @@ static int pick_commits(struct repository *r,
 			 opts->record_origin || should_edit(opts) ||
 			 opts->committer_date_is_author_date ||
 			 opts->ignore_date));
-	if (read_and_refresh_cache(r, opts))
-		return -1;
+	if (opts->strategy && strcmp(opts->strategy, "ort"))
+		ensure_full_index(r->index);
 
 	unlink(rebase_path_message());
 	unlink(rebase_path_stopped_sha());
