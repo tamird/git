@@ -141,7 +141,24 @@ test_expect_success setup '
 
 		expect_pattern $n || return 1
 
-	done >expect
+	done >expect &&
+
+	printf "prefix\nold\nsuffix\nno newline" >file-common &&
+	git add file-common &&
+	printf "prefix\nnew\ninserted\nsuffix\nno newline" >file-common &&
+	cat >expect-common <<-\EOF
+	diff --git a/file-common b/file-common
+	--- a/file-common
+	+++ b/file-common
+	@@ -1,4 +1,5 @@
+	 prefix
+	-old
+	+new
+	+inserted
+	 suffix
+	 no newline
+	\ No newline at end of file
+	EOF
 '
 
 test_expect_success 'diff -U0' '
@@ -151,6 +168,14 @@ test_expect_success 'diff -U0' '
 		git diff -U0 file-?$n || return 1
 	done | zc >actual &&
 	test_cmp expect actual
+
+'
+
+test_expect_success 'diff with common prefix and shifted tail' '
+
+	git diff -- file-common >actual &&
+	sed -e "/^index /d" <actual >actual-clean &&
+	test_cmp expect-common actual-clean
 
 '
 

@@ -140,11 +140,13 @@ static void xdl_free_ctx(xdfile_t *xdf)
 
 
 static int xdl_prepare_ctx(unsigned int pass, mmfile_t *mf, long narec, xpparam_t const *xpp,
-			   xdlclassifier_t *cf, xdfile_t *xdf) {
+			   xdlclassifier_t *cf, xdfile_t const *xdf1, xdfile_t *xdf) {
 	long bsize;
 	uint64_t hav;
-	uint8_t const *blk, *cur, *top, *prev;
+	uint8_t const *blk, *cur, *top, *prev, *suffix;
+	size_t suffix_pos;
 	xrecord_t *crec;
+	int common_prefix;
 
 	xdf->reference_index = NULL;
 	xdf->changed = NULL;
@@ -155,16 +157,64 @@ static int xdl_prepare_ctx(unsigned int pass, mmfile_t *mf, long narec, xpparam_
 
 	xdf->nrec = 0;
 	if ((cur = blk = xdl_mmfile_first(mf, &bsize))) {
-		for (top = blk + bsize; cur < top; ) {
+		suffix = top = blk + bsize;
+		/*
+		 * Reuse classifications at common ends only for multi-record
+		 * inputs. A mismatch could otherwise scan a lone record twice
+		 * before hashing it.
+		 */
+		suffix_pos = xdf1 && xdf1->nrec > 1 ? xdf1->nrec : 0;
+		common_prefix = !!suffix_pos;
+		while (suffix_pos) {
+			xrecord_t const *rec = &xdf1->recs[suffix_pos - 1];
+			uint8_t const *candidate;
+
+			if (rec->size > (size_t)(suffix - blk))
+				break;
+			candidate = suffix - rec->size;
+			if ((candidate > blk && candidate[-1] != '\n') ||
+			    memcmp(candidate, rec->ptr, rec->size))
+				break;
+			suffix = candidate;
+			suffix_pos--;
+		}
+
+		for (; cur < top; ) {
+			xrecord_t const *reuse = NULL;
+
 			prev = cur;
-			hav = xdl_hash_record(&cur, top, xpp->flags);
+			if (xdf1 && cur == suffix && suffix_pos < xdf1->nrec) {
+				reuse = &xdf1->recs[suffix_pos++];
+				cur += reuse->size;
+				suffix = cur;
+			} else if (common_prefix && xdf->nrec < xdf1->nrec) {
+				xrecord_t const *candidate = &xdf1->recs[xdf->nrec];
+
+				if (candidate->size <= (size_t)(top - cur) &&
+				    (candidate->size == (size_t)(top - cur) ||
+				     cur[candidate->size - 1] == '\n') &&
+				    !memcmp(cur, candidate->ptr, candidate->size)) {
+					reuse = candidate;
+					cur += candidate->size;
+				} else {
+					common_prefix = 0;
+				}
+			} else {
+				common_prefix = 0;
+			}
+			if (!reuse)
+				hav = xdl_hash_record(&cur, top, xpp->flags);
 			if (XDL_ALLOC_GROW(xdf->recs, (long)xdf->nrec + 1, narec))
 				goto abort;
 			crec = &xdf->recs[xdf->nrec++];
 			crec->ptr = prev;
 			crec->size = cur - prev;
-			if (xdl_classify_record(pass, cf, crec, hav) < 0)
+			if (reuse) {
+				crec->minimal_perfect_hash = reuse->minimal_perfect_hash;
+				cf->rcrecs[crec->minimal_perfect_hash]->len2++;
+			} else if (xdl_classify_record(pass, cf, crec, hav) < 0) {
 				goto abort;
+			}
 		}
 	}
 
@@ -445,12 +495,12 @@ int xdl_prepare_env(mmfile_t *mf1, mmfile_t *mf2, xpparam_t const *xpp,
 	if (xdl_init_classifier(&cf, enl1 + enl2 + 1, xpp->flags) < 0)
 		return -1;
 
-	if (xdl_prepare_ctx(1, mf1, enl1, xpp, &cf, &xe->xdf1) < 0) {
+	if (xdl_prepare_ctx(1, mf1, enl1, xpp, &cf, NULL, &xe->xdf1) < 0) {
 
 		xdl_free_classifier(&cf);
 		return -1;
 	}
-	if (xdl_prepare_ctx(2, mf2, enl2, xpp, &cf, &xe->xdf2) < 0) {
+	if (xdl_prepare_ctx(2, mf2, enl2, xpp, &cf, &xe->xdf1, &xe->xdf2) < 0) {
 
 		xdl_free_ctx(&xe->xdf1);
 		xdl_free_classifier(&cf);
