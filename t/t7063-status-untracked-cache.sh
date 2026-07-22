@@ -1046,4 +1046,24 @@ test_expect_success 'directory snapshots ignore weak file-stat configuration' '
 	)
 '
 
+test_expect_success PTHREADS 'parallel directory snapshots ignore weak file-stat configuration' '
+	(
+		cd weak-dir &&
+		git config status.showUntrackedFiles all &&
+		git status --porcelain -uall >/dev/null &&
+		git status --porcelain -uall >/dev/null &&
+		dir_mtime=$(test-tool chmtime --get nested) &&
+		mv nested/two nested/three &&
+		test-tool chmtime =$dir_mtime nested &&
+		GIT_OPTIONAL_LOCKS=0 git -c core.untrackedCache=false \
+			status --porcelain -uall >.git/expect &&
+		GIT_TEST_UNTRACKED_CACHE_THREADS=1 \
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/weak-dir-parallel.trace" \
+			git status --porcelain -uall >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_grep "parallel-lstat:[1-9]" \
+			"$TRASH_DIRECTORY/weak-dir-parallel.trace"
+	)
+'
+
 test_done
