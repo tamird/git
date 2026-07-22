@@ -13,10 +13,39 @@ stop_simple_IPC_server () {
 	test-tool simple-ipc stop-daemon
 }
 
+wait_for_worker_trace () {
+	tries=0
+	while ! grep \
+		"\"event\":\"thread_start\".*\"thread\":\"th[0-9]*:ipc-worker\"" \
+		daemon.trace >workers
+	do
+		tries=$(($tries + 1))
+		if test "$tries" -ge 5
+		then
+			return 1
+		fi
+		sleep 1
+	done
+}
+
+wait_for_pids () {
+	result=0
+	for pid
+	do
+		wait "$pid" || result=1
+	done
+	test "$result" = 0
+}
+
 test_expect_success 'start simple command server' '
 	test_atexit stop_simple_IPC_server &&
-	test-tool simple-ipc start-daemon --threads=8 &&
-	test-tool simple-ipc is-active
+	GIT_TRACE2_EVENT="$PWD/daemon.trace" \
+		test-tool simple-ipc start-daemon --threads=8
+'
+
+test_expect_success !MINGW 'worker pool starts with one thread' '
+	wait_for_worker_trace &&
+	test_line_count = 1 workers
 '
 
 test_expect_success 'simple command server' '
@@ -42,10 +71,29 @@ test_expect_success 'chunk response' '
 	test_grep -q "big: [0]*9999\$" actual
 '
 
-test_expect_success 'slow response' '
+test_expect_success MINGW 'slow response' '
 	test-tool simple-ipc send --token=slow >actual &&
 	test_line_count -ge 100 actual &&
 	test_grep -q "big: [0]*99\$" actual
+'
+
+test_expect_success !MINGW 'worker pool grows on demand' '
+	pids= &&
+	for i in 1 2 3 4
+	do
+		{ test-tool simple-ipc send --token=slow >actual.$i & } &&
+		pids="$pids $!" || return 1
+	done &&
+	wait_for_pids $pids &&
+	for i in 1 2 3 4
+	do
+		test_line_count -ge 100 actual.$i &&
+		grep -q "big: [0]*99\$" actual.$i || return 1
+	done &&
+	grep "\"event\":\"thread_start\".*\"thread\":\"th[0-9]*:ipc-worker\"" \
+		daemon.trace >workers &&
+	test_line_count -ge 4 workers &&
+	test_line_count -lt 9 workers
 '
 
 # Send an IPC with n=100,000 bytes of ballast.  This should be large enough
