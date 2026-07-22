@@ -30,7 +30,7 @@ static void hash_string(struct git_hash_ctx *ctx, const char *value)
 void grep_index_identity_oid_sequence_init(
 	struct repository *repo, struct git_hash_ctx *ctx, size_t nr)
 {
-	repo->hash_algo->init_fn(ctx);
+	git_hash_init(ctx, repo->hash_algo);
 	git_hash_update(ctx, "grep-index-ipc-index-v1", 24);
 	hash_uint32(ctx, repo->hash_algo->format_id);
 	hash_uint32(ctx, nr);
@@ -40,7 +40,7 @@ static void hash_scope(struct repository *repo, struct object_id *oid)
 {
 	struct git_hash_ctx ctx;
 
-	repo->hash_algo->init_fn(&ctx);
+	git_hash_init(&ctx, repo->hash_algo);
 	git_hash_update(&ctx, "grep-worktree-scope-v1", 22);
 	hash_uint32(&ctx, repo->hash_algo->format_id);
 	hash_string(&ctx, repo_get_work_tree(repo));
@@ -102,7 +102,7 @@ int grep_worktree_entry_identity_hash(
 
 	if (serialize_worktree_entry(&data, ce))
 		return -1;
-	algo->init_fn(&ctx);
+	git_hash_init(&ctx, algo);
 	git_hash_update(&ctx, "grep-worktree-entry-v1", 22);
 	hash_uint32(&ctx, identity->object_format_id);
 	git_hash_update(&ctx, data.header, sizeof(data.header));
@@ -125,7 +125,7 @@ static int compute_identity(struct repository *repo,
 
 	grep_index_identity_oid_sequence_init(
 		repo, &oids_ctx, istate->cache_nr);
-	repo->hash_algo->init_fn(&entries_ctx);
+	git_hash_init(&entries_ctx, repo->hash_algo);
 	git_hash_update(&entries_ctx, "grep-worktree-index-v2", 22);
 	hash_uint32(&entries_ctx, repo->hash_algo->format_id);
 	hash_string(&entries_ctx, repo_get_work_tree(repo));
@@ -283,7 +283,7 @@ static void write_token(struct repository *repo,
 
 cleanup:
 	if (f)
-		discard_hashfile(f);
+		free_hashfile(f);
 	rollback_lock_file(&lock);
 	strbuf_release(&path);
 }
@@ -304,7 +304,7 @@ int grep_index_identity_get(struct repository *repo,
 		 * Scope the immutable base to this checkout so its positions
 		 * cannot be reused by another worktree sharing the object store.
 		 */
-		repo->hash_algo->init_fn(&ctx);
+		git_hash_init(&ctx, repo->hash_algo);
 		git_hash_update(&ctx, "grep-worktree-split-base-v1", 27);
 		hash_uint32(&ctx, repo->hash_algo->format_id);
 		git_hash_update(&ctx, scope_oid.hash, repo->hash_algo->rawsz);
