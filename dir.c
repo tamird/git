@@ -2711,7 +2711,8 @@ static void validate_untracked_stat(struct untracked_cache_dir *untracked,
 	if (untracked->valid) {
 		(*nr_lstat)++;
 		if (!lstat(path->len ? path->buf : ".", &st) &&
-		    !match_stat_data_racy(istate, &untracked->stat_data, &st))
+		    !match_untracked_dir_stat_racy(&istate->timestamp,
+					      &untracked->stat_data, &st))
 			untracked->stat_matches = 1;
 	}
 	if (!recurse)
