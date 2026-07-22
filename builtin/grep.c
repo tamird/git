@@ -1077,6 +1077,7 @@ static int grep_cache(struct grep_opt *opt,
 	size_t selected_pos = 0;
 	int use_selected = 0;
 	int literal_selected = 0;
+	int prefix_selected = 0;
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
 	int worktree_sidecar_loaded = 0;
@@ -1214,8 +1215,8 @@ static int grep_cache(struct grep_opt *opt,
 	    git_env_bool("GIT_TEST_GREP_LITERAL_PATHS", 1) && !cached &&
 	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
 	    (recursive_basename ||
-	     (!pathspec->has_wildcard &&
-	      !(pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))))) {
+	     !(pathspec->magic &
+	       ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL | PATHSPEC_GLOB)))) {
 		struct strbuf dir = STRBUF_INIT;
 		size_t selected_map_size =
 			DIV_ROUND_UP(repo->index->cache_nr, 8);
@@ -1227,14 +1228,20 @@ static int grep_cache(struct grep_opt *opt,
 		for (size_t i = 0; i < pathspec->nr; i++) {
 			const struct pathspec_item *item = &pathspec->items[i];
 			const struct cache_entry *previous;
+			int wildcard_prefix =
+				item->nowildcard_len != item->len;
 			int end;
 			int dir_pos;
 
 			if (!recursive_basename &&
 			    (!item->len || item->match[item->len - 1] == '/' ||
-			     item->nowildcard_len != item->len ||
+			     (wildcard_prefix &&
+			      (!item->nowildcard_len ||
+			       !memchr(item->match, '/',
+				       item->nowildcard_len))) ||
 			     item->magic &
-				     ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL))) {
+				     ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL |
+				       PATHSPEC_GLOB))) {
 				can_select = 0;
 				break;
 			}
@@ -1242,11 +1249,41 @@ static int grep_cache(struct grep_opt *opt,
 			if (recursive_basename) {
 				nr = 0;
 				end = repo->index->cache_nr;
+			} else if (wildcard_prefix) {
+				strbuf_reset(&dir);
+				strbuf_add(&dir, item->match,
+					   item->nowildcard_len);
+				nr = index_name_pos_sparse(repo->index,
+							   dir.buf, dir.len);
+				if (nr < 0)
+					nr = -nr - 1;
+				previous =
+					nr ? repo->index->cache[nr - 1] : NULL;
+				if (previous &&
+				    S_ISSPARSEDIR(previous->ce_mode) &&
+				    ce_namelen(previous) < dir.len &&
+				    !strncmp(previous->name, dir.buf,
+					     ce_namelen(previous))) {
+					can_select = 0;
+					break;
+				}
+				end = repo->index->cache_nr;
+				for (int low = nr; low < end;) {
+					int mid = low + (end - low) / 2;
+
+					if (starts_with(repo->index->cache[mid]
+								->name,
+							dir.buf))
+						low = mid + 1;
+					else
+						end = mid;
+				}
+				prefix_selected = 1;
 			} else {
 				nr = index_name_pos_sparse(repo->index, item->match,
 							   item->len);
 			}
-			if (!recursive_basename && nr < 0) {
+			if (!recursive_basename && !wildcard_prefix && nr < 0) {
 				nr = -nr - 1;
 				if (nr < repo->index->cache_nr &&
 				    !strcmp(repo->index->cache[nr]->name,
@@ -1300,7 +1337,7 @@ static int grep_cache(struct grep_opt *opt,
 					}
 					continue;
 				}
-			} else if (!recursive_basename) {
+			} else if (!recursive_basename && !wildcard_prefix) {
 				end = nr + 1;
 			}
 
@@ -1316,6 +1353,16 @@ static int grep_cache(struct grep_opt *opt,
 				     memcmp(ce->name + name_len - recursive_basename_len,
 					    recursive_basename,
 					    recursive_basename_len)))
+					continue;
+				if (!recursive_basename && wildcard_prefix &&
+				    S_ISSPARSEDIR(ce->ce_mode)) {
+					can_select = 0;
+					break;
+				}
+				if (!recursive_basename && wildcard_prefix &&
+				    !match_pathspec(repo->index, pathspec,
+						    ce->name, name_len, 0,
+						    NULL, 0))
 					continue;
 
 				if (ce_stage(ce)) {
@@ -1354,6 +1401,8 @@ static int grep_cache(struct grep_opt *opt,
 			trace2_data_intmax("grep", repo,
 					   recursive_basename ?
 						   "recursive_basename_path_candidates" :
+					   prefix_selected ?
+						   "rooted_glob_path_candidates" :
 						   "literal_path_candidates",
 					   selected_nr);
 			if (selected_nr < GREP_MIN_FILES_FOR_THREADS) {
