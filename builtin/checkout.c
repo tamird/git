@@ -627,9 +627,25 @@ static int checkout_paths(const struct checkout_opts *opts,
 				   rev, &opts->pathspec, 0);
 	}
 
+	/*
+	 * Allow updating the index when checking out from the index.
+	 * This is to save new stat info.
+	 */
+	if (opts->checkout_worktree && !opts->checkout_index && !opts->source_tree)
+		checkout_index = 1;
+	else
+		checkout_index = opts->checkout_index;
+
 	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
-	if (repo_read_index_preload(the_repository, &opts->pathspec, 0) < 0)
+	if (repo_read_index(the_repository) < 0)
 		return error(_("index file corrupt"));
+	/* Persist a full refresh after fsmonitor invalidated the index. */
+	preload_index(the_repository->index,
+		      checkout_index &&
+				      the_repository->index->cache_changed & FSMONITOR_CHANGED ?
+			      NULL :
+			      &opts->pathspec,
+		      0);
 
 	if (opts->source_tree)
 		read_tree_some(opts->source_tree, &opts->pathspec,
@@ -687,15 +703,6 @@ static int checkout_paths(const struct checkout_opts *opts,
 		errs |= checkout_worktree(opts, new_branch_info);
 	else
 		remove_marked_cache_entries(the_repository->index, 1);
-
-	/*
-	 * Allow updating the index when checking out from the index.
-	 * This is to save new stat info.
-	 */
-	if (opts->checkout_worktree && !opts->checkout_index && !opts->source_tree)
-		checkout_index = 1;
-	else
-		checkout_index = opts->checkout_index;
 
 	if (checkout_index) {
 		if (write_locked_index(the_repository->index, &lock_file, COMMIT_LOCK))
