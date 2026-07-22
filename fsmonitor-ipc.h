@@ -5,6 +5,13 @@
 
 struct repository;
 
+#define FSMONITOR_IPC_QUERY_PREFIX "query-v1 "
+#define FSMONITOR_IPC_WORKTREE_ID_HEX 64
+
+/* Hash the canonical worktree root and its stable filesystem identity. */
+int fsmonitor_ipc__get_worktree_identity(const char *worktree,
+					 struct strbuf *identity);
+
 /*
  * Returns true if built-in file system monitor daemon is defined
  * for this platform.

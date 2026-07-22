@@ -1439,4 +1439,32 @@ test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
 	test_grep -q " M dir1/dir2/dir4/FILE-4-A" "$PWD/file_case_wrong-try3.out"
 '
 
+test_expect_success MACOS 'worktree binding rejects same-gitdir aliases' '
+	test_when_finished "git -C binding-a fsmonitor--daemon stop 2>/dev/null || :" &&
+	git init --separate-git-dir="$PWD/binding-gitdir" binding-a &&
+	mkdir binding-b &&
+	cp binding-a/.git binding-b/.git &&
+	(
+		cd binding-a &&
+		test_commit base tracked &&
+		git config core.untrackedCache true &&
+		git config core.fsmonitor true &&
+		GIT_TRACE2_EVENT="$PWD/../binding-daemon.trace" \
+			git status --porcelain=v2 >/dev/null &&
+		git status --porcelain=v2 >/dev/null
+	) &&
+	cp binding-a/tracked binding-b/tracked &&
+	echo changed >>binding-b/tracked &&
+	git -C binding-b --no-optional-locks \
+		-c core.fsmonitor=false -c core.untrackedCache=false \
+		status --porcelain=v2 >binding.expect &&
+	git -C binding-b --no-optional-locks \
+		status --porcelain=v2 >binding.actual &&
+	test_cmp binding.expect binding.actual &&
+	test_grep "^1 \.M .* tracked$" binding.actual &&
+	test_grep "\"key\":\"query/worktree-mismatch\",\"value\":\"1\"" \
+		binding-daemon.trace &&
+	git -C binding-a fsmonitor--daemon stop
+'
+
 test_done
