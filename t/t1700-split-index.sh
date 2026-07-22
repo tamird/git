@@ -280,24 +280,54 @@ test_expect_success 'merge interleaved split-index additions' '
 	)
 '
 
-test_expect_success 'fall back for unmerged split-index additions' '
+test_expect_success 'merge unmerged split-index additions' '
 	test_create_repo unmerged &&
 	(
 		cd unmerged &&
 		test_write_lines base >z-base &&
-		git update-index --add z-base &&
+		q_to_tab >base <<-EOF &&
+		100644 $EMPTY_BLOB 1Qconflict
+		100644 $(git hash-object -w z-base) 0Qz-base
+		EOF
+		git update-index --index-info <base &&
 		git config splitIndex.maxPercentChange 100 &&
 		git update-index --split-index &&
 		q_to_tab >unmerged <<-EOF &&
-		100644 $EMPTY_BLOB 1Qconflict
 		100644 $EMPTY_BLOB 2Qconflict
+		100644 $EMPTY_BLOB 3Qconflict
 		EOF
 		git update-index --index-info <unmerged &&
-		git ls-files --stage >actual &&
+		GIT_TRACE2_EVENT="$PWD/trace" git ls-files --stage >actual &&
+		test_region index shared/merge trace &&
 		q_to_tab >expect <<-EOF &&
 		100644 $EMPTY_BLOB 1Qconflict
 		100644 $EMPTY_BLOB 2Qconflict
+		100644 $EMPTY_BLOB 3Qconflict
 		100644 $(git hash-object z-base) 0Qz-base
+		EOF
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'stage 0 replaces unmerged shared-index entries' '
+	test_create_repo resolved &&
+	(
+		cd resolved &&
+		q_to_tab >base <<-EOF &&
+		100644 $EMPTY_BLOB 1Qconflict
+		100644 $EMPTY_BLOB 2Qconflict
+		EOF
+		git update-index --index-info <base &&
+		git config splitIndex.maxPercentChange 100 &&
+		git update-index --split-index &&
+		resolved=$(printf resolved | git hash-object -w --stdin) &&
+		q_to_tab >resolution <<-EOF &&
+		100644 $resolved 0Qconflict
+		EOF
+		git update-index --index-info <resolution &&
+		git ls-files --stage >actual &&
+		q_to_tab >expect <<-EOF &&
+		100644 $resolved 0Qconflict
 		EOF
 		test_cmp expect actual
 	)
