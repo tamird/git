@@ -355,6 +355,46 @@ test_expect_success LIBPCRE2 'ERE bracket classes preserve matches' '
 	test_cmp expect actual
 '
 
+test_expect_success LIBPCRE2 'ERE POSIX space classes preserve matches' '
+	test_when_finished "rm -f ere-space-lookahead" &&
+	cat >ere-space-lookahead <<-\EOF &&
+	-rrequirements.txt
+	  --constraint \
+	--extra-index-url=https://download.example
+	https://download.pytorch.org/whl
+	-r requirements.txt
+	--requirement=foo
+	--extra-index-url=https://example.org
+	https://downloadXpytorch.org/whl
+	--constraint
+	\
+	space plus
+	optional space
+	optionalspace
+	EOF
+	cat >expect <<-\EOF &&
+	ere-space-lookahead:1:-rrequirements.txt
+	ere-space-lookahead:2:  --constraint \
+	ere-space-lookahead:3:--extra-index-url=https://download.example
+	ere-space-lookahead:4:https://download.pytorch.org/whl
+	EOF
+	git grep --no-index -n -E \
+		"(^[[:space:]]*(-r|-c|--requirement|--constraint)([^[:space:]=]|[[:space:]]*\\\\[[:space:]]*$)|^--extra-index-url=.*download|download\\.pytorch\\.org)" \
+		-- ere-space-lookahead >actual &&
+	test_cmp expect actual &&
+	echo "ere-space-lookahead:11:space plus" >expect &&
+	git grep --no-index -n -E "space[[:space:]]+plus" \
+		-- ere-space-lookahead >actual &&
+	test_cmp expect actual &&
+	cat >expect <<-\EOF &&
+	ere-space-lookahead:12:optional space
+	ere-space-lookahead:13:optionalspace
+	EOF
+	git grep --no-index -n -E "optional[[:space:]]?space" \
+		-- ere-space-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success LIBPCRE2 'ERE word-boundary escapes preserve matches' '
 	test_when_finished "rm -f ere-boundary-lookahead" &&
 	cat >ere-boundary-lookahead <<-\EOF &&
