@@ -258,7 +258,7 @@ static bool maybe_changed_path(struct last_modified *lm,
 			       struct commit *origin,
 			       struct bitmap *active)
 {
-	struct bloom_filter *filter;
+	struct bloom_filter filter;
 	struct last_modified_entry *ent;
 	struct hashmap_iter iter;
 
@@ -268,15 +268,14 @@ static bool maybe_changed_path(struct last_modified *lm,
 	if (commit_graph_generation(origin) == GENERATION_NUMBER_INFINITY)
 		return true;
 
-	filter = get_bloom_filter(lm->rev.repo, origin);
-	if (!filter)
+	if (!get_bloom_filter(lm->rev.repo, origin, &filter))
 		return true;
 
 	hashmap_for_each_entry(&lm->paths, &iter, ent, hashent) {
 		if (active && !bitmap_get(active, ent->diff_idx))
 			continue;
 
-		if (bloom_filter_contains(filter, &ent->key,
+		if (bloom_filter_contains(&filter, &ent->key,
 					  lm->rev.bloom_filter_settings))
 			return true;
 	}

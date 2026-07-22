@@ -1273,19 +1273,17 @@ static int maybe_changed_path(struct repository *r,
 			      struct blame_bloom_data *bd)
 {
 	int i;
-	struct bloom_filter *filter;
+	struct bloom_filter filter;
 
 	if (!bd)
 		return 1;
 
-	filter = get_bloom_filter(r, commit);
-
-	if (!filter)
+	if (!get_bloom_filter(r, commit, &filter))
 		return 1;
 
 	bloom_count_queries++;
 	for (i = 0; i < bd->nr; i++) {
-		if (bloom_filter_contains(filter,
+		if (bloom_filter_contains(&filter,
 					  bd->keys[i],
 					  bd->settings))
 			return 1;

@@ -1021,7 +1021,7 @@ static int bloom_filter_check(struct rev_info *rev,
 			      struct commit *commit,
 			      struct line_log_data *range)
 {
-	struct bloom_filter *filter;
+	struct bloom_filter filter;
 	struct bloom_key key;
 	int result = 0;
 
@@ -1029,7 +1029,7 @@ static int bloom_filter_check(struct rev_info *rev,
 		return 1;
 
 	if (!rev->bloom_filter_settings ||
-	    !(filter = get_bloom_filter(rev->repo, commit)))
+	    !get_bloom_filter(rev->repo, commit, &filter))
 		return 1;
 
 	if (!range)
@@ -1039,7 +1039,8 @@ static int bloom_filter_check(struct rev_info *rev,
 		bloom_key_fill(&key, range->path, strlen(range->path),
 			       rev->bloom_filter_settings);
 
-		if (bloom_filter_contains(filter, &key, rev->bloom_filter_settings))
+		if (bloom_filter_contains(&filter, &key,
+					  rev->bloom_filter_settings))
 			result = 1;
 
 		bloom_key_clear(&key);
