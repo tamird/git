@@ -204,9 +204,9 @@ void merge_base_index(struct index_state *istate)
 	    cmp_cache_name_compare(&last_base, &first_new) < 0)
 		goto insert_entries;
 	/*
-	 * Normal split-index additions have unique, sorted names. Keep the
-	 * insertion path for entries that need full validation or same-name
-	 * stage handling.
+	 * Normal split-index additions are sorted by name and stage. Keep the
+	 * insertion path for entries that need full validation, have duplicate
+	 * name-and-stage entries, or are out of order.
 	 */
 	for (i = si->nr_replacements; i < si->saved_cache_nr; i++) {
 		struct cache_entry *new = si->saved_cache[i];
@@ -217,9 +217,8 @@ void merge_base_index(struct index_state *istate)
 			    i);
 		if (!verify_path(new->name, new->ce_mode) ||
 		    (i > si->nr_replacements &&
-		     (ce_same_name(si->saved_cache[i - 1], new) ||
-		      cmp_cache_name_compare(&si->saved_cache[i - 1],
-					     &new) >= 0)))
+		     cmp_cache_name_compare(&si->saved_cache[i - 1],
+					    &new) >= 0))
 			goto insert_entries;
 	}
 
@@ -231,9 +230,9 @@ void merge_base_index(struct index_state *istate)
 		struct cache_entry *new = si->saved_cache[new_pos];
 		int cmp;
 
-		if (ce_same_name(base, new))
-			goto insert_entries;
 		cmp = cmp_cache_name_compare(&base, &new);
+		if (!cmp || (!ce_stage(new) && ce_same_name(base, new)))
+			goto insert_entries;
 		if (cmp < 0)
 			base_pos++;
 		else
