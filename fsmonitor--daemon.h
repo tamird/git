@@ -34,6 +34,9 @@ void fsmonitor_batch__add_path(struct fsmonitor_batch *batch, const char *path);
 struct fsm_listen_data; /* opaque platform-specific data for listener thread */
 struct fsm_health_data; /* opaque platform-specific data for health thread */
 struct grep_index_ipc_server;
+#ifdef __APPLE__
+struct fsmonitor_daemon_coordinator;
+#endif
 
 struct fsmonitor_daemon_state {
 	pthread_t listener_thread;
@@ -64,7 +67,19 @@ struct fsmonitor_daemon_state {
 	struct strbuf path_grep_workers_ipc;
 	struct grep_index_ipc_server *grep_index_server;
 	pthread_mutex_t grep_index_mutex;
+#ifdef __APPLE__
+	struct fsmonitor_daemon_coordinator *coordinator;
+	char *gitdir;
+	pthread_mutex_t ready_lock;
+	pthread_cond_t ready_cond;
+	int listener_ready;
+	int listener_started;
+#endif
 };
+
+#ifdef __APPLE__
+int fsmonitor_listener_ready(struct fsmonitor_daemon_state *state, int error);
+#endif
 
 /*
  * Pathname classifications.

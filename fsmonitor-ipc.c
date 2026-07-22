@@ -1,6 +1,7 @@
 #define USE_THE_REPOSITORY_VARIABLE
 
 #include "git-compat-util.h"
+#include "abspath.h"
 #include "gettext.h"
 #include "simple-ipc.h"
 #include "fsmonitor-ipc.h"
@@ -50,6 +51,22 @@ int fsmonitor_ipc__is_supported(void)
 	return 1;
 }
 
+#ifdef __APPLE__
+static void fsmonitor_ipc__format_request(struct strbuf *request,
+					  const char *command,
+					  size_t command_len)
+{
+	char *gitdir = real_pathdup(repo_get_git_dir(the_repository), 1);
+
+	strbuf_addstr(request, "v1");
+	strbuf_addch(request, '\0');
+	strbuf_addstr(request, gitdir);
+	strbuf_addch(request, '\0');
+	strbuf_add(request, command, command_len);
+	free(gitdir);
+}
+#endif
+
 enum ipc_active_state fsmonitor_ipc__get_state(void)
 {
 	return ipc_get_active_state(fsmonitor_ipc__get_path(the_repository));
@@ -81,6 +98,11 @@ int fsmonitor_ipc__send_query(const char *since_token,
 		= IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	const char *tok = since_token ? since_token : "";
 	size_t tok_len = since_token ? strlen(since_token) : 0;
+#ifdef __APPLE__
+	struct strbuf request = STRBUF_INIT;
+
+	fsmonitor_ipc__format_request(&request, tok, tok_len);
+#endif
 
 	options.wait_if_busy = 1;
 	options.wait_if_not_found = 0;
@@ -95,8 +117,18 @@ try_again:
 	switch (state) {
 	case IPC_STATE__LISTENING:
 		ret = ipc_client_send_command_to_connection(
-			connection, tok, tok_len, answer);
+			connection,
+#ifdef __APPLE__
+			request.buf, request.len,
+#else
+			tok, tok_len,
+#endif
+			answer);
 		ipc_client_close_connection(connection);
+#ifdef __APPLE__
+		if (!ret && !memchr(answer->buf, '\0', answer->len))
+			ret = -1;
+#endif
 
 		trace2_data_intmax("fsm_client", NULL,
 				   "query/response-length", answer->len);
@@ -108,8 +140,18 @@ try_again:
 			goto done;
 
 		tried_to_spawn++;
-		if (spawn_daemon())
+		if (spawn_daemon()) {
+#ifdef __APPLE__
+			/*
+			 * Another worktree may have won the race to start the
+			 * repository-wide daemon.
+			 */
+			if (fsmonitor_ipc__get_state() != IPC_STATE__LISTENING)
+				goto done;
+#else
 			goto done;
+#endif
+		}
 
 		/*
 		 * Try again, but this time give the daemon a chance to
@@ -137,6 +179,9 @@ try_again:
 
 done:
 	trace2_region_leave("fsm_client", "query", NULL);
+#ifdef __APPLE__
+	strbuf_release(&request);
+#endif
 
 	return ret;
 }
@@ -151,6 +196,11 @@ int fsmonitor_ipc__send_command(const char *command,
 	enum ipc_active_state state;
 	const char *c = command ? command : "";
 	size_t c_len = command ? strlen(command) : 0;
+#ifdef __APPLE__
+	struct strbuf request = STRBUF_INIT;
+
+	fsmonitor_ipc__format_request(&request, c, c_len);
+#endif
 
 	strbuf_reset(answer);
 
@@ -160,13 +210,25 @@ int fsmonitor_ipc__send_command(const char *command,
 	state = ipc_client_try_connect(fsmonitor_ipc__get_path(the_repository),
 						&options, &connection);
 	if (state != IPC_STATE__LISTENING) {
+#ifdef __APPLE__
+		strbuf_release(&request);
+#endif
 		die(_("fsmonitor--daemon is not running"));
 		return -1;
 	}
 
-	ret = ipc_client_send_command_to_connection(connection, c, c_len,
-						    answer);
+	ret = ipc_client_send_command_to_connection(
+		connection,
+#ifdef __APPLE__
+		request.buf, request.len,
+#else
+		c, c_len,
+#endif
+		answer);
 	ipc_client_close_connection(connection);
+#ifdef __APPLE__
+	strbuf_release(&request);
+#endif
 
 	if (ret == -1) {
 		die(_("could not send '%s' command to fsmonitor--daemon"), c);

@@ -668,6 +668,50 @@ test_expect_success 'worktree with .git file' '
 	test_must_fail git -C wt-secondary fsmonitor--daemon status
 '
 
+test_expect_success MACOS 'worktrees share one daemon' '
+	test_when_finished "rm -rf shared-base shared-secondary" &&
+	test_when_finished \
+		"{ git -C shared-base fsmonitor--daemon stop 2>/dev/null || :; }" &&
+
+	git init shared-base &&
+	test_commit -C shared-base initial &&
+	start_daemon -C shared-base &&
+	git -C shared-base worktree add ../shared-secondary &&
+	test_must_fail git -C shared-secondary fsmonitor--daemon status &&
+
+	test-tool -C shared-base fsmonitor-client query --token 0 >base.0 &&
+	test-tool -C shared-secondary fsmonitor-client query --token 0 >secondary.0 &&
+	git -C shared-secondary fsmonitor--daemon status &&
+	nul_to_q <base.0 >base.q0 &&
+	nul_to_q <secondary.0 >secondary.q0 &&
+	base_token=$(sed "s/Q.*//" base.q0) &&
+	secondary_token=$(sed "s/Q.*//" secondary.q0) &&
+	test "$base_token" != "$secondary_token" &&
+	test "$(echo "$base_token" | cut -d. -f2)" = \
+		"$(echo "$secondary_token" | cut -d. -f2)" &&
+
+	>shared-base/base-only &&
+	>shared-secondary/secondary-only &&
+	test-tool -C shared-base fsmonitor-client query \
+		--token "$base_token" >base.1 &&
+	test-tool -C shared-secondary fsmonitor-client query \
+		--token "$secondary_token" >secondary.1 &&
+	nul_to_q <base.1 >base.q1 &&
+	nul_to_q <secondary.1 >secondary.q1 &&
+	test_grep base-only base.q1 &&
+	test_grep ! secondary-only base.q1 &&
+	test_grep secondary-only secondary.q1 &&
+	test_grep ! base-only secondary.q1 &&
+
+	git -C shared-secondary fsmonitor--daemon stop &&
+	test_must_fail git -C shared-base fsmonitor--daemon status &&
+	test_must_fail git -C shared-secondary fsmonitor--daemon status &&
+
+	start_daemon -C shared-secondary &&
+	test-tool -C shared-base fsmonitor-client query --token 0 >/dev/null &&
+	git -C shared-base fsmonitor--daemon status
+'
+
 # NEEDSWORK: Repeat one of the "edit" tests on wt-secondary and
 # confirm that we get the same events and behavior -- that is, that
 # fsmonitor--daemon correctly watches BOTH the working directory and

@@ -260,6 +260,18 @@ static int start_fsmonitor_daemon(void)
 {
 	ASSERT(have_fsmonitor_support());
 
+#ifdef __APPLE__
+	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING) {
+		struct strbuf answer = STRBUF_INIT;
+		int ret = fsmonitor_ipc__send_command("register", &answer);
+
+		if (!ret && strcmp(answer.buf, "registered") &&
+		    strcmp(answer.buf, "already"))
+			ret = error(_("failed to register worktree with fsmonitor"));
+		strbuf_release(&answer);
+		return ret;
+	}
+#endif
 	if (fsmonitor_ipc__get_state() != IPC_STATE__LISTENING)
 		return run_git("fsmonitor--daemon", "start", NULL);
 
