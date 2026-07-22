@@ -1653,24 +1653,33 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			}
 		}
 
-		if (pattern_type == GREP_PATTERN_TYPE_ERE) {
+		if (pattern_type == GREP_PATTERN_TYPE_ERE ||
+		    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+		     !opt->ignore_case &&
+		     p->patternlen > 4 &&
+		     !memcmp(p->pattern, "^\\s*(", 5))) {
 			size_t outer_start = 0;
 			size_t outer_end = p->patternlen;
+			size_t outer_body;
 
-			if (outer_start < outer_end &&
-			    p->pattern[outer_start] == '^')
-				outer_start++;
-			if (outer_start < outer_end &&
-			    p->pattern[outer_end - 1] == '$') {
-				size_t backslashes = 0;
+			if (pattern_type == GREP_PATTERN_TYPE_PCRE) {
+				outer_start = 4;
+			} else {
+				if (outer_start < outer_end &&
+				    p->pattern[outer_start] == '^')
+					outer_start++;
+				if (outer_start < outer_end &&
+				    p->pattern[outer_end - 1] == '$') {
+					size_t backslashes = 0;
 
-				for (size_t i = outer_end - 1;
-				     i > outer_start &&
-				     p->pattern[i - 1] == '\\';
-				     i--)
-					backslashes++;
-				if (!(backslashes & 1))
-					outer_end--;
+					for (size_t i = outer_end - 1;
+					     i > outer_start &&
+					     p->pattern[i - 1] == '\\';
+					     i--)
+						backslashes++;
+					if (!(backslashes & 1))
+						outer_end--;
+				}
 			}
 			if (outer_end > outer_start + 1 &&
 			    p->pattern[outer_start] == '(') {
@@ -1678,7 +1687,17 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				int depth = 1;
 				int valid = 1;
 
-				for (i = outer_start + 1; i < outer_end; i++) {
+				outer_body = outer_start + 1;
+				if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+				    outer_body < outer_end &&
+				    p->pattern[outer_body] == '?') {
+					if (outer_body + 1 == outer_end ||
+					    p->pattern[outer_body + 1] != ':')
+						valid = 0;
+					else
+						outer_body += 2;
+				}
+				for (i = outer_body; valid && i < outer_end; i++) {
 					unsigned char ch = p->pattern[i];
 
 					if (ch == '\\') {
@@ -1686,7 +1705,24 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							valid = 0;
 							break;
 						}
+						if (pattern_type ==
+							    GREP_PATTERN_TYPE_PCRE &&
+						    (p->pattern[i] == 'Q' ||
+						     p->pattern[i] == 'c')) {
+							valid = 0;
+							break;
+						}
 					} else if (ch == '[') {
+						if (pattern_type ==
+						    GREP_PATTERN_TYPE_PCRE) {
+							if (grep_index_pcre_class_end(
+								    p->pattern, i,
+								    outer_end, &i)) {
+								valid = 0;
+								break;
+							}
+							continue;
+						}
 						if (++i < outer_end &&
 						    p->pattern[i] == '^')
 							i++;
@@ -1737,7 +1773,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					}
 				}
 				if (valid && !depth && i + 1 == outer_end) {
-					scan_start = outer_start + 1;
+					scan_start = outer_body;
 					scan_end = i;
 				}
 			}

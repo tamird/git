@@ -109,6 +109,9 @@ test_expect_success 'setup' '
 	printf ab >fixed-pcre &&
 	echo "present needle" >present &&
 	echo "import sample_ext.vendor_internal" >agent-regex &&
+	printf "%s\n" "from engine_manager.foo" "import engine_manager" \
+		>wrapped-pcre &&
+	echo "from import ordinary contents" >wrapped-pcre-negative &&
 	echo "ordinary contents" >ordinary &&
 	echo "abc bcd cde def efg fgh gh(" >negative-required-ere &&
 	echo "abcdefgh(" >positive-required-ere &&
@@ -177,7 +180,8 @@ test_expect_success 'setup' '
 		return 1
 	done &&
 	echo "literal mixed candidate needle" >literal-candidate-z-40 &&
-	git add short fixed-pcre present agent-regex ordinary \
+	git add short fixed-pcre present agent-regex wrapped-pcre \
+		wrapped-pcre-negative ordinary \
 		negative-required-ere positive-required-ere negative-context-ere \
 		escaped-dot \
 		escaped-dot-ere escaped-dot-quantified non-ascii outer-from \
@@ -2836,6 +2840,40 @@ test_expect_success LIBPCRE2 'content index prunes simple PCRE groups' '
 	test_must_fail git grep --cached -P \
 		"absent\\s*=\\s*(?:optional\\.)?needle" -- short 2>err &&
 	test_must_be_empty err
+'
+
+test_expect_success LIBPCRE2 'content index unwraps whole PCRE group' '
+	pattern="^\\s*(from\\s+engine_manager(?:\\.|\\s)|import\\s+engine_manager(?:\\.|\\s|$))" &&
+	git grep --cached --no-content-index -P "$pattern" \
+		-- wrapped-pcre >expect &&
+	git grep --cached -P "$pattern" -- wrapped-pcre >actual &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :wrapped-pcre-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -P \
+		"^\\s*(from\\s+absent_manager(?:\\.|\\s)|import\\s+absent_manager(?:\\.|\\s|$))" \
+		-- wrapped-pcre-negative 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"^\\s*(?:from\\s+absent_manager(?:\\.|\\s)|import\\s+absent_manager(?:\\.|\\s|$))" \
+		-- wrapped-pcre-negative 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -i -P \
+		"^\\s*(from\\s+absent_manager(?:\\.|\\s)|import\\s+absent_manager(?:\\.|\\s|$))" \
+		-- wrapped-pcre-negative 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"^\\s*(?!absent_manager)" -- wrapped-pcre-negative 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"^\\s*((?i)absent_manager)" -- wrapped-pcre-negative 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
+		"^\\s*(from\\s+absent_manager(?:\\.|\\s)|import\\s+absent_manager(?:\\.|\\s|$))?" \
+		-- wrapped-pcre-negative 2>err &&
+	test_grep "unable to read" err
 '
 
 test_expect_success LIBPCRE2 'content index prunes PCRE boundaries' '
