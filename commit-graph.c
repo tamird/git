@@ -1989,7 +1989,8 @@ static int add_ref_to_set(const struct reference *ref, void *cb_data)
 
 	if (!reference_get_peeled_oid(data->repo, ref, &peeled))
 		maybe_peeled = &peeled;
-	if (odb_read_object_info(data->repo->objects, maybe_peeled, NULL) == OBJ_COMMIT)
+	if (!oidset_contains(data->commits, maybe_peeled) &&
+	    odb_read_object_info(data->repo->objects, maybe_peeled, NULL) == OBJ_COMMIT)
 		oidset_insert(data->commits, maybe_peeled);
 
 	display_progress(data->progress, oidset_size(data->commits));
