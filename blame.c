@@ -281,14 +281,10 @@ static struct commit *fake_working_tree_commit(struct repository *r,
 			   OBJ_BLOB, &origin->blob_oid);
 
 	/*
-	 * Read the current index, replace the path entry with
-	 * origin->blob_sha1 without mucking with its mode or type
-	 * bits; we are not going to write this index out -- we just
-	 * want to run "diff-index --cached".
+	 * Replace the path entry in the current index with origin->blob_oid
+	 * without mucking with its mode or type bits; we are not going to
+	 * write this index out -- we just want to run "diff-index --cached".
 	 */
-	discard_index(r->index);
-	repo_read_index(r);
-
 	len = strlen(path);
 	if (!mode) {
 		int pos = index_name_pos(r->index, path, len);
