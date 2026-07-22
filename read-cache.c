@@ -3304,9 +3304,9 @@ static int write_shared_index(struct index_state *istate,
 
 static const int default_max_percent_split_change = 20;
 
-static int too_many_not_shared_entries(struct index_state *istate)
+static int too_many_split_entries(struct index_state *istate)
 {
-	int i, not_shared = 0;
+	int i, split_entries = 0;
 	int max_split = repo_config_get_max_percent_split_change(the_repository);
 
 	switch (max_split) {
@@ -3322,14 +3322,14 @@ static int too_many_not_shared_entries(struct index_state *istate)
 		break; /* just use the configured value */
 	}
 
-	/* Count not shared entries */
+	/* Count entries written to the split index. */
 	for (i = 0; i < istate->cache_nr; i++) {
 		struct cache_entry *ce = istate->cache[i];
-		if (!ce->index)
-			not_shared++;
+		if (!ce->index || (ce->ce_flags & CE_UPDATE_IN_BASE))
+			split_entries++;
 	}
 
-	return (int64_t)istate->cache_nr * max_split < (int64_t)not_shared * 100;
+	return (int64_t)istate->cache_nr * max_split < (int64_t)split_entries * 100;
 }
 
 int write_locked_index(struct index_state *istate, struct lock_file *lock,
@@ -3371,7 +3371,7 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 				istate->cache_changed |= SPLIT_INDEX_ORDERED;
 		}
 	}
-	if (too_many_not_shared_entries(istate))
+	if (too_many_split_entries(istate))
 		istate->cache_changed |= SPLIT_INDEX_ORDERED;
 
 	new_shared_index = istate->cache_changed & SPLIT_INDEX_ORDERED;
