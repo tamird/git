@@ -376,6 +376,11 @@ struct ipc_server_data {
 	int queue_size;
 	int back_pos;
 	int front_pos;
+	int nr_queued_connections;
+
+	int max_worker_threads;
+	int nr_worker_threads;
+	int nr_active_workers;
 
 	int started;
 	int shutdown_requested;
@@ -395,6 +400,8 @@ static int fifo_dequeue(struct ipc_server_data *server_data)
 
 	if (server_data->back_pos == server_data->front_pos)
 		return -1;
+	if (!server_data->nr_queued_connections)
+		BUG("non-empty IPC queue has no queued connections");
 
 	fd = server_data->fifo_fds[server_data->front_pos];
 	server_data->fifo_fds[server_data->front_pos] = -1;
@@ -402,6 +409,7 @@ static int fifo_dequeue(struct ipc_server_data *server_data)
 	server_data->front_pos++;
 	if (server_data->front_pos == server_data->queue_size)
 		server_data->front_pos = 0;
+	server_data->nr_queued_connections--;
 
 	return fd;
 }
@@ -429,6 +437,7 @@ static int fifo_enqueue(struct ipc_server_data *server_data, int fd)
 
 	server_data->fifo_fds[server_data->back_pos] = fd;
 	server_data->back_pos = next_back_pos;
+	server_data->nr_queued_connections++;
 
 	return fd;
 }
@@ -452,8 +461,10 @@ static int worker_thread__wait_for_connection(
 			break;
 
 		fd = fifo_dequeue(server_data);
-		if (fd >= 0)
+		if (fd >= 0) {
+			server_data->nr_active_workers++;
 			break;
+		}
 
 		pthread_cond_wait(&server_data->work_available_cond,
 				  &server_data->work_available_mutex);
@@ -461,6 +472,18 @@ static int worker_thread__wait_for_connection(
 	pthread_mutex_unlock(&server_data->work_available_mutex);
 
 	return fd;
+}
+
+static void worker_thread__release_connection(
+	struct ipc_worker_thread_data *worker_thread_data)
+{
+	struct ipc_server_data *server_data = worker_thread_data->server_data;
+
+	pthread_mutex_lock(&server_data->work_available_mutex);
+	if (!server_data->nr_active_workers)
+		BUG("IPC worker released an inactive connection");
+	server_data->nr_active_workers--;
+	pthread_mutex_unlock(&server_data->work_available_mutex);
 }
 
 /*
@@ -657,10 +680,13 @@ static void *worker_thread_proc(void *_worker_thread_data)
 			break; /* in shutdown */
 
 		io = worker_thread__wait_for_io_start(worker_thread_data, fd);
-		if (io == -1)
+		if (io == -1) {
+			worker_thread__release_connection(worker_thread_data);
 			continue; /* client hung up without sending anything */
+		}
 
 		ret = worker_thread__do_io(worker_thread_data, fd);
+		worker_thread__release_connection(worker_thread_data);
 
 		if (ret == SIMPLE_IPC_QUIT) {
 			trace2_data_string("ipc-worker", NULL, "queue_stop_async",
@@ -763,6 +789,29 @@ static int accept_thread__wait_for_connection(
 }
 
 /*
+ * Start another worker while holding work_available_mutex. The accept thread
+ * is the only caller after initialization, so it also remains the only thread
+ * that mutates worker_thread_list while the server is running.
+ */
+static int create_worker_thread(struct ipc_server_data *server_data)
+{
+	struct ipc_worker_thread_data *wtd = xcalloc(1, sizeof(*wtd));
+
+	wtd->magic = MAGIC_WORKER_THREAD_DATA;
+	wtd->server_data = server_data;
+
+	if (pthread_create(&wtd->pthread_id, NULL, worker_thread_proc, wtd)) {
+		free(wtd);
+		return -1;
+	}
+
+	wtd->next_thread = server_data->worker_thread_list;
+	server_data->worker_thread_list = wtd;
+	server_data->nr_worker_threads++;
+	return 0;
+}
+
+/*
  * Thread proc for the IPC server "accept thread".  This waits for
  * an incoming socket connection, appends it to the queue of available
  * connections, and notifies a worker thread to process it.
@@ -797,8 +846,15 @@ static void *accept_thread_proc(void *_accept_thread_data)
 		if (client_fd < 0) {
 			/* ignore transient accept() errors */
 		}
-		else {
-			fifo_enqueue(server_data, client_fd);
+		else if (fifo_enqueue(server_data, client_fd) >= 0) {
+			if (server_data->nr_active_workers +
+				    server_data->nr_queued_connections >
+			    server_data->nr_worker_threads &&
+			    server_data->nr_worker_threads <
+				    server_data->max_worker_threads &&
+			    create_worker_thread(server_data))
+				server_data->max_worker_threads =
+					server_data->nr_worker_threads;
 			pthread_cond_broadcast(&server_data->work_available_cond);
 		}
 		pthread_mutex_unlock(&server_data->work_available_mutex);
@@ -817,8 +873,8 @@ static void *accept_thread_proc(void *_accept_thread_data)
  * connection is better than having the client timeout and do the full
  * computation itself.)
  *
- * The FIFO queue size is set to a multiple of the worker pool size.
- * This value chosen at random.
+ * The FIFO queue size is set to a multiple of the configured maximum
+ * worker pool size. This value chosen at random.
  */
 #define FIFO_SCALE (100)
 
@@ -890,7 +946,6 @@ int ipc_server_init_async(struct ipc_server_data **returned_server_data,
 	struct unix_ss_socket *server_socket = NULL;
 	struct ipc_server_data *server_data;
 	int sv[2];
-	int k;
 	int ret;
 	int nr_threads = opts->nr_threads;
 
@@ -932,6 +987,7 @@ int ipc_server_init_async(struct ipc_server_data **returned_server_data,
 
 	if (nr_threads < 1)
 		nr_threads = 1;
+	server_data->max_worker_threads = nr_threads;
 
 	pthread_mutex_init(&server_data->work_available_mutex, NULL);
 	pthread_cond_init(&server_data->work_available_cond, NULL);
@@ -957,27 +1013,8 @@ int ipc_server_init_async(struct ipc_server_data **returned_server_data,
 			   accept_thread_proc, server_data->accept_thread))
 		die_errno(_("could not start accept_thread '%s'"), path);
 
-	for (k = 0; k < nr_threads; k++) {
-		struct ipc_worker_thread_data *wtd;
-
-		wtd = xcalloc(1, sizeof(*wtd));
-		wtd->magic = MAGIC_WORKER_THREAD_DATA;
-		wtd->server_data = server_data;
-
-		if (pthread_create(&wtd->pthread_id, NULL, worker_thread_proc,
-				   wtd)) {
-			if (k == 0)
-				die(_("could not start worker[0] for '%s'"),
-				    path);
-			/*
-			 * Limp along with the thread pool that we have.
-			 */
-			break;
-		}
-
-		wtd->next_thread = server_data->worker_thread_list;
-		server_data->worker_thread_list = wtd;
-	}
+	if (create_worker_thread(server_data))
+		die(_("could not start worker[0] for '%s'"), path);
 
 	*returned_server_data = server_data;
 	return 0;
