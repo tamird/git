@@ -292,10 +292,16 @@ test_expect_success '--simplify-by-decoration keeps --follow side history' '
 test_expect_success '--follow Bloom skips preserve max-count' '
 	setup "--max-count=1 --follow -- file5_renamed" &&
 	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
-	test "$(bloom_stat commits_elided)" = 0 &&
+	test "$(bloom_stat commits_elided)" -gt 0 &&
 	test_cmp log_wo_bloom log_w_bloom &&
 	printf rename >expect &&
 	test_cmp expect log_w_bloom
+'
+
+test_expect_success '--follow Bloom skips preserve oldest max-count' '
+	setup "--max-count-oldest=1 --follow -- file5_renamed" &&
+	test "$(bloom_stat commits_elided)" = 0 &&
+	test_cmp log_wo_bloom log_w_bloom
 '
 
 test_expect_success '--follow Bloom skips preserve skip-count' '
