@@ -37,7 +37,8 @@ run::
 
 stop::
 	Stops the daemon running in the current working
-	directory, if present.
+	directory, if present. On macOS, this also stops monitoring
+	the repository's other linked worktrees.
 
 status::
 	Exits with zero status if a daemon is watching the
@@ -46,11 +47,14 @@ status::
 REMARKS
 -------
 
-This daemon is a long running process used to watch a single working
+This daemon is a long running process used to watch a working
 directory and maintain a list of the recently changed files and
 directories.  Performance of commands such as `git status` can be
 increased if they just ask for a summary of changes to the working
 directory and can avoid scanning the disk.
+
+On macOS, linked worktrees in the same repository share one daemon,
+which maintains a separate list of changes for each working directory.
 
 When `core.fsmonitor` is set to `true` (see linkgit:git-config[1])
 commands, such as `git status`, will ask the daemon for changes and
@@ -83,9 +87,10 @@ but not on network-mounted filesystems, NTFS, or FAT32.  Other filesystems
 may or may not have the needed support; the fsmonitor daemon is not guaranteed
 to work with these filesystems and such use is considered experimental.
 
-By default, the socket is created in the `.git` directory.  If that directory
-is on a network-mounted filesystem or its socket path exceeds the platform's
-Unix-domain socket limit, the socket is instead created at
+By default, the socket is created in the `.git` directory.  On macOS,
+linked worktrees share a socket in their common `.git` directory.  If
+that directory is on a network-mounted filesystem or its socket path
+exceeds the platform's Unix-domain socket limit, the socket is instead created at
 `$HOME/.git-fsmonitor-*` unless `$HOME` itself is on a network-mounted
 filesystem.  In that case, set `fsmonitor.socketDir` to a directory on a
 native filesystem.

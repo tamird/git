@@ -22,6 +22,9 @@
 #include "run-command.h"
 #include "trace.h"
 #include "trace2.h"
+#ifdef __APPLE__
+#include "worktree.h"
+#endif
 
 static const char * const builtin_fsmonitor__daemon_usage[] = {
 	N_("git fsmonitor--daemon start [<options>]"),
@@ -43,6 +46,24 @@ static int fsmonitor__start_timeout_sec = 60;
 
 #define FSMONITOR__ANNOUNCE_STARTUP "fsmonitor.announcestartup"
 static int fsmonitor__announce_startup = 0;
+
+#ifdef __APPLE__
+struct fsmonitor_daemon_coordinator {
+	pthread_mutex_t states_lock;
+	struct strmap states;
+	struct fsmonitor_daemon_state *owner;
+	struct ipc_server_data *ipc_server_data;
+	char *common_dir;
+	char *main_worktree;
+};
+
+static pthread_mutex_t fsmonitor_token_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t fsmonitor_intern_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static struct fsmonitor_daemon_state *fsmonitor_get_state(
+	struct fsmonitor_daemon_coordinator *coordinator,
+	const char *gitdir, int create, int *created);
+#endif
 
 static int fsmonitor_config(const char *var, const char *value,
 			    const struct config_context *ctx, void *cb)
@@ -118,14 +139,28 @@ static int do_as_client__send_stop(void)
 static int do_as_client__status(void)
 {
 	enum ipc_active_state state = fsmonitor_ipc__get_state();
+#ifdef __APPLE__
+	struct strbuf answer = STRBUF_INIT;
+#endif
 
 	switch (state) {
 	case IPC_STATE__LISTENING:
+#ifdef __APPLE__
+		if (fsmonitor_ipc__send_command("status", &answer) ||
+		    strcmp(answer.buf, "ok")) {
+			strbuf_release(&answer);
+			goto not_watching;
+		}
+		strbuf_release(&answer);
+#endif
 		printf(_("fsmonitor-daemon is watching '%s'\n"),
 		       the_repository->worktree);
 		return 0;
 
 	default:
+#ifdef __APPLE__
+not_watching:
+#endif
 		printf(_("fsmonitor-daemon is not watching '%s'\n"),
 		       the_repository->worktree);
 		return 1;
@@ -390,6 +425,9 @@ static struct fsmonitor_token_data *fsmonitor_new_token_data(void)
 	struct fsmonitor_token_data *token;
 	struct fsmonitor_batch *batch;
 
+#ifdef __APPLE__
+	pthread_mutex_lock(&fsmonitor_token_lock);
+#endif
 	CALLOC_ARRAY(token, 1);
 	batch = fsmonitor_batch__new();
 
@@ -450,6 +488,9 @@ static struct fsmonitor_token_data *fsmonitor_new_token_data(void)
 	 */
 	if (test_env_value)
 		batch->pinned_time = time(NULL);
+#ifdef __APPLE__
+	pthread_mutex_unlock(&fsmonitor_token_lock);
+#endif
 
 	return token;
 }
@@ -483,7 +524,15 @@ void fsmonitor_batch__free_list(struct fsmonitor_batch *batch)
 void fsmonitor_batch__add_path(struct fsmonitor_batch *batch,
 			       const char *path)
 {
-	const char *interned_path = strintern(path);
+	const char *interned_path;
+
+#ifdef __APPLE__
+	pthread_mutex_lock(&fsmonitor_intern_lock);
+#endif
+	interned_path = strintern(path);
+#ifdef __APPLE__
+	pthread_mutex_unlock(&fsmonitor_intern_lock);
+#endif
 
 	trace_printf_key(&trace_fsmonitor, "event: %s", interned_path);
 
@@ -680,6 +729,9 @@ static void fsmonitor_start_grep_index_server(
 	struct fsmonitor_daemon_state *state)
 {
 	pthread_mutex_lock(&state->grep_index_mutex);
+#ifdef __APPLE__
+	pthread_mutex_lock(&fsmonitor_intern_lock);
+#endif
 	if (!state->grep_index_server &&
 	    !grep_index_ipc_server_init(
 		    &state->grep_index_server,
@@ -688,6 +740,9 @@ static void fsmonitor_start_grep_index_server(
 		    state->path_grep_workers_ipc.buf,
 		    fsmonitor__ipc_threads))
 		grep_index_ipc_server_start(state->grep_index_server);
+#ifdef __APPLE__
+	pthread_mutex_unlock(&fsmonitor_intern_lock);
+#endif
 	pthread_mutex_unlock(&state->grep_index_mutex);
 }
 
@@ -711,6 +766,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	int do_trivial = 0;
 	int do_flush = 0;
 	int do_cookie = 0;
+	int result = 0;
 	enum fsmonitor_cookie_item_result cookie_result;
 
 	/*
@@ -783,8 +839,15 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 
 	pthread_mutex_lock(&state->main_lock);
 
-	if (!state->current_token_data)
+	if (!state->current_token_data) {
+#ifdef __APPLE__
+		pthread_mutex_unlock(&state->main_lock);
+		result = reply(reply_data, "missing", 7);
+		goto cleanup;
+#else
 		BUG("fsmonitor state does not have a current token");
+#endif
+	}
 
 	/*
 	 * Write a cookie file inside the directory being watched in
@@ -993,19 +1056,88 @@ cleanup:
 	strbuf_release(&requested_token_id);
 	strbuf_release(&payload);
 
-	return 0;
+	return result;
 }
 
 static ipc_server_application_cb handle_client;
+
+#ifdef __APPLE__
+static int parse_shared_request(const char *request, size_t request_len,
+				char **gitdir, char **command)
+{
+	const char *first, *second;
+
+	first = memchr(request, '\0', request_len);
+	if (!first || first - request != 2 || memcmp(request, "v1", 2))
+		return -1;
+	second = memchr(first + 1, '\0',
+			request_len - (first + 1 - request));
+	if (!second || second == first + 1 ||
+	    memchr(second + 1, '\0', request_len - (second + 1 - request)))
+		return -1;
+
+	*gitdir = xmemdupz(first + 1, second - first - 1);
+	*command = xmemdupz(second + 1,
+			    request_len - (second + 1 - request));
+	return 0;
+}
+#endif
 
 static int handle_client(void *data,
 			 const char *command, size_t command_len,
 			 ipc_server_reply_cb *reply,
 			 struct ipc_server_reply_data *reply_data)
 {
+#ifdef __APPLE__
+	struct fsmonitor_daemon_coordinator *coordinator = data;
+	struct fsmonitor_daemon_state *state;
+	char *gitdir = NULL, *framed_command = NULL;
+	int created = 0;
+#else
 	struct fsmonitor_daemon_state *state = data;
+#endif
 	int result;
 
+#ifdef __APPLE__
+	if (command_len == 16 &&
+	    !memcmp(command, "start-grep-index", command_len)) {
+		state = coordinator->owner;
+	} else {
+		if (parse_shared_request(command, command_len, &gitdir,
+					 &framed_command))
+			return error(_("invalid fsmonitor IPC request"));
+		command = framed_command;
+
+		if (!strcmp(command, "quit")) {
+			state = coordinator->owner;
+		} else {
+			state = fsmonitor_get_state(coordinator, gitdir,
+						    strcmp(command, "status"),
+						    &created);
+			if (!state) {
+				result = reply(reply_data, "missing", 7);
+				goto done;
+			}
+			pthread_mutex_lock(&state->ready_lock);
+			if (state->listener_ready < 0) {
+				pthread_mutex_unlock(&state->ready_lock);
+				result = reply(reply_data, "missing", 7);
+				goto done;
+			}
+			pthread_mutex_unlock(&state->ready_lock);
+			if (!strcmp(command, "status")) {
+				result = reply(reply_data, "ok", 2);
+				goto done;
+			}
+			if (!strcmp(command, "register")) {
+				result = reply(reply_data,
+					       created ? "registered" : "already",
+					       created ? 10 : 7);
+				goto done;
+			}
+		}
+	}
+#else
 	/*
 	 * The Simple IPC API now supports {char*, len} arguments, but
 	 * FSMonitor always uses proper null-terminated strings, so
@@ -1013,6 +1145,7 @@ static int handle_client(void *data,
 	 */
 	if (command_len != strlen(command))
 		BUG("FSMonitor assumes text messages");
+#endif
 
 	trace_printf_key(&trace_fsmonitor, "requested token: %s", command);
 
@@ -1023,6 +1156,11 @@ static int handle_client(void *data,
 
 	trace2_region_leave("fsmonitor", "handle_client", the_repository);
 
+#ifdef __APPLE__
+done:
+	free(gitdir);
+	free(framed_command);
+#endif
 	return result;
 }
 
@@ -1224,6 +1362,192 @@ static void *fsm_listen__thread_proc(void *_state)
 	return NULL;
 }
 
+#ifdef __APPLE__
+int fsmonitor_listener_ready(struct fsmonitor_daemon_state *state, int error)
+{
+	pthread_mutex_lock(&state->ready_lock);
+	state->listener_ready = error ? -1 : 1;
+	pthread_cond_broadcast(&state->ready_cond);
+	pthread_mutex_unlock(&state->ready_lock);
+
+	if (!error) {
+		pthread_mutex_lock(&state->coordinator->states_lock);
+		ipc_server_start_async(state->ipc_server_data);
+		pthread_mutex_unlock(&state->coordinator->states_lock);
+	}
+
+	return error && state == state->coordinator->owner;
+}
+
+static int fsmonitor_state_init(
+	struct fsmonitor_daemon_state *state,
+	struct fsmonitor_daemon_coordinator *coordinator,
+	const char *worktree, const char *gitdir)
+{
+	memset(state, 0, sizeof(*state));
+	state->coordinator = coordinator;
+	state->gitdir = xstrdup(gitdir);
+	state->ipc_server_data = coordinator->ipc_server_data;
+	hashmap_init(&state->cookies, cookies_cmp, NULL, 0);
+	pthread_mutex_init(&state->main_lock, NULL);
+	pthread_mutex_init(&state->ready_lock, NULL);
+	pthread_cond_init(&state->cookies_cond, NULL);
+	pthread_cond_init(&state->ready_cond, NULL);
+	state->current_token_data = fsmonitor_new_token_data();
+
+	strbuf_init(&state->path_worktree_watch, 0);
+	strbuf_addstr(&state->path_worktree_watch, worktree);
+	state->nr_paths_watching = 1;
+	strbuf_init(&state->alias.alias, 0);
+	strbuf_init(&state->alias.points_to, 0);
+	if (fsmonitor__get_alias(state->path_worktree_watch.buf,
+				 &state->alias))
+		return -1;
+
+	strbuf_init(&state->path_gitdir_watch, 0);
+	strbuf_addf(&state->path_gitdir_watch, "%s/.git", worktree);
+	if (!is_directory(state->path_gitdir_watch.buf)) {
+		strbuf_reset(&state->path_gitdir_watch);
+		strbuf_addstr(&state->path_gitdir_watch, gitdir);
+		state->nr_paths_watching = 2;
+	}
+
+	strbuf_init(&state->path_cookie_prefix, 0);
+	strbuf_addbuf(&state->path_cookie_prefix, &state->path_gitdir_watch);
+	strbuf_addch(&state->path_cookie_prefix, '/');
+	strbuf_addstr(&state->path_cookie_prefix, FSMONITOR_DIR);
+	mkdir(state->path_cookie_prefix.buf, 0777);
+	strbuf_addch(&state->path_cookie_prefix, '/');
+	strbuf_addstr(&state->path_cookie_prefix, FSMONITOR_COOKIE_DIR);
+	mkdir(state->path_cookie_prefix.buf, 0777);
+	strbuf_addch(&state->path_cookie_prefix, '/');
+
+	if (fsm_listen__ctor(state))
+		return -1;
+	return 0;
+}
+
+static void fsmonitor_state_release(struct fsmonitor_daemon_state *state)
+{
+	struct hashmap_iter iter;
+	struct fsmonitor_cookie_item *cookie;
+
+	fsmonitor_free_token_data(state->current_token_data);
+	hashmap_for_each_entry(&state->cookies, &iter, cookie, entry)
+		free(cookie->name);
+	hashmap_clear_and_free(&state->cookies,
+			       struct fsmonitor_cookie_item, entry);
+	fsm_listen__dtor(state);
+	pthread_cond_destroy(&state->ready_cond);
+	pthread_cond_destroy(&state->cookies_cond);
+	pthread_mutex_destroy(&state->ready_lock);
+	pthread_mutex_destroy(&state->main_lock);
+	strbuf_release(&state->path_worktree_watch);
+	strbuf_release(&state->path_gitdir_watch);
+	strbuf_release(&state->path_cookie_prefix);
+	strbuf_release(&state->alias.alias);
+	strbuf_release(&state->alias.points_to);
+	free(state->gitdir);
+}
+
+static int fsmonitor_state_wait_ready(struct fsmonitor_daemon_state *state)
+{
+	int ready;
+
+	pthread_mutex_lock(&state->ready_lock);
+	while (!state->listener_ready)
+		pthread_cond_wait(&state->ready_cond, &state->ready_lock);
+	ready = state->listener_ready;
+	pthread_mutex_unlock(&state->ready_lock);
+	return ready < 0 ? -1 : 0;
+}
+
+static int fsmonitor_state_start(struct fsmonitor_daemon_state *state)
+{
+	if (pthread_create(&state->listener_thread, NULL,
+			   fsm_listen__thread_proc, state))
+		return error(_("could not start fsmonitor listener thread"));
+	state->listener_started = 1;
+	if (fsmonitor_state_wait_ready(state)) {
+		pthread_join(state->listener_thread, NULL);
+		state->listener_started = 0;
+		return -1;
+	}
+	return 0;
+}
+
+static char *fsmonitor_worktree_path(
+	struct fsmonitor_daemon_coordinator *coordinator,
+	const char *gitdir)
+{
+	struct strbuf admin = STRBUF_INIT;
+	struct strbuf worktree = STRBUF_INIT;
+	const char *id;
+	char *path = NULL;
+
+	if (!fspathcmp(gitdir, coordinator->common_dir)) {
+		if (coordinator->main_worktree)
+			strbuf_addstr(&worktree, coordinator->main_worktree);
+		goto done;
+	}
+
+	strbuf_addf(&admin, "%s/worktrees/", coordinator->common_dir);
+	if (!skip_prefix(gitdir, admin.buf, &id) ||
+	    !*id || strchr(id, '/'))
+		goto done;
+
+	strbuf_reset(&admin);
+	strbuf_addf(&admin, "%s/gitdir", gitdir);
+	if (strbuf_read_file(&worktree, admin.buf, 0) <= 0)
+		goto done;
+	strbuf_rtrim(&worktree);
+	if (!is_absolute_path(worktree.buf)) {
+		strbuf_strip_suffix(&admin, "gitdir");
+		strbuf_insertstr(&worktree, 0, admin.buf);
+	}
+	strbuf_realpath_forgiving(&worktree, worktree.buf, 0);
+	strbuf_strip_suffix(&worktree, "/.git");
+
+done:
+	if (is_directory(worktree.buf))
+		path = strbuf_detach(&worktree, NULL);
+	strbuf_release(&admin);
+	strbuf_release(&worktree);
+	return path;
+}
+
+static struct fsmonitor_daemon_state *fsmonitor_get_state(
+	struct fsmonitor_daemon_coordinator *coordinator,
+	const char *gitdir, int create, int *created)
+{
+	struct fsmonitor_daemon_state *state;
+
+	*created = 0;
+	pthread_mutex_lock(&coordinator->states_lock);
+	state = strmap_get(&coordinator->states, gitdir);
+	if (!state && create) {
+		char *worktree = fsmonitor_worktree_path(coordinator, gitdir);
+
+		if (worktree) {
+			CALLOC_ARRAY(state, 1);
+			if (fsmonitor_state_init(state, coordinator, worktree,
+						 gitdir) ||
+			    fsmonitor_state_start(state)) {
+				fsmonitor_state_release(state);
+				FREE_AND_NULL(state);
+			} else {
+				strmap_put(&coordinator->states, gitdir, state);
+				*created = 1;
+			}
+			free(worktree);
+		}
+	}
+	pthread_mutex_unlock(&coordinator->states_lock);
+
+	return state;
+}
+#endif
+
 static int fsmonitor_run_daemon_1(struct fsmonitor_daemon_state *state)
 {
 	struct ipc_server_opts ipc_opts = {
@@ -1248,10 +1572,19 @@ static int fsmonitor_run_daemon_1(struct fsmonitor_daemon_state *state)
 	 */
 	if (ipc_server_init_async(&state->ipc_server_data,
 				  state->path_ipc.buf, &ipc_opts,
-				  handle_client, state))
+				  handle_client,
+#ifdef __APPLE__
+				  state->coordinator
+#else
+				  state
+#endif
+				  ))
 		return error_errno(
 			_("could not start IPC thread pool on '%s'"),
 			state->path_ipc.buf);
+#ifdef __APPLE__
+	state->coordinator->ipc_server_data = state->ipc_server_data;
+#endif
 
 	/*
 	 * Start the fsmonitor listener thread to collect filesystem
@@ -1287,6 +1620,26 @@ cleanup:
 	 * request, from filesystem activity, or an error).
 	 */
 	ipc_server_await(state->ipc_server_data);
+#ifdef __APPLE__
+	{
+		struct hashmap_iter iter;
+		struct strmap_entry *entry;
+
+		strmap_for_each_entry(&state->coordinator->states, &iter,
+				      entry) {
+			struct fsmonitor_daemon_state *other = entry->value;
+
+			if (other == state)
+				continue;
+			if (other->listener_started) {
+				fsm_listen__stop_async(other);
+				pthread_join(other->listener_thread, NULL);
+			}
+			fsmonitor_state_release(other);
+			free(other);
+		}
+	}
+#endif
 	if (state->grep_index_server) {
 		grep_index_ipc_server_stop(state->grep_index_server);
 		grep_index_ipc_server_await(state->grep_index_server);
@@ -1321,11 +1674,64 @@ cleanup:
 static int fsmonitor_run_daemon(void)
 {
 	struct fsmonitor_daemon_state state;
+#ifdef __APPLE__
+	struct fsmonitor_daemon_coordinator coordinator;
+	struct worktree **worktrees;
+	char *configured_worktree = NULL;
+#endif
 	const char *home;
 	int err;
 
 	memset(&state, 0, sizeof(state));
 
+#ifdef __APPLE__
+	memset(&coordinator, 0, sizeof(coordinator));
+	pthread_mutex_init(&coordinator.states_lock, NULL);
+	strmap_init(&coordinator.states);
+	coordinator.owner = &state;
+	coordinator.common_dir =
+		real_pathdup(repo_get_common_dir(the_repository), 1);
+	if (the_repository->repository_format_worktree_config) {
+		struct config_set cs;
+		const char *value;
+		char *config_worktree =
+			xstrfmt("%s/config.worktree", coordinator.common_dir);
+
+		git_configset_init(&cs);
+		git_configset_add_file(&cs, config_worktree);
+		if (!git_configset_get_value(&cs, "core.worktree",
+					     &value, NULL))
+			configured_worktree = xstrdup(value);
+		git_configset_clear(&cs);
+		free(config_worktree);
+	}
+	if (!configured_worktree) {
+		const char *value;
+
+		if (!repo_config_get_string_tmp(the_repository, "core.worktree",
+						&value))
+			configured_worktree = xstrdup(value);
+	}
+	if (configured_worktree) {
+		struct strbuf path = STRBUF_INIT;
+
+		if (!is_absolute_path(configured_worktree))
+			strbuf_addf(&path, "%s/", coordinator.common_dir);
+		strbuf_addstr(&path, configured_worktree);
+		coordinator.main_worktree = real_pathdup(path.buf, 0);
+		strbuf_release(&path);
+	} else {
+		worktrees = get_worktrees_without_reading_head();
+		coordinator.main_worktree =
+			real_pathdup(worktrees[0]->path, 0);
+		free_worktrees(worktrees);
+	}
+	free(configured_worktree);
+	state.coordinator = &coordinator;
+	state.gitdir = real_pathdup(repo_get_git_dir(the_repository), 1);
+	pthread_mutex_init(&state.ready_lock, NULL);
+	pthread_cond_init(&state.ready_cond, NULL);
+#endif
 	hashmap_init(&state.cookies, cookies_cmp, NULL, 0);
 	pthread_mutex_init(&state.main_lock, NULL);
 	pthread_mutex_init(&state.grep_index_mutex, NULL);
@@ -1333,6 +1739,9 @@ static int fsmonitor_run_daemon(void)
 	state.listen_error_code = 0;
 	state.health_error_code = 0;
 	state.current_token_data = fsmonitor_new_token_data();
+#ifdef __APPLE__
+	strmap_put(&coordinator.states, state.gitdir, &state);
+#endif
 
 	/* Prepare to (recursively) watch the <worktree-root> directory. */
 	strbuf_init(&state.path_worktree_watch, 0);
@@ -1466,6 +1875,10 @@ done:
 	fsmonitor_free_token_data(state.current_token_data);
 	state.current_token_data = NULL;
 	pthread_cond_destroy(&state.cookies_cond);
+#ifdef __APPLE__
+	pthread_cond_destroy(&state.ready_cond);
+	pthread_mutex_destroy(&state.ready_lock);
+#endif
 	pthread_mutex_destroy(&state.grep_index_mutex);
 	pthread_mutex_destroy(&state.main_lock);
 	{
@@ -1491,6 +1904,13 @@ done:
 	strbuf_release(&state.path_grep_workers_ipc);
 	strbuf_release(&state.alias.alias);
 	strbuf_release(&state.alias.points_to);
+#ifdef __APPLE__
+	free(state.gitdir);
+	strmap_clear(&coordinator.states, 0);
+	pthread_mutex_destroy(&coordinator.states_lock);
+	free(coordinator.common_dir);
+	free(coordinator.main_worktree);
+#endif
 
 	return err;
 }
@@ -1572,9 +1992,20 @@ static int try_to_start_background_daemon(void)
 	 * of creating the background process (and not whether it
 	 * immediately exited).
 	 */
-	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING)
+	if (fsmonitor_ipc__get_state() == IPC_STATE__LISTENING) {
+#ifdef __APPLE__
+		struct strbuf answer = STRBUF_INIT;
+
+		if (!fsmonitor_ipc__send_command("register", &answer) &&
+		    !strcmp(answer.buf, "registered")) {
+			strbuf_release(&answer);
+			return 0;
+		}
+		strbuf_release(&answer);
+#endif
 		die(_("fsmonitor--daemon is already running '%s'"),
 		    the_repository->worktree);
+	}
 
 	if (fsmonitor__announce_startup) {
 		fprintf(stderr, _("starting fsmonitor-daemon in '%s'\n"),
@@ -1599,6 +2030,19 @@ static int try_to_start_background_daemon(void)
 
 	switch (sbgr) {
 	case SBGR_READY:
+#ifdef __APPLE__
+		{
+			struct strbuf answer = STRBUF_INIT;
+
+			if (fsmonitor_ipc__send_command("register", &answer) ||
+			    (strcmp(answer.buf, "registered") &&
+			     strcmp(answer.buf, "already"))) {
+				strbuf_release(&answer);
+				return error(_("daemon did not register worktree"));
+			}
+			strbuf_release(&answer);
+		}
+#endif
 		return 0;
 
 	default:
