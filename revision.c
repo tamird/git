@@ -4574,6 +4574,9 @@ enum commit_action get_commit_action(struct rev_info *revs, struct commit *commi
 		    ((revs->max_parents >= 0) && (n > revs->max_parents)))
 			return commit_ignore;
 	}
+	if (revs->prune && revs->dense &&
+	    (commit->object.flags & TREESAME) && !want_ancestry(revs))
+		return commit_ignore;
 	if (!commit_match(commit, revs))
 		return commit_ignore;
 	if (revs->prune && revs->dense) {
@@ -4581,9 +4584,6 @@ enum commit_action get_commit_action(struct rev_info *revs, struct commit *commi
 		if (commit->object.flags & TREESAME) {
 			int n;
 			struct commit_list *p;
-			/* drop merges unless we want parenthood */
-			if (!want_ancestry(revs))
-				return commit_ignore;
 
 			if (revs->show_pulls && (commit->object.flags & PULL_MERGE))
 				return commit_show;
