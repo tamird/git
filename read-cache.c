@@ -3222,6 +3222,8 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 			   istate->version);
 	trace2_data_intmax("index", istate->repo, "write/cache_nr",
 			   istate->cache_nr);
+	trace2_data_intmax("index", istate->repo, "write/changed_mask",
+			   istate->cache_changed);
 
 	ret = 0;
 
