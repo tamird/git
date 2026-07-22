@@ -2221,9 +2221,10 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 
 	istate->timestamp.sec = 0;
 	istate->timestamp.nsec = 0;
+	istate->index_file_fd_valid = 0;
 	istate->index_file_identity_valid = 0;
 	istate->index_file_stat_valid = 0;
-	fd = open(path, O_RDONLY);
+	fd = git_open(path);
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
 			set_new_index_sparsity(istate);
@@ -2246,7 +2247,6 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	if (mmap == MAP_FAILED)
 		die_errno(_("%s: unable to map index file%s"), path,
 			mmap_os_err());
-	close(fd);
 
 	hdr = (const struct cache_header *)mmap;
 	if (verify_hdr(hdr, mmap_size) < 0)
@@ -2254,6 +2254,30 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 
 	oidread(&istate->oid, (const unsigned char *)hdr + mmap_size - the_hash_algo->rawsz,
 		the_repository->hash_algo);
+	/*
+	 * A null trailer cannot identify the index we read. Pin its inode when
+	 * that is reliable; otherwise remember the exact contents.
+	 */
+	if (is_null_oid(&istate->oid) && istate->repo &&
+	    istate == istate->repo->index &&
+	    !fspathcmp(path, repo_get_index_file(istate->repo))) {
+		if (fstat_is_reliable() && st.st_dev && st.st_ino) {
+			istate->index_file_fd = fd;
+			istate->index_file_fd_valid = 1;
+			fd = -1;
+		} else {
+			struct git_hash_ctx ctx;
+
+			git_hash_init(&ctx, istate->repo->hash_algo);
+			git_hash_update(&ctx, mmap, mmap_size);
+			git_hash_final_oid(&istate->index_file_identity, &ctx);
+			istate->index_file_identity_valid = 1;
+		}
+	}
+	if (fd >= 0) {
+		close(fd);
+		fd = -1;
+	}
 	istate->version = ntohl(hdr->hdr_version);
 	istate->cache_nr = ntohl(hdr->hdr_entries);
 	istate->cache_alloc = alloc_nr(istate->cache_nr);
@@ -2341,6 +2365,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	return istate->cache_nr;
 
 unmap:
+	if (fd >= 0)
+		close(fd);
 	munmap((void *)mmap, mmap_size);
 	die(_("index file corrupt"));
 }
@@ -2453,6 +2479,10 @@ void release_index(struct index_state *istate)
 	resolve_undo_clear_index(istate);
 	free_name_hash(istate);
 	cache_tree_discard(istate);
+	if (istate->index_file_fd_valid) {
+		close(istate->index_file_fd);
+		istate->index_file_fd_valid = 0;
+	}
 	free(istate->fsmonitor_last_update);
 	free(istate->cache);
 	discard_split_index(istate);
@@ -2705,22 +2735,25 @@ static int ce_write_entry(struct hashfile *f, struct cache_entry *ce,
 }
 
 /*
- * This function verifies if index_state has the correct sha1 of the
- * index file.  Don't die if we have any other failure, just return 0.
+ * This function verifies that index_state identifies the current index file.
+ * Don't die if we have any other failure, just return 0.
  */
 static int verify_index_from(const struct index_state *istate, const char *path)
 {
 	int fd;
+	int result = 0;
 	ssize_t n;
+	const char *map = MAP_FAILED;
+	size_t mmap_size = 0;
 	struct stat st;
 	unsigned char hash[GIT_MAX_RAWSZ];
 
 	if (!istate->initialized)
 		return 0;
 
-	fd = open(path, O_RDONLY);
+	fd = git_open(path);
 	if (fd < 0)
-		return 0;
+		goto out;
 
 	if (fstat(fd, &st))
 		goto out;
@@ -2728,19 +2761,48 @@ static int verify_index_from(const struct index_state *istate, const char *path)
 	if (st.st_size < sizeof(struct cache_header) + the_hash_algo->rawsz)
 		goto out;
 
+	if (istate->index_file_fd_valid) {
+		result = istate->index_file_stat.st_dev == st.st_dev &&
+			 istate->index_file_stat.st_ino == st.st_ino;
+		goto out;
+	}
+
 	n = pread_in_full(fd, hash, the_hash_algo->rawsz, st.st_size - the_hash_algo->rawsz);
 	if (n != the_hash_algo->rawsz)
 		goto out;
 
-	if (!hasheq(istate->oid.hash, hash, the_repository->hash_algo))
+	if (!is_null_oid(&istate->oid)) {
+		result = hasheq(istate->oid.hash, hash,
+			       the_repository->hash_algo);
+		goto out;
+	}
+
+	if (!istate->index_file_identity_valid)
 		goto out;
 
-	close(fd);
-	return 1;
+	if ((uintmax_t)st.st_size > SIZE_MAX)
+		goto out;
+	mmap_size = (size_t)st.st_size;
+	map = xmmap_gently(NULL, mmap_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (map == MAP_FAILED)
+		goto out;
+
+	{
+		struct git_hash_ctx ctx;
+		struct object_id identity;
+
+		git_hash_init(&ctx, istate->repo->hash_algo);
+		git_hash_update(&ctx, map, mmap_size);
+		git_hash_final_oid(&identity, &ctx);
+		result = oideq(&istate->index_file_identity, &identity);
+	}
 
 out:
-	close(fd);
-	return 0;
+	if (map != MAP_FAILED)
+		munmap((void *)map, mmap_size);
+	if (fd >= 0)
+		close(fd);
+	return result;
 }
 
 static int repo_verify_index(struct repository *repo)
@@ -3343,6 +3405,12 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 {
 	int new_shared_index, ret, test_split_index_env;
 	struct split_index *si = istate->split_index;
+
+	if (istate->index_file_fd_valid) {
+		close(istate->index_file_fd);
+		istate->index_file_fd_valid = 0;
+	}
+	istate->index_file_identity_valid = 0;
 
 	if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0) &&
 	    cache_tree_verify(the_repository, istate) < 0)

@@ -108,6 +108,41 @@ test_expect_success 'setup' '
 	EOF
 '
 
+test_expect_success 'fsmonitor refresh preserves a concurrent index update' '
+	test_when_finished "
+		rm -rf concurrent-index-false concurrent-index-true
+	" &&
+	for split_index in false true
+	do
+		repo=concurrent-index-$split_index &&
+		test_create_repo "$repo" &&
+		(
+			cd "$repo" &&
+			echo base >file &&
+			git add file &&
+			git commit -m base &&
+			test_hook --setup fsmonitor-test <<-\EOF &&
+				printf "token-1\0"
+			EOF
+			git config core.fsmonitor .git/hooks/fsmonitor-test &&
+			git config index.skipHash true &&
+			git config core.splitIndex "$split_index" &&
+			git config splitIndex.maxPercentChange 100 &&
+			git update-index --fsmonitor &&
+			echo staged >file &&
+			test_hook --clobber fsmonitor-test <<-\EOF &&
+				git -c core.fsmonitor=false \
+					-c index.skipHash=true add file &&
+				printf "token-2\0"
+			EOF
+			git status --porcelain &&
+			echo staged >expect &&
+			git show :file >actual &&
+			test_cmp expect actual
+		) || return 1
+	done
+'
+
 test_expect_success 'diff-index honors fsmonitor validity' '
 	test_when_finished "rm -rf diff-index" &&
 	test_create_repo diff-index &&
