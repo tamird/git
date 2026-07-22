@@ -4232,6 +4232,26 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		data->added = count_lines(two->data, two->size);
 	}
 
+	else if (DIFF_FILE_VALID(one) != DIFF_FILE_VALID(two) &&
+		 !(o->xdl_opts & XDF_IGNORE_BLANK_LINES) &&
+		 !o->ignore_regex_nr) {
+		struct diff_filespec *valid =
+			DIFF_FILE_VALID(one) ? one : two;
+		int lines;
+
+		if (fill_mmfile(o->repo, &mf1, one) < 0 ||
+		    fill_mmfile(o->repo, &mf2, two) < 0)
+			die("unable to read files to diff");
+		if (mf1.size > MAX_XDIFF_SIZE || mf2.size > MAX_XDIFF_SIZE)
+			die("unable to generate diffstat for %s", one->path);
+
+		lines = count_lines(valid->data, valid->size);
+		if (valid == one)
+			data->deleted = lines;
+		else
+			data->added = lines;
+	}
+
 	else if (may_differ) {
 		/* Crazy xdl interfaces.. */
 		xpparam_t xpp;
