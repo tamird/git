@@ -2776,6 +2776,7 @@ int write_commit_graph(struct odb_source *source,
 	close_reachable(&ctx);
 
 	copy_oids_to_commits(&ctx);
+	oid_array_clear(&ctx.oids);
 
 	if (ctx.commits.nr >= GRAPH_EDGE_LAST_MASK) {
 		error(_("too many commits to write graph"));
