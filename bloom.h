@@ -141,13 +141,15 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
  *   - there is a Bloom filter for commit "c", but it cannot be read
  *     because the filter uses an incompatible version of murmur3
  *
- * , then `get_bloom_filter()` will return NULL. Otherwise, the corresponding
- * Bloom filter will be returned.
+ * , then `get_bloom_filter()` will return 0. Otherwise, it will populate the
+ * caller-owned "filter" and return 1. The filter data remains owned by the
+ * Bloom filter slab or commit graph.
  *
  * For callers who wish to inspect Bloom filters with incompatible hash
  * versions, use get_or_compute_bloom_filter().
  */
-struct bloom_filter *get_bloom_filter(struct repository *r, struct commit *c);
+int get_bloom_filter(struct repository *r, struct commit *c,
+		     struct bloom_filter *filter);
 
 int bloom_filter_contains(const struct bloom_filter *filter,
 			  const struct bloom_key *key,
