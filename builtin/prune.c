@@ -27,6 +27,7 @@ static int show_only;
 static int verbose;
 static timestamp_t expire;
 static int show_progress = -1;
+static int reachability_traversal_initialized;
 
 static int prune_tmp_file(const char *fullpath)
 {
@@ -56,10 +57,9 @@ static int prune_tmp_file(const char *fullpath)
 
 static void perform_reachability_traversal(struct rev_info *revs)
 {
-	static int initialized;
 	struct progress *progress = NULL;
 
-	if (initialized)
+	if (reachability_traversal_initialized)
 		return;
 
 	if (show_progress)
@@ -67,7 +67,7 @@ static void perform_reachability_traversal(struct rev_info *revs)
 						  _("Checking connectivity"), 0);
 	mark_reachable_objects(revs, 1, expire, progress);
 	stop_progress(&progress);
-	initialized = 1;
+	reachability_traversal_initialized = 1;
 }
 
 static int is_object_reachable(const struct object_id *oid,
@@ -86,6 +86,10 @@ static int prune_object(const struct object_id *oid, const char *fullpath,
 {
 	struct rev_info *revs = data;
 	struct stat st;
+
+	if (!reachability_traversal_initialized && expire != TIME_MAX &&
+	    !lstat(fullpath, &st) && st.st_mtime > expire)
+		return 0;
 
 	if (is_object_reachable(oid, revs))
 		return 0;

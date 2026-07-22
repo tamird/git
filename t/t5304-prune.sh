@@ -59,6 +59,33 @@ test_expect_success 'prune --expire' '
 	test_path_is_missing $BLOB_FILE
 '
 
+test_expect_success 'prune skips reachability when all loose objects are recent' '
+	test_when_finished "rm -f detect-reachability reachability-traversed" &&
+	test_when_finished "test-tool chmtime =+0 .git/objects/pack/*.pack" &&
+	test-tool chmtime =-7200 .git/objects/pack/*.pack &&
+	write_script detect-reachability <<-\EOF &&
+	touch reachability-traversed
+	EOF
+	test_config gc.recentObjectsHook ./detect-reachability &&
+	blob=$(echo recent-prune-marker | git hash-object -w --stdin) &&
+	git prune --expire=1.hour.ago &&
+	test_path_is_missing reachability-traversed &&
+	git cat-file -e "$blob"
+'
+
+test_expect_success 'prune preserves objects freshened during reachability' '
+	test_when_finished "rm -f refresh-prune-object" &&
+	blob=$(echo refreshed-prune-marker | git hash-object -w --stdin) &&
+	blob_file=.git/objects/$(test_oid_to_path "$blob") &&
+	test-tool chmtime =-7200 "$blob_file" &&
+	write_script refresh-prune-object <<-EOF &&
+	test-tool chmtime =+0 "$blob_file"
+	EOF
+	test_config gc.recentObjectsHook ./refresh-prune-object &&
+	git prune --expire=1.hour.ago &&
+	git cat-file -e "$blob"
+'
+
 test_expect_success 'gc: implicit prune --expire' '
 	add_blob &&
 	test-tool chmtime =-$((2*$week-30)) $BLOB_FILE &&
