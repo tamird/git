@@ -204,6 +204,56 @@ test_expect_success PTHREADS 'path-limited add persists a full fsmonitor refresh
 	)
 '
 
+test_expect_success PTHREADS 'literal add skips redundant index preload' '
+	test_when_finished "rm -rf add-literal-preload trace2-add-literal" &&
+	test_create_repo add-literal-preload &&
+	(
+		cd add-literal-preload &&
+		echo clean >clean &&
+		echo dirty >dirty &&
+		echo one >one &&
+		echo two >two &&
+		test-tool chmtime =-60 clean dirty one two &&
+		git add clean dirty one two &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		GIT_TEST_PRELOAD_INDEX=true git status --porcelain &&
+		echo modified >dirty &&
+		echo staged-one >one &&
+		echo staged-two >two &&
+		printf "dirty\none\ntwo\n" >.git/fsmonitor-dirty &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-add-literal" \
+			git add -- one two &&
+		test_region ! index preload "$TRASH_DIRECTORY/trace2-add-literal" &&
+		git ls-files -f -- clean >actual &&
+		echo "h clean" >expect &&
+		test_cmp expect actual &&
+		git diff --cached --name-only >actual &&
+		printf "one\ntwo\n" >expect &&
+		test_cmp expect actual &&
+		git show :one >actual &&
+		echo staged-one >expect &&
+		test_cmp expect actual &&
+		git show :two >actual &&
+		echo staged-two >expect &&
+		test_cmp expect actual &&
+		git diff --name-only >actual &&
+		echo dirty >expect &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'diff-index honors fsmonitor validity' '
 	test_when_finished "rm -rf diff-index" &&
 	test_create_repo diff-index &&
