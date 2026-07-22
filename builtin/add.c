@@ -27,6 +27,8 @@
 #include "submodule.h"
 #include "add-interactive.h"
 
+#define ADD_LITERAL_PRELOAD_LIMIT 32
+
 static const char * const builtin_add_usage[] = {
 	N_("git add [<options>] [--] <pathspec>..."),
 	NULL
@@ -494,10 +496,42 @@ int cmd_add(int argc,
 
 	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
-	preload_index(repo->index,
-		      !show_only && (repo->index->cache_changed & FSMONITOR_CHANGED) ?
-			      NULL : &pathspec,
-		      0);
+	if (!show_only && (repo->index->cache_changed & FSMONITOR_CHANGED)) {
+		preload_index(repo->index, NULL, 0);
+	} else {
+		int skip_preload = !show_only && !refresh_only &&
+				   !add_renormalize && !chmod_arg && !intent_to_add &&
+				   !take_worktree_changes && !pathspec_from_file &&
+				   !include_sparse && !ignored_too &&
+				   addremove_explicit < 0 && pathspec.nr > 0 &&
+				   pathspec.nr <= ADD_LITERAL_PRELOAD_LIMIT && !pathspec.magic;
+
+		for (int i = 0; skip_preload && i < pathspec.nr; i++) {
+			const struct pathspec_item *item = &pathspec.items[i];
+			struct cache_entry *ce;
+			int pos;
+
+			if (item->nowildcard_len != item->len) {
+				skip_preload = 0;
+				break;
+			}
+
+			pos = index_name_pos_sparse(repo->index, item->match,
+						    item->len);
+			if (pos < 0) {
+				skip_preload = 0;
+				break;
+			}
+
+			ce = repo->index->cache[pos];
+			if ((!S_ISREG(ce->ce_mode) && !S_ISLNK(ce->ce_mode)) ||
+			    ce_skip_worktree(ce) || ce_intent_to_add(ce))
+				skip_preload = 0;
+		}
+
+		if (!skip_preload)
+			preload_index(repo->index, &pathspec, 0);
+	}
 
 	die_in_unpopulated_submodule(repo->index, prefix);
 	die_path_inside_submodule(repo->index, &pathspec);
