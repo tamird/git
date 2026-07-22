@@ -1279,8 +1279,6 @@ static int fsmonitor_run_daemon_1(struct fsmonitor_daemon_state *state)
 	}
 	health_started = 1;
 
-	fsmonitor_start_grep_index_server(state);
-
 	/*
 	 * The daemon is now fully functional in background threads.
 	 * Our primary thread should now just wait while the threads
