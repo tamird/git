@@ -438,6 +438,10 @@ test_expect_success 'refs work with relative gitdir and work tree' '
 	git -C relative commit --allow-empty -m two &&
 
 	GIT_DIR=relative/.git GIT_WORK_TREE=relative git reset HEAD^ &&
+	GIT_DIR=relative/.git GIT_WORK_TREE=relative \
+		git reflog expire --all --expire=never --expire-unreachable=never \
+		--verbose >actual.expire &&
+	test_file_not_empty actual.expire &&
 
 	git -C relative log -1 --format=%s >actual &&
 	echo one >expect &&
