@@ -2589,6 +2589,8 @@ test_expect_success 'grep selects literal pathsets directly' '
 		git rm -rf grep-literal-a grep-literal-z \
 			grep-literal-dir grep-literal-dir.sibling \
 			grep-literal-component grep-literal-recursive \
+			grep-literal-root grep-literal-root.sibling \
+			grep-literal-other \
 			grep-literal-many-*" &&
 	echo "literal needle a" >grep-literal-a &&
 	echo "literal needle z" >grep-literal-z &&
@@ -2670,6 +2672,102 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_cmp glob-expected actual &&
 	test_grep ! "recursive_basename_path_candidates" \
 		grep-literal-trace-glob-basename &&
+	mkdir -p grep-literal-root/a grep-literal-root/adjacent \
+		grep-literal-root/b \
+		grep-literal-root.sibling/a grep-literal-other/a &&
+	echo "rooted needle a" \
+		>grep-literal-root/a/pipeline.yml &&
+	echo "rooted needle adjacent" \
+		>grep-literal-root/adjacent/pipeline.yml &&
+	echo "rooted needle b" \
+		>grep-literal-root/b/pipeline.yml &&
+	echo "rooted needle sibling" \
+		>grep-literal-root.sibling/a/pipeline.yml &&
+	echo "rooted needle other" \
+		>grep-literal-other/a/pipeline.yml &&
+	git add grep-literal-root grep-literal-root.sibling \
+		grep-literal-other &&
+	cat >rooted-expected <<-\EOF &&
+	grep-literal-root/a/pipeline.yml:rooted needle a
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	grep-literal-root/b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-rooted-glob" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/**/pipeline.yml" >actual &&
+	test_cmp rooted-expected actual &&
+	test_trace2_data grep rooted_glob_path_candidates 3 \
+		<grep-literal-trace-rooted-glob &&
+	git update-index --assume-unchanged \
+		grep-literal-root/a/pipeline.yml &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-rooted-valid" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/**/pipeline.yml" >actual &&
+	test_cmp rooted-expected actual &&
+	test_grep ! "rooted_glob_path_candidates" \
+		grep-literal-trace-rooted-valid &&
+	git update-index --no-assume-unchanged \
+		grep-literal-root/a/pipeline.yml &&
+	cat >mid-component-expected <<-\EOF &&
+	grep-literal-root/a/pipeline.yml:rooted needle a
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-mid-component-glob" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/a*/pipeline.yml" >actual &&
+	test_cmp mid-component-expected actual &&
+	test_trace2_data grep rooted_glob_path_candidates 2 \
+		<grep-literal-trace-mid-component-glob &&
+	cat >roots-expected <<-\EOF &&
+	grep-literal-other/a/pipeline.yml:rooted needle other
+	grep-literal-root/a/pipeline.yml:rooted needle a
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	grep-literal-root/b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-rooted-globs" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/**/pipeline.yml" \
+			":(glob)grep-literal-other/**/pipeline.yml" \
+			grep-literal-root/a/pipeline.yml \
+			>actual &&
+	test_cmp roots-expected actual &&
+	test_trace2_data grep rooted_glob_path_candidates 4 \
+		<grep-literal-trace-rooted-globs &&
+	cat >mixed-expected <<-\EOF &&
+	grep-literal-dir/file:literal needle directory
+	grep-literal-dir/nested/file:literal needle nested
+	grep-literal-other/a/pipeline.yml:rooted needle other
+	grep-literal-root/a/pipeline.yml:rooted needle a
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	grep-literal-root/b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-mixed-globs" \
+		git grep "needle" -- grep-literal-dir \
+			":(glob)grep-literal-root/**/pipeline.yml" \
+			":(glob)grep-literal-other/**/pipeline.yml" \
+			>actual &&
+	test_cmp mixed-expected actual &&
+	test_trace2_data grep rooted_glob_path_candidates 6 \
+		<grep-literal-trace-mixed-globs &&
+	cat >excluded-expected <<-\EOF &&
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	grep-literal-root/b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-excluded-glob" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/**/pipeline.yml" \
+			":(exclude)grep-literal-root/a/pipeline.yml" \
+			>actual &&
+	test_cmp excluded-expected actual &&
+	test_grep ! "rooted_glob_path_candidates" \
+		grep-literal-trace-excluded-glob &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-icase-glob" \
+		git grep "rooted needle" -- \
+			":(icase,glob)GREP-LITERAL-ROOT/**/PIPELINE.YML" \
+			>actual &&
+	test_cmp rooted-expected actual &&
+	test_grep ! "rooted_glob_path_candidates" \
+		grep-literal-trace-icase-glob &&
 	for i in $(test_seq 1 40)
 	do
 		echo "many literal paths" >grep-literal-many-$i || return 1
@@ -4866,7 +4964,14 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		git -C grep-worktree-sparse grep \
 		"outside sparse index" -- outside/file &&
 	test_grep ! "literal_path_candidates" \
-		grep-worktree-trace-sparse-outside
+		grep-worktree-trace-sparse-outside &&
+	test_expect_code 1 env \
+		GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-sparse-glob" \
+		git -C grep-worktree-sparse grep \
+		"outside sparse index" -- \
+			":(glob)outside/**/file" &&
+	test_grep ! "rooted_glob_path_candidates" \
+		grep-worktree-trace-sparse-glob
 '
 
 test_expect_success 'grep can find things only in the work tree (i-t-a)' '
