@@ -1,6 +1,7 @@
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "config.h"
+#include "gettext.h"
 #include "grep-index-identity.h"
 #include "grep-index-ipc.h"
 #include "grep-index.h"
@@ -165,7 +166,8 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server UNUSED)
 # define GREP_INDEX_IPC_WORKER_LEASE_NS (1000ULL * 1000 * 1000)
 # define GREP_INDEX_IPC_OBJECT_STORE_RELEASE_NS \
 	(10ULL * 1000 * 1000 * 1000)
-# define GREP_INDEX_IPC_MAX_WORKER_LEASES    1024
+# define GREP_INDEX_IPC_MEMORY_IDLE_SECONDS (5 * 60)
+# define GREP_INDEX_IPC_MAX_WORKER_LEASES   1024
 
 enum grep_index_ipc_worker_request_result {
 	GREP_INDEX_IPC_WORKER_REQUEST_AMBIGUOUS = -1,
@@ -213,10 +215,16 @@ struct grep_index_ipc_server {
 	pthread_mutex_t index_mutex;
 	pthread_mutex_t worker_mutex;
 	pthread_rwlock_t generation_lock;
+	pthread_cond_t memory_idle_cond;
+	pthread_t memory_idle_thread;
 	size_t active_requests;
 	size_t cached_index_bytes;
 	uint64_t object_store_released_at;
+	uint64_t memory_idle_at;
+	uint64_t memory_idle_ns;
 	uint32_t worker_capacity;
+	int memory_idle_stop;
+	int memory_idle_started;
 	int repo_initialized;
 	int legacy_manifest_stat_valid;
 	int transposed_manifest_stat_valid;
@@ -1305,6 +1313,8 @@ static int grep_index_ipc_handle_request(
 			trace2_data_intmax("grep-index", &server->repo,
 					   "memory_cache/rotations", 1);
 		}
+		server->memory_idle_at = now;
+		pthread_cond_signal(&server->memory_idle_cond);
 	}
 	pthread_mutex_unlock(&server->request_mutex);
 	grep_index_memory_free(stale_index);
@@ -1315,6 +1325,76 @@ static int grep_index_ipc_handle_request(
 	return result;
 }
 
+static void *grep_index_ipc_memory_idle_thread(void *data)
+{
+	struct grep_index_ipc_server *server = data;
+
+	trace2_thread_start("grep-index-idle");
+	pthread_mutex_lock(&server->request_mutex);
+	while (!server->memory_idle_stop) {
+		struct grep_index_memory *stale_index = NULL;
+		uint64_t now;
+		uint64_t elapsed;
+
+		if (server->active_requests || !server->memory_idle_at) {
+			pthread_cond_wait(&server->memory_idle_cond,
+					  &server->request_mutex);
+			continue;
+		}
+		now = getnanotime();
+		if (now < server->memory_idle_at) {
+			server->memory_idle_at = now;
+			elapsed = 0;
+		} else {
+			elapsed = now - server->memory_idle_at;
+		}
+
+		if (elapsed < server->memory_idle_ns) {
+			struct timeval tv;
+			struct timespec ts;
+			uint64_t remaining = server->memory_idle_ns - elapsed;
+
+			gettimeofday(&tv, NULL);
+			ts.tv_sec = tv.tv_sec + remaining / 1000000000;
+			ts.tv_nsec = tv.tv_usec * 1000 +
+				     remaining % 1000000000;
+			if (ts.tv_nsec >= 1000000000) {
+				ts.tv_sec++;
+				ts.tv_nsec -= 1000000000;
+			}
+			pthread_cond_timedwait(&server->memory_idle_cond,
+					       &server->request_mutex, &ts);
+			continue;
+		}
+
+		/* Match request lock order while replacing the fallback cache. */
+		pthread_mutex_unlock(&server->request_mutex);
+		pthread_rwlock_rdlock(&server->generation_lock);
+		pthread_mutex_lock(&server->request_mutex);
+		now = getnanotime();
+		if (!server->memory_idle_stop &&
+		    !server->active_requests &&
+		    now >= server->memory_idle_at &&
+		    now - server->memory_idle_at >= server->memory_idle_ns) {
+			grep_index_memory_release_object_store(server->index);
+			server->object_store_released_at = getnanotime();
+			stale_index = server->index;
+			server->index = grep_index_memory_new(
+				&server->repo, server->persistent);
+			server->memory_idle_at = 0;
+			trace2_data_intmax("grep-index", &server->repo,
+					   "memory_cache/idle-evictions", 1);
+		}
+		pthread_mutex_unlock(&server->request_mutex);
+		pthread_rwlock_unlock(&server->generation_lock);
+		grep_index_memory_free(stale_index);
+		pthread_mutex_lock(&server->request_mutex);
+	}
+	pthread_mutex_unlock(&server->request_mutex);
+	trace2_thread_exit();
+	return NULL;
+}
+
 int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 			       const char *gitdir, const char *path,
 			       const char *worker_path,
@@ -1322,6 +1402,7 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 {
 	struct grep_index_ipc_server *server;
 	const char *test_capacity;
+	unsigned long idle_seconds;
 	struct ipc_server_opts opts = {
 		.nr_threads = nr_threads > GREP_INDEX_IPC_MAX_SERVER_THREADS ?
 				      GREP_INDEX_IPC_MAX_SERVER_THREADS :
@@ -1338,6 +1419,12 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 
 	CALLOC_ARRAY(server, 1);
 	server->object_store_released_at = getnanotime();
+	idle_seconds = git_env_ulong(
+		"GIT_TEST_GREP_INDEX_MEMORY_IDLE_SECONDS",
+		GREP_INDEX_IPC_MEMORY_IDLE_SECONDS);
+	if (!idle_seconds || idle_seconds > UINT64_MAX / 1000000000)
+		BUG("invalid GIT_TEST_GREP_INDEX_MEMORY_IDLE_SECONDS");
+	server->memory_idle_ns = idle_seconds * 1000000000;
 	if (repo_init(&server->repo, gitdir, NULL)) {
 		free(server);
 		*server_out = NULL;
@@ -1354,6 +1441,7 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 	pthread_mutex_init(&server->index_mutex, NULL);
 	pthread_mutex_init(&server->worker_mutex, NULL);
 	pthread_rwlock_init(&server->generation_lock, NULL);
+	pthread_cond_init(&server->memory_idle_cond, NULL);
 	server->worker_capacity = online_cpus();
 	if (server->worker_capacity > UINT32_MAX / 2)
 		server->worker_capacity = UINT32_MAX;
@@ -1408,6 +1496,17 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 
 void grep_index_ipc_server_start(struct grep_index_ipc_server *server)
 {
+	if (server) {
+		int err = pthread_create(&server->memory_idle_thread, NULL,
+					 grep_index_ipc_memory_idle_thread,
+					 server);
+
+		if (err)
+			warning(_("could not start grep index idle thread: %s"),
+				strerror(err));
+		else
+			server->memory_idle_started = 1;
+	}
 	if (server)
 		ipc_server_start_async(server->worker_ipc);
 	if (server)
@@ -1416,6 +1515,12 @@ void grep_index_ipc_server_start(struct grep_index_ipc_server *server)
 
 void grep_index_ipc_server_stop(struct grep_index_ipc_server *server)
 {
+	if (server && server->memory_idle_started) {
+		pthread_mutex_lock(&server->request_mutex);
+		server->memory_idle_stop = 1;
+		pthread_cond_signal(&server->memory_idle_cond);
+		pthread_mutex_unlock(&server->request_mutex);
+	}
 	if (server)
 		ipc_server_stop_async(server->ipc);
 	if (server)
@@ -1428,6 +1533,10 @@ void grep_index_ipc_server_await(struct grep_index_ipc_server *server)
 		ipc_server_await(server->ipc);
 	if (server)
 		ipc_server_await(server->worker_ipc);
+	if (server && server->memory_idle_started) {
+		pthread_join(server->memory_idle_thread, NULL);
+		server->memory_idle_started = 0;
+	}
 }
 
 void grep_index_ipc_server_free(struct grep_index_ipc_server *server)
@@ -1449,6 +1558,7 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server)
 		free(lease);
 	}
 	pthread_rwlock_destroy(&server->generation_lock);
+	pthread_cond_destroy(&server->memory_idle_cond);
 	pthread_mutex_destroy(&server->worker_mutex);
 	pthread_mutex_destroy(&server->index_mutex);
 	pthread_mutex_destroy(&server->request_mutex);

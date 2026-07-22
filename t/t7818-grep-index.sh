@@ -437,6 +437,39 @@ test_expect_success FSMONITOR_DAEMON 'daemon rotates saturated content cache' '
 	test_must_be_empty err
 '
 
+test_expect_success FSMONITOR_DAEMON 'daemon evicts idle content cache' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor &&
+			    rm -f daemon-idle.trace" &&
+	git config core.fsmonitor true &&
+	GIT_TEST_GREP_INDEX_MEMORY_IDLE_SECONDS=1 \
+	GIT_TRACE2_EVENT="$PWD/daemon-idle.trace" \
+		git fsmonitor--daemon start &&
+	echo "idle cache object" >idle-cache &&
+	git add idle-cache &&
+	test_when_finished "git reset --hard HEAD" &&
+	oid=$(git rev-parse :idle-cache) &&
+	test_must_fail git grep --cached "absent idle pattern" -- idle-cache &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+	do
+		if test -f daemon-idle.trace &&
+		   grep "\"key\":\"memory_cache/idle-evictions\",\"value\":\"1\"" \
+			daemon-idle.trace >/dev/null
+		then
+			break
+		fi &&
+		sleep 1 || return 1
+	done &&
+	test_grep "\"key\":\"memory_cache/idle-evictions\",\"value\":\"1\"" \
+		daemon-idle.trace &&
+	test_must_fail git grep --cached "absent idle pattern" \
+		-- idle-cache 2>err &&
+	test_grep "unable to read" err
+'
+
 test_expect_success 'setup indexed pickaxe history' '
 	echo "pickaxe needle old" >pickaxe-old &&
 	echo "pickaxe daemon old" >pickaxe-daemon-history &&
