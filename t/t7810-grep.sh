@@ -154,6 +154,33 @@ test_expect_success ENHANCED_BRE,LIBPCRE2 \
 	test_cmp expect actual
 '
 
+test_expect_success ENHANCED_BRE,LIBPCRE2 \
+	'BRE wildcard and literal candidate translations preserve matches' '
+	test_when_finished "rm -f bre-lookahead" &&
+	cat >bre-lookahead <<-\EOF &&
+	version>2x11+cpu
+	version>2.11cpu
+	version>2x111cpu
+	torchvision==0x26
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	bre-lookahead:1:version>2x11+cpu
+	bre-lookahead:4:torchvision==0x26
+	EOF
+	git grep --no-index -n \
+		"version>2.11+cpu\\|torchvision==0.26" \
+		-- bre-lookahead >actual &&
+	test_cmp expect actual &&
+	cat >expect <<-\EOF &&
+	bre-lookahead:2:version>2.11cpu
+	bre-lookahead:3:version>2x111cpu
+	EOF
+	git grep --no-index -n -E "version>2.11+cpu" \
+		-- bre-lookahead >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success LIBPCRE2 \
 	'POSIX wildcard preserves matches' '
 	test_when_finished "rm -f bre-lookahead" &&

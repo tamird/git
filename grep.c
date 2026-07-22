@@ -763,7 +763,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				continue;
 			}
 			if (ch < 0x80 &&
-			    (isalnum(ch) || strchr("_ =-/@:", ch))) {
+			    (isalnum(ch) || strchr("_ =-/@:>", ch))) {
 				have_literal = 1;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
@@ -810,10 +810,20 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				i++;
 				continue;
 			}
+			if (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE &&
+			    ch == '+') {
+				have_literal = 1;
+				strbuf_addstr(&lookahead_pattern, "\\+");
+				continue;
+			}
 			if (ch == '.' && i + 1 < p->patternlen &&
 			    p->pattern[i + 1] == '*') {
 				strbuf_add(&lookahead_pattern, p->pattern + i, 2);
 				i++;
+				continue;
+			}
+			if (ch == '.') {
+				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
