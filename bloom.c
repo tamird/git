@@ -4,7 +4,9 @@
 #include "bloom.h"
 #include "diff.h"
 #include "diffcore.h"
+#include "gettext.h"
 #include "hashmap.h"
+#include "hex.h"
 #include "commit-graph.h"
 #include "commit.h"
 #include "commit-slab.h"
@@ -456,6 +458,8 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 						 enum bloom_filter_computed *computed)
 {
 	struct bloom_filter *filter;
+	struct tree *commit_tree;
+	struct tree *parent_tree = NULL;
 	int i;
 	struct diff_options diffopt;
 
@@ -496,19 +500,37 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 	if (!compute_if_not_present)
 		return NULL;
 
+	/*
+	 * Resolve the trees once instead of making the tree diff peel the
+	 * commit objects again.
+	 */
+	if (repo_parse_commit(r, c))
+		die(_("unable to parse commit %s"), oid_to_hex(&c->object.oid));
+	commit_tree = repo_get_commit_tree(r, c);
+	if (!commit_tree)
+		die(_("unable to read tree for commit %s"),
+		    oid_to_hex(&c->object.oid));
+
+	if (c->parents) {
+		struct commit *parent = c->parents->item;
+
+		if (repo_parse_commit(r, parent))
+			die(_("unable to parse parent commit %s"),
+			    oid_to_hex(&parent->object.oid));
+		parent_tree = repo_get_commit_tree(r, parent);
+		if (!parent_tree)
+			die(_("unable to read tree for parent commit %s"),
+			    oid_to_hex(&parent->object.oid));
+	}
+
 	repo_diff_setup(r, &diffopt);
 	diffopt.flags.recursive = 1;
 	diffopt.detect_rename = 0;
 	diffopt.max_changes = settings->max_changed_paths;
 	diff_setup_done(&diffopt);
 
-	/* ensure commit is parsed so we have parent information */
-	repo_parse_commit(r, c);
-
-	if (c->parents)
-		diff_tree_oid(&c->parents->item->object.oid, &c->object.oid, "", &diffopt);
-	else
-		diff_tree_oid(NULL, &c->object.oid, "", &diffopt);
+	diff_tree_oid(parent_tree ? &parent_tree->object.oid : NULL,
+		      &commit_tree->object.oid, "", &diffopt);
 	diffcore_std(&diffopt);
 
 	if (diff_queued_diff.nr <= settings->max_changed_paths) {
