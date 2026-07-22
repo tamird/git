@@ -308,7 +308,7 @@ test_expect_success 'switching trees does not invalidate shared index' '
 		>split &&
 		git add split &&
 		test-tool dump-split-index .git/index | grep -v ^own >before &&
-		git commit -m "as-is" &&
+		git -c splitIndex.maxPercentChange=100 commit -m "as-is" &&
 		test-tool dump-split-index .git/index | grep -v ^own >after &&
 		test_cmp before after
 	)
