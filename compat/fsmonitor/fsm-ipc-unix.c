@@ -27,9 +27,11 @@ const char *fsmonitor_ipc__get_path(struct repository *r)
 	if (ipc_path)
 		return ipc_path;
 
-
+	repo_config_get_string(r, "fsmonitor.socketdir", &sock_dir);
 	/* By default the socket file is created in the .git directory */
-	if (fsmonitor__is_fs_remote(r->gitdir) < 1) {
+	if ((!sock_dir || !*sock_dir) &&
+	    fsmonitor__is_fs_remote(r->gitdir) < 1) {
+		free(sock_dir);
 		ipc_path = fsmonitor_ipc__get_default_path();
 		return ipc_path;
 	}
@@ -37,8 +39,6 @@ const char *fsmonitor_ipc__get_path(struct repository *r)
 	git_SHA1_Init(&sha1ctx);
 	git_SHA1_Update(&sha1ctx, r->worktree, strlen(r->worktree));
 	git_SHA1_Final(hash, &sha1ctx);
-
-	repo_config_get_string(r, "fsmonitor.socketdir", &sock_dir);
 
 	/* Create the socket file in either socketDir or $HOME */
 	if (sock_dir && *sock_dir) {
