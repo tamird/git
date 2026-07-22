@@ -2219,6 +2219,7 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 						item->filename + batch->tree_name_len :
 						NULL,
 					0, SIZE_MAX,
+					queried ||
 					result == GREP_INDEX_IPC_MAYBE);
 		}
 		free(item->filename);
