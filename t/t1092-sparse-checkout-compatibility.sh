@@ -1100,6 +1100,27 @@ test_expect_success 'merge, cherry-pick, and rebase' '
 	done
 '
 
+test_expect_success 'continued recursive rebase expands the sparse index' '
+	test_when_finished "rm -f trace2.txt" &&
+	init_repos &&
+
+	git -C full-checkout checkout -b recursive-expected update-deep &&
+	git -C full-checkout cherry-pick update-folder2 &&
+	git -C full-checkout rebase --strategy=recursive update-folder1 &&
+	git -C full-checkout rev-parse HEAD^{tree} >expect &&
+
+	git -C sparse-index checkout -b recursive-resume update-deep &&
+	git -C sparse-index cherry-pick update-folder2 &&
+	test_must_fail git -C sparse-index rebase --strategy=recursive \
+		--exec "test -f resume-ready" update-folder1 &&
+	touch sparse-index/resume-ready &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+		git -C sparse-index rebase --continue &&
+	test_region index ensure_full_index trace2.txt &&
+	git -C sparse-index rev-parse HEAD^{tree} >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'merge with conflict outside cone' '
 	init_repos &&
 
