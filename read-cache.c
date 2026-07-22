@@ -718,6 +718,7 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 	int verbose = flags & (ADD_CACHE_VERBOSE | ADD_CACHE_PRETEND);
 	int pretend = flags & ADD_CACHE_PRETEND;
 	int intent_only = flags & ADD_CACHE_INTENT;
+	int ignore_case = repo_ignore_case(the_repository);
 	int add_option = (ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE|
 			  (intent_only ? ADD_CACHE_NEW_ONLY : 0));
 	unsigned hash_flags = pretend ? 0 : INDEX_WRITE_OBJECT;
@@ -732,6 +733,23 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 	if (S_ISDIR(st_mode)) {
 		while (namelen && path[namelen-1] == '/')
 			namelen--;
+	}
+	/*
+	 * Reuse an exact unmerged entry without building the name hash. With
+	 * case-insensitive matching, first prove its spelling is unique.
+	 */
+	if (!(flags & ADD_CACHE_RENORMALIZE) &&
+	    !istate->sparse_index &&
+	    !istate->name_hash_initialized) {
+		int pos = index_name_pos_also_unmerged(istate, path, namelen);
+		size_t scans = 0;
+
+		if (pos >= 0 && ce_stage(istate->cache[pos]) &&
+		    (!ignore_case ||
+		     index_file_exists_icase_probe(
+			     istate, path, namelen, &scans, 1024) ==
+			     INDEX_FILE_ICASE_PROBE_PRESENT))
+			alias = istate->cache[pos];
 	}
 	ce = make_empty_cache_entry(istate, namelen);
 	memcpy(ce->name, path, namelen);
@@ -760,12 +778,11 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 	 * case of the file being added to the repository matches (is folded into) the existing
 	 * entry's directory case.
 	 */
-	if (repo_ignore_case(the_repository)) {
+	if (ignore_case && !alias)
 		adjust_dirname_case(istate, ce->name);
-	}
-	if (!(flags & ADD_CACHE_RENORMALIZE)) {
+	if (!(flags & ADD_CACHE_RENORMALIZE) && !alias) {
 		alias = index_file_exists(istate, ce->name,
-					  ce_namelen(ce), repo_ignore_case(the_repository));
+					  ce_namelen(ce), ignore_case);
 		if (alias &&
 		    !ce_stage(alias) &&
 		    !ie_match_stat(istate, alias, st, ce_option)) {
@@ -786,7 +803,7 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 	} else
 		set_object_name_for_intent_to_add_entry(ce);
 
-	if (repo_ignore_case(the_repository) && alias && different_name(ce, alias))
+	if (ignore_case && alias && different_name(ce, alias))
 		ce = create_alias_ce(istate, ce, alias);
 	ce->ce_flags |= CE_ADDED;
 
