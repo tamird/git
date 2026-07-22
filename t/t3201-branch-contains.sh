@@ -46,6 +46,23 @@ test_expect_success 'branch --contains main' '
 
 '
 
+test_expect_success 'branch -a --contains includes detached HEAD and remotes' '
+	git update-ref refs/remotes/origin/main main &&
+	git checkout --detach side &&
+	test_when_finished "
+		git checkout side &&
+		git update-ref -d refs/remotes/origin/main
+	" &&
+	git branch -a --contains=main >actual &&
+	cat >expect <<-\EOF &&
+	* (HEAD detached at refs/heads/side)
+	  main
+	  side
+	  remotes/origin/main
+	EOF
+	test_cmp expect actual
+'
+
 test_expect_success 'branch --no-contains=main' '
 
 	git branch --no-contains=main >actual &&
