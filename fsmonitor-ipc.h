@@ -13,8 +13,8 @@ int fsmonitor_ipc__is_supported(void);
 
 /*
  * Returns the pathname to the IPC named pipe or Unix domain socket
- * where a `git-fsmonitor--daemon` process will listen.  This is a
- * per-worktree value.
+ * where a `git-fsmonitor--daemon` process will listen. On macOS this is
+ * shared by all worktrees in a repository; elsewhere it is per-worktree.
  *
  * Returns NULL if the daemon is not supported on this platform.
  */

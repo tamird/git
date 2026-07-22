@@ -49,7 +49,8 @@ struct fsm_listen_data
 	pthread_mutex_t dq_lock;
 
 	enum shutdown_style {
-		SHUTDOWN_EVENT = 0,
+		WAITING = 0,
+		SHUTDOWN_EVENT,
 		FORCE_SHUTDOWN,
 		FORCE_ERROR_STOP,
 	} shutdown_style;
@@ -562,10 +563,11 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	 * Our fs event listener is now running, so it's safe to start
 	 * serving client requests.
 	 */
-	ipc_server_start_async(state->ipc_server_data);
+	fsmonitor_listener_ready(state, 0);
 
 	pthread_mutex_lock(&data->dq_lock);
-	pthread_cond_wait(&data->dq_finished, &data->dq_lock);
+	while (data->shutdown_style == WAITING)
+		pthread_cond_wait(&data->dq_finished, &data->dq_lock);
 	pthread_mutex_unlock(&data->dq_lock);
 
 	/*
@@ -586,9 +588,11 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 		state->listen_error_code = -1;
 		/* fall thru */
 	case FORCE_SHUTDOWN:
+		fsmonitor_listener_ready(state, -1);
 		ipc_server_stop_async(state->ipc_server_data);
 		/* fall thru */
 	case SHUTDOWN_EVENT:
+	case WAITING:
 	default:
 		break;
 	}
@@ -596,6 +600,7 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 
 force_error_stop_without_loop:
 	state->listen_error_code = -1;
-	ipc_server_stop_async(state->ipc_server_data);
+	if (fsmonitor_listener_ready(state, -1))
+		ipc_server_stop_async(state->ipc_server_data);
 	return;
 }
