@@ -200,27 +200,32 @@ test_expect_success 'content index query wire versions' '
 	test-tool grep-index-ipc query-wire
 '
 
-test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long common directory' '
+test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long gitdir without socketDir' '
 	long_component=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx &&
 	long_git_dir=long-git-$long_component$long_component &&
 	long_worktree=long-worktree &&
-	test_when_finished "test_might_fail git -C \"$long_worktree\" \
+	test_when_finished "test_might_fail env \
+				HOME=\"$grep_index_socket_dir\" \
+				git -C \"$long_worktree\" \
 				fsmonitor--daemon stop &&
 			    rm -rf \"$long_git_dir\" \"$long_worktree\" \
 				long-path.trace" &&
-	git init --separate-git-dir="$long_git_dir" "$long_worktree" &&
-	echo "long path contents" >"$long_worktree/file" &&
-	git -C "$long_worktree" add file &&
-	git -C "$long_worktree" commit -m initial &&
-	git -C "$long_worktree" config core.fsmonitor true &&
-	git -C "$long_worktree" config fsmonitor.socketDir \
-		"$grep_index_socket_dir" &&
-	git -C "$long_worktree" \
-		fsmonitor--daemon start &&
-	test_must_fail env GIT_TRACE2_EVENT="$PWD/long-path.trace" \
-		git -C "$long_worktree" grep --cached "absent long path" &&
-	test_trace2_data grep content_index_ipc_candidates 0 \
-		<long-path.trace
+	(
+		HOME="$grep_index_socket_dir" &&
+		export HOME &&
+		git init --separate-git-dir="$long_git_dir" "$long_worktree" &&
+		echo "long path contents" >"$long_worktree/file" &&
+		git -C "$long_worktree" add file &&
+		git -C "$long_worktree" commit -m initial &&
+		git -C "$long_worktree" config core.fsmonitor true &&
+		git -C "$long_worktree" \
+			fsmonitor--daemon start &&
+		test_must_fail env GIT_TRACE2_EVENT="$PWD/long-path.trace" \
+			git -C "$long_worktree" grep --cached \
+				"absent long path" &&
+		test_trace2_data grep content_index_ipc_candidates 0 \
+			<long-path.trace
+	)
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '

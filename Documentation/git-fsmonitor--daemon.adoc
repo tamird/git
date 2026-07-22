@@ -83,12 +83,12 @@ but not on network-mounted filesystems, NTFS, or FAT32.  Other filesystems
 may or may not have the needed support; the fsmonitor daemon is not guaranteed
 to work with these filesystems and such use is considered experimental.
 
-By default, the socket is created in the `.git` directory.  However, if the
-`.git` directory is on a network-mounted filesystem, it will instead be
-created at `$HOME/.git-fsmonitor-*` unless `$HOME` itself is on a
-network-mounted filesystem, in which case you must set the configuration
-variable `fsmonitor.socketDir` to the path of a directory on a native
-filesystem in which to create the socket file.
+By default, the socket is created in the `.git` directory.  If that directory
+is on a network-mounted filesystem or its socket path exceeds the platform's
+Unix-domain socket limit, the socket is instead created at
+`$HOME/.git-fsmonitor-*` unless `$HOME` itself is on a network-mounted
+filesystem.  In that case, set `fsmonitor.socketDir` to a directory on a
+native filesystem.
 
 If none of the above directories (`.git`, `$HOME`, or `fsmonitor.socketDir`)
 is on a native filesystem the fsmonitor daemon will report an
