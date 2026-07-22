@@ -917,7 +917,8 @@ static void batch_each_object(struct batch_options *opt,
 
 		for (source = the_repository->objects->sources; source; source = source->next) {
 			struct odb_source_files *files = odb_source_files_downcast(source);
-			int ret = odb_source_for_each_object(&files->packed->base, &oi,
+			int ret = odb_source_for_each_object(&files->packed->base,
+							     opt->unordered ? &oi : NULL,
 							     batch_one_object_oi, &payload, &opts);
 			if (ret)
 				break;
