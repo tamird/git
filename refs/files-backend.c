@@ -20,7 +20,6 @@
 #include "../lockfile.h"
 #include "../path.h"
 #include "../dir.h"
-#include "../chdir-notify.h"
 #include "../setup.h"
 #include "../worktree.h"
 #include "../wrapper.h"
@@ -111,23 +110,6 @@ static void clear_loose_ref_cache(struct files_ref_store *refs)
 	}
 }
 
-static void files_ref_store_reparent(const char *name UNUSED,
-				     const char *old_cwd,
-				     const char *new_cwd,
-				     void *payload)
-{
-	struct files_ref_store *refs = payload;
-	char *tmp;
-
-	tmp = reparent_relative_path(old_cwd, new_cwd, refs->base.gitdir);
-	free(refs->base.gitdir);
-	refs->base.gitdir = tmp;
-
-	tmp = reparent_relative_path(old_cwd, new_cwd, refs->gitcommondir);
-	free(refs->gitcommondir);
-	refs->gitcommondir = tmp;
-}
-
 static int files_ref_store_config(const char *var, const char *value,
 				  const struct config_context *ctx UNUSED,
 				  void *payload)
@@ -170,20 +152,21 @@ static struct ref_store *files_ref_store_init(struct repository *repo,
 	struct ref_store *ref_store = (struct ref_store *)refs;
 	struct strbuf ref_common_dir = STRBUF_INIT;
 	struct strbuf refdir = STRBUF_INIT;
+	char *abs_refdir;
 	bool is_worktree;
 
 	refs_compute_filesystem_location(gitdir, payload, &is_worktree, &refdir,
 					 &ref_common_dir);
 
-	base_ref_store_init(ref_store, repo, refdir.buf, &refs_be_files);
+	abs_refdir = absolute_pathdup(refdir.buf);
+	base_ref_store_init(ref_store, repo, abs_refdir, &refs_be_files);
+	free(abs_refdir);
 
-	refs->gitcommondir = strbuf_detach(&ref_common_dir, NULL);
+	refs->gitcommondir = absolute_pathdup(ref_common_dir.buf);
 	refs->packed_ref_store =
 		packed_ref_store_init(repo, NULL, refs->gitcommondir, opts);
 	refs->store_flags = opts->access_flags;
-
-	chdir_notify_register(NULL, files_ref_store_reparent, refs);
-
+	strbuf_release(&ref_common_dir);
 	strbuf_release(&refdir);
 
 	return ref_store;
@@ -234,7 +217,6 @@ static void files_ref_store_release(struct ref_store *ref_store)
 	free(refs->gitcommondir);
 	ref_store_release(refs->packed_ref_store);
 	free(refs->packed_ref_store);
-	chdir_notify_unregister(NULL, files_ref_store_reparent, refs);
 }
 
 static void files_reflog_path(struct files_ref_store *refs,
