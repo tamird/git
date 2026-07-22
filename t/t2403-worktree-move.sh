@@ -180,6 +180,24 @@ test_expect_success 'force remove worktree with untracked file' '
 	test_path_is_missing destination
 '
 
+test_expect_success 'force remove worktree with nested and special files' '
+	git worktree add --detach special-files HEAD &&
+	mkdir -p outside special-files/nested &&
+	: >outside/keep &&
+	: >special-files/nested/file &&
+	if test_have_prereq SYMLINKS
+	then
+		ln -s "$PWD/outside" special-files/directory-link
+	fi &&
+	if test_have_prereq PIPE
+	then
+		mkfifo special-files/pipe
+	fi &&
+	git worktree remove --force special-files &&
+	test_path_is_missing special-files &&
+	test_path_is_file outside/keep
+'
+
 test_expect_success 'remove missing worktree' '
 	git worktree add to-be-gone &&
 	test -d .git/worktrees/to-be-gone &&
