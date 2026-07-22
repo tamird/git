@@ -1059,7 +1059,8 @@ static void batch_each_object(struct batch_options *opt,
 		.filter = &opt->objects_filter,
 	};
 
-	odb_for_each_object_ext(the_repository->objects, &oi,
+	odb_for_each_object_ext(the_repository->objects,
+				opt->unordered ? &oi : NULL,
 				batch_one_object_oi, &payload, &opts);
 }
 
