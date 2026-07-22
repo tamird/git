@@ -3791,10 +3791,12 @@ static int remove_dir_recurse(struct strbuf *path, int flag, int *kept_up)
 	len = path->len;
 	while ((e = readdir_skip_dot_and_dotdot(dir)) != NULL) {
 		struct stat st;
+		unsigned char dtype = DTYPE(e);
+		int needs_stat = dtype == DT_DIR || dtype == DT_UNKNOWN;
 
 		strbuf_setlen(path, len);
 		strbuf_addstr(path, e->d_name);
-		if (lstat(path->buf, &st)) {
+		if (needs_stat && lstat(path->buf, &st)) {
 			if (errno == ENOENT)
 				/*
 				 * file disappeared, which is what we
@@ -3802,7 +3804,7 @@ static int remove_dir_recurse(struct strbuf *path, int flag, int *kept_up)
 				 */
 				continue;
 			/* fall through */
-		} else if (S_ISDIR(st.st_mode)) {
+		} else if (needs_stat && S_ISDIR(st.st_mode)) {
 			if (!remove_dir_recurse(path, flag, &kept_down))
 				continue; /* happy */
 		} else if (!only_empty &&
