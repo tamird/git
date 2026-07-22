@@ -194,6 +194,14 @@ static int grep_result_cache_cmp(const void *data UNUSED,
 	       !oideq(&a->oid, &b->oid);
 }
 
+static int index_position_cmp(const void *va, const void *vb)
+{
+	const int *a = va;
+	const int *b = vb;
+
+	return (*a > *b) - (*a < *b);
+}
+
 static void grep_result_cache_lock(void)
 {
 	if (threads_started)
@@ -1213,6 +1221,7 @@ static int grep_cache(struct grep_opt *opt,
 			DIV_ROUND_UP(repo->index->cache_nr, 8);
 		unsigned char *selected_map;
 		int can_select = 1;
+		int selected_needs_sort = 0;
 
 		CALLOC_ARRAY(selected_map, selected_map_size);
 		for (size_t i = 0; i < pathspec->nr; i++) {
@@ -1326,19 +1335,20 @@ static int grep_cache(struct grep_opt *opt,
 				if (selected_map[nr / 8] & bit)
 					continue;
 				selected_map[nr / 8] |= bit;
-				selected_nr++;
+				if (selected_nr &&
+				    selected[selected_nr - 1] > nr)
+					selected_needs_sort = 1;
+				ALLOC_GROW(selected, selected_nr + 1,
+					   selected_alloc);
+				selected[selected_nr++] = nr;
 			}
 			if (!can_select)
 				break;
 		}
 		if (can_select) {
-			selected_alloc = selected_nr;
-			ALLOC_ARRAY(selected, selected_alloc);
-			selected_nr = 0;
-			for (nr = 0; nr < repo->index->cache_nr; nr++)
-				if (selected_map[nr / 8] &
-				    (1u << (nr & 7)))
-					selected[selected_nr++] = nr;
+			if (selected_needs_sort)
+				QSORT(selected, selected_nr,
+				      index_position_cmp);
 			use_selected = 1;
 			literal_selected = 1;
 			trace2_data_intmax("grep", repo,
