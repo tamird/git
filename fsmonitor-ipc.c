@@ -3,6 +3,7 @@
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "gettext.h"
+#include "hash.h"
 #include "simple-ipc.h"
 #include "fsmonitor-ipc.h"
 #include "repository.h"
@@ -45,6 +46,48 @@ int fsmonitor_ipc__send_command(const char *command UNUSED,
 }
 
 #else
+
+int fsmonitor_ipc__get_worktree_identity(const char *worktree,
+					 struct strbuf *identity)
+{
+	static const char hex[] = "0123456789abcdef";
+	struct strbuf canonical = STRBUF_INIT;
+	struct strbuf stable = STRBUF_INIT;
+	git_SHA256_CTX ctx;
+	unsigned char hash[GIT_SHA256_RAWSZ];
+	struct stat st;
+	int ret = -1;
+
+	if (!worktree ||
+	    !strbuf_realpath(&canonical, worktree, 0) ||
+	    stat(canonical.buf, &st))
+		goto done;
+
+	strbuf_addf(&stable, "v1\n%zu:", canonical.len);
+	strbuf_addbuf(&stable, &canonical);
+	strbuf_addf(&stable, "\n%"PRIuMAX"\n%"PRIuMAX,
+		    (uintmax_t)st.st_dev, (uintmax_t)st.st_ino);
+#ifdef __APPLE__
+	strbuf_addf(&stable, "\n%"PRIdMAX"\n%ld\n%"PRIu32,
+		    (intmax_t)st.st_birthtimespec.tv_sec,
+		    st.st_birthtimespec.tv_nsec, st.st_gen);
+#endif
+
+	git_SHA256_Init(&ctx);
+	git_SHA256_Update(&ctx, stable.buf, stable.len);
+	git_SHA256_Final(hash, &ctx);
+	strbuf_reset(identity);
+	for (size_t i = 0; i < ARRAY_SIZE(hash); i++) {
+		strbuf_addch(identity, hex[hash[i] >> 4]);
+		strbuf_addch(identity, hex[hash[i] & 0xf]);
+	}
+	ret = 0;
+
+done:
+	strbuf_release(&stable);
+	strbuf_release(&canonical);
+	return ret;
+}
 
 int fsmonitor_ipc__is_supported(void)
 {
@@ -90,6 +133,8 @@ static int spawn_daemon(void)
 int fsmonitor_ipc__send_query(const char *since_token,
 			      struct strbuf *answer)
 {
+	struct strbuf command = STRBUF_INIT;
+	struct strbuf identity = STRBUF_INIT;
 	int ret = -1;
 	int tried_to_spawn = 0;
 	enum ipc_active_state state = IPC_STATE__OTHER_ERROR;
@@ -97,17 +142,28 @@ int fsmonitor_ipc__send_query(const char *since_token,
 	struct ipc_client_connect_options options
 		= IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	const char *tok = since_token ? since_token : "";
-	size_t tok_len = since_token ? strlen(since_token) : 0;
 #ifdef __APPLE__
 	struct strbuf request = STRBUF_INIT;
+#endif
 
-	fsmonitor_ipc__format_request(&request, tok, tok_len);
+	trace2_region_enter("fsm_client", "query", NULL);
+	if (fsmonitor_ipc__get_worktree_identity(
+		    repo_get_work_tree(the_repository), &identity)) {
+		trace2_data_intmax("fsm_client", NULL,
+				   "query/worktree-identity-error", 1);
+		goto done;
+	}
+	strbuf_addstr(&command, FSMONITOR_IPC_QUERY_PREFIX);
+	strbuf_addbuf(&command, &identity);
+	strbuf_addch(&command, '\n');
+	strbuf_addstr(&command, tok);
+#ifdef __APPLE__
+	fsmonitor_ipc__format_request(&request, command.buf, command.len);
 #endif
 
 	options.wait_if_busy = 1;
 	options.wait_if_not_found = 0;
 
-	trace2_region_enter("fsm_client", "query", NULL);
 	trace2_data_string("fsm_client", NULL, "query/command", tok);
 
 try_again:
@@ -121,7 +177,7 @@ try_again:
 #ifdef __APPLE__
 			request.buf, request.len,
 #else
-			tok, tok_len,
+			command.buf, command.len,
 #endif
 			answer);
 		ipc_client_close_connection(connection);
@@ -182,6 +238,8 @@ done:
 #ifdef __APPLE__
 	strbuf_release(&request);
 #endif
+	strbuf_release(&identity);
+	strbuf_release(&command);
 
 	return ret;
 }
