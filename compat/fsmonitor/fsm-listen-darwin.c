@@ -24,6 +24,7 @@
 #endif
 
 #include "git-compat-util.h"
+#include "dir.h"
 #include "fsmonitor-ll.h"
 #include "fsm-listen.h"
 #include "fsmonitor--daemon.h"
@@ -245,11 +246,10 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		 */
 
 		/*
-		 * If events were dropped, or a recursive scan cannot be
-		 * represented as an interior worktree cone, flush our cached
-		 * data.  The worktree root may contain the cookie directory,
-		 * so publishing it as a cone could leave clients waiting for a
-		 * coalesced cookie event.  We need to:
+		 * If events were dropped, or a recursive scan is outside the
+		 * worktree, at its root, or may include the cookie directory,
+		 * flush our cached data.  A coalesced cookie event could leave
+		 * clients waiting until timeout.  We need to:
 		 *
 		 * [1] Abort/wake any client threads waiting for a cookie and
 		 *     flush the cached state data (the current token), and
@@ -261,7 +261,9 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		 */
 		if (ef_is_dropped(event_flags[k]) ||
 		    (event_flags[k] & kFSEventStreamEventFlagMustScanSubDirs &&
-		     (!worktree_rel || !*worktree_rel))) {
+		     (path_type == IS_OUTSIDE_CONE ||
+		      (path_type == IS_WORKDIR_PATH && !*worktree_rel) ||
+		      dir_inside_of(state->path_cookie_prefix.buf, path_k) >= 0))) {
 			if (trace_pass_fl(&trace_fsmonitor))
 				log_flags_set(path_k, event_flags[k]);
 
@@ -285,7 +287,8 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		 * FSEvents coalesced changes below this path.  Publish the path
 		 * as a directory so clients invalidate that cone recursively.
 		 */
-		if (event_flags[k] & kFSEventStreamEventFlagMustScanSubDirs) {
+		if (path_type == IS_WORKDIR_PATH &&
+		    event_flags[k] & kFSEventStreamEventFlagMustScanSubDirs) {
 			if (trace_pass_fl(&trace_fsmonitor))
 				log_flags_set(path_k, event_flags[k]);
 
