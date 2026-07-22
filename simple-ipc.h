@@ -175,6 +175,10 @@ struct ipc_server_data;
  */
 struct ipc_server_opts
 {
+	/*
+	 * Maximum number of worker threads. Implementations may create
+	 * workers on demand.
+	 */
 	int nr_threads;
 
 	/*
@@ -202,8 +206,9 @@ struct ipc_server_opts
  * called (possibly on a random thread) to handle the message and
  * optionally compose a reply message.
  *
- * This initializes all threads but no actual work will be done until
- * ipc_server_start_async() is called.
+ * This initializes at least one worker thread and any controller threads,
+ * but no actual work will be done until ipc_server_start_async() is called.
+ * Additional workers may be created on demand up to `nr_threads`.
  */
 int ipc_server_init_async(struct ipc_server_data **returned_server_data,
 			  const char *path, const struct ipc_server_opts *opts,
