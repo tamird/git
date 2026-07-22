@@ -769,12 +769,35 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	int do_trivial = 0;
 	int do_flush = 0;
 	int do_cookie = 0;
+	int invalid_binding = 0;
 	int result = 0;
 	enum fsmonitor_cookie_item_result cookie_result;
+
+	if (strcmp(command, "start-grep-index") &&
+	    strcmp(command, "quit") && strcmp(command, "flush")) {
+		const char *identity;
+		const char *query;
+
+		if (!skip_prefix(command, FSMONITOR_IPC_QUERY_PREFIX,
+				 &identity) ||
+		    !(query = strchr(identity, '\n')) ||
+		    query - identity != FSMONITOR_IPC_WORKTREE_ID_HEX ||
+		    state->worktree_identity.len !=
+			FSMONITOR_IPC_WORKTREE_ID_HEX ||
+		    memcmp(identity, state->worktree_identity.buf,
+			   FSMONITOR_IPC_WORKTREE_ID_HEX)) {
+			invalid_binding = 1;
+			trace2_data_intmax("fsmonitor", the_repository,
+					   "query/worktree-mismatch", 1);
+		} else {
+			command = query + 1;
+		}
+	}
 
 	/*
 	 * We expect `command` to be of the form:
 	 *
+	 * <query>   := query-v1 SP <worktree-root-hash> LF <command>
 	 * <command> := quit NUL
 	 *            | flush NUL
 	 *            | <V1-time-since-epoch-ns> NUL
@@ -806,6 +829,11 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 		 */
 		do_flush = 1;
 		do_trivial = 1;
+
+	} else if (invalid_binding) {
+		/* Never trust a token from an unbound or different worktree. */
+		do_trivial = 1;
+		do_cookie = 1;
 
 	} else if (!skip_prefix(command, "builtin:", &p)) {
 		/* assume V1 timestamp or garbage */
@@ -1400,6 +1428,10 @@ static int fsmonitor_state_init(
 
 	strbuf_init(&state->path_worktree_watch, 0);
 	strbuf_addstr(&state->path_worktree_watch, worktree);
+	strbuf_init(&state->worktree_identity, 0);
+	if (fsmonitor_ipc__get_worktree_identity(
+		    state->path_worktree_watch.buf, &state->worktree_identity))
+		return -1;
 	state->nr_paths_watching = 1;
 	strbuf_init(&state->alias.alias, 0);
 	strbuf_init(&state->alias.points_to, 0);
@@ -1446,6 +1478,7 @@ static void fsmonitor_state_release(struct fsmonitor_daemon_state *state)
 	pthread_mutex_destroy(&state->ready_lock);
 	pthread_mutex_destroy(&state->main_lock);
 	strbuf_release(&state->path_worktree_watch);
+	strbuf_release(&state->worktree_identity);
 	strbuf_release(&state->path_gitdir_watch);
 	strbuf_release(&state->path_cookie_prefix);
 	strbuf_release(&state->alias.alias);
@@ -1750,6 +1783,12 @@ static int fsmonitor_run_daemon(void)
 	strbuf_init(&state.path_worktree_watch, 0);
 	strbuf_addstr(&state.path_worktree_watch,
 		      absolute_path(repo_get_work_tree(the_repository)));
+	strbuf_init(&state.worktree_identity, 0);
+	if (fsmonitor_ipc__get_worktree_identity(
+		    state.path_worktree_watch.buf, &state.worktree_identity)) {
+		err = error(_("could not identify worktree root"));
+		goto done;
+	}
 	state.nr_paths_watching = 1;
 
 	strbuf_init(&state.alias.alias, 0);
@@ -1899,6 +1938,7 @@ done:
 	ipc_server_free(state.ipc_server_data);
 
 	strbuf_release(&state.path_worktree_watch);
+	strbuf_release(&state.worktree_identity);
 	strbuf_release(&state.path_gitdir_watch);
 	strbuf_release(&state.path_cookie_prefix);
 	strbuf_release(&state.path_ipc);
