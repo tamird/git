@@ -143,6 +143,43 @@ test_expect_success 'fsmonitor refresh preserves a concurrent index update' '
 	done
 '
 
+test_expect_success PTHREADS 'path-limited add persists a full fsmonitor refresh' '
+	test_when_finished "rm -rf add-fsmonitor-refresh" &&
+	test_create_repo add-fsmonitor-refresh &&
+	(
+		cd add-fsmonitor-refresh &&
+		echo clean >clean &&
+		echo dirty >dirty &&
+		echo target >target &&
+		test-tool chmtime =-60 clean dirty target &&
+		git add clean dirty target &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-trivial
+			then
+				rm .git/fsmonitor-trivial &&
+				printf "/\0"
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		GIT_TEST_PRELOAD_INDEX=true git status --porcelain &&
+		echo modified >dirty &&
+		echo staged >target &&
+		: >.git/fsmonitor-trivial &&
+		GIT_TEST_PRELOAD_INDEX=true git add -- target &&
+		git ls-files -f -- clean dirty >actual &&
+		printf "h clean\nH dirty\n" >expect &&
+		test_cmp expect actual &&
+		git diff --cached --name-only >actual &&
+		echo target >expect &&
+		test_cmp expect actual &&
+		git diff --name-only >actual &&
+		echo dirty >expect &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'diff-index honors fsmonitor validity' '
 	test_when_finished "rm -rf diff-index" &&
 	test_create_repo diff-index &&

@@ -492,8 +492,12 @@ int cmd_add(int argc,
 		 (!(addremove || take_worktree_changes)
 		  ? ADD_CACHE_IGNORE_REMOVAL : 0));
 
-	if (repo_read_index_preload(repo, &pathspec, 0) < 0)
+	if (repo_read_index(repo) < 0)
 		die(_("index file corrupt"));
+	preload_index(repo->index,
+		      !show_only && (repo->index->cache_changed & FSMONITOR_CHANGED) ?
+			      NULL : &pathspec,
+		      0);
 
 	die_in_unpopulated_submodule(repo->index, prefix);
 	die_path_inside_submodule(repo->index, &pathspec);
