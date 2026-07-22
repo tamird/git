@@ -4722,7 +4722,7 @@ static int skip_bloom_negative_follow_commit(struct rev_info *revs,
 	    !revs->diffopt.flags.follow_renames || revs->prune ||
 	    revs->always_show_header || revs->graph || revs->track_linear ||
 	    revs->boundary || revs->rewrite_parents || revs->children.name ||
-	    revs->reverse || revs->skip_count >= 0 || revs->max_count >= 0 ||
+	    revs->reverse || revs->skip_count >= 0 || revs->max_count_type ||
 	    revs->count || revs->full_diff || revs->remerge_diff)
 		return 0;
 
