@@ -428,27 +428,42 @@ static struct bloom_filter *upgrade_filter(struct repository *r, struct commit *
 	return filter;
 }
 
-struct bloom_filter *get_bloom_filter(struct repository *r, struct commit *c)
+int get_bloom_filter(struct repository *r, struct commit *c,
+		     struct bloom_filter *filter)
 {
 	struct commit_graft *graft;
-	struct bloom_filter *filter;
+	const struct bloom_filter *slab_filter = NULL;
+	struct commit_graph *g;
+	uint32_t graph_pos;
 	int hash_version;
+
+	memset(filter, 0, sizeof(*filter));
 
 	if (is_repository_shallow(r)) {
 		graft = lookup_commit_graft(r, &c->object.oid);
 		if (graft && graft->nr_parent < 0)
-			return NULL;
+			return 0;
 	}
-	filter = get_or_compute_bloom_filter(r, c, 0, NULL, NULL);
-	if (!filter)
-		return NULL;
+
+	if (bloom_filter_slab_initialized)
+		slab_filter = bloom_filter_slab_peek(&bloom_filters, c);
+	if (slab_filter && slab_filter->data) {
+		*filter = *slab_filter;
+		filter->to_free = NULL;
+	} else {
+		g = repo_find_commit_pos_in_graph(r, c, &graph_pos);
+		if (!g || !load_bloom_filter_from_graph(g, filter, graph_pos))
+			return 0;
+	}
+	if (!filter->data || !filter->len)
+		return 0;
 
 	prepare_repo_settings(r);
 	hash_version = r->settings.commit_graph_changed_paths_version;
 
 	if (!(hash_version == -1 || hash_version == filter->version))
-		return NULL; /* unusable filter */
-	return filter;
+		return 0; /* unusable filter */
+	return 1;
 }
 
 struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,

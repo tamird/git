@@ -977,7 +977,7 @@ static enum revision_bloom_filter_result
 check_maybe_different_in_bloom_filter(struct rev_info *revs,
 				      struct commit *commit)
 {
-	struct bloom_filter *filter;
+	struct bloom_filter filter;
 	int result = 0;
 
 	if (!revs->bloom_keyvecs_nr)
@@ -985,9 +985,7 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 	if (commit_graph_position(commit) == COMMIT_NOT_FROM_GRAPH)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
-	filter = get_bloom_filter(revs->repo, commit);
-
-	if (!filter) {
+	if (!get_bloom_filter(revs->repo, commit, &filter)) {
 		count_bloom_filter_not_present++;
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 	}
@@ -998,7 +996,7 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		while (node >= 0) {
 			count_bloom_filter_trie_steps++;
 			if (bloom_filter_contains(
-				    filter, revs->bloom_query[node].key,
+				    &filter, revs->bloom_query[node].key,
 				    revs->bloom_filter_settings)) {
 				if (revs->bloom_query[node].terminal) {
 					result = 1;
@@ -1020,7 +1018,7 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		for (size_t nr = 0; !result && nr < revs->bloom_keyvecs_nr;
 		     nr++)
 			result = bloom_filter_contains_vec(
-				filter, revs->bloom_keyvecs[nr],
+				&filter, revs->bloom_keyvecs[nr],
 				revs->bloom_filter_settings);
 	}
 

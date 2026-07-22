@@ -1549,8 +1549,8 @@ static int write_graph_chunk_bloom_indexes(struct hashfile *f,
 	uint32_t cur_pos = 0;
 
 	while (list < last) {
-		struct bloom_filter *filter = get_bloom_filter(ctx->r, *list);
-		size_t len = filter ? filter->len : 0;
+		struct bloom_filter filter;
+		size_t len = get_bloom_filter(ctx->r, *list, &filter) ? filter.len : 0;
 		cur_pos += len;
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 		hashwrite_be32(f, cur_pos);
@@ -1590,12 +1590,12 @@ static int write_graph_chunk_bloom_data(struct hashfile *f,
 	hashwrite_be32(f, ctx->bloom_settings->bits_per_entry);
 
 	while (list < last) {
-		struct bloom_filter *filter = get_bloom_filter(ctx->r, *list);
-		size_t len = filter ? filter->len : 0;
+		struct bloom_filter filter;
+		size_t len = get_bloom_filter(ctx->r, *list, &filter) ? filter.len : 0;
 
 		display_progress(ctx->progress, ++ctx->progress_cnt);
 		if (len)
-			hashwrite(f, filter->data, len * sizeof(unsigned char));
+			hashwrite(f, filter.data, len * sizeof(unsigned char));
 		list++;
 	}
 
