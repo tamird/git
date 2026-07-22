@@ -2588,7 +2588,8 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_when_finished "rm -f grep-literal-trace-* &&
 		git rm -rf grep-literal-a grep-literal-z \
 			grep-literal-dir grep-literal-dir.sibling \
-			grep-literal-component grep-literal-recursive \
+			grep-literal-base grep-literal-component \
+			grep-literal-recursive \
 			grep-literal-root grep-literal-root.sibling \
 			grep-literal-other \
 			grep-literal-many-*" &&
@@ -2670,8 +2671,26 @@ test_expect_success 'grep selects literal pathsets directly' '
 		git grep "recursive needle" -- \
 			":(glob)**/grep-literal-component" >actual &&
 	test_cmp glob-expected actual &&
-	test_grep ! "recursive_basename_path_candidates" \
-		grep-literal-trace-glob-basename &&
+	test_trace2_data grep recursive_basename_path_candidates 2 \
+		<grep-literal-trace-glob-basename &&
+	echo "recursive needle base" >grep-literal-base &&
+	echo "recursive needle nested base" \
+		>grep-literal-recursive/a/grep-literal-base &&
+	git add grep-literal-base grep-literal-recursive/a/grep-literal-base &&
+	cat >basenames-expected <<-\EOF &&
+	grep-literal-base:recursive needle base
+	grep-literal-component:recursive needle root
+	grep-literal-recursive/a/grep-literal-base:recursive needle nested base
+	grep-literal-recursive/a/grep-literal-component:recursive needle file
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-glob-basenames" \
+		git grep "recursive needle" -- \
+			":(glob)**/grep-literal-component" \
+			":(glob)**/grep-literal-base" \
+			"**/grep-literal-component" >actual &&
+	test_cmp basenames-expected actual &&
+	test_trace2_data grep recursive_basename_path_candidates 4 \
+		<grep-literal-trace-glob-basenames &&
 	mkdir -p grep-literal-root/a grep-literal-root/adjacent \
 		grep-literal-root/b \
 		grep-literal-root.sibling/a grep-literal-other/a &&
