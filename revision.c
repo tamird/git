@@ -1664,15 +1664,13 @@ static int still_interesting(struct prio_queue *src, timestamp_t date, int slop,
 static void limit_to_ancestry(struct commit_list *bottoms, struct commit_list *list)
 {
 	struct commit_list *p;
-	struct commit_list *rlist = NULL;
 	int made_progress;
 
 	/*
-	 * Reverse the list so that it will be likely that we would
-	 * process parents before children.
+	 * Temporarily reverse the list so that we are likely to process
+	 * parents before children. Restore it before subsequent traversals.
 	 */
-	for (p = list; p; p = p->next)
-		commit_list_insert(p->item, &rlist);
+	list = commit_list_reverse(list);
 
 	for (p = bottoms; p; p = p->next)
 		p->item->object.flags |= TMP_MARK;
@@ -1683,7 +1681,7 @@ static void limit_to_ancestry(struct commit_list *bottoms, struct commit_list *l
 	 */
 	do {
 		made_progress = 0;
-		for (p = rlist; p; p = p->next) {
+		for (p = list; p; p = p->next) {
 			struct commit *c = p->item;
 			struct commit_list *parents;
 			if (c->object.flags & (TMP_MARK | UNINTERESTING))
@@ -1699,6 +1697,8 @@ static void limit_to_ancestry(struct commit_list *bottoms, struct commit_list *l
 			}
 		}
 	} while (made_progress);
+
+	list = commit_list_reverse(list);
 
 	/*
 	 * NEEDSWORK: decide if we want to remove parents that are
@@ -1722,7 +1722,6 @@ static void limit_to_ancestry(struct commit_list *bottoms, struct commit_list *l
 		p->item->object.flags &= ~(TMP_MARK | ANCESTRY_PATH);
 	for (p = bottoms; p; p = p->next)
 		p->item->object.flags &= ~(TMP_MARK | ANCESTRY_PATH);
-	commit_list_free(rlist);
 }
 
 /*
