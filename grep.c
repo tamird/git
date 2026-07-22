@@ -769,12 +769,17 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				continue;
 			}
 			if (ch == '^' || ch == '$') {
-				/* Anchor syntax is contextual; let POSIX verify it. */
-				strbuf_addstr(&lookahead_pattern, ".*");
+				if (opt->pattern_type_option ==
+				    GREP_PATTERN_TYPE_ERE)
+					strbuf_addch(&lookahead_pattern, ch);
+				else
+					/* BRE anchor syntax is contextual. */
+					strbuf_addstr(&lookahead_pattern, ".*");
 				continue;
 			}
 			if (ch == '\\' && i + 1 < p->patternlen &&
 			    (p->pattern[i + 1] == '.' ||
+			     p->pattern[i + 1] == '\\' ||
 			     (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			      strchr("()", p->pattern[i + 1])))) {
 				have_literal = 1;
@@ -815,25 +820,42 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			    ch == '[') {
 				size_t end = i + 1;
 				size_t start;
+				int has_space_class = 0;
 
 				if (end < p->patternlen && p->pattern[end] == '^')
 					end++;
 				start = end;
 				while (end < p->patternlen &&
-				       p->pattern[end] != ']' &&
-				       (unsigned char)p->pattern[end] < 0x80 &&
-				       p->pattern[end] != '\n' &&
-				       p->pattern[end] != '[' &&
-				       p->pattern[end] != '\\')
+				       p->pattern[end] != ']') {
+					if (p->pattern[end] == '[' &&
+					    starts_with(p->pattern + end,
+							"[:space:]")) {
+						has_space_class = 1;
+						end += strlen("[:space:]");
+						continue;
+					}
+					if ((unsigned char)p->pattern[end] >= 0x80 ||
+					    p->pattern[end] == '\n' ||
+					    p->pattern[end] == '[' ||
+					    p->pattern[end] == '\\')
+						break;
 					end++;
+				}
 				if (end > start && end < p->patternlen &&
 				    p->pattern[end] == ']') {
-					/* Widen the class; POSIX verifies the candidate. */
-					strbuf_addch(&lookahead_pattern, '.');
+					if (has_space_class)
+						strbuf_add(&lookahead_pattern,
+							   p->pattern + i,
+							   end - i + 1);
+					else
+						/* POSIX verifies the widened class. */
+						strbuf_addch(&lookahead_pattern,
+							     '.');
 					i = end;
 					if (i + 1 < p->patternlen &&
-					    p->pattern[i + 1] == '?') {
-						strbuf_addch(&lookahead_pattern, '?');
+					    strchr("?*+", p->pattern[i + 1])) {
+						strbuf_addch(&lookahead_pattern,
+							     p->pattern[i + 1]);
 						i++;
 					}
 					continue;
