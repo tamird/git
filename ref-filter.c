@@ -3438,9 +3438,9 @@ static int do_filter_refs(struct ref_filter *filter, unsigned int type, refs_for
 
 	/*
 	 * For common cases where we need only branches or remotes or tags,
-	 * we only iterate through those refs. If a mix of refs is needed,
-	 * we iterate over all refs and filter out required refs with the help
-	 * of filter_ref_kind().
+	 * we only iterate through those refs. For other mixes of refs, we
+	 * generally iterate over all refs and filter out required refs with
+	 * the help of filter_ref_kind().
 	 */
 	if (filter->kind == FILTER_REFS_BRANCHES)
 		prefix = "refs/heads/";
@@ -3462,6 +3462,19 @@ static int do_filter_refs(struct ref_filter *filter, unsigned int type, refs_for
 
 		if (!ret)
 			ret = do_for_each_ref_iterator(iter, fn, cb_data);
+	} else if (!filter->start_after &&
+		   (filter->kind & ~FILTER_REFS_DETACHED_HEAD) ==
+			   (FILTER_REFS_BRANCHES | FILTER_REFS_REMOTES)) {
+		const char *prefixes[] = {
+			"refs/heads/",
+			"refs/remotes/",
+			NULL
+		};
+		struct refs_for_each_ref_options opts = { 0 };
+
+		ret = refs_for_each_ref_in_prefixes(
+			get_main_ref_store(the_repository), prefixes, &opts,
+			fn, cb_data);
 	} else if (filter->kind & FILTER_REFS_REGULAR) {
 		ret = for_each_fullref_in_pattern(filter, fn, cb_data);
 	}
