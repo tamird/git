@@ -175,13 +175,8 @@ struct index_state {
 	struct split_index *split_index;
 	struct cache_time timestamp;
 	struct stat index_file_stat;
-	/*
-	 * Set retain_index_file_mapping before reading the index to keep the
-	 * exact mapped bytes available for ensure_index_file_identity().
-	 */
+	int index_file_fd;
 	struct object_id index_file_identity;
-	const char *retained_index_file_map;
-	size_t retained_index_file_map_size;
 	unsigned name_hash_initialized : 1,
 		 initialized : 1,
 		 drop_cache_tree : 1,
@@ -189,7 +184,7 @@ struct index_state {
 		 updated_skipworktree : 1,
 		 fsmonitor_has_run_once : 1,
 		 lazy_cache_tree : 1,
-		 retain_index_file_mapping : 1,
+		 index_file_fd_valid : 1,
 		 index_file_identity_valid : 1,
 		 index_file_stat_valid : 1;
 	enum sparse_index_mode sparse_index;
