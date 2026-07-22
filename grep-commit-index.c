@@ -243,7 +243,7 @@ static int load_grep_commit_index_segment(struct repository *repo,
 			offset_bytes;
 	if (metadata_size > payload_size)
 		goto invalid;
-	repo->hash_algo->init_fn(&metadata_ctx);
+	git_hash_init(&metadata_ctx, repo->hash_algo);
 	git_hash_update(&metadata_ctx, map, metadata_size);
 	git_hash_final_oid(&metadata_checksum, &metadata_ctx);
 	if (!hasheq(metadata_checksum.hash, payload_end, repo->hash_algo))
@@ -396,7 +396,7 @@ int grep_commit_index_lookup(struct grep_commit_index *index,
 		    end - start < segment->hash_algo->rawsz)
 			continue;
 		record_size = end - start - segment->hash_algo->rawsz;
-		segment->hash_algo->init_fn(&record_ctx);
+		git_hash_init(&record_ctx, segment->hash_algo);
 		git_hash_update(&record_ctx, commit_oid->hash,
 				segment->hash_algo->rawsz);
 		git_hash_update(&record_ctx, segment->data + start,
@@ -691,7 +691,7 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 		if (record_buf.len + repo->hash_algo->rawsz !=
 		    offsets[i + 1] - offsets[i])
 			BUG("commit edge record size mismatch");
-		repo->hash_algo->init_fn(&record_ctx);
+		git_hash_init(&record_ctx, repo->hash_algo);
 		git_hash_update(&record_ctx, records[i].commit_oid.hash,
 				repo->hash_algo->rawsz);
 		git_hash_update(&record_ctx, record_buf.buf, record_buf.len);
@@ -717,7 +717,7 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 	{
 		struct git_hash_ctx segment_ctx;
 
-		repo->hash_algo->init_fn(&segment_ctx);
+		git_hash_init(&segment_ctx, repo->hash_algo);
 		for (;;) {
 			ssize_t bytes = xread(temp_fd, file_buf,
 					      sizeof(file_buf));
@@ -754,7 +754,7 @@ int write_grep_commit_index(struct repository *repo, struct rev_info *revs,
 cleanup:
 	stop_progress(&progress);
 	if (hashfile)
-		discard_hashfile(hashfile);
+		free_hashfile(hashfile);
 	delete_tempfile(&temp);
 	diff_queue_clear(&diff_queued_diff);
 	diff_free(&diffopt);

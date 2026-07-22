@@ -439,7 +439,7 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 	if (segment.blocks_nr !=
 	    DIV_ROUND_UP(segment.data_len, segment.block_size))
 		goto unmap;
-	index->repo->hash_algo->init_fn(&hash_ctx);
+	git_hash_init(&hash_ctx, index->repo->hash_algo);
 	git_hash_update(&hash_ctx, map, metadata_size);
 	git_hash_final_oid(&metadata_checksum, &hash_ctx);
 	if (!oideq(&metadata_checksum, &checksum))
@@ -2362,7 +2362,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 		struct git_hash_ctx ctx;
 		const struct grep_pat *pattern = opt->pattern_list;
 
-		opt->repo->hash_algo->init_fn(&ctx);
+		git_hash_init(&ctx, opt->repo->hash_algo);
 		git_hash_update(&ctx, fixed_list_domain,
 				sizeof(fixed_list_domain));
 		for (; pattern; pattern = pattern->next) {
@@ -2422,7 +2422,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			struct git_hash_ctx ctx;
 			unsigned char type = pattern_type;
 
-			opt->repo->hash_algo->init_fn(&ctx);
+			git_hash_init(&ctx, opt->repo->hash_algo);
 			if (literal_regex || required_literal_regex) {
 				git_hash_update(&ctx, regex_domain,
 						sizeof(regex_domain));
@@ -2612,7 +2612,7 @@ static int grep_index_transposed_verify_range(
 			continue;
 		if (block_len > segment->block_size)
 			block_len = segment->block_size;
-		segment->hash_algo->init_fn(&ctx);
+		git_hash_init(&ctx, segment->hash_algo);
 		git_hash_update(&ctx, segment->data + pos, block_len);
 		git_hash_final_oid(&checksum, &ctx);
 		if (!hasheq(checksum.hash,
@@ -3770,7 +3770,7 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 			got = read_in_full(data_fd, block, want);
 			if (got < 0 || (size_t)got != want)
 				die_errno(_("unable to read temporary grep data"));
-			repo->hash_algo->init_fn(&hash_ctx);
+			git_hash_init(&hash_ctx, repo->hash_algo);
 			git_hash_update(&hash_ctx, block, want);
 			git_hash_final(
 				block_hashes +
@@ -3835,7 +3835,7 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 		}
 		strbuf_add(&metadata, block_hashes,
 			   blocks_nr * repo->hash_algo->rawsz);
-		repo->hash_algo->init_fn(&hash_ctx);
+		git_hash_init(&hash_ctx, repo->hash_algo);
 		git_hash_update(&hash_ctx, metadata.buf, metadata.len);
 		git_hash_final_oid(&metadata_checksum, &hash_ctx);
 		hash_to_hex_algop_r(hex, metadata_checksum.hash,
@@ -4062,7 +4062,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 cleanup:
 	stop_progress(&progress);
 	if (hashfile)
-		discard_hashfile(hashfile);
+		free_hashfile(hashfile);
 	delete_tempfile(&temp);
 	delete_tempfile(&filter_temp);
 	free(filter);

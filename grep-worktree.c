@@ -289,7 +289,7 @@ static int rotate_observation_generation(
 done:
 	saved_errno = errno;
 	if (f)
-		discard_hashfile(f);
+		free_hashfile(f);
 	delete_tempfile(&temp);
 	strbuf_release(&path);
 	strbuf_release(&temp_path);
@@ -1020,7 +1020,7 @@ done:
 	if (compact_map)
 		munmap((void *)compact_map, compact_size);
 	if (f)
-		discard_hashfile(f);
+		free_hashfile(f);
 	if (result)
 		rollback_lock_file(lock);
 	free(fanout);
@@ -1593,7 +1593,7 @@ done:
 	    write_invalidation_marker(cache))
 		die_errno(_("unable to invalidate grep worktree cache"));
 	if (f)
-		discard_hashfile(f);
+		free_hashfile(f);
 	rollback_lock_file(&lock);
 	rollback_lock_file(&recovery_lock);
 	if (current.recovery_map)
