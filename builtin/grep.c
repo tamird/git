@@ -1216,7 +1216,8 @@ static int grep_cache(struct grep_opt *opt,
 	    !recurse_submodules && !opt->allow_textconv && pathspec->nr &&
 	    (recursive_basename_pathspec ||
 	     !(pathspec->magic &
-	       ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL | PATHSPEC_GLOB)))) {
+	       ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL | PATHSPEC_GLOB |
+		 PATHSPEC_EXCLUDE)))) {
 		struct strbuf dir = STRBUF_INIT;
 		size_t selected_map_size =
 			DIV_ROUND_UP(repo->index->cache_nr, 8);
@@ -1234,6 +1235,9 @@ static int grep_cache(struct grep_opt *opt,
 				item->nowildcard_len != item->len;
 			int end;
 			int dir_pos;
+
+			if (item->magic & PATHSPEC_EXCLUDE)
+				continue;
 
 			if (!recursive_basename_pathspec &&
 			    (!item->len || item->match[item->len - 1] == '/' ||
@@ -1394,7 +1398,9 @@ static int grep_cache(struct grep_opt *opt,
 					can_select = 0;
 					break;
 				}
-				if (!recursive_basename_pathspec && wildcard_prefix &&
+				if (!recursive_basename_pathspec &&
+				    (wildcard_prefix ||
+				     (pathspec->magic & PATHSPEC_EXCLUDE)) &&
 				    !match_pathspec(repo->index, pathspec,
 						    ce->name, name_len, 0,
 						    NULL, 0))

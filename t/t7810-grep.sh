@@ -2845,8 +2845,37 @@ test_expect_success 'grep selects literal pathsets directly' '
 			":(exclude)grep-literal-root/a/pipeline.yml" \
 			>actual &&
 	test_cmp excluded-expected actual &&
-	test_grep ! "rooted_glob_path_candidates" \
-		grep-literal-trace-excluded-glob &&
+	test_trace2_data grep rooted_glob_path_candidates 2 \
+		<grep-literal-trace-excluded-glob &&
+	cat >excluded-roots-expected <<-\EOF &&
+	grep-literal-other/a/pipeline.yml:rooted needle other
+	grep-literal-root/adjacent/pipeline.yml:rooted needle adjacent
+	grep-literal-root/b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-excluded-globs" \
+		git grep "rooted needle" -- \
+			":(glob)grep-literal-root/**/pipeline.yml" \
+			":(glob)grep-literal-other/**/pipeline.yml" \
+			":(exclude)grep-literal-root/a" >actual &&
+	test_cmp excluded-roots-expected actual &&
+	test_trace2_data grep rooted_glob_path_candidates 3 \
+		<grep-literal-trace-excluded-globs &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-exclude-only" \
+		git grep "rooted needle" -- \
+			":(exclude)grep-literal-root/a" >actual &&
+	test_line_count = 4 actual &&
+	test_grep ! "literal_path_candidates" \
+		grep-literal-trace-exclude-only &&
+	cat >subdirectory-excluded-expected <<-\EOF &&
+	adjacent/pipeline.yml:rooted needle adjacent
+	b/pipeline.yml:rooted needle b
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-subdirectory-exclude" \
+		git -C grep-literal-root grep "rooted needle" -- \
+			":(exclude)a" >actual &&
+	test_cmp subdirectory-excluded-expected actual &&
+	test_grep ! "literal_path_candidates" \
+		grep-literal-trace-subdirectory-exclude &&
 	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-icase-glob" \
 		git grep "rooted needle" -- \
 			":(icase,glob)GREP-LITERAL-ROOT/**/PIPELINE.YML" \
