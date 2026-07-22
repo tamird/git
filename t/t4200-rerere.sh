@@ -324,9 +324,21 @@ test_expect_success 'resolution was recorded properly' '
 
 test_expect_success 'rerere.autoupdate' '
 	git config rerere.autoupdate true &&
+	test_config core.ignorecase true &&
+	test_config core.splitIndex true &&
+	test_config splitIndex.maxPercentChange 100 &&
 	git reset --hard &&
 	git checkout version2 &&
-	test_must_fail git merge fifth &&
+	git update-index --split-index &&
+	test_must_fail env GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-rerere-autoupdate" \
+		git merge fifth &&
+	test_path_is_file "$TRASH_DIRECTORY/trace2-rerere-autoupdate" &&
+	test_region ! index name-hash-init \
+		"$TRASH_DIRECTORY/trace2-rerere-autoupdate" &&
+	git show :file3 >actual &&
+	test_cmp expected actual &&
+	git ls-files -u >actual &&
+	test_must_be_empty actual &&
 	git update-index --refresh
 '
 
