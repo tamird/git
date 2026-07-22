@@ -420,6 +420,31 @@ test_expect_success 'check behavior with splitIndex.maxPercentChange unset' '
 	test_cmp expect actual
 '
 
+test_expect_success 'replace enough entries to write a new shared index' '
+	test_create_repo replacement-limit &&
+	(
+		cd replacement-limit &&
+		for i in 0 1 2 3 4 5 6 7 8 9
+		do
+			echo "$i" >"file$i" || return 1
+		done &&
+		git add -- file* &&
+		git config splitIndex.maxPercentChange 20 &&
+		git update-index --split-index &&
+		old_base=$(git rev-parse --shared-index-path) &&
+
+		for i in 0 1 2
+		do
+			echo "changed$i" >"file$i" || return 1
+		done &&
+		git update-index -- file0 file1 file2 &&
+		new_base=$(git rev-parse --shared-index-path) &&
+
+		test "$old_base" != "$new_base" &&
+		test_path_is_file "$new_base"
+	)
+'
+
 test_expect_success 'check splitIndex.maxPercentChange set to 0' '
 	git config splitIndex.maxPercentChange 0 &&
 	create_non_racy_file seven &&
