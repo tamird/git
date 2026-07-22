@@ -1953,10 +1953,12 @@ static void tweak_split_index(struct index_state *istate)
 
 static void post_read_index_from(struct index_state *istate)
 {
+	trace2_region_enter("index", "post_read", istate->repo);
 	check_ce_order(istate);
 	tweak_untracked_cache(istate);
 	tweak_split_index(istate);
 	tweak_fsmonitor(istate);
+	trace2_region_leave("index", "post_read", istate->repo);
 }
 
 static size_t estimate_cache_size_from_compressed(unsigned int entries)
@@ -2351,8 +2353,10 @@ unmap:
  */
 static void freshen_shared_index(const char *shared_index, int warn)
 {
+	trace2_region_enter("index", "shared/freshen", the_repository);
 	if (!check_and_freshen_file(shared_index, 1) && warn)
 		warning(_("could not freshen shared index '%s'"), shared_index);
+	trace2_region_leave("index", "shared/freshen", the_repository);
 }
 
 int read_index_from(struct index_state *istate, const char *path,
@@ -2415,7 +2419,9 @@ int read_index_from(struct index_state *istate, const char *path,
 		    oid_to_hex(&split_index->base->oid));
 
 	freshen_shared_index(base_path, 0);
+	trace2_region_enter("index", "shared/merge", istate->repo);
 	merge_base_index(istate);
+	trace2_region_leave("index", "shared/merge", istate->repo);
 	post_read_index_from(istate);
 	trace_performance_leave("read cache %s", base_path);
 	free(base_path);
