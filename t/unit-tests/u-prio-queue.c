@@ -85,6 +85,36 @@ void test_prio_queue__mixed(void)
 		   ((int []){ 2, 3, 4, 1, 5, 6 }));
 }
 
+void test_prio_queue__deferred_get_state(void)
+{
+	struct prio_queue pq = { intcmp };
+	int input[] = { 3, 1, 4, 2 };
+	int *item;
+	int count = 0, sum = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(input); i++)
+		prio_queue_put(&pq, &input[i]);
+
+	item = prio_queue_get(&pq);
+	cl_assert_equal_i(1, *item);
+	cl_assert_equal_i(3, prio_queue_size(&pq));
+	prio_queue_for_each(&pq, item) {
+		count++;
+		sum += *item;
+	}
+	cl_assert_equal_i(3, count);
+	cl_assert_equal_i(9, sum);
+
+	clear_prio_queue(&pq);
+	cl_assert_equal_i(0, prio_queue_size(&pq));
+	prio_queue_put(&pq, &input[2]);
+	prio_queue_put(&pq, &input[3]);
+	item = prio_queue_get(&pq);
+	cl_assert_equal_i(2, *item);
+	cl_assert_equal_i(1, prio_queue_size(&pq));
+	clear_prio_queue(&pq);
+}
+
 void test_prio_queue__empty(void)
 {
 	TEST_INPUT(((int []){ 1, 2, GET, GET, GET, 1, 2, GET, GET, GET }),
