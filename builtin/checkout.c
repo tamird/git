@@ -773,6 +773,7 @@ static int reset_tree(struct tree *tree, const struct checkout_opts *o,
 				UNPACK_RESET_PROTECT_UNTRACKED;
 	opts.preserve_ignored = (!o->force && !o->overwrite_ignore);
 	opts.merge = 1;
+	opts.skip_cache_tree_update = 1;
 	opts.fn = oneway_merge;
 	opts.verbose_update = o->show_progress;
 	opts.src_index = the_repository->index;
@@ -836,6 +837,7 @@ static void init_topts(struct unpack_trees_options *topts,
 	topts->initial_checkout = is_index_unborn(the_repository->index);
 	topts->update = 1;
 	topts->merge = 1;
+	topts->skip_cache_tree_update = 1;
 	topts->quiet = quiet;
 	topts->verbose_update = show_progress;
 	topts->fn = twoway_merge;
