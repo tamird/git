@@ -329,37 +329,67 @@ static int unmatched_cost(const struct patch_util *util, int creation_factor)
 	return util->diffsize * creation_factor / 100;
 }
 
+static int add_shortcut_cost(const struct patch_util *util,
+			     int creation_factor, uintmax_t *total)
+{
+	uintmax_t cost;
+
+	if (creation_factor < 0 || util->diffsize < 0)
+		return 0;
+
+	cost = (uintmax_t)util->diffsize * creation_factor / 100;
+	if (cost >= COST_MAX || *total >= COST_MAX - cost)
+		return 0;
+
+	*total += cost;
+	return 1;
+}
+
 static void get_correspondences(struct string_list *a, struct string_list *b,
 				int creation_factor, size_t max_memory)
 {
 	int n;
 	int *cost, c, *a2b, *b2a;
 	int a_nr = 0, b_nr = 0, a_single = -1, b_single = -1;
+	uintmax_t total_unmatched_cost = 0;
+	int shortcut_safe = 1;
 	int i, j;
 	size_t cost_size, cost_bytes;
 
 	/* Exact matches already have fixed correspondences. */
 	for (i = 0; i < a->nr; i++)
 		if (((struct patch_util *)a->items[i].util)->matching < 0) {
+			struct patch_util *util = a->items[i].util;
+
 			a_single = i;
 			a_nr++;
+			if (shortcut_safe &&
+			    !add_shortcut_cost(util, creation_factor,
+					       &total_unmatched_cost))
+				shortcut_safe = 0;
 		}
 	for (i = 0; i < b->nr; i++)
 		if (((struct patch_util *)b->items[i].util)->matching < 0) {
+			struct patch_util *util = b->items[i].util;
+
 			b_single = i;
 			b_nr++;
+			if (shortcut_safe &&
+			    !add_shortcut_cost(util, creation_factor,
+					       &total_unmatched_cost))
+				shortcut_safe = 0;
 		}
 
 	if (!a_nr || !b_nr)
 		return;
 
 	/*
-	 * With one item on either side, there can be at most one new pair.
-	 * Handle an unambiguous result directly, but let the general solver
-	 * retain its tie-breaking behavior.
+	 * With one item on either side, leave every patch unmatched only when
+	 * every possible correspondence is strictly more expensive. Preserve
+	 * the solver's choices for all viable and tied correspondences.
 	 */
-	if (a_nr == 1 || b_nr == 1) {
-		int best_a = -1, best_b = -1, best_cost = 0, best_count = 0;
+	if (shortcut_safe && (a_nr == 1 || b_nr == 1)) {
+		int best_cost = 0, have_pair = 0;
 		int pair_nr = a_nr == 1 ? b->nr : a->nr;
 
 		for (i = 0; i < pair_nr; i++) {
@@ -375,26 +405,14 @@ static void get_correspondences(struct string_list *a, struct string_list *b,
 				    unmatched_cost(a_util, creation_factor) -
 				    unmatched_cost(b_util, creation_factor);
 
-			if (!best_count || pair_cost < best_cost) {
-				best_a = a_pos;
-				best_b = b_pos;
+			if (!have_pair || pair_cost < best_cost) {
 				best_cost = pair_cost;
-				best_count = 1;
-			} else if (pair_cost == best_cost) {
-				best_count++;
+				have_pair = 1;
 			}
 		}
 
-		if (best_cost > 0)
+		if (have_pair && best_cost > 0)
 			return;
-		if (best_cost < 0 && best_count == 1) {
-			struct patch_util *a_util = a->items[best_a].util;
-			struct patch_util *b_util = b->items[best_b].util;
-
-			a_util->matching = best_b;
-			b_util->matching = best_a;
-			return;
-		}
 	}
 
 	n = a->nr + b->nr;
