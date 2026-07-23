@@ -4096,8 +4096,12 @@ static void explore_walk_step(struct rev_info *revs)
 	if (c->object.flags & UNINTERESTING)
 		mark_parents_uninteresting(revs, c);
 
-	for (p = c->parents; p; p = p->next)
+	for (p = c->parents; p; p = p->next) {
 		test_flag_and_insert(&info->explore_queue, p->item, TOPO_WALK_EXPLORED);
+		if ((c->object.flags & UNINTERESTING) ?
+		    revs->exclude_first_parent_only : revs->first_parent_only)
+			break;
+	}
 }
 
 static void explore_to_depth(struct rev_info *revs,
