@@ -1542,9 +1542,12 @@ static int grep_cache(struct grep_opt *opt,
 					       repo->index->cache[nr + 1]->name))
 					nr++;
 		}
-		if (worktree_bytes >= min_bytes)
+		if (worktree_bytes >= min_bytes) {
+			trace2_region_enter("grep", "load_worktree_cache", repo);
 			worktree_cache = grep_worktree_cache_load(
 				repo, repo->index, &worktree_sidecar_loaded);
+			trace2_region_leave("grep", "load_worktree_cache", repo);
+		}
 		if (worktree_cache && worktree_sidecar_loaded &&
 		    worktree_blob_cache_mode == WORKTREE_BLOB_CACHE_ALWAYS &&
 		    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC) {
@@ -1613,14 +1616,17 @@ static int grep_cache(struct grep_opt *opt,
 		unsigned char *maybe;
 		unsigned char *unresolved;
 		int negative_cache_supported;
+		int index_query_result;
 
 		CALLOC_ARRAY(maybe, bitmap_size);
 		CALLOC_ARRAY(unresolved, bitmap_size);
-		if (!grep_index_ipc_query_index(
-			    repo, content_index_query, maybe, unresolved,
-			    repo->index->cache_nr,
-			    &content_index_negative_identity,
-			    &negative_cache_supported)) {
+		trace2_region_enter("grep", "query_content_index_ipc", repo);
+		index_query_result = grep_index_ipc_query_index(
+			repo, content_index_query, maybe, unresolved,
+			repo->index->cache_nr, &content_index_negative_identity,
+			&negative_cache_supported);
+		trace2_region_leave("grep", "query_content_index_ipc", repo);
+		if (!index_query_result) {
 			int have_unresolved = 0;
 
 			used_index_ipc = 1;
@@ -1676,6 +1682,8 @@ static int grep_cache(struct grep_opt *opt,
 					if (sample_size > nr_oids)
 						sample_size = nr_oids;
 					ALLOC_ARRAY(results, nr_oids);
+					trace2_region_enter(
+						"grep", "query_content_index_overlay", repo);
 					if (!grep_index_ipc_query(
 						    repo, content_index_query, oids,
 						    sample_size, results)) {
@@ -1730,6 +1738,8 @@ static int grep_cache(struct grep_opt *opt,
 								"content_index_overlay_bypassed",
 								1);
 					}
+					trace2_region_leave(
+						"grep", "query_content_index_overlay", repo);
 				}
 				free(results);
 				free(positions);
