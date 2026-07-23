@@ -4418,12 +4418,21 @@ static int invalidate_one_component(struct untracked_cache *uc,
 
 	if (rest) {
 		int component_len = rest - path;
-		struct untracked_cache_dir *d =
-			lookup_untracked(uc, dir, path, component_len);
-		int ret =
-			invalidate_one_component(uc, d, rest + 1,
-						 len - (component_len + 1),
-						 invalidate_descendants);
+		struct untracked_cache_dir *d;
+		int ret;
+
+		if (invalidate_descendants) {
+			d = find_untracked(dir, path, component_len, NULL);
+			if (!d) {
+				invalidate_one_directory(uc, dir, 0);
+				return uc->dir_flags & DIR_SHOW_OTHER_DIRECTORIES;
+			}
+		} else {
+			d = lookup_untracked(uc, dir, path, component_len);
+		}
+		ret = invalidate_one_component(uc, d, rest + 1,
+					       len - (component_len + 1),
+					       invalidate_descendants);
 		dir->can_skip_replay = 0;
 		if (ret)
 			invalidate_one_directory(uc, dir, 0);
@@ -4431,8 +4440,11 @@ static int invalidate_one_component(struct untracked_cache *uc,
 	}
 
 	if (invalidate_descendants) {
-		struct untracked_cache_dir *d = lookup_untracked(uc, dir, path, len);
-		invalidate_one_directory(uc, d, 1);
+		struct untracked_cache_dir *d =
+			find_untracked(dir, path, len, NULL);
+
+		if (d)
+			invalidate_one_directory(uc, d, 1);
 	}
 	invalidate_one_directory(uc, dir, 0);
 	return uc->dir_flags & DIR_SHOW_OTHER_DIRECTORIES;
