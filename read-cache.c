@@ -1579,14 +1579,21 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 		if (filtered)
 			continue;
 
-		if (!fsmonitor_refreshed && !ce_uptodate(ce)) {
+		if (ce_uptodate(ce))
+			continue;
+
+		if (!fsmonitor_refreshed) {
 			refresh_fsmonitor(istate);
 			fsmonitor_refreshed = 1;
 		}
 
+		if (ce->ce_flags & CE_FSMONITOR_VALID) {
+			ce_mark_uptodate(ce);
+			continue;
+		}
+
 		if (!preloaded && !S_ISGITLINK(ce->ce_mode) &&
-		    !ce_uptodate(ce) && !ce_skip_worktree(ce) &&
-		    !(ce->ce_flags & CE_FSMONITOR_VALID)) {
+		    !ce_skip_worktree(ce)) {
 			preload_index(istate, pathspec, 0);
 			preloaded = 1;
 		}
