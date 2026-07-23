@@ -317,6 +317,61 @@ test_expect_success 'root directory cannot be sparse' '
 	test_cmp expect actual
 '
 
+test_expect_success 'literal diff only reconciles matching sparse paths' '
+	test_when_finished "rm -f sparse-literal-full.trace \
+				 sparse-literal-index.trace \
+				 sparse-literal-index-before" &&
+	init_repos &&
+	test_hook --setup -C sparse-checkout sparse-literal-fsmonitor <<-\EOF &&
+		printf "sparse-literal-token\\0"
+		if test -f .git/sparse-literal-dirty
+		then
+			i=0
+			while test "$i" -lt 51
+			do
+				printf "folder1/a\\0"
+				printf "folder2/a\\0"
+				i=$((i + 1))
+			done
+		fi
+	EOF
+	git -C sparse-checkout config core.fsmonitor \
+		.git/hooks/sparse-literal-fsmonitor &&
+	git -C sparse-checkout update-index --fsmonitor &&
+	write_script sparse-literal-edit <<-\EOF &&
+		echo modified >>"$1"
+	EOF
+	run_on_all mkdir -p folder1 folder2 &&
+	run_on_all cp a folder1/a &&
+	run_on_all cp a folder2/a &&
+	run_on_all ../sparse-literal-edit folder1/a &&
+	run_on_all ../sparse-literal-edit folder2/a &&
+	: >sparse-checkout/.git/sparse-literal-dirty &&
+	cp sparse-checkout/.git/index sparse-literal-index-before &&
+	git -C full-checkout diff -- folder1/a >expect &&
+	GIT_TRACE2_EVENT="$PWD/sparse-literal-full.trace" \
+		git -C sparse-checkout diff -- folder1/a >actual &&
+	test_cmp expect actual &&
+	test_trace2_data fsmonitor apply_count 102 \
+		<sparse-literal-full.trace &&
+	test_trace2_data index sparse_path_count 1 \
+		<sparse-literal-full.trace &&
+	test_trace2_data index sparse_lstat_count 1 \
+		<sparse-literal-full.trace &&
+	test_cmp_bin sparse-literal-index-before \
+		sparse-checkout/.git/index &&
+	GIT_TRACE2_EVENT="$PWD/sparse-literal-index.trace" \
+		git -C sparse-index diff -- folder1/a >actual &&
+	test_cmp expect actual &&
+	test_trace2_data index sparse_path_count 1 \
+		<sparse-literal-index.trace &&
+	test_trace2_data index sparse_lstat_count 1 \
+		<sparse-literal-index.trace &&
+	test_trace2_data index full_lstat_count 1 \
+		<sparse-literal-index.trace &&
+	test_all_match git status --porcelain=v2
+'
+
 test_expect_success 'status with options' '
 	init_repos &&
 	test_sparse_match ls &&

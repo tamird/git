@@ -138,7 +138,8 @@ static void builtin_diff_blobs(struct rev_info *revs,
 }
 
 static void builtin_diff_index(struct rev_info *revs,
-			       int argc, const char **argv)
+			       int argc, const char **argv,
+			       int *sparse_validation_scoped)
 {
 	unsigned int option = 0;
 	while (1 < argc) {
@@ -161,10 +162,13 @@ static void builtin_diff_index(struct rev_info *revs,
 		usage(builtin_diff_usage);
 	if (!(option & DIFF_INDEX_CACHED)) {
 		setup_work_tree(the_repository);
-		if (repo_read_index_preload(the_repository,
-					    &revs->diffopt.pathspec, 0) < 0) {
+		if (repo_read_index_with_pathspec(
+			    the_repository, &revs->diffopt.pathspec,
+			    sparse_validation_scoped) < 0) {
 			die_errno("repo_read_index_preload");
 		}
+		preload_index(the_repository->index,
+			      &revs->diffopt.pathspec, 0);
 	} else if (repo_read_index(the_repository) < 0) {
 		die_errno("repo_read_cache");
 	}
@@ -250,7 +254,9 @@ static void refresh_index_quietly(const struct pathspec *pathspec)
 	repo_update_index_if_able(the_repository, &lock_file);
 }
 
-static void builtin_diff_files(struct rev_info *revs, int argc, const char **argv)
+static void builtin_diff_files(struct rev_info *revs, int argc,
+			       const char **argv,
+			       int *sparse_validation_scoped)
 {
 	unsigned int options = 0;
 
@@ -283,10 +289,12 @@ static void builtin_diff_files(struct rev_info *revs, int argc, const char **arg
 		diff_merges_set_dense_combined_if_unset(revs);
 
 	setup_work_tree(the_repository);
-	if (repo_read_index_preload(the_repository, &revs->diffopt.pathspec,
-				    0) < 0) {
+	if (repo_read_index_with_pathspec(
+		    the_repository, &revs->diffopt.pathspec,
+		    sparse_validation_scoped) < 0) {
 		die_errno("repo_read_index_preload");
 	}
+	preload_index(the_repository->index, &revs->diffopt.pathspec, 0);
 	run_diff_files(revs, options);
 }
 
@@ -409,6 +417,7 @@ int cmd_diff(int argc,
 	int blobs = 0, paths = 0;
 	struct object_array_entry *blob[2];
 	int nongit = 0, no_index = 0;
+	int sparse_validation_scoped = 0;
 	int result;
 	struct symdiff sdiff;
 
@@ -616,7 +625,8 @@ int cmd_diff(int argc,
 	if (!ent.nr) {
 		switch (blobs) {
 		case 0:
-			builtin_diff_files(&rev, argc, argv);
+			builtin_diff_files(&rev, argc, argv,
+					   &sparse_validation_scoped);
 			break;
 		case 1:
 			if (paths != 1)
@@ -635,7 +645,8 @@ int cmd_diff(int argc,
 	else if (blobs)
 		usage(builtin_diff_usage);
 	else if (ent.nr == 1)
-		builtin_diff_index(&rev, argc, argv);
+		builtin_diff_index(&rev, argc, argv,
+				   &sparse_validation_scoped);
 	else if (ent.nr == 2) {
 		if (sdiff.warn)
 			warning(_("%s...%s: multiple merge bases, using %s"),
@@ -649,7 +660,8 @@ int cmd_diff(int argc,
 	result = diff_result_code(&rev);
 	if (1 < rev.diffopt.skip_stat_unmatch)
 		refresh_index_quietly(&rev.prune_data);
-	else if (!ent.nr && !blobs && rev.diffopt.skip_stat_unmatch &&
+	else if (!sparse_validation_scoped && !ent.nr && !blobs &&
+		 rev.diffopt.skip_stat_unmatch &&
 		 (the_repository->index->cache_changed & FSMONITOR_CHANGED) &&
 		 use_optional_locks()) {
 		struct lock_file lock_file = LOCK_INIT;
