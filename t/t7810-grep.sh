@@ -2678,7 +2678,7 @@ test_expect_success 'grep selects literal pathsets directly' '
 			grep-literal-recursive \
 			grep-literal-root grep-literal-root.sibling \
 			grep-literal-other \
-			grep-literal-many-*" &&
+			grep-literal-many-* grep-literal-compact" &&
 	echo "literal needle a" >grep-literal-a &&
 	echo "literal needle z" >grep-literal-z &&
 	mkdir -p grep-literal-dir/nested &&
@@ -2921,6 +2921,30 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_cmp many-expected actual &&
 	test_trace2_data grep literal_path_candidates 40 \
 		<grep-literal-trace-many &&
+	mkdir -p grep-literal-compact/a grep-literal-compact/b &&
+	for i in $(test_seq 1 49)
+	do
+		if test "$i" -le 25
+		then
+			dir=a
+		else
+			dir=b
+		fi &&
+		path=$(printf "grep-literal-compact/%s/%02d" "$dir" "$i") &&
+		echo "compact literal paths" >"$path" || return 1
+	done &&
+	git add grep-literal-compact &&
+	git ls-files -- grep-literal-compact/a grep-literal-compact/b \
+		>many-paths &&
+	sed "s/$/:compact literal paths/" many-paths >many-expected &&
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-compact" \
+		git grep "compact literal paths" -- \
+			grep-literal-compact/a grep-literal-compact/b >actual &&
+	test_cmp many-expected actual &&
+	test_trace2_data grep literal_path_candidates 49 \
+		<grep-literal-trace-compact &&
+	test_region ! grep load_content_index grep-literal-trace-compact &&
+	test_region ! grep prepare_content_index grep-literal-trace-compact &&
 	git update-index --assume-unchanged \
 		grep-literal-dir/nested/file &&
 	rm grep-literal-dir/nested/file &&
