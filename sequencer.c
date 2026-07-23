@@ -5486,7 +5486,7 @@ int sequencer_continue(struct repository *r, struct replay_opts *opts)
 	struct todo_list todo_list = TODO_LIST_INIT;
 	int res;
 
-	if (read_and_refresh_cache(r, opts))
+	if (!is_rebase_i(opts) && read_and_refresh_cache(r, opts))
 		return -1;
 
 	if (read_populate_opts(opts))
