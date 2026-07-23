@@ -416,7 +416,7 @@ struct fsmonitor_token_data {
 struct fsmonitor_batch {
 	struct fsmonitor_batch *next;
 	uint64_t batch_seq_nr;
-	const char **interned_paths;
+	char **paths;
 	size_t nr, alloc;
 	time_t pinned_time;
 };
@@ -512,12 +512,9 @@ void fsmonitor_batch__free_list(struct fsmonitor_batch *batch)
 	while (batch) {
 		struct fsmonitor_batch *next = batch->next;
 
-		/*
-		 * The actual strings within the array of this batch
-		 * are interned, so we don't own them.  We only own
-		 * the array.
-		 */
-		free(batch->interned_paths);
+		for (size_t i = 0; i < batch->nr; i++)
+			free(batch->paths[i]);
+		free(batch->paths);
 		free(batch);
 
 		batch = next;
@@ -527,34 +524,26 @@ void fsmonitor_batch__free_list(struct fsmonitor_batch *batch)
 void fsmonitor_batch__add_path(struct fsmonitor_batch *batch,
 			       const char *path)
 {
-	const char *interned_path;
+	char *owned_path = xstrdup(path);
 
-#ifdef __APPLE__
-	pthread_mutex_lock(&fsmonitor_intern_lock);
-#endif
-	interned_path = strintern(path);
-#ifdef __APPLE__
-	pthread_mutex_unlock(&fsmonitor_intern_lock);
-#endif
+	trace_printf_key(&trace_fsmonitor, "event: %s", owned_path);
 
-	trace_printf_key(&trace_fsmonitor, "event: %s", interned_path);
-
-	ALLOC_GROW(batch->interned_paths, batch->nr + 1, batch->alloc);
-	batch->interned_paths[batch->nr++] = interned_path;
+	ALLOC_GROW(batch->paths, batch->nr + 1, batch->alloc);
+	batch->paths[batch->nr++] = owned_path;
 }
 
 static void fsmonitor_batch__combine(struct fsmonitor_batch *batch_dest,
-				     const struct fsmonitor_batch *batch_src)
+				     struct fsmonitor_batch *batch_src)
 {
 	size_t k;
 
-	ALLOC_GROW(batch_dest->interned_paths,
+	ALLOC_GROW(batch_dest->paths,
 		   batch_dest->nr + batch_src->nr + 1,
 		   batch_dest->alloc);
 
 	for (k = 0; k < batch_src->nr; k++)
-		batch_dest->interned_paths[batch_dest->nr++] =
-			batch_src->interned_paths[k];
+		batch_dest->paths[batch_dest->nr++] = batch_src->paths[k];
+	batch_src->nr = 0;
 }
 
 /*
@@ -994,11 +983,6 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	 * to the batch (sequence number) they named.
 	 *
 	 * We use a strset to de-dup the list of pathnames.
-	 *
-	 * NEEDSWORK: each batch contains a list of interned strings,
-	 * so we only need to do pointer comparisons here to build the
-	 * hash table.  Currently, we're still comparing the string
-	 * values.
 	 */
 	strset_init_with_options(&shown, NULL, 0);
 	for (batch = batch_head;
@@ -1007,7 +991,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 		size_t k;
 
 		for (k = 0; k < batch->nr; k++) {
-			const char *s = batch->interned_paths[k];
+			const char *s = batch->paths[k];
 			size_t s_len;
 
 			if (!strset_add(&shown, s))

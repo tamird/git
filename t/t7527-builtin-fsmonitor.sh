@@ -617,12 +617,15 @@ test_expect_success 'flush cached data' '
 	nul_to_q <actual_0 >actual_q0 &&
 
 	>test_flush/file_1 &&
+	retry_grep "^event: file_1$" "$PWD/.git/trace_daemon" &&
 	>test_flush/file_2 &&
+	retry_grep "^event: file_2$" "$PWD/.git/trace_daemon" &&
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_1 &&
 	nul_to_q <actual_1 >actual_q1 &&
 
 	test_grep "file_1" actual_q1 &&
+	test_grep "file_2" actual_q1 &&
 
 	# Force a flush.  This will change the <token_id>, reset the <seq_nr>, and
 	# flush the file data.  Then create some events and ensure that the file
