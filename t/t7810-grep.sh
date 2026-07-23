@@ -1605,13 +1605,14 @@ test_expect_success PTHREADS 'threaded --quiet retires unclaimed work' '
 		haystack=$(printf "haystack\n" | git hash-object -w --stdin) &&
 		{
 			printf "100644 %s\t0000.txt\n" "$needle" &&
-			test_seq -f "100644 $haystack\t%04g.txt" 1 300
+			printf "100644 %s\t0001.txt\n" "$needle" &&
+			test_seq -f "100644 $haystack\t%04g.txt" 2 301
 		} | git update-index --index-info &&
 		git add .gitattributes count-textconv &&
 		git grep --cached --textconv --threads=2 --quiet \
 			textconv:needle &&
 		printf "%s\n" count.* >counts &&
-		test_line_count -lt 300 counts
+		test_line_count -le 2 counts
 	)
 '
 
