@@ -42,6 +42,7 @@
 #include "commit-reach.h"
 #include "commit-graph.h"
 #include "pretty.h"
+#include "trace2.h"
 #include "trailer.h"
 
 static const char * const builtin_commit_usage[] = {
@@ -1547,6 +1548,7 @@ struct repository *repo UNUSED)
 	static struct wt_status s;
 	unsigned int progress_flag = 0;
 	int fd;
+	int optional_locks;
 	struct object_id oid;
 	static struct option builtin_status_options[] = {
 		OPT__VERBOSE(&verbose, N_("be verbose")),
@@ -1634,10 +1636,15 @@ struct repository *repo UNUSED)
 		      REFRESH_QUIET|REFRESH_UNMERGED|progress_flag,
 		      &s.pathspec, NULL, NULL);
 
-	if (use_optional_locks())
+	optional_locks = use_optional_locks();
+	if (optional_locks)
 		fd = repo_hold_locked_index(the_repository, &index_lock, 0);
 	else
 		fd = -1;
+	trace2_data_string("status", the_repository, "index/optional-lock",
+			   optional_locks ?
+				   (fd < 0 ? "unavailable" : "acquired") :
+				   "disabled");
 
 	s.is_initial = repo_get_oid(the_repository, s.reference, &oid) ? 1 : 0;
 	if (!s.is_initial)

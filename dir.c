@@ -126,6 +126,22 @@ static void update_can_skip_replay(struct untracked_cache_dir *dir)
 			dir->can_skip_replay = 0;
 }
 
+static int has_skippable_subtree(const struct untracked_cache_dir *dir)
+{
+	unsigned int i;
+
+	for (i = 0; i < dir->dirs_nr; i++) {
+		const struct untracked_cache_dir *child = dir->dirs[i];
+
+		if (!child->recurse)
+			continue;
+		if (child->can_skip_replay || has_skippable_subtree(child))
+			return 1;
+	}
+
+	return 0;
+}
+
 struct dirent *readdir_skip_dot_and_dotdot(DIR *dirp)
 {
 	struct dirent *e;
@@ -3528,17 +3544,28 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		}
 
 		if (untracked_cache->root->dirs_nr) {
-			/*
-			 * A missing skip-worktree .gitignore may be read from
-			 * the index, whose changes are not reported by
-			 * fsmonitor.
-			 */
-			for (i = 0; i < istate->cache_nr; i++)
-				if (ce_skip_worktree(istate->cache[i]))
-					break;
-			if (i == istate->cache_nr) {
-				refresh_fsmonitor(istate);
-				if (untracked_cache->use_fsmonitor) {
+			int had_skippable_subtree =
+				has_skippable_subtree(untracked_cache->root);
+
+			refresh_fsmonitor(istate);
+			if (!untracked_cache->use_fsmonitor) {
+				if (untracked)
+					validate_untracked_stats(untracked, istate);
+			} else if (had_skippable_subtree ||
+				   untracked_cache->dir_invalidated) {
+				/*
+				 * A missing skip-worktree .gitignore may be read from
+				 * the index, whose changes are not reported by
+				 * fsmonitor.
+				 */
+				trace2_region_enter("dir", "skip-worktree-scan",
+						    istate->repo);
+				for (i = 0; i < istate->cache_nr; i++)
+					if (ce_skip_worktree(istate->cache[i]))
+						break;
+				trace2_region_leave("dir", "skip-worktree-scan",
+						    istate->repo);
+				if (i == istate->cache_nr) {
 					if (untracked_cache->root->can_skip_replay) {
 						dir->internal.pruned_subtrees++;
 						goto done;
@@ -3546,8 +3573,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 					dir->internal.can_prune_replay = 1;
 					if (negative_only)
 						untracked_prune = untracked_cache->root;
-				} else if (untracked)
-					validate_untracked_stats(untracked, istate);
+				}
 			}
 		}
 	}

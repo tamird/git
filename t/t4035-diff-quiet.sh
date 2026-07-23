@@ -165,4 +165,25 @@ test_expect_success 'git diff --quiet on a path that need conversion' '
 	git diff --quiet crlf.txt
 '
 
+test_expect_success 'git diff refreshes only matching index entries' '
+	mkdir refresh-scope &&
+	printf "included\n" >refresh-scope/included &&
+	printf "excluded\n" >refresh-scope/excluded &&
+	git add -- refresh-scope/included refresh-scope/excluded &&
+	test-tool chmtime +10 refresh-scope/included refresh-scope/excluded &&
+	git diff -- refresh-scope/included >actual &&
+	test_must_be_empty actual &&
+	printf "refresh-scope/excluded\n" >expected &&
+	git diff-files --name-only -- refresh-scope/included \
+		refresh-scope/excluded >actual &&
+	test_cmp expected actual &&
+	test-tool chmtime +10 refresh-scope/included refresh-scope/excluded &&
+	git diff -- refresh-scope/ \
+		":(exclude)refresh-scope/excluded" >actual &&
+	test_must_be_empty actual &&
+	git diff-files --name-only -- refresh-scope/included \
+		refresh-scope/excluded >actual &&
+	test_cmp expected actual
+'
+
 test_done
