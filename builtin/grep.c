@@ -88,6 +88,7 @@ static uint64_t worker_lease_id;
 static struct grep_opt *worker_template;
 
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
+#define GREP_INDEX_OVERLAY_SAMPLE_SIZE (1U << 12)
 #define GREP_TREE_INDEX_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_TREE_INDEX_BATCH_SIZE	  (1U << 16)
 #define GREP_TREE_INDEX_BATCH_MAX_BYTES	  (16U * 1024 * 1024)
@@ -1657,13 +1658,41 @@ static int grep_cache(struct grep_opt *opt,
 					positions[nr_oids++] = i;
 				}
 				if (nr_oids) {
+					size_t sample_size = git_env_ulong(
+						"GIT_TEST_GREP_INDEX_OVERLAY_SAMPLE_SIZE",
+						GREP_INDEX_OVERLAY_SAMPLE_SIZE);
+					size_t queried = 0;
+					uint64_t sample_rejected = 0;
+					int bypassed = 0;
+
+					if (!sample_size ||
+					    sample_size > GREP_INDEX_OVERLAY_SAMPLE_SIZE)
+						sample_size = GREP_INDEX_OVERLAY_SAMPLE_SIZE;
+					if (sample_size > nr_oids)
+						sample_size = nr_oids;
 					ALLOC_ARRAY(results, nr_oids);
 					if (!grep_index_ipc_query(
 						    repo, content_index_query, oids,
-						    nr_oids, results)) {
+						    sample_size, results)) {
 						uint64_t rejected = 0;
 
-						for (size_t i = 0; i < nr_oids; i++) {
+						queried = sample_size;
+						for (size_t i = 0; i < sample_size; i++)
+							if (results[i] ==
+							    GREP_INDEX_IPC_IMPOSSIBLE)
+								sample_rejected++;
+						if (sample_size < nr_oids) {
+							if (sample_rejected * 8 < sample_size) {
+								bypassed = 1;
+							} else if (!grep_index_ipc_query(
+								   repo, content_index_query,
+								   oids + sample_size,
+								   nr_oids - sample_size,
+								   results + sample_size)) {
+								queried = nr_oids;
+							}
+						}
+						for (size_t i = 0; i < queried; i++) {
 							size_t index_pos = positions[i];
 							unsigned char bit =
 								1u << (index_pos & 7);
@@ -1685,11 +1714,16 @@ static int grep_cache(struct grep_opt *opt,
 						trace2_data_intmax(
 							"grep", repo,
 							"content_index_overlay_objects",
-							nr_oids);
+							queried);
 						trace2_data_intmax(
 							"grep", repo,
 							"content_index_overlay_rejected",
 							rejected);
+						if (bypassed)
+							trace2_data_intmax(
+								"grep", repo,
+								"content_index_overlay_bypassed",
+								1);
 					}
 				}
 				free(results);

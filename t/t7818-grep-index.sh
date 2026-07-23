@@ -1818,6 +1818,32 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-present.trace &&
 	test_trace2_data grep content_index_overlay_rejected 0 \
 		<overlay-present.trace &&
+	echo "overlay-present:overlay present needle 7818" >expect &&
+	env GIT_TEST_GREP_INDEX_OVERLAY_SAMPLE_SIZE=1 \
+		GIT_TRACE2_EVENT="$PWD/overlay-sample-productive.trace" \
+		git grep --cached "overlay present needle 7818" \
+		-- overlay-absent overlay-present >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_overlay_objects 2 \
+		<overlay-sample-productive.trace &&
+	test_trace2_data grep content_index_overlay_rejected 1 \
+		<overlay-sample-productive.trace &&
+	! test_grep content_index_overlay_bypassed \
+		overlay-sample-productive.trace &&
+	printf "%s\n" \
+		"overlay-present:overlay present needle 7818" \
+		"overlay-worktree:overlay worktree contents" >expect &&
+	env GIT_TEST_GREP_INDEX_OVERLAY_SAMPLE_SIZE=1 \
+		GIT_TRACE2_EVENT="$PWD/overlay-sample-bypass.trace" \
+		git grep --cached overlay \
+		-- overlay-present overlay-worktree >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_overlay_objects 1 \
+		<overlay-sample-bypass.trace &&
+	test_trace2_data grep content_index_overlay_rejected 0 \
+		<overlay-sample-bypass.trace &&
+	test_trace2_data grep content_index_overlay_bypassed 1 \
+		<overlay-sample-bypass.trace &&
 	missing_oid=$(git rev-parse :overlay-missing) &&
 	missing_object=.git/objects/$(test_oid_to_path "$missing_oid") &&
 	mv "$missing_object" "$missing_object.save" &&
