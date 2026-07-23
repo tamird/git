@@ -1449,7 +1449,9 @@ static int grep_cache(struct grep_opt *opt,
 						   "rooted_glob_path_candidates" :
 						   "literal_path_candidates",
 					   selected_nr);
-			if (selected_nr < GREP_MIN_FILES_FOR_THREADS) {
+			if (selected_nr < GREP_MIN_FILES_FOR_THREADS ||
+			    (selected_nr < 2 * GREP_MIN_FILES_FOR_THREADS &&
+			     pathspec->nr < GREP_MIN_FILES_FOR_THREADS)) {
 				uint64_t selected_bytes = 0;
 
 				skip_cache_setup = 1;
@@ -1469,8 +1471,9 @@ static int grep_cache(struct grep_opt *opt,
 					}
 					selected_bytes += st.st_size;
 				}
-				if (skip_cache_setup && num_threads > 1 &&
-				    threads_auto)
+				if (skip_cache_setup &&
+				    selected_nr < GREP_MIN_FILES_FOR_THREADS &&
+				    num_threads > 1 && threads_auto)
 					num_threads = 1;
 			}
 		} else {
