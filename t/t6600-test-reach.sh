@@ -367,6 +367,18 @@ test_expect_success 'rev-list: first-parent topo-order' '
 	run_all_modes git rev-list --first-parent --topo-order commit-6-6
 '
 
+test_expect_success 'rev-list: first-parent topo-order excludes all negative parents' '
+	>expect &&
+	run_all_modes git rev-list --first-parent --topo-order \
+		commit-3-3 ^commit-6-6
+'
+
+test_expect_success 'rev-list: first-parent topo-order excludes only first negative parents' '
+	git rev-parse commit-3-3 commit-3-2 >expect &&
+	run_all_modes git rev-list --first-parent --exclude-first-parent-only \
+		--topo-order commit-3-3 ^commit-6-6
+'
+
 test_expect_success 'rev-list: range topo-order' '
 	git rev-parse \
 		commit-6-6 commit-5-6 commit-4-6 commit-3-6 commit-2-6 commit-1-6 \
