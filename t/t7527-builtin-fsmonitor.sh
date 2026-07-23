@@ -1447,6 +1447,81 @@ test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
 	test_grep -q " M dir1/dir2/dir4/FILE-4-A" "$PWD/file_case_wrong-try3.out"
 '
 
+test_expect_success 'lock-free status reuses current untracked snapshot' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot" &&
+	git init test_untracked_snapshot &&
+	(
+		cd test_untracked_snapshot &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		: >../untracked-snapshot.excludes &&
+		git config core.excludesFile \
+			"$PWD/../untracked-snapshot.excludes" &&
+		mkdir -p nested/one nested/two &&
+		echo exclude >exclude-target &&
+		echo one >nested/one/untracked &&
+		echo two >nested/two/untracked
+	) &&
+	start_daemon -C test_untracked_snapshot \
+		--t2 "$PWD/untracked-snapshot-daemon.trace" &&
+	(
+		cd test_untracked_snapshot &&
+		git status --porcelain >/dev/null &&
+		git hash-object .git/index >../untracked-snapshot-index.before &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-first.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-first.out &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-snapshot-first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-second.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-second.out &&
+		test_cmp ../untracked-snapshot-first.out \
+			../untracked-snapshot-second.out &&
+		test_trace2_data fsmonitor untracked-cache/hit \
+			1 <../untracked-snapshot-second.trace &&
+		echo exclude-target >../untracked-snapshot.excludes &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-excluded.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-excluded.out &&
+		test_trace2_data fsmonitor untracked-cache/hit \
+			1 <../untracked-snapshot-excluded.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-snapshot-excluded.trace &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-snapshot-excluded.expect &&
+		test_cmp ../untracked-snapshot-excluded.expect \
+			../untracked-snapshot-excluded.out &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-repaired.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-repaired.out &&
+		test_cmp ../untracked-snapshot-excluded.out \
+			../untracked-snapshot-repaired.out &&
+		test_trace2_data fsmonitor untracked-cache/hit \
+			1 <../untracked-snapshot-repaired.trace &&
+		mkdir added &&
+		echo added >added/untracked &&
+		git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-added.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-snapshot-added.expect &&
+		test_cmp ../untracked-snapshot-added.expect \
+			../untracked-snapshot-added.out &&
+		rm added/untracked &&
+		rmdir added &&
+		git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-removed.out &&
+		test_cmp ../untracked-snapshot-excluded.out \
+			../untracked-snapshot-removed.out &&
+		git hash-object .git/index >../untracked-snapshot-index.after &&
+		test_cmp ../untracked-snapshot-index.before \
+			../untracked-snapshot-index.after
+	)
+'
+
 test_expect_success MACOS 'worktree binding rejects same-gitdir aliases' '
 	test_when_finished "git -C binding-a fsmonitor--daemon stop 2>/dev/null || :" &&
 	git init --separate-git-dir="$PWD/binding-gitdir" binding-a &&

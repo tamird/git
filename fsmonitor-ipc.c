@@ -2,8 +2,13 @@
 
 #include "git-compat-util.h"
 #include "abspath.h"
+#include "dir.h"
+#include "fsmonitor-ll.h"
+#include "fsmonitor-settings.h"
 #include "gettext.h"
 #include "hash.h"
+#include "hex.h"
+#include "read-cache-ll.h"
 #include "simple-ipc.h"
 #include "fsmonitor-ipc.h"
 #include "repository.h"
@@ -43,6 +48,16 @@ int fsmonitor_ipc__send_command(const char *command UNUSED,
 				struct strbuf *answer UNUSED)
 {
 	return -1;
+}
+
+enum fsmonitor_untracked_cache_result
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate UNUSED)
+{
+	return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+}
+
+void fsmonitor_ipc__save_untracked_cache(struct index_state *istate UNUSED)
+{
 }
 
 #else
@@ -242,6 +257,150 @@ done:
 	strbuf_release(&command);
 
 	return ret;
+}
+
+static int fsmonitor_ipc__send_untracked_cache_command(
+	const char *command, size_t command_len, struct strbuf *answer)
+{
+	struct ipc_client_connection *connection = NULL;
+	struct ipc_client_connect_options options =
+		IPC_CLIENT_CONNECT_OPTIONS_INIT;
+	struct strbuf bound = STRBUF_INIT;
+	struct strbuf identity = STRBUF_INIT;
+	int ret = -1;
+#ifdef __APPLE__
+	struct strbuf request = STRBUF_INIT;
+#endif
+
+	if (fsmonitor_ipc__get_worktree_identity(
+		    repo_get_work_tree(the_repository), &identity))
+		goto done;
+
+	strbuf_addstr(&bound, FSMONITOR_IPC_QUERY_PREFIX);
+	strbuf_addbuf(&bound, &identity);
+	strbuf_addch(&bound, '\n');
+	strbuf_add(&bound, command, command_len);
+#ifdef __APPLE__
+	fsmonitor_ipc__format_request(&request, bound.buf, bound.len);
+#endif
+
+	options.wait_if_busy = 1;
+	if (ipc_client_try_connect(fsmonitor_ipc__get_path(the_repository),
+				   &options, &connection) !=
+	    IPC_STATE__LISTENING)
+		goto done;
+
+	strbuf_reset(answer);
+	ret = ipc_client_send_command_to_connection_gently(
+		connection,
+#ifdef __APPLE__
+		request.buf, request.len,
+#else
+		bound.buf, bound.len,
+#endif
+		answer);
+	ipc_client_close_connection(connection);
+
+done:
+#ifdef __APPLE__
+	strbuf_release(&request);
+#endif
+	strbuf_release(&identity);
+	strbuf_release(&bound);
+	return ret;
+}
+
+enum fsmonitor_untracked_cache_result
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate)
+{
+	struct strbuf command = STRBUF_INIT;
+	struct strbuf answer = STRBUF_INIT;
+	struct untracked_cache *candidate;
+	enum fsmonitor_untracked_cache_result result =
+		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+
+	if (!istate->untracked || is_null_oid(&istate->oid) ||
+	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
+		return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+
+	refresh_fsmonitor(istate);
+	if (!istate->fsmonitor_last_update ||
+	    !istate->untracked->use_fsmonitor)
+		return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
+		    "get %s %s", oid_to_hex(&istate->oid),
+		    istate->fsmonitor_last_update);
+	if (fsmonitor_ipc__send_untracked_cache_command(
+		    command.buf, command.len, &answer))
+		goto done;
+	if (answer.len == 4 && !memcmp(answer.buf, "miss", 4)) {
+		result = FSMONITOR_UNTRACKED_CACHE_MISS;
+		goto done;
+	}
+	if (answer.len <= 4 ||
+	    answer.len - 4 > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
+	    memcmp(answer.buf, "hit", 4))
+		goto done;
+
+	candidate = read_untracked_extension_bounded(answer.buf + 4,
+						     answer.len - 4);
+	if (!candidate)
+		goto done;
+	result = FSMONITOR_UNTRACKED_CACHE_HIT;
+	candidate->use_fsmonitor = 1;
+	free_untracked_cache(istate->untracked);
+	istate->untracked = candidate;
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/hit", 1);
+
+done:
+	strbuf_release(&answer);
+	strbuf_release(&command);
+	return result;
+}
+
+void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
+{
+	static const char hex[] = "0123456789abcdef";
+	struct strbuf command = STRBUF_INIT;
+	struct strbuf snapshot = STRBUF_INIT;
+	struct strbuf answer = STRBUF_INIT;
+	size_t start;
+
+	if (!istate->untracked || !istate->untracked->root ||
+	    !istate->untracked->use_fsmonitor ||
+	    !istate->fsmonitor_last_update || is_null_oid(&istate->oid) ||
+	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
+		return;
+
+	write_untracked_extension(&snapshot, istate->untracked);
+	if (!snapshot.len || snapshot.len >
+		FSMONITOR_IPC_UNTRACKED_CACHE_MAX)
+		goto done;
+
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
+		    "put %s %s ", oid_to_hex(&istate->oid),
+		    istate->fsmonitor_last_update);
+	start = command.len;
+	strbuf_grow(&command, snapshot.len * 2);
+	for (size_t i = 0; i < snapshot.len; i++) {
+		unsigned char value = snapshot.buf[i];
+
+		command.buf[start + i * 2] = hex[value >> 4];
+		command.buf[start + i * 2 + 1] = hex[value & 0xf];
+	}
+	strbuf_setlen(&command, start + snapshot.len * 2);
+	if (!fsmonitor_ipc__send_untracked_cache_command(
+		    command.buf, command.len, &answer) &&
+	    answer.len == 2 && !memcmp(answer.buf, "ok", 2))
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/saved", snapshot.len);
+
+done:
+	strbuf_release(&answer);
+	strbuf_release(&snapshot);
+	strbuf_release(&command);
 }
 
 int fsmonitor_ipc__send_command(const char *command,

@@ -4,9 +4,18 @@
 #include "simple-ipc.h"
 
 struct repository;
+struct index_state;
 
 #define FSMONITOR_IPC_QUERY_PREFIX "query-v1 "
 #define FSMONITOR_IPC_WORKTREE_ID_HEX 64
+#define FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "untracked-cache-v1 "
+#define FSMONITOR_IPC_UNTRACKED_CACHE_MAX (8 * 1024 * 1024)
+
+enum fsmonitor_untracked_cache_result {
+	FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED,
+	FSMONITOR_UNTRACKED_CACHE_MISS,
+	FSMONITOR_UNTRACKED_CACHE_HIT,
+};
 
 /* Hash the canonical worktree root and its stable filesystem identity. */
 int fsmonitor_ipc__get_worktree_identity(const char *worktree,
@@ -53,5 +62,10 @@ int fsmonitor_ipc__send_query(const char *since_token,
  */
 int fsmonitor_ipc__send_command(const char *command,
 				struct strbuf *answer);
+
+/* Reuse a complete, current-token untracked snapshot without an index lock. */
+enum fsmonitor_untracked_cache_result
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate);
+void fsmonitor_ipc__save_untracked_cache(struct index_state *istate);
 
 #endif /* FSMONITOR_IPC_H */

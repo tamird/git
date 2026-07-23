@@ -25,6 +25,7 @@
 #include "utf8.h"
 #include "varint.h"
 #include "ewah/ewok.h"
+#include "ewah/ewok_rlw.h"
 #include "fsmonitor-ll.h"
 #include "read-cache-ll.h"
 #include "setup.h"
@@ -4179,6 +4180,10 @@ void free_untracked_cache(struct untracked_cache *uc)
 
 struct read_data {
 	int index;
+	int failed;
+	size_t nr;
+	size_t max_depth;
+	size_t remaining_entries;
 	struct untracked_cache_dir **ucd;
 	struct ewah_bitmap *check_only;
 	struct ewah_bitmap *valid;
@@ -4186,6 +4191,92 @@ struct read_data {
 	const unsigned char *data;
 	const unsigned char *end;
 };
+
+static int read_untracked_varint(const unsigned char **data,
+				 const unsigned char *end,
+				 uint64_t *value)
+{
+	const unsigned char *next = *data;
+	const unsigned char *decoded;
+
+	for (size_t i = 0; i < 10 && next < end; i++) {
+		if (!(*next++ & 0x80)) {
+			decoded = *data;
+			*value = decode_varint(&decoded);
+			if (decoded != next)
+				return -1;
+			*data = decoded;
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+static int read_untracked_bitmap(struct ewah_bitmap *bitmap,
+				 const unsigned char **data,
+				 const unsigned char *end, size_t nr)
+{
+	const unsigned char *next = *data;
+	size_t remaining = end - next;
+	size_t words, encoded_len, pointer = 0, expanded = 0;
+	size_t bitmap_bits, max_words, last_header = 0, rlw;
+	unsigned int trailing_bits;
+	ssize_t actual_len;
+
+	if (remaining < 3 * sizeof(uint32_t))
+		return -1;
+
+	bitmap_bits = get_be32(next);
+	if (bitmap_bits > nr)
+		return -1;
+	max_words = DIV_ROUND_UP(bitmap_bits, BITS_IN_EWORD);
+	trailing_bits = bitmap_bits % BITS_IN_EWORD;
+
+	words = get_be32(next + sizeof(uint32_t));
+	if (!words ||
+	    words > (remaining - 3 * sizeof(uint32_t)) / sizeof(eword_t))
+		return -1;
+
+	encoded_len = 3 * sizeof(uint32_t) + words * sizeof(eword_t);
+	rlw = get_be32(next + encoded_len - sizeof(uint32_t));
+	if (rlw >= words)
+		return -1;
+
+	actual_len = ewah_read_mmap(bitmap, next, encoded_len);
+	if (actual_len < 0 || (size_t)actual_len != encoded_len)
+		return -1;
+
+	while (pointer < bitmap->buffer_size) {
+		eword_t *word = &bitmap->buffer[pointer];
+		eword_t running = rlw_get_running_len(word);
+		eword_t literals = rlw_get_literal_words(word);
+
+		last_header = pointer;
+		if (running > max_words - expanded)
+			return -1;
+		if (running && rlw_get_run_bit(word) && trailing_bits &&
+		    expanded + running == max_words)
+			return -1;
+		expanded += running;
+
+		if (literals > bitmap->buffer_size - pointer - 1 ||
+		    literals > max_words - expanded)
+			return -1;
+
+		for (size_t i = 0; i < literals; i++) {
+			if (++expanded == max_words && trailing_bits &&
+			    bitmap->buffer[pointer + 1 + i] >> trailing_bits)
+				return -1;
+		}
+		pointer += literals + 1;
+	}
+	if (rlw != last_header || expanded != max_words)
+		return -1;
+
+	*data = next + encoded_len;
+	return 0;
+}
 
 static void stat_data_from_disk(struct stat_data *to, const unsigned char *data)
 {
@@ -4202,31 +4293,35 @@ static void stat_data_from_disk(struct stat_data *to, const unsigned char *data)
 }
 
 static int read_one_dir(struct untracked_cache_dir **untracked_,
-			struct read_data *rd)
+			struct read_data *rd, unsigned int depth)
 {
 	struct untracked_cache_dir ud, *untracked;
 	const unsigned char *data = rd->data, *end = rd->end;
 	const unsigned char *eos;
-	uint64_t value;
+	uint64_t untracked_nr, dirs_nr;
 	int i;
 
 	memset(&ud, 0, sizeof(ud));
 
-	value = decode_varint(&data);
-	if (data > end)
+	if (depth >= rd->max_depth || rd->index < 0 ||
+	    (size_t)rd->index >= rd->nr ||
+	    read_untracked_varint(&data, end, &untracked_nr) ||
+	    read_untracked_varint(&data, end, &dirs_nr) ||
+	    untracked_nr > INT_MAX || dirs_nr > INT_MAX ||
+	    untracked_nr >= (size_t)(end - data) ||
+	    dirs_nr > rd->nr - rd->index - 1 ||
+	    untracked_nr > rd->remaining_entries ||
+	    dirs_nr > rd->remaining_entries - untracked_nr)
 		return -1;
+	rd->remaining_entries -= untracked_nr + dirs_nr;
 	ud.recurse	   = 1;
-	ud.untracked_alloc = value;
-	ud.untracked_nr	   = value;
+	ud.untracked_alloc = untracked_nr;
+	ud.untracked_nr	   = untracked_nr;
 	if (ud.untracked_nr)
-		ALLOC_ARRAY(ud.untracked, ud.untracked_nr);
+		CALLOC_ARRAY(ud.untracked, ud.untracked_nr);
 
-	ud.dirs_alloc = ud.dirs_nr = decode_varint(&data);
-	if (data > end) {
-		free(ud.untracked);
-		return -1;
-	}
-	ALLOC_ARRAY(ud.dirs, ud.dirs_nr);
+	ud.dirs_alloc = ud.dirs_nr = dirs_nr;
+	CALLOC_ARRAY(ud.dirs, ud.dirs_nr);
 
 	eos = memchr(data, '\0', end - data);
 	if (!eos || eos == end) {
@@ -4252,7 +4347,7 @@ static int read_one_dir(struct untracked_cache_dir **untracked_,
 	rd->data = data;
 
 	for (i = 0; i < untracked->dirs_nr; i++) {
-		if (read_one_dir(untracked->dirs + i, rd) < 0)
+		if (read_one_dir(untracked->dirs + i, rd, depth + 1) < 0)
 			return -1;
 	}
 	return 0;
@@ -4261,18 +4356,27 @@ static int read_one_dir(struct untracked_cache_dir **untracked_,
 static void set_check_only(size_t pos, void *cb)
 {
 	struct read_data *rd = cb;
-	struct untracked_cache_dir *ud = rd->ucd[pos];
+	struct untracked_cache_dir *ud;
+
+	if (rd->failed || pos >= rd->nr) {
+		rd->failed = 1;
+		return;
+	}
+	ud = rd->ucd[pos];
 	ud->check_only = 1;
 }
 
 static void read_stat(size_t pos, void *cb)
 {
 	struct read_data *rd = cb;
-	struct untracked_cache_dir *ud = rd->ucd[pos];
-	if (rd->data + sizeof(struct stat_data) > rd->end) {
-		rd->data = rd->end + 1;
+	struct untracked_cache_dir *ud;
+
+	if (rd->failed || pos >= rd->nr ||
+	    (size_t)(rd->end - rd->data) < sizeof(struct stat_data)) {
+		rd->failed = 1;
 		return;
 	}
+	ud = rd->ucd[pos];
 	stat_data_from_disk(&ud->stat_data, rd->data);
 	rd->data += sizeof(struct stat_data);
 	ud->valid = 1;
@@ -4281,11 +4385,14 @@ static void read_stat(size_t pos, void *cb)
 static void read_oid(size_t pos, void *cb)
 {
 	struct read_data *rd = cb;
-	struct untracked_cache_dir *ud = rd->ucd[pos];
-	if (rd->data + the_hash_algo->rawsz > rd->end) {
-		rd->data = rd->end + 1;
+	struct untracked_cache_dir *ud;
+
+	if (rd->failed || pos >= rd->nr ||
+	    (size_t)(rd->end - rd->data) < the_hash_algo->rawsz) {
+		rd->failed = 1;
 		return;
 	}
+	ud = rd->ucd[pos];
 	oidread(&ud->exclude_oid, rd->data, the_repository->hash_algo);
 	rd->data += the_hash_algo->rawsz;
 }
@@ -4298,7 +4405,9 @@ static void load_oid_stat(struct oid_stat *oid_stat, const unsigned char *data,
 	oid_stat->valid = 1;
 }
 
-struct untracked_cache *read_untracked_extension(const void *data, unsigned long sz)
+static struct untracked_cache *read_untracked_extension_1(
+	const void *data, unsigned long sz, size_t max_nodes,
+	size_t max_entries, size_t max_depth)
 {
 	struct untracked_cache *uc;
 	struct read_data rd;
@@ -4306,9 +4415,10 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	const char *ident;
 	uint64_t ident_len;
 	uint64_t varint_len;
-	ssize_t len;
 	int i;
+	int valid = 0;
 	const char *exclude_per_dir;
+	const char *exclude_end;
 	const unsigned hashsz = the_hash_algo->rawsz;
 	const unsigned offset = sizeof(struct ondisk_untracked_cache);
 	const unsigned exclude_per_dir_offset = offset + 2 * hashsz;
@@ -4317,13 +4427,13 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 		return NULL;
 	end--;
 
-	ident_len = decode_varint(&next);
-	if (next + ident_len > end)
+	if (read_untracked_varint(&next, end, &ident_len) ||
+	    ident_len > (size_t)(end - next))
 		return NULL;
 	ident = (const char *)next;
 	next += ident_len;
 
-	if (next + exclude_per_dir_offset + 1 > end)
+	if ((size_t)(end - next) < exclude_per_dir_offset + 1)
 		return NULL;
 
 	CALLOC_ARRAY(uc, 1);
@@ -4337,14 +4447,22 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 		      next + offset + hashsz);
 	uc->dir_flags = get_be32(next + ouc_offset(dir_flags));
 	exclude_per_dir = (const char *)next + exclude_per_dir_offset;
-	uc->exclude_per_dir = uc->exclude_per_dir_to_free = xstrdup(exclude_per_dir);
-	/* NUL after exclude_per_dir is covered by sizeof(*ouc) */
-	next += exclude_per_dir_offset + strlen(exclude_per_dir) + 1;
-	if (next >= end)
+	exclude_end = memchr(exclude_per_dir, '\0',
+			     end - (const unsigned char *)exclude_per_dir);
+	if (!exclude_end)
 		goto done2;
+	uc->exclude_per_dir = uc->exclude_per_dir_to_free =
+		xmemdupz(exclude_per_dir, exclude_end - exclude_per_dir);
+	next = (const unsigned char *)exclude_end + 1;
+	if (next >= end) {
+		valid = next == end;
+		goto done2;
+	}
 
-	varint_len = decode_varint(&next);
-	if (next > end || varint_len == 0)
+	if (read_untracked_varint(&next, end, &varint_len) ||
+	    !varint_len || varint_len > INT_MAX ||
+	    varint_len > max_nodes ||
+	    varint_len > (size_t)(end - next))
 		goto done2;
 
 	rd.valid      = ewah_new();
@@ -4353,33 +4471,31 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	rd.data	      = next;
 	rd.end	      = end;
 	rd.index      = 0;
+	rd.failed     = 0;
+	rd.nr         = varint_len;
+	rd.max_depth  = max_depth;
+	rd.remaining_entries = max_entries;
 	ALLOC_ARRAY(rd.ucd, varint_len);
 
-	if (read_one_dir(&uc->root, &rd) || rd.index != varint_len)
+	if (read_one_dir(&uc->root, &rd, 0) || rd.index != varint_len)
 		goto done;
 
 	next = rd.data;
-	len = ewah_read_mmap(rd.valid, next, end - next);
-	if (len < 0)
-		goto done;
-
-	next += len;
-	len = ewah_read_mmap(rd.check_only, next, end - next);
-	if (len < 0)
-		goto done;
-
-	next += len;
-	len = ewah_read_mmap(rd.sha1_valid, next, end - next);
-	if (len < 0)
+	if (read_untracked_bitmap(rd.valid, &next, end, rd.nr) ||
+	    read_untracked_bitmap(rd.check_only, &next, end, rd.nr) ||
+	    read_untracked_bitmap(rd.sha1_valid, &next, end, rd.nr))
 		goto done;
 
 	ewah_each_bit(rd.check_only, set_check_only, &rd);
-	rd.data = next + len;
+	rd.data = next;
 	ewah_each_bit(rd.valid, read_stat, &rd);
 	ewah_each_bit(rd.sha1_valid, read_oid, &rd);
+	if (rd.failed)
+		goto done;
 	next = rd.data;
 	for (i = rd.index - 1; i >= 0; i--)
 		update_can_skip_replay(rd.ucd[i]);
+	valid = 1;
 
 done:
 	free(rd.ucd);
@@ -4387,11 +4503,25 @@ done:
 	ewah_free(rd.check_only);
 	ewah_free(rd.sha1_valid);
 done2:
-	if (next != end) {
+	if (!valid || next != end) {
 		free_untracked_cache(uc);
 		uc = NULL;
 	}
 	return uc;
+}
+
+struct untracked_cache *read_untracked_extension(const void *data,
+						unsigned long sz)
+{
+	return read_untracked_extension_1(data, sz, SIZE_MAX, SIZE_MAX,
+					  SIZE_MAX);
+}
+
+struct untracked_cache *read_untracked_extension_bounded(const void *data,
+							unsigned long sz)
+{
+	return read_untracked_extension_1(data, sz, 256 * 1024,
+					 1024 * 1024, 1024);
 }
 
 static void invalidate_one_directory(struct untracked_cache *uc,
