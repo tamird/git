@@ -5184,6 +5184,7 @@ test_expect_success 'grep of revision in partial clone batches prefetch and hono
 	# in a/.  It should fetch both blobs in one batched request.
 	GIT_TRACE2_EVENT="$(pwd)/grep-trace-pathspec" \
 		git -C grep-partial grep -c "needle" HEAD -- "a/*.txt" >result &&
+	test_region grep prefetch_blobs grep-trace-pathspec &&
 
 	# Only a/matches.txt contains "needle" among the matched paths.
 	test_line_count = 1 result &&
@@ -5203,6 +5204,7 @@ test_expect_success 'grep of revision in partial clone batches prefetch and hono
 	# from the promisor.
 	GIT_TRACE2_EVENT="$(pwd)/grep-trace-all" \
 		git -C grep-partial grep -c "needle" HEAD >result &&
+	test_region grep prefetch_blobs grep-trace-all &&
 
 	test_line_count = 2 result &&
 	test_trace2_data promisor fetch_count 1 <grep-trace-all &&

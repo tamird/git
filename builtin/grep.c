@@ -2527,6 +2527,8 @@ static void prefetch_grep_blobs(struct grep_opt *opt,
 	if (!repo_has_promisor_remote(opt->repo))
 		return;
 
+	trace2_region_enter("grep", "prefetch_blobs", opt->repo);
+
 	/* For each tree, gather the blobs in it */
 	for (int i = 0; i < list->nr; i++) {
 		struct object *real_obj;
@@ -2560,6 +2562,7 @@ static void prefetch_grep_blobs(struct grep_opt *opt,
 		oid_array_clear(&to_fetch);
 	}
 	oidset_clear(&blob_oids);
+	trace2_region_leave("grep", "prefetch_blobs", opt->repo);
 }
 
 static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
