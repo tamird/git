@@ -167,7 +167,7 @@ test_expect_success 'fsmonitor refresh preserves a concurrent index update' '
 	done
 '
 
-test_expect_success PTHREADS 'path-limited add persists a full fsmonitor refresh' '
+test_expect_success PTHREADS 'nonliteral add persists a full fsmonitor refresh' '
 	test_when_finished "rm -rf add-fsmonitor-refresh" &&
 	test_create_repo add-fsmonitor-refresh &&
 	(
@@ -191,7 +191,7 @@ test_expect_success PTHREADS 'path-limited add persists a full fsmonitor refresh
 		echo modified >dirty &&
 		echo staged >target &&
 		: >.git/fsmonitor-trivial &&
-		GIT_TEST_PRELOAD_INDEX=true git add -- target &&
+		GIT_TEST_PRELOAD_INDEX=true git add -- ":(glob)target" &&
 		git ls-files -f -- clean dirty >actual &&
 		printf "h clean\nH dirty\n" >expect &&
 		test_cmp expect actual &&
@@ -202,6 +202,84 @@ test_expect_success PTHREADS 'path-limited add persists a full fsmonitor refresh
 		echo dirty >expect &&
 		test_cmp expect actual
 	)
+'
+
+test_expect_success PTHREADS 'git diff persists a full fsmonitor refresh' '
+	test_when_finished "rm -rf diff-fsmonitor-refresh" &&
+	test_create_repo diff-fsmonitor-refresh &&
+	(
+		cd diff-fsmonitor-refresh &&
+		echo clean >clean &&
+		echo dirty >dirty &&
+		test-tool chmtime =-60 clean dirty &&
+		git add -- clean dirty &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-trivial
+			then
+				rm .git/fsmonitor-trivial &&
+				printf "/\0"
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		GIT_TEST_PRELOAD_INDEX=true git status --porcelain &&
+		echo modified >dirty &&
+		: >.git/fsmonitor-trivial &&
+		GIT_TEST_PRELOAD_INDEX=true git diff --name-only >.git/actual &&
+		echo dirty >.git/expect &&
+		test_cmp .git/expect .git/actual &&
+		test_path_is_missing .git/fsmonitor-trivial &&
+		git ls-files -f -- clean dirty >.git/actual &&
+		printf "h clean\nH dirty\n" >.git/expect &&
+		test_cmp .git/expect .git/actual
+	)
+'
+
+test_expect_success PTHREADS 'git diff respects fsmonitor refresh write settings' '
+	test_when_finished "rm -rf diff-fsmonitor-optional-locks \
+		diff-fsmonitor-auto-refresh" &&
+	for mode in optional-locks auto-refresh
+	do
+		repo=diff-fsmonitor-$mode &&
+		test_create_repo "$repo" &&
+		(
+			cd "$repo" &&
+			echo clean >clean &&
+			echo dirty >dirty &&
+			test-tool chmtime =-60 clean dirty &&
+			git add -- clean dirty &&
+			git commit -m initial &&
+			test_hook --setup fsmonitor-test <<-\EOF &&
+				printf "last_update_token\0" &&
+				if test -f .git/fsmonitor-trivial
+				then
+					rm .git/fsmonitor-trivial &&
+					printf "/\0"
+				fi
+			EOF
+			git config core.fsmonitor .git/hooks/fsmonitor-test &&
+			GIT_TEST_PRELOAD_INDEX=true git status --porcelain &&
+			echo modified >dirty &&
+			: >.git/fsmonitor-trivial &&
+			cp .git/index .git/index.before &&
+			case "$mode" in
+			optional-locks)
+				GIT_TEST_PRELOAD_INDEX=true \
+					git --no-optional-locks diff --name-only >.git/actual
+				;;
+			auto-refresh)
+				GIT_TEST_PRELOAD_INDEX=true \
+					git -c diff.autoRefreshIndex=false \
+					diff --name-only >.git/actual
+				;;
+			esac &&
+			echo dirty >.git/expect &&
+			test_cmp .git/expect .git/actual &&
+			test_path_is_missing .git/fsmonitor-trivial &&
+			test_cmp_bin .git/index.before .git/index
+		) || return 1
+	done
 '
 
 test_expect_success PTHREADS 'literal add skips redundant index preload' '
@@ -218,7 +296,11 @@ test_expect_success PTHREADS 'literal add skips redundant index preload' '
 		git commit -m initial &&
 		test_hook --setup fsmonitor-test <<-\EOF &&
 			printf "last_update_token\0" &&
-			if test -f .git/fsmonitor-dirty
+			if test -f .git/fsmonitor-trivial
+			then
+				rm .git/fsmonitor-trivial &&
+				printf "/\0"
+			elif test -f .git/fsmonitor-dirty
 			then
 				while read path
 				do
@@ -232,12 +314,14 @@ test_expect_success PTHREADS 'literal add skips redundant index preload' '
 		echo staged-one >one &&
 		echo staged-two >two &&
 		printf "dirty\none\ntwo\n" >.git/fsmonitor-dirty &&
+		: >.git/fsmonitor-trivial &&
 		GIT_TEST_PRELOAD_INDEX=true \
 		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-add-literal" \
 			git add -- one two &&
+		test_path_is_missing .git/fsmonitor-trivial &&
 		test_region ! index preload "$TRASH_DIRECTORY/trace2-add-literal" &&
 		git ls-files -f -- clean >actual &&
-		echo "h clean" >expect &&
+		echo "H clean" >expect &&
 		test_cmp expect actual &&
 		git diff --cached --name-only >actual &&
 		printf "one\ntwo\n" >expect &&
@@ -815,6 +899,37 @@ test_expect_success UNTRACKED_CACHE 'do not prune a flat tracked index' '
 	test_grep "directories-visited:1" trace-flat-tracked
 '
 
+test_expect_success UNTRACKED_CACHE 'do not scan index for a result-bearing subtree' '
+	test_create_repo mixed-tracked &&
+	(
+		cd mixed-tracked &&
+		test_seq 1 64 |
+		sed "s/^/tracked-/" |
+		xargs touch &&
+		mkdir results &&
+		: >results/tracked &&
+		git config feature.manyFiles true &&
+		git add -- . &&
+		test "$(git update-index --show-index-version)" = 4 &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		: >results/untracked &&
+		echo "?? results/untracked" >../mixed-expect &&
+		git status --porcelain >../mixed-before &&
+		test_cmp ../mixed-expect ../mixed-before &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-mixed-tracked" \
+			git status --porcelain >../mixed-after &&
+		test_cmp ../mixed-expect ../mixed-after
+	) &&
+	test_grep "subtrees-pruned:0" trace-mixed-tracked &&
+	test_grep "directories-visited:2" trace-mixed-tracked &&
+	test_grep ! "skip-worktree-scan" trace-mixed-tracked
+'
+
 test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 	test_create_repo empty-untracked &&
 	(
@@ -1069,6 +1184,37 @@ test_expect_success UNTRACKED_CACHE 'index-backed ignore disables shortcut' '
 	test_grep "directories-visited:[1-9]" trace-index-ignore &&
 	test_grep "subtrees-pruned:0" trace-index-ignore-ls-files &&
 	test_grep "directories-visited:[1-9]" trace-index-ignore-ls-files
+'
+
+test_expect_success UNTRACKED_CACHE 'clearing skip-worktree invalidates cached ignores' '
+	test_create_repo skip-ignore-transition &&
+	(
+		cd skip-ignore-transition &&
+		mkdir dir &&
+		echo ignored >dir/.gitignore &&
+		: >dir/tracked &&
+		: >dir/ignored &&
+		git add -- dir/.gitignore dir/tracked &&
+		git commit -m initial &&
+		git update-index --skip-worktree dir/.gitignore &&
+		rm dir/.gitignore &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../skip-transition-before &&
+		test_must_be_empty ../skip-transition-before &&
+		git -c core.fsmonitor=false update-index \
+			--no-skip-worktree dir/.gitignore &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-skip-transition" \
+			git status --porcelain >../skip-transition-actual &&
+		git -c core.untrackedCache=false status --porcelain \
+			>../skip-transition-expect
+	) &&
+	test_cmp skip-transition-expect skip-transition-actual &&
+	test_grep "^?? dir/ignored$" skip-transition-actual &&
+	test_grep "directories-visited:[1-9]" trace-skip-transition
 '
 
 test_expect_success UNTRACKED_CACHE 'prune pathspec status with fsmonitor' '

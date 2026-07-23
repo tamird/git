@@ -9,6 +9,7 @@
 
 #include "builtin.h"
 #include "config.h"
+#include "environment.h"
 #include "ewah/ewok.h"
 #include "lockfile.h"
 #include "color.h"
@@ -234,7 +235,7 @@ static void builtin_diff_combined(struct rev_info *revs,
 	oid_array_clear(&parents);
 }
 
-static void refresh_index_quietly(void)
+static void refresh_index_quietly(const struct pathspec *pathspec)
 {
 	struct lock_file lock_file = LOCK_INIT;
 	int fd;
@@ -244,8 +245,8 @@ static void refresh_index_quietly(void)
 		return;
 	discard_index(the_repository->index);
 	repo_read_index(the_repository);
-	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED, NULL, NULL,
-		      NULL);
+	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED,
+		      pathspec, NULL, NULL);
 	repo_update_index_if_able(the_repository, &lock_file);
 }
 
@@ -647,7 +648,15 @@ int cmd_diff(int argc,
 				      first_non_parent);
 	result = diff_result_code(&rev);
 	if (1 < rev.diffopt.skip_stat_unmatch)
-		refresh_index_quietly();
+		refresh_index_quietly(&rev.prune_data);
+	else if (!ent.nr && !blobs && rev.diffopt.skip_stat_unmatch &&
+		 (the_repository->index->cache_changed & FSMONITOR_CHANGED) &&
+		 use_optional_locks()) {
+		struct lock_file lock_file = LOCK_INIT;
+
+		if (repo_hold_locked_index(the_repository, &lock_file, 0) >= 0)
+			repo_update_index_if_able(the_repository, &lock_file);
+	}
 	release_revisions(&rev);
 	object_array_clear(&ent);
 	symdiff_release(&sdiff);

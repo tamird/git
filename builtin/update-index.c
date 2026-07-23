@@ -244,11 +244,19 @@ static int mark_ce_flags(const char *path, int flag, int mark)
 	int namelen = strlen(path);
 	int pos = index_name_pos(the_repository->index, path, namelen);
 	if (0 <= pos) {
+		int was_skip_worktree =
+			!!ce_skip_worktree(the_repository->index->cache[pos]);
+
 		mark_fsmonitor_invalid(the_repository->index, the_repository->index->cache[pos]);
 		if (mark)
 			the_repository->index->cache[pos]->ce_flags |= flag;
 		else
 			the_repository->index->cache[pos]->ce_flags &= ~flag;
+		if (flag == CE_SKIP_WORKTREE &&
+		    was_skip_worktree !=
+		    !!ce_skip_worktree(the_repository->index->cache[pos]))
+			untracked_cache_invalidate_path(the_repository->index,
+							 path, 1);
 		the_repository->index->cache[pos]->ce_flags |= CE_UPDATE_IN_BASE;
 		cache_tree_invalidate_path(the_repository->index, path);
 		the_repository->index->cache_changed |= CE_ENTRY_CHANGED;
