@@ -256,7 +256,9 @@ test_expect_success PTHREADS 'literal add skips redundant index preload' '
 
 test_expect_success PTHREADS 'fsmonitor preloads only dirty index entries' '
 	test_when_finished "rm -rf refresh-fsmonitor-preload \
-		trace2-refresh-fsmonitor-clean trace2-refresh-fsmonitor-dirty" &&
+		trace2-refresh-fsmonitor-clean trace2-refresh-fsmonitor-dirty \
+		trace2-refresh-fsmonitor-assumed \
+		trace2-refresh-fsmonitor-multiple" &&
 	test_create_repo refresh-fsmonitor-preload &&
 	(
 		cd refresh-fsmonitor-preload &&
@@ -291,8 +293,27 @@ test_expect_success PTHREADS 'fsmonitor preloads only dirty index entries' '
 			git status --porcelain >.git/actual &&
 		printf " M dirty\n" >.git/expect &&
 		test_cmp .git/expect .git/actual &&
+		test_region ! index preload \
+			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-dirty" &&
+		git update-index --assume-unchanged -- clean &&
+		echo modified >clean &&
+		printf "%s\n" clean dirty >.git/fsmonitor-dirty &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-refresh-fsmonitor-assumed" \
+			git status --porcelain >.git/actual &&
+		printf " M dirty\n" >.git/expect &&
+		test_cmp .git/expect .git/actual &&
+		test_region ! index preload \
+			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-assumed" &&
+		git update-index --no-assume-unchanged -- clean &&
+		printf "%s\n" clean dirty >.git/fsmonitor-dirty &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-refresh-fsmonitor-multiple" \
+			git status --porcelain >.git/actual &&
+		printf " M clean\n M dirty\n" >.git/expect &&
+		test_cmp .git/expect .git/actual &&
 		test_region index preload \
-			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-dirty"
+			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-multiple"
 	)
 '
 
