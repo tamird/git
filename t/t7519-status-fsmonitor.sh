@@ -254,6 +254,48 @@ test_expect_success PTHREADS 'literal add skips redundant index preload' '
 	)
 '
 
+test_expect_success PTHREADS 'fsmonitor preloads only dirty index entries' '
+	test_when_finished "rm -rf refresh-fsmonitor-preload \
+		trace2-refresh-fsmonitor-clean trace2-refresh-fsmonitor-dirty" &&
+	test_create_repo refresh-fsmonitor-preload &&
+	(
+		cd refresh-fsmonitor-preload &&
+		echo clean >clean &&
+		echo dirty >dirty &&
+		git add -- clean dirty &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		GIT_TEST_PRELOAD_INDEX=true \
+			git status --porcelain >.git/actual &&
+		test_must_be_empty .git/actual &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-refresh-fsmonitor-clean" \
+			git status --porcelain >.git/actual &&
+		test_must_be_empty .git/actual &&
+		test_region ! index preload \
+			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-clean" &&
+		echo modified >dirty &&
+		echo dirty >.git/fsmonitor-dirty &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace2-refresh-fsmonitor-dirty" \
+			git status --porcelain >.git/actual &&
+		printf " M dirty\n" >.git/expect &&
+		test_cmp .git/expect .git/actual &&
+		test_region index preload \
+			"$TRASH_DIRECTORY/trace2-refresh-fsmonitor-dirty"
+	)
+'
+
 test_expect_success 'diff-index honors fsmonitor validity' '
 	test_when_finished "rm -rf diff-index" &&
 	test_create_repo diff-index &&

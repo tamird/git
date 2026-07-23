@@ -1510,6 +1510,8 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 	int ignore_submodules = (flags & REFRESH_IGNORE_SUBMODULES) != 0;
 	int ignore_skip_worktree = (flags & REFRESH_IGNORE_SKIP_WORKTREE) != 0;
 	int first = 1;
+	int preloaded = 0;
+	int fsmonitor_refreshed = is_fsmonitor_refreshed(istate);
 	int in_porcelain = (flags & REFRESH_IN_PORCELAIN);
 	unsigned int options = (CE_MATCH_REFRESH |
 				(really ? CE_MATCH_IGNORE_VALID : 0) |
@@ -1534,12 +1536,6 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 	typechange_fmt = in_porcelain ? "T\t%s\n" : "%s: needs update\n";
 	added_fmt      = in_porcelain ? "A\t%s\n" : "%s: needs update\n";
 	unmerged_fmt   = in_porcelain ? "U\t%s\n" : "%s: needs merge\n";
-	/*
-	 * Use the multi-threaded preload_index() to refresh most of the
-	 * cache entries quickly then in the single threaded loop below,
-	 * we only have to do the special cases that are left.
-	 */
-	preload_index(istate, pathspec, 0);
 	trace2_region_enter("index", "refresh", NULL);
 
 	for (i = 0; i < istate->cache_nr; i++) {
@@ -1582,6 +1578,18 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 
 		if (filtered)
 			continue;
+
+		if (!fsmonitor_refreshed && !ce_uptodate(ce)) {
+			refresh_fsmonitor(istate);
+			fsmonitor_refreshed = 1;
+		}
+
+		if (!preloaded && !S_ISGITLINK(ce->ce_mode) &&
+		    !ce_uptodate(ce) && !ce_skip_worktree(ce) &&
+		    !(ce->ce_flags & CE_FSMONITOR_VALID)) {
+			preload_index(istate, pathspec, 0);
+			preloaded = 1;
+		}
 
 		new_entry = refresh_cache_ent(istate, ce, options,
 					      &cache_errno, &changed,
