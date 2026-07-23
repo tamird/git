@@ -1813,6 +1813,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_negative_cache_hits 1 \
 		<overlay-hit.trace &&
+	test_region grep query_content_index_ipc overlay-hit.trace &&
+	test_region ! grep query_content_index_overlay overlay-hit.trace &&
 	! test_grep content_index_overlay_objects overlay-hit.trace &&
 	mv "$absent_object.save" "$absent_object" &&
 	echo "overlay-present:overlay present needle 7818" >expect &&
@@ -1882,6 +1884,9 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		GIT_TRACE2_EVENT="$PWD/overlay-literal.trace" \
 		git grep "overlay present needle 7818" -- "$@" >actual &&
 	test_cmp expect actual &&
+	test_region grep load_worktree_cache overlay-literal.trace &&
+	test_region grep query_content_index_ipc overlay-literal.trace &&
+	test_region grep query_content_index_overlay overlay-literal.trace &&
 	test_trace2_data grep literal_path_candidates 42 \
 		<overlay-literal.trace &&
 	test_trace2_data grep content_index_overlay_objects 2 \
