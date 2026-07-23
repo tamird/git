@@ -687,6 +687,45 @@ test_expect_success UNTRACKED_CACHE 'fsmonitor invalidates directory cones' '
 	test_grep "opendir:3" trace-cone
 '
 
+test_expect_success UNTRACKED_CACHE 'missing fsmonitor cones do not create cache nodes' '
+	test_create_repo fsmonitor-missing-cones &&
+	(
+		cd fsmonitor-missing-cones &&
+		mkdir -p parent/existing &&
+		: >parent/existing/tracked &&
+		git add -- parent &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-missing-cones
+			then
+				for repeat in 1 2
+				do
+					n=256 &&
+					while test "$n" -gt 0
+					do
+						printf "parent/missing-%04d/descendant/\0" "$n" &&
+						n=$((n - 1)) ||
+						exit 1
+					done
+				done
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../missing-before &&
+		test_must_be_empty ../missing-before &&
+		: >.git/fsmonitor-missing-cones &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-missing-cones" \
+			git status --porcelain >../missing-after &&
+		test_must_be_empty ../missing-after &&
+		test_grep "node-creation:0" \
+			"$TRASH_DIRECTORY/trace-missing-cones" &&
+		test-tool dump-untracked-cache >../missing-cache &&
+		test_grep ! "^/parent/missing-" ../missing-cache
+	)
+'
+
 test_expect_success UNTRACKED_CACHE 'do not prune a flat tracked index' '
 	test_create_repo flat-tracked &&
 	(
