@@ -851,8 +851,10 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 		goto out;
 	}
 
+	trace2_region_enter("cache_tree", "validate", index_state->repo);
 	was_valid = !(flags & WRITE_TREE_IGNORE_CACHE_TREE) &&
 		    cache_tree_fully_valid(cache_tree_get(index_state));
+	trace2_region_leave("cache_tree", "validate", index_state->repo);
 
 	ret = write_index_as_tree_internal(oid, index_state, was_valid, flags,
 					   prefix);
