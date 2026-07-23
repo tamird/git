@@ -32,6 +32,7 @@ int grep_index_ipc_query_with_max_parallel_requests(
 	size_t max_parallel_requests);
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
+			       const struct object_id *index_identity,
 			       unsigned char *maybe,
 			       unsigned char *unresolved, size_t nr,
 			       struct object_id *identity,

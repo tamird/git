@@ -4,6 +4,7 @@
 #define GREP_WORKTREE_CACHE_MIN_BYTES (1ULL << 30)
 
 struct cache_entry;
+struct grep_index_identity;
 struct index_state;
 struct repository;
 
@@ -19,6 +20,7 @@ int grep_worktree_cache_entry_eligible(const struct cache_entry *ce);
 /* sidecar_loaded is set when a compact or recovery cache can be reused. */
 struct grep_worktree_cache *grep_worktree_cache_load(
 	struct repository *repo, struct index_state *istate,
+	struct grep_index_identity *identity,
 	int *sidecar_loaded);
 enum grep_worktree_cache_result grep_worktree_cache_lookup(
 	struct grep_worktree_cache *cache, size_t pos);

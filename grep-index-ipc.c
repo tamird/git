@@ -51,6 +51,7 @@ int grep_index_ipc_query_with_max_parallel_requests(
 
 int grep_index_ipc_query_index(struct repository *repo UNUSED,
 			       const struct grep_index_query *query UNUSED,
+			       const struct object_id *index_identity UNUSED,
 			       unsigned char *maybe UNUSED,
 			       unsigned char *unresolved UNUSED,
 			       size_t nr UNUSED,
@@ -1953,6 +1954,7 @@ cleanup:
 
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
+			       const struct object_id *index_identity,
 			       unsigned char *maybe,
 			       unsigned char *unresolved, size_t nr,
 			       struct object_id *result_identity,
@@ -1970,7 +1972,6 @@ int grep_index_ipc_query_index(struct repository *repo,
 	size_t bitmap_size = nr / 8 + !!(nr % 8);
 	size_t rawsz = repo->hash_algo->rawsz;
 	size_t request_len = GREP_INDEX_IPC_INDEX_REQUEST_HEADER_SIZE;
-	struct grep_index_identity index_identity;
 	struct object_id identity;
 	const struct object_id *cache_key =
 		grep_index_query_cache_key(query);
@@ -1994,9 +1995,7 @@ int grep_index_ipc_query_index(struct repository *repo,
 		if (oidmap_get_size(&repo->objects->replace_map))
 		goto cleanup;
 	}
-	if (grep_index_identity_get(repo, repo->index, &index_identity))
-		goto cleanup;
-	oidcpy(&identity, &index_identity.oid_sequence);
+	oidcpy(&identity, index_identity);
 	path = grep_index_ipc_path(repo);
 	if (rawsz * (1 + !!cache_key) >
 	    GREP_INDEX_IPC_MAX_REQUEST_SIZE - request_len)

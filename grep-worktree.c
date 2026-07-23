@@ -702,10 +702,10 @@ static int split_base_position(struct grep_worktree_cache *cache,
 
 struct grep_worktree_cache *grep_worktree_cache_load(
 	struct repository *repo, struct index_state *istate,
+	struct grep_index_identity *identity,
 	int *sidecar_loaded)
 {
 	struct grep_worktree_cache *cache;
-	struct grep_index_identity identity;
 	struct lock_file lock = LOCK_INIT;
 	struct object_id observation_generation;
 	struct strbuf invalid_path = STRBUF_INIT;
@@ -761,14 +761,13 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 		cache->split_base_bitmap_size =
 			bitmap_size(cache->split_base_nr);
 	}
-	if (grep_index_identity_get(repo, istate, &identity)) {
+	if (grep_index_identity_get(repo, istate, identity))
 		goto disable;
-	}
-	oidcpy(&cache->state_oid, &identity.worktree);
-	oidcpy(&cache->worktree_scope, &identity.worktree_scope);
+	oidcpy(&cache->state_oid, &identity->worktree);
+	oidcpy(&cache->worktree_scope, &identity->worktree_scope);
 	grep_worktree_entry_identity_init(repo, &cache->entry_identity);
 	oidcpy(&cache->split_base_identity,
-	       &identity.worktree_split_base_identity);
+	       &identity->worktree_split_base_identity);
 	allocate_cache_bitmaps(cache);
 	loaded = load_cache(cache, cache->equal, cache->different,
 			    cache->split_base_equal);

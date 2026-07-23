@@ -1879,14 +1879,19 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		git grep --no-content-index \
 		"overlay present warmup absent 7818" -- overlay-present &&
 	set -- overlay-worktree overlay-present literal-candidate-* &&
+	rm -f .git/index.grep-token &&
 	echo "overlay-present:overlay present needle 7818" >expect &&
 	env \
 		GIT_TRACE2_EVENT="$PWD/overlay-literal.trace" \
-		git grep "overlay present needle 7818" -- "$@" >actual &&
+		git --no-optional-locks grep \
+			"overlay present needle 7818" -- "$@" >actual &&
 	test_cmp expect actual &&
+	test_path_is_missing .git/index.grep-token &&
 	test_region grep load_worktree_cache overlay-literal.trace &&
 	test_region grep query_content_index_ipc overlay-literal.trace &&
 	test_region grep query_content_index_overlay overlay-literal.trace &&
+	test_trace2_data grep index_identity/computations 1 \
+		<overlay-literal.trace &&
 	test_trace2_data grep literal_path_candidates 42 \
 		<overlay-literal.trace &&
 	test_trace2_data grep content_index_overlay_objects 2 \
