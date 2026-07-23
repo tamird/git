@@ -928,9 +928,11 @@ static int grep_directory(struct grep_opt *opt,
 			  const struct pathspec *pathspec, int exc_std,
 			  int use_index, struct index_state *istate);
 struct grep_tree_batch;
+struct grep_tree_query_context;
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr, struct grep_tree_batch *batch);
+		     int check_attr, struct grep_tree_batch *batch,
+		     struct grep_tree_query_context *query);
 
 static int grep_submodule(struct grep_opt *opt,
 			  const struct pathspec *pathspec,
@@ -1024,7 +1026,7 @@ static int grep_submodule(struct grep_opt *opt,
 
 		init_tree_desc(&tree, oid, data, size);
 		hit = grep_tree(&subopt, pathspec, &tree, &base, base.len,
-				object_type == OBJ_COMMIT, NULL);
+				object_type == OBJ_COMMIT, NULL, NULL);
 		strbuf_release(&base);
 		free(data);
 	} else {
@@ -2047,7 +2049,7 @@ static int grep_cache(struct grep_opt *opt,
 			init_tree_desc(&tree, &ce->oid, data, size);
 
 			hit |= grep_tree(opt, pathspec, &tree, &name, 0, 0,
-					 NULL);
+					 NULL, NULL);
 			strbuf_setlen(&name, name_base_len);
 			strbuf_addstr(&name, ce->name);
 			free(data);
@@ -2287,7 +2289,8 @@ static void flush_grep_tree_batch_before_die(struct grep_tree_batch *batch)
 
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
-		     int check_attr, struct grep_tree_batch *batch)
+		     int check_attr, struct grep_tree_batch *batch,
+		     struct grep_tree_query_context *query)
 {
 	struct repository *repo = opt->repo;
 	int hit = 0;
@@ -2355,7 +2358,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						check_attr ?
 							base->buf + tn_len :
 							NULL,
-						0, SIZE_MAX, 0);
+						0, SIZE_MAX,
+						query && query->bypassed);
 				} else {
 					ALLOC_GROW(batch->items, batch->nr + 1,
 						   batch->alloc);
@@ -2373,7 +2377,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			} else {
 				hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
 						check_attr ? base->buf + tn_len : NULL,
-						0, SIZE_MAX, 0);
+						0, SIZE_MAX,
+						query && query->bypassed);
 			}
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
@@ -2401,7 +2406,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				init_tree_desc(&sub, &entry.oid, data, size);
 			}
 			hit |= grep_tree(opt, pathspec, &sub, base, tn_len,
-					 check_attr, batch);
+					 check_attr, batch, query);
 			free(data);
 		} else if (recurse_submodules && S_ISGITLINK(entry.mode)) {
 			hit |= grep_submodule(opt, pathspec, &entry.oid,
@@ -2562,7 +2567,8 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct grep_tree_query_context *query)
 {
 	if (obj->type == OBJ_BLOB)
-		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0, 0);
+		return grep_oid(opt, &obj->oid, name, 0, path, 0, 0,
+				query->bypassed);
 	if (obj->type == OBJ_COMMIT || obj->type == OBJ_TREE) {
 		struct grep_tree_batch batch = {
 			.opt = opt,
@@ -2615,7 +2621,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 			init_tree_desc(&tree, &obj->oid, data, size);
 		}
 		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
-				obj->type == OBJ_COMMIT, batch_ptr);
+				obj->type == OBJ_COMMIT, batch_ptr, query);
 		if (batch_ptr) {
 			hit |= flush_grep_tree_batch(batch_ptr);
 			free(batch.items);
