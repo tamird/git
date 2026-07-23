@@ -1430,6 +1430,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-bypass.trace &&
 	test_trace2_data grep content_index_tree_bypassed 1 \
 		<tree-bypass.trace &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
+		git grep --threads=1 --fixed-strings \
+			-e "import sample_ext.__private" \
+			-e "ordinary contents" HEAD -- \
+			escaped-dot ordinary short >actual 2>err &&
+	test_grep "unable to read" err &&
 	replaced_oid=$(git rev-parse :ordinary) &&
 	replacement_oid=$(git rev-parse :present) &&
 	git replace "$replaced_oid" "$replacement_oid" &&
