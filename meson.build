@@ -575,7 +575,6 @@ libgit_sources = [
   'usage.c',
   'userdiff.c',
   'utf8.c',
-  'version.c',
   'versioncmp.c',
   'walker.c',
   'wildmatch.c',
@@ -1782,7 +1781,22 @@ version_def_h = custom_target(
   depends: [git_version_file],
   env: version_gen_environment,
 )
-libgit_sources += version_def_h
+# The trailing header is already guarded by version.c's own include; its
+# contents ensure header changes update only this generated source.
+libgit_sources += custom_target(
+  input: ['version.c', version_def_h],
+  output: 'version.c',
+  command: [
+    shell,
+    '-c',
+    '''printf '#include "%s"' "$1" && echo && cat "$2"''',
+    'git-version-source',
+    fs.as_posix(meson.current_source_dir() / 'version.c'),
+    '@INPUT1@',
+  ],
+  capture: true,
+  env: script_environment,
+)
 
 rust_option = get_option('rust')
 if rust_option.allowed()
