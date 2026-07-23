@@ -50,6 +50,9 @@ struct fsmonitor_daemon_state {
 	int nr_paths_watching;
 
 	struct fsmonitor_token_data *current_token_data;
+	struct strbuf untracked_cache_oid;
+	struct strbuf untracked_cache_token;
+	struct strbuf untracked_cache_data;
 
 	struct strbuf path_cookie_prefix;
 	pthread_cond_t cookies_cond;
