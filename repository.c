@@ -9,6 +9,7 @@
 #include "object.h"
 #include "lockfile.h"
 #include "path.h"
+#include "pathspec.h"
 #include "read-cache-ll.h"
 #include "remote.h"
 #include "setup.h"
@@ -440,9 +441,16 @@ void repo_clear(struct repository *repo)
 	repo_clear_path_cache(&repo->cached_paths);
 }
 
-int repo_read_index(struct repository *repo)
+int repo_read_index_with_pathspec(
+	struct repository *repo, const struct pathspec *pathspec,
+	int *sparse_validation_scoped)
 {
 	int res;
+
+	*sparse_validation_scoped = 0;
+	if (!pathspec || pathspec->nr != 1 || !pathspec->items[0].len ||
+	    pathspec->magic || pathspec->has_wildcard)
+		pathspec = NULL;
 
 	/* Complete the double-reference */
 	if (!repo->index) {
@@ -463,9 +471,18 @@ int repo_read_index(struct repository *repo)
 	 * SKIP_WORKTREE attribute are missing from the worktree; if not,
 	 * clear that attribute for that path.
 	 */
-	clear_skip_worktree_from_present_files(repo->index);
+	clear_skip_worktree_from_present_files(
+		repo->index, pathspec, sparse_validation_scoped);
 
 	return res;
+}
+
+int repo_read_index(struct repository *repo)
+{
+	int sparse_validation_scoped;
+
+	return repo_read_index_with_pathspec(
+		repo, NULL, &sparse_validation_scoped);
 }
 
 int repo_hold_locked_index(struct repository *repo,

@@ -6,6 +6,7 @@
 #include "ewah/ewok.h"
 #include "gettext.h"
 #include "name-hash.h"
+#include "read-cache.h"
 #include "read-cache-ll.h"
 #include "repository.h"
 #include "sparse-index.h"
@@ -617,7 +618,9 @@ static int path_found(const char *path, struct path_found_data *data)
 	return 0;
 }
 
-static int clear_skip_worktree_from_present_files_sparse(struct index_state *istate)
+static int clear_skip_worktree_from_present_files_sparse(
+	struct index_state *istate, const struct pathspec *pathspec,
+	int *sparse_validation_scoped)
 {
 	struct path_found_data data = PATH_FOUND_DATA_INIT;
 
@@ -630,6 +633,15 @@ static int clear_skip_worktree_from_present_files_sparse(struct index_state *ist
 		struct cache_entry *ce = istate->cache[i];
 
 		if (ce_skip_worktree(ce)) {
+			if (pathspec &&
+			    !(S_ISSPARSEDIR(ce->ce_mode) ?
+				match_leading_pathspec(istate, pathspec,
+						       ce->name, ce_namelen(ce),
+						       0, NULL, 1) :
+				ce_path_match(istate, ce, pathspec, NULL))) {
+				*sparse_validation_scoped = 1;
+				continue;
+			}
 			path_count++;
 			if (path_found(ce->name, &data)) {
 				if (S_ISSPARSEDIR(ce->ce_mode)) {
@@ -651,7 +663,9 @@ static int clear_skip_worktree_from_present_files_sparse(struct index_state *ist
 	return to_restart;
 }
 
-static void clear_skip_worktree_from_present_files_full(struct index_state *istate)
+static void clear_skip_worktree_from_present_files_full(
+	struct index_state *istate, const struct pathspec *pathspec,
+	int *sparse_validation_scoped)
 {
 	struct path_found_data data = PATH_FOUND_DATA_INIT;
 
@@ -666,6 +680,11 @@ static void clear_skip_worktree_from_present_files_full(struct index_state *ista
 			BUG("ensure-full-index did not fully flatten?");
 
 		if (ce_skip_worktree(ce)) {
+			if (pathspec &&
+			    !ce_path_match(istate, ce, pathspec, NULL)) {
+				*sparse_validation_scoped = 1;
+				continue;
+			}
 			path_count++;
 			if (path_found(ce->name, &data))
 				ce->ce_flags &= ~CE_SKIP_WORKTREE;
@@ -681,7 +700,9 @@ static void clear_skip_worktree_from_present_files_full(struct index_state *ista
 	clear_path_found_data(&data);
 }
 
-void clear_skip_worktree_from_present_files(struct index_state *istate)
+void clear_skip_worktree_from_present_files(
+	struct index_state *istate, const struct pathspec *pathspec,
+	int *sparse_validation_scoped)
 {
 	struct repo_config_values *cfg = repo_config_values(the_repository);
 
@@ -689,9 +710,11 @@ void clear_skip_worktree_from_present_files(struct index_state *istate)
 	    cfg->sparse_expect_files_outside_of_patterns)
 		return;
 
-	if (clear_skip_worktree_from_present_files_sparse(istate)) {
+	if (clear_skip_worktree_from_present_files_sparse(
+		    istate, pathspec, sparse_validation_scoped)) {
 		ensure_full_index(istate);
-		clear_skip_worktree_from_present_files_full(istate);
+		clear_skip_worktree_from_present_files_full(
+			istate, pathspec, sparse_validation_scoped);
 	}
 }
 
