@@ -616,6 +616,11 @@ test_expect_success 'flush cached data' '
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_0 &&
 	nul_to_q <actual_0 >actual_q0 &&
 
+	test-tool -C test_flush fsmonitor-client query \
+		--token "builtin:test_00000001:18446744073709551615" >actual_future &&
+	nul_to_q <actual_future >actual_future_q &&
+	test_grep "^builtin:test_00000001:[0-9][0-9]*Q/Q$" actual_future_q &&
+
 	>test_flush/file_1 &&
 	retry_grep "^event: file_1$" "$PWD/.git/trace_daemon" &&
 	>test_flush/file_2 &&

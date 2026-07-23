@@ -935,6 +935,16 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 					   "response/token", "different");
 			do_trivial = 1;
 
+		} else if (requested_oldest_seq_nr >
+			   batch_head->batch_seq_nr) {
+			/*
+			 * The client requested a batch that has not been
+			 * created, so it cannot be treated as up to date.
+			 */
+			trace_printf_key(&trace_fsmonitor,
+					 "client requested future data");
+			do_trivial = 1;
+
 		} else if (requested_oldest_seq_nr <
 			   token_data->batch_tail->batch_seq_nr) {
 			/*
