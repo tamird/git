@@ -687,6 +687,32 @@ test_expect_success UNTRACKED_CACHE 'fsmonitor invalidates directory cones' '
 	test_grep "opendir:3" trace-cone
 '
 
+test_expect_success UNTRACKED_CACHE 'do not prune a flat tracked index' '
+	test_create_repo flat-tracked &&
+	(
+		cd flat-tracked &&
+		test_seq 1 64 |
+		sed "s/^/tracked-/" |
+		xargs touch &&
+		git config feature.manyFiles true &&
+		git add -- . &&
+		test "$(git update-index --show-index-version)" = 4 &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.untrackedCache true &&
+		git status --porcelain >../flat-before &&
+		test_must_be_empty ../flat-before &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-flat-tracked" \
+			git status --porcelain >../flat-after &&
+		test_must_be_empty ../flat-after
+	) &&
+	test_grep "subtrees-pruned:0" trace-flat-tracked &&
+	test_grep "directories-visited:1" trace-flat-tracked
+'
+
 test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 	test_create_repo empty-untracked &&
 	(

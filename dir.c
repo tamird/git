@@ -3527,25 +3527,28 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 			dir->untracked = NULL;
 		}
 
-		/*
-		 * A missing skip-worktree .gitignore may be read from the
-		 * index, whose changes are not reported by fsmonitor.
-		 */
-		for (i = 0; i < istate->cache_nr; i++)
-			if (ce_skip_worktree(istate->cache[i]))
-				break;
-		if (i == istate->cache_nr) {
-			refresh_fsmonitor(istate);
-			if (untracked_cache->use_fsmonitor) {
-				if (untracked_cache->root->can_skip_replay) {
-					dir->internal.pruned_subtrees++;
-					goto done;
-				}
-				dir->internal.can_prune_replay = 1;
-				if (negative_only)
-					untracked_prune = untracked_cache->root;
-			} else if (untracked)
-				validate_untracked_stats(untracked, istate);
+		if (untracked_cache->root->dirs_nr) {
+			/*
+			 * A missing skip-worktree .gitignore may be read from
+			 * the index, whose changes are not reported by
+			 * fsmonitor.
+			 */
+			for (i = 0; i < istate->cache_nr; i++)
+				if (ce_skip_worktree(istate->cache[i]))
+					break;
+			if (i == istate->cache_nr) {
+				refresh_fsmonitor(istate);
+				if (untracked_cache->use_fsmonitor) {
+					if (untracked_cache->root->can_skip_replay) {
+						dir->internal.pruned_subtrees++;
+						goto done;
+					}
+					dir->internal.can_prune_replay = 1;
+					if (negative_only)
+						untracked_prune = untracked_cache->root;
+				} else if (untracked)
+					validate_untracked_stats(untracked, istate);
+			}
 		}
 	}
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))
