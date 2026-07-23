@@ -1356,6 +1356,24 @@ test_expect_success 'log with multiple --grep uses union' '
 	test_cmp expect actual
 '
 
+test_expect_success 'log with multiple fixed greps uses union' '
+	git log --fixed-strings --grep=third --grep=fourth --format=%s >actual &&
+	printf "%s\n" fourth third >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'fixed log grep does not match commit headers' '
+	git log --fixed-strings --grep=Asterisk --grep=third --format=%s >actual &&
+	echo third >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'fixed log grep preserves all-match' '
+	git log --fixed-strings --all-match --grep=i --grep=r --format=%s >actual &&
+	echo third >expect &&
+	test_cmp expect actual
+'
+
 test_expect_success 'log --all-match with multiple --grep uses intersection' '
 	git log --all-match --grep=i --grep=r --format=%s >actual &&
 	{
