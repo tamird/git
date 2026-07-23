@@ -1128,6 +1128,31 @@ void compile_grep_patterns(struct grep_opt *opt)
 		}
 	}
 
+	if (!extended && opt->status_only &&
+	    opt->pattern_type_option == GREP_PATTERN_TYPE_FIXED &&
+	    !opt->ignore_case && !opt->word_regexp && !opt->columnnum &&
+	    !opt->invert && !opt->all_match && !opt->no_body_match &&
+	    !header_expr && opt->pattern_list && opt->pattern_list->next) {
+		for (p = opt->pattern_list; p; p = p->next)
+			if (p->token != GREP_PATTERN_BODY || !p->patternlen)
+				break;
+
+		if (!p) {
+			kwset_t kws = kwsalloc(NULL);
+			const char *kwserr;
+
+			for (p = opt->pattern_list; p; p = p->next) {
+				kwserr = kwsincr(kws, p->pattern, p->patternlen);
+				if (kwserr)
+					die("failed to add keyword: %s", kwserr);
+			}
+			kwserr = kwsprep(kws);
+			if (kwserr)
+				die("failed to prepare keywords: %s", kwserr);
+			opt->pattern_list->kws = kws;
+		}
+	}
+
 	if (opt->all_match || opt->no_body_match || header_expr)
 		extended = 1;
 	else if (!extended)
@@ -1514,6 +1539,12 @@ static int match_line(struct grep_opt *opt,
 	if (opt->pattern_expression)
 		return match_expr(opt, bol, eol, ctx, col, icol,
 				  collect_hits);
+
+	if (ctx == GREP_CONTEXT_BODY && opt->status_only &&
+	    opt->pattern_type_option == GREP_PATTERN_TYPE_FIXED &&
+	    opt->pattern_list && opt->pattern_list->kws)
+		return kwsexec(opt->pattern_list->kws, bol, eol - bol,
+			       NULL) != (size_t)-1;
 
 	/* we do not call with collect_hits without being extended */
 	for (p = opt->pattern_list; p; p = p->next) {
