@@ -12,6 +12,7 @@
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
 #include "grep-index-ipc.h"
+#include "hex.h"
 #include "path.h"
 #include "compat/fsmonitor/fsm-health.h"
 #include "compat/fsmonitor/fsm-listen.h"
@@ -660,6 +661,9 @@ static void with_lock__do_force_resync(struct fsmonitor_daemon_state *state)
 	if (state->current_token_data->client_ref_count == 0)
 		free_me = state->current_token_data;
 	state->current_token_data = new_one;
+	strbuf_reset(&state->untracked_cache_oid);
+	strbuf_reset(&state->untracked_cache_token);
+	strbuf_reset(&state->untracked_cache_data);
 
 	fsmonitor_free_token_data(free_me);
 
@@ -738,6 +742,114 @@ static void fsmonitor_start_grep_index_server(
 	pthread_mutex_unlock(&state->grep_index_mutex);
 }
 
+static int fsmonitor_handle_untracked_cache(
+	struct fsmonitor_daemon_state *state, const char *command,
+	ipc_server_reply_cb *reply, struct ipc_server_reply_data *reply_data)
+{
+	struct strbuf index_oid = STRBUF_INIT;
+	struct strbuf token = STRBUF_INIT;
+	struct strbuf current_token = STRBUF_INIT;
+	struct strbuf snapshot = STRBUF_INIT;
+	struct strbuf response = STRBUF_INIT;
+	struct object_id oid;
+	const char *p, *end, *hex_payload = NULL;
+	size_t hex_len, saved_len = 0;
+	int save = 0, ret;
+
+	strbuf_addstr(&response, "miss");
+	if (skip_prefix(command, "get ", &p))
+		save = 0;
+	else if (skip_prefix(command, "put ", &p))
+		save = 1;
+	else
+		goto done;
+
+	if (parse_oid_hex(p, &oid, &end) || *end != ' ' ||
+	    is_null_oid(&oid))
+		goto done;
+	strbuf_add_oid_hex(&index_oid, &oid);
+	p = end + 1;
+
+	if (save) {
+		end = strchr(p, ' ');
+		if (!end || end == p)
+			goto done;
+		strbuf_add(&token, p, end - p);
+		hex_payload = end + 1;
+		hex_len = strnlen(hex_payload,
+				  2 * FSMONITOR_IPC_UNTRACKED_CACHE_MAX + 1);
+		if (!hex_len || hex_len >
+			2 * FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
+		    hex_len % 2)
+			goto done;
+		for (size_t i = 0; i < hex_len; i++) {
+			if (hexval(hex_payload[i]) & ~0xf)
+				goto done;
+		}
+		strbuf_grow(&snapshot, hex_len / 2);
+		if (hex_to_bytes((unsigned char *)snapshot.buf,
+				 hex_payload, hex_len / 2))
+			goto done;
+		strbuf_setlen(&snapshot, hex_len / 2);
+	} else {
+		if (!*p || strchr(p, ' '))
+			goto done;
+		strbuf_addstr(&token, p);
+	}
+
+	pthread_mutex_lock(&state->main_lock);
+	if (!state->current_token_data ||
+	    (!save && (!state->untracked_cache_data.len ||
+		       strcmp(index_oid.buf,
+			      state->untracked_cache_oid.buf) ||
+		       strcmp(token.buf,
+			      state->untracked_cache_token.buf))))
+		goto unlock;
+
+	if (with_lock__wait_for_cookie(state) != FCIR_SEEN ||
+	    !state->current_token_data)
+		goto unlock;
+
+	with_lock__format_response_token(
+		&current_token, &state->current_token_data->token_id,
+		state->current_token_data->batch_head);
+	if (strcmp(token.buf, current_token.buf) ||
+	    (!save && (strcmp(index_oid.buf,
+			      state->untracked_cache_oid.buf) ||
+		       strcmp(token.buf,
+			      state->untracked_cache_token.buf))))
+		goto unlock;
+
+	strbuf_reset(&response);
+	if (save) {
+		strbuf_swap(&state->untracked_cache_oid, &index_oid);
+		strbuf_swap(&state->untracked_cache_token, &token);
+		strbuf_swap(&state->untracked_cache_data, &snapshot);
+		saved_len = state->untracked_cache_data.len;
+		strbuf_addstr(&response, "ok");
+	} else {
+		strbuf_add(&response, "hit", 4);
+		strbuf_addbuf(&response, &state->untracked_cache_data);
+	}
+
+unlock:
+	pthread_mutex_unlock(&state->main_lock);
+
+done:
+	ret = reply(reply_data, response.buf, response.len);
+	trace2_data_intmax("fsmonitor", the_repository,
+			   save ? "untracked-cache/saved" :
+				  "untracked-cache/hit",
+			   save ? saved_len :
+				  response.len > 4);
+	strbuf_release(&response);
+	strbuf_release(&snapshot);
+	strbuf_release(&current_token);
+	strbuf_release(&token);
+	strbuf_release(&index_oid);
+	return ret;
+}
+
 static int do_handle_client(struct fsmonitor_daemon_state *state,
 			    const char *command,
 			    ipc_server_reply_cb *reply,
@@ -793,7 +905,11 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	 *            | <V2-opaque-fsmonitor-token> NUL
 	 */
 
-	if (!strcmp(command, "start-grep-index")) {
+	if (!invalid_binding &&
+	    skip_prefix(command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX, &p)) {
+		return fsmonitor_handle_untracked_cache(state, p, reply,
+					       reply_data);
+	} else if (!strcmp(command, "start-grep-index")) {
 		fsmonitor_start_grep_index_server(state);
 		return reply(reply_data, "ok", 2);
 	} else if (!strcmp(command, "quit")) {
@@ -1122,6 +1238,7 @@ static int handle_client(void *data,
 	struct fsmonitor_daemon_state *state = data;
 #endif
 	int result;
+	const char *traced_command;
 
 #ifdef __APPLE__
 	if (command_len == 16 &&
@@ -1172,10 +1289,24 @@ static int handle_client(void *data,
 		BUG("FSMonitor assumes text messages");
 #endif
 
-	trace_printf_key(&trace_fsmonitor, "requested token: %s", command);
+	traced_command = command;
+	if (starts_with(command, FSMONITOR_IPC_QUERY_PREFIX)) {
+		const char *bound = strchr(command, '\n');
+
+		if (bound && starts_with(bound + 1,
+					 FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX))
+			traced_command = starts_with(
+				bound + 1,
+				FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "put ") ?
+				FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "put" :
+				FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "get";
+	}
+	trace_printf_key(&trace_fsmonitor, "requested token: %s",
+			 traced_command);
 
 	trace2_region_enter("fsmonitor", "handle_client", the_repository);
-	trace2_data_string("fsmonitor", the_repository, "request", command);
+	trace2_data_string("fsmonitor", the_repository, "request",
+			   traced_command);
 
 	result = do_handle_client(state, command, reply, reply_data);
 
@@ -1419,6 +1550,9 @@ static int fsmonitor_state_init(
 	pthread_cond_init(&state->cookies_cond, NULL);
 	pthread_cond_init(&state->ready_cond, NULL);
 	state->current_token_data = fsmonitor_new_token_data();
+	strbuf_init(&state->untracked_cache_oid, 0);
+	strbuf_init(&state->untracked_cache_token, 0);
+	strbuf_init(&state->untracked_cache_data, 0);
 
 	strbuf_init(&state->path_worktree_watch, 0);
 	strbuf_addstr(&state->path_worktree_watch, worktree);
@@ -1467,6 +1601,9 @@ static void fsmonitor_state_release(struct fsmonitor_daemon_state *state)
 	hashmap_clear_and_free(&state->cookies,
 			       struct fsmonitor_cookie_item, entry);
 	fsm_listen__dtor(state);
+	strbuf_release(&state->untracked_cache_oid);
+	strbuf_release(&state->untracked_cache_token);
+	strbuf_release(&state->untracked_cache_data);
 	pthread_cond_destroy(&state->ready_cond);
 	pthread_cond_destroy(&state->cookies_cond);
 	pthread_mutex_destroy(&state->ready_lock);
@@ -1582,6 +1719,8 @@ static int fsmonitor_run_daemon_1(struct fsmonitor_daemon_state *state)
 {
 	struct ipc_server_opts ipc_opts = {
 		.nr_threads = fsmonitor__ipc_threads,
+		.max_request_size =
+			2 * FSMONITOR_IPC_UNTRACKED_CACHE_MAX + 16384,
 
 		/*
 		 * We know that there are no other active threads yet,
@@ -1769,6 +1908,9 @@ static int fsmonitor_run_daemon(void)
 	state.listen_error_code = 0;
 	state.health_error_code = 0;
 	state.current_token_data = fsmonitor_new_token_data();
+	strbuf_init(&state.untracked_cache_oid, 0);
+	strbuf_init(&state.untracked_cache_token, 0);
+	strbuf_init(&state.untracked_cache_data, 0);
 #ifdef __APPLE__
 	strmap_put(&coordinator.states, state.gitdir, &state);
 #endif
@@ -1939,6 +2081,9 @@ done:
 	strbuf_release(&state.path_grep_index_gitdir);
 	strbuf_release(&state.path_grep_index_ipc);
 	strbuf_release(&state.path_grep_workers_ipc);
+	strbuf_release(&state.untracked_cache_oid);
+	strbuf_release(&state.untracked_cache_token);
+	strbuf_release(&state.untracked_cache_data);
 	strbuf_release(&state.alias.alias);
 	strbuf_release(&state.alias.points_to);
 #ifdef __APPLE__
