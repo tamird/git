@@ -1510,7 +1510,7 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 	int ignore_submodules = (flags & REFRESH_IGNORE_SUBMODULES) != 0;
 	int ignore_skip_worktree = (flags & REFRESH_IGNORE_SKIP_WORKTREE) != 0;
 	int first = 1;
-	int preloaded = 0;
+	unsigned int preload_candidates = 0;
 	int fsmonitor_refreshed = is_fsmonitor_refreshed(istate);
 	int in_porcelain = (flags & REFRESH_IN_PORCELAIN);
 	unsigned int options = (CE_MATCH_REFRESH |
@@ -1592,11 +1592,11 @@ int refresh_index(struct index_state *istate, unsigned int flags,
 			continue;
 		}
 
-		if (!preloaded && !S_ISGITLINK(ce->ce_mode) &&
-		    !ce_skip_worktree(ce)) {
+		if (preload_candidates < 2 && !S_ISGITLINK(ce->ce_mode) &&
+		    !ce_skip_worktree(ce) &&
+		    (really || !(ce->ce_flags & CE_VALID)) &&
+		    ++preload_candidates == 2)
 			preload_index(istate, pathspec, 0);
-			preloaded = 1;
-		}
 
 		new_entry = refresh_cache_ent(istate, ce, options,
 					      &cache_errno, &changed,
