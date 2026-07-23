@@ -22,6 +22,7 @@
 #include "run-command.h"
 #include "grep.h"
 #include "grep-index.h"
+#include "grep-index-identity.h"
 #include "grep-index-ipc.h"
 #include "grep-worktree.h"
 #include "lockfile.h"
@@ -1070,6 +1071,7 @@ static int grep_cache(struct grep_opt *opt,
 	struct repository *repo = opt->repo;
 	struct repo_config_values *cfg = repo_config_values(the_repository);
 	struct dir_struct untracked_dir = DIR_INIT;
+	struct grep_index_identity index_identity;
 	int hit = 0;
 	int nr;
 	size_t untracked_pos = 0;
@@ -1084,6 +1086,8 @@ static int grep_cache(struct grep_opt *opt,
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
 	int worktree_sidecar_loaded = 0;
+	int index_identity_valid = 0;
+	unsigned int index_identity_computations = 0;
 	int prepare_index_query;
 	int full_worktree = !pathspec->nr &&
 			    !(pathspec->magic & PATHSPEC_MAXDEPTH);
@@ -1545,7 +1549,12 @@ static int grep_cache(struct grep_opt *opt,
 		if (worktree_bytes >= min_bytes) {
 			trace2_region_enter("grep", "load_worktree_cache", repo);
 			worktree_cache = grep_worktree_cache_load(
-				repo, repo->index, &worktree_sidecar_loaded);
+				repo, repo->index, &index_identity,
+				&worktree_sidecar_loaded);
+			if (worktree_cache) {
+				index_identity_computations++;
+				index_identity_valid = 1;
+			}
 			trace2_region_leave("grep", "load_worktree_cache", repo);
 		}
 		if (worktree_cache && worktree_sidecar_loaded &&
@@ -1580,6 +1589,7 @@ static int grep_cache(struct grep_opt *opt,
 			if (refresh_bytes >= refresh_min_bytes) {
 				struct lock_file lock_file = LOCK_INIT;
 
+				index_identity_valid = 0;
 				refresh_index(repo->index,
 					      REFRESH_QUIET | REFRESH_UNMERGED |
 						      REFRESH_IGNORE_SUBMODULES |
@@ -1616,15 +1626,23 @@ static int grep_cache(struct grep_opt *opt,
 		unsigned char *maybe;
 		unsigned char *unresolved;
 		int negative_cache_supported;
-		int index_query_result;
+		int index_query_result = -1;
 
 		CALLOC_ARRAY(maybe, bitmap_size);
 		CALLOC_ARRAY(unresolved, bitmap_size);
 		trace2_region_enter("grep", "query_content_index_ipc", repo);
-		index_query_result = grep_index_ipc_query_index(
-			repo, content_index_query, maybe, unresolved,
-			repo->index->cache_nr, &content_index_negative_identity,
-			&negative_cache_supported);
+		if (!index_identity_valid) {
+			index_identity_computations++;
+			index_identity_valid = !grep_index_identity_get(
+				repo, repo->index, &index_identity);
+		}
+		if (index_identity_valid)
+			index_query_result = grep_index_ipc_query_index(
+				repo, content_index_query,
+				&index_identity.oid_sequence,
+				maybe, unresolved, repo->index->cache_nr,
+				&content_index_negative_identity,
+				&negative_cache_supported);
 		trace2_region_leave("grep", "query_content_index_ipc", repo);
 		if (!index_query_result) {
 			int have_unresolved = 0;
@@ -2150,6 +2168,10 @@ static int grep_cache(struct grep_opt *opt,
 			break;
 	}
 
+	if (index_identity_computations)
+		trace2_data_intmax("grep", repo,
+				   "index_identity/computations",
+				   index_identity_computations);
 	if (content_index_ipc_result)
 		trace2_data_intmax("grep", repo,
 				   "content_index_ipc_worktree_blob_rejected_after_pathspec",
