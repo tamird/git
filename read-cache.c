@@ -2864,7 +2864,7 @@ out:
 	return result;
 }
 
-static int repo_verify_index(struct repository *repo)
+int repo_verify_index(struct repository *repo)
 {
 	return verify_index_from(repo->index, repo->index_file);
 }

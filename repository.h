@@ -284,6 +284,8 @@ int repo_read_index_with_pathspec(
 int repo_hold_locked_index(struct repository *repo,
 			   struct lock_file *lf,
 			   int flags);
+/* Under the index lock, check that the loaded index is still current. */
+int repo_verify_index(struct repository *repo);
 
 int repo_read_index_unmerged(struct repository *);
 /*

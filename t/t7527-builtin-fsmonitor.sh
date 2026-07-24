@@ -318,6 +318,78 @@ test_expect_success 'cannot start multiple daemons' '
 	test_must_fail git -C test_multiple fsmonitor--daemon status
 '
 
+test_expect_success 'git diff reuses only a synchronized full index' '
+	for split in false true
+	do
+		repo=test_diff_refresh_$split &&
+		test_when_finished "stop_daemon_delete_repo $repo" &&
+		git init "$repo" &&
+		(
+			cd "$repo" &&
+			git config core.splitIndex "$split" &&
+			test_commit base tracked &&
+			if test "$split" = true
+			then
+				git update-index --split-index
+			fi &&
+			git config core.fsmonitor true
+		) &&
+		start_daemon -C "$repo" &&
+		(
+			cd "$repo" &&
+			git status --porcelain >.git/diff-refresh-before &&
+			test_must_be_empty .git/diff-refresh-before &&
+			test-tool chmtime +10 tracked &&
+			GIT_TRACE2_EVENT="$PWD/.git/diff-refresh.trace" \
+				git diff --name-only >.git/diff-refresh-actual &&
+			test_must_be_empty .git/diff-refresh-actual &&
+			case "$split" in
+			false) reuse=1 ;;
+			true) reuse=0 ;;
+			esac &&
+			test_trace2_data index refresh/reuse "$reuse" \
+				<.git/diff-refresh.trace &&
+			git diff-files --name-only -- tracked \
+				>.git/diff-refresh-after &&
+			test_must_be_empty .git/diff-refresh-after
+		) || return 1
+	done
+'
+
+test_expect_success 'git diff rereads an index after a worktree change' '
+	test_when_finished "stop_daemon_delete_repo test_diff_refresh_changed" &&
+	git init test_diff_refresh_changed &&
+	(
+		cd test_diff_refresh_changed &&
+		git config core.splitIndex false &&
+		echo clean >clean &&
+		echo trigger >trigger &&
+		git add -- clean trigger &&
+		git commit -m initial &&
+		write_script .git/diff-refresh-race <<-\EOF &&
+			echo concurrent >>clean
+		EOF
+		git config diff.external .git/diff-refresh-race &&
+		git config core.fsmonitor true
+	) &&
+	start_daemon -C test_diff_refresh_changed &&
+	(
+		cd test_diff_refresh_changed &&
+		git status --porcelain >.git/diff-refresh-before &&
+		test_must_be_empty .git/diff-refresh-before &&
+		test-tool chmtime +10 clean &&
+		echo modified >>trigger &&
+		GIT_TRACE2_EVENT="$PWD/.git/diff-refresh.trace" \
+			git diff >.git/diff-refresh-actual &&
+		test_must_be_empty .git/diff-refresh-actual &&
+		test_trace2_data index refresh/reuse 0 \
+			<.git/diff-refresh.trace &&
+		printf " M clean\n M trigger\n" >.git/diff-refresh-expect &&
+		git status --porcelain >.git/diff-refresh-after &&
+		test_cmp .git/diff-refresh-expect .git/diff-refresh-after
+	)
+'
+
 # These tests use the main repo in the trash directory
 
 test_expect_success 'setup' '
