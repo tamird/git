@@ -1194,6 +1194,18 @@ static void do_invalidate_gitignore(struct untracked_cache_dir *dir)
 		do_invalidate_gitignore(dir->dirs[i]);
 }
 
+static void trace_gitignore_invalidation(struct untracked_cache *uc,
+					 const struct repository *repo,
+					 const char *source)
+{
+	if (uc->gitignore_invalidated < 64)
+		trace2_data_string("untracked_cache", repo,
+				   "gitignore-invalidation-source", source);
+	else if (uc->gitignore_invalidated == 64)
+		trace2_data_intmax("untracked_cache", repo,
+				   "gitignore-invalidation-truncated", 64);
+}
+
 static void invalidate_gitignore(struct untracked_cache *uc,
 				 struct untracked_cache_dir *dir)
 {
@@ -1895,6 +1907,9 @@ static void prep_exclude(struct dir_struct *dir,
 		 */
 		if (untracked &&
 		    !oideq(&oid_stat.oid, &untracked->exclude_oid)) {
+			trace_gitignore_invalidation(dir->untracked, istate->repo,
+					     pl->src ? pl->src :
+					     dir->internal.basebuf.buf);
 			invalidate_gitignore(dir->untracked, untracked);
 			oidcpy(&untracked->exclude_oid, &oid_stat.oid);
 		}
@@ -3469,11 +3484,15 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 	if (!oideq(&dir->internal.ss_info_exclude.oid,
 		   &dir->untracked->ss_info_exclude.oid)) {
+		trace_gitignore_invalidation(dir->untracked, istate->repo,
+					     "info/exclude");
 		invalidate_gitignore(dir->untracked, root);
 		dir->untracked->ss_info_exclude = dir->internal.ss_info_exclude;
 	}
 	if (!oideq(&dir->internal.ss_excludes_file.oid,
 		   &dir->untracked->ss_excludes_file.oid)) {
+		trace_gitignore_invalidation(dir->untracked, istate->repo,
+					     "core.excludesFile");
 		invalidate_gitignore(dir->untracked, root);
 		dir->untracked->ss_excludes_file = dir->internal.ss_excludes_file;
 	}
