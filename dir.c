@@ -3606,6 +3606,9 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 						break;
 				trace2_region_leave("dir", "skip-worktree-scan",
 						    istate->repo);
+				trace2_data_intmax("untracked_cache", istate->repo,
+						   "skip-worktree-found",
+						   i < istate->cache_nr);
 				if (i == istate->cache_nr) {
 					if (untracked_cache->root->can_skip_replay) {
 						dir->internal.pruned_subtrees++;
