@@ -4541,6 +4541,17 @@ static void invalidate_one_directory(struct untracked_cache *uc,
 			invalidate_one_directory(uc, ucd->dirs[i], 1);
 }
 
+void untracked_cache_invalidate_all(struct index_state *istate)
+{
+	struct untracked_cache *uc = istate->untracked;
+
+	if (!uc || !uc->root)
+		return;
+
+	invalidate_one_directory(uc, uc->root, 1);
+	istate->cache_changed |= UNTRACKED_CHANGED;
+}
+
 /*
  * Normally when an entry is added or removed from a directory,
  * invalidating that directory is enough. No need to touch its
