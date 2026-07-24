@@ -1245,6 +1245,17 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 	int fd;
 	size_t size = 0;
 	char *buf;
+	struct object_id legacy_oid;
+	int has_legacy_oid = 0;
+
+	if (oid_stat && !oid_stat->valid && istate &&
+	    (flags & PATTERN_NOFOLLOW)) {
+		if (!is_null_oid(&oid_stat->oid)) {
+			oidcpy(&legacy_oid, &oid_stat->oid);
+			has_legacy_oid = 1;
+		}
+		oidclr(&oid_stat->oid, the_hash_algo);
+	}
 
 	if (flags & PATTERN_NOFOLLOW)
 		fd = open_nofollow(fname, O_RDONLY);
@@ -1285,9 +1296,20 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 			if (oid_stat->valid &&
 			    !match_stat_data_racy(istate, &oid_stat->stat, &st))
 				; /* no content change, oid_stat->oid still good */
-			else
+			else {
 				hash_object_file(the_hash_algo, buf, size,
 						 OBJ_BLOB, &oid_stat->oid);
+				if (has_legacy_oid &&
+				    !oideq(&oid_stat->oid, &legacy_oid)) {
+					struct object_id appended_oid;
+
+					buf[size] = '\n';
+					hash_object_file(the_hash_algo, buf, size + 1,
+							 OBJ_BLOB, &appended_oid);
+					if (oideq(&appended_oid, &legacy_oid))
+						oidcpy(&oid_stat->oid, &legacy_oid);
+				}
+			}
 			fill_stat_data(&oid_stat->stat, &st);
 			oid_stat->valid = 1;
 		}
@@ -1852,6 +1874,8 @@ static void prep_exclude(struct dir_struct *dir,
 			strbuf_addbuf(&sb, &dir->internal.basebuf);
 			strbuf_addstr(&sb, dir->exclude_per_dir);
 			pl->src = strbuf_detach(&sb, NULL);
+			if (untracked)
+				oidcpy(&oid_stat.oid, &untracked->exclude_oid);
 			add_patterns(pl->src, pl->src, stk->baselen, pl, istate,
 				     PATTERN_NOFOLLOW,
 				     untracked ? &oid_stat : NULL);

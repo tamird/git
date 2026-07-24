@@ -1018,6 +1018,38 @@ test_expect_success UNTRACKED_CACHE 'keep tracked ignore identity with fsmonitor
 	test_grep "gitignore-invalidation:0" trace-ignore-identity
 '
 
+test_expect_success UNTRACKED_CACHE 'reuse legacy ignore identity with fsmonitor' '
+	(
+		cd ignore-identity &&
+		printf "ignored/\n\n" >.gitignore &&
+		git status --porcelain >/dev/null &&
+		printf "ignored/\n" >.gitignore &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ignore-legacy" \
+			git --no-optional-locks status --porcelain \
+			>../ignore-legacy-actual &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../ignore-legacy-expect &&
+		test_cmp ../ignore-legacy-expect ../ignore-legacy-actual &&
+		printf "elsewhere/\n" >.gitignore &&
+		test_hook --setup --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf ".gitignore\0"
+		EOF
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-ignore-legacy-change" \
+			git --no-optional-locks status --porcelain \
+			>../ignore-legacy-change-actual &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../ignore-legacy-change-expect &&
+		test_cmp ../ignore-legacy-change-expect \
+			../ignore-legacy-change-actual
+	) &&
+	test_grep "gitignore-invalidation:0" trace-ignore-legacy &&
+	test_grep "gitignore-invalidation:[1-9]" trace-ignore-legacy-change &&
+	test_grep "?? ignored/" ignore-legacy-change-actual
+'
+
 test_expect_success UNTRACKED_CACHE 'fsmonitor invalidates empty root summary' '
 	(
 		cd empty-untracked &&
