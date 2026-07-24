@@ -1428,6 +1428,12 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							     j <= i; j++) {
 								struct grep_index_query_clause
 									alternative = { 0 };
+								struct grep_index_query_boundary
+									boundary = {
+										.alternative_nr =
+											group.alternatives_nr
+									};
+								size_t alternative_trigrams_nr;
 
 								if (j != i &&
 								    p->pattern[j] != '|') {
@@ -1448,21 +1454,13 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 										p->pattern[j]);
 									continue;
 								}
-								if (literal.len < 3 ||
+								if (literal.len < 2 ||
 								    group.alternatives_nr ==
-									    alternatives_left ||
-								    literal.len - 2 >
-									    trigrams_left -
-										    trigrams_nr) {
+									    alternatives_left) {
 									candidate_simple = 0;
 									break;
 								}
 								if (enrich_boundaries) {
-									struct grep_index_query_boundary
-										boundary = {
-											.alternative_nr =
-												group.alternatives_nr
-										};
 									unsigned char text[4];
 									size_t text_nr = 0;
 
@@ -1505,6 +1503,41 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 											trigram_hash(
 												text + k,
 												query->ignore_case);
+								}
+								alternative_trigrams_nr =
+									literal.len == 2 ?
+										boundary.trigrams_nr :
+										literal.len - 2;
+								if (!alternative_trigrams_nr ||
+								    alternative_trigrams_nr >
+									    trigrams_left -
+										    trigrams_nr) {
+									candidate_simple = 0;
+									break;
+								}
+								alternative.trigrams_nr =
+									alternative_trigrams_nr;
+								alternative.trigrams_alloc =
+									alternative_trigrams_nr;
+								ALLOC_ARRAY(
+									alternative.trigrams,
+									alternative_trigrams_nr);
+								if (literal.len == 2) {
+									/* Short alternatives require baseline boundaries. */
+									COPY_ARRAY(
+										alternative.trigrams,
+										boundary.trigrams,
+										alternative_trigrams_nr);
+								} else {
+									for (size_t k = 0;
+									     k < alternative_trigrams_nr;
+									     k++)
+										alternative.trigrams[k] =
+											trigram_hash(
+												(const unsigned char *)
+													literal.buf +
+												k,
+												query->ignore_case);
 									if (boundary.trigrams_nr) {
 										ALLOC_GROW(
 											boundaries,
@@ -1516,22 +1549,6 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 												boundary;
 									}
 								}
-								alternative.trigrams_nr =
-									literal.len - 2;
-								alternative.trigrams_alloc =
-									literal.len - 2;
-								ALLOC_ARRAY(
-									alternative.trigrams,
-									literal.len - 2);
-								for (size_t k = 0;
-								     k < literal.len - 2;
-								     k++)
-									alternative.trigrams[k] =
-										trigram_hash(
-											(const unsigned char *)
-												literal.buf +
-											k,
-											query->ignore_case);
 								ALLOC_GROW(
 									group.alternatives,
 									group.alternatives_nr +
@@ -1541,7 +1558,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 									[group.alternatives_nr++] =
 									alternative;
 								trigrams_nr +=
-									literal.len - 2;
+									alternative_trigrams_nr;
 								strbuf_reset(&literal);
 							}
 						} else {
