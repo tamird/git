@@ -163,6 +163,10 @@ test_expect_success 'setup' '
 	echo "prefoo.suf" >ere-concat-foo &&
 	echo "prebarsuf" >ere-concat-bar &&
 	echo "xfoobary" >ere-concat-repeat &&
+	echo "name = \"xy\"" >ere-short-left &&
+	echo "name = \"alphabet\"" >ere-short-long &&
+	echo "name = \"unrelated\"" >ere-short-negative &&
+	echo "xy_suffix" >ere-short-right &&
 	echo "NAME = require_monorepo()" >quantified-ordinary-assignment &&
 	echo "prefixsuffix" >quantified-ordinary-zero &&
 	echo "prefixxsuffix" >quantified-ordinary-one &&
@@ -194,7 +198,8 @@ test_expect_success 'setup' '
 		structured-middle-from structured-middle-import \
 		structured-optional ere-concat ere-concat-test ere-concat-dev \
 		ere-mixed-plain ere-concat-foo ere-concat-bar \
-		ere-concat-repeat quantified-ordinary-assignment \
+		ere-concat-repeat ere-short-left ere-short-long \
+		ere-short-negative ere-short-right quantified-ordinary-assignment \
 		quantified-ordinary-zero quantified-ordinary-one escaped-ere \
 		literal-candidate-* &&
 	git commit -m initial
@@ -2677,6 +2682,83 @@ test_expect_success 'ERE boundaries use decoded alternatives' '
 	git grep --cached -E "pre(foo\\.|b[a]r)suf" \
 		-- ere-concat-foo ere-concat-bar >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'ERE boundaries preserve short and long alternatives' '
+	pattern="^name[[:space:]]*=[[:space:]]*\"(xy|alphabet)\"" &&
+	git grep --cached --no-content-index -E "$pattern" \
+		-- ere-short-left ere-short-long >expect &&
+	git grep --cached -E "$pattern" \
+		-- ere-short-left ere-short-long >actual &&
+	test_cmp expect actual &&
+	git grep --cached --no-content-index -E "(xy|alphabet)_suffix" \
+		-- ere-short-right >expect &&
+	git grep --cached -E "(xy|alphabet)_suffix" \
+		-- ere-short-right >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'ERE boundaries prune short-alternative candidates' '
+	pattern="^name[[:space:]]*=[[:space:]]*\"(xy|alphabet)\"" &&
+	oid=$(git rev-parse :ere-short-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" \
+		-- ere-short-negative 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'daemon prunes short-alternative candidates' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_when_finished "rm -f ere-short-boundary-ipc.trace" &&
+	oid=$(git rev-parse :ere-short-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/ere-short-boundary-ipc.trace" \
+		git grep --cached -E \
+		"^name[[:space:]]*=[[:space:]]*\"(xy|alphabet)\"" \
+		-- ere-short-negative 2>err &&
+	test_must_be_empty err &&
+	test_grep \
+		"\"key\":\"content_index_ipc_candidates\",\"value\":\"0\"" \
+		ere-short-boundary-ipc.trace
+'
+
+test_expect_success 'short ERE alternatives preserve possible blob reads' '
+	for path in ere-short-left ere-short-long ere-short-right
+	do
+		oid=$(git rev-parse ":$path") &&
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		test_when_finished "mv \"$object.save\" \"$object\"" &&
+		case "$path" in
+		ere-short-right) pattern="(xy|alphabet)_suffix" ;;
+		*) pattern="^name[[:space:]]*=[[:space:]]*\"(xy|alphabet)\"" ;;
+		esac &&
+		test_must_fail git grep --cached -E "$pattern" \
+			-- "$path" 2>err &&
+		test_grep "unable to read" err || return 1
+	done
+'
+
+test_expect_success 'unbounded and repeated short ERE groups read blobs' '
+	oid=$(git rev-parse :ere-short-right) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "(xy|alphabet)" \
+		-- ere-short-right 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E "(xy|alphabet)+_suffix" \
+		-- ere-short-right 2>err &&
+	test_grep "unable to read" err
 '
 
 test_expect_success 'repeated ERE groups do not correlate alternatives' '
