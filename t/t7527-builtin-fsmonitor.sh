@@ -1628,7 +1628,57 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			../untracked-snapshot-removed.out &&
 		git hash-object .git/index >../untracked-snapshot-index.after &&
 		test_cmp ../untracked-snapshot-index.before \
-			../untracked-snapshot-index.after
+			../untracked-snapshot-index.after &&
+		echo "$(test_oid zero)" >../untracked-snapshot-zero.expect &&
+		for mode in skip-hash many-files
+		do
+			case "$mode" in
+			skip-hash)
+				git config index.skipHash true
+				;;
+			many-files)
+				git config --unset index.skipHash &&
+				git config feature.manyFiles true
+				;;
+			esac &&
+			git update-index --no-assume-unchanged -- tracked &&
+			git update-index --refresh --force-write-index &&
+			test_trailing_hash .git/index \
+				>"../untracked-snapshot-$mode-trailer" &&
+			test_cmp ../untracked-snapshot-zero.expect \
+				"../untracked-snapshot-$mode-trailer" &&
+			for rewrite in initial rewritten
+			do
+				if test "$rewrite" = rewritten
+				then
+					git update-index \
+						--assume-unchanged -- tracked || return 1
+				fi &&
+				prefix="../untracked-snapshot-$mode-$rewrite" &&
+				git hash-object .git/index \
+					>"$prefix-index.before" &&
+				GIT_TRACE2_EVENT="$PWD/$prefix-miss.trace" \
+					git --no-optional-locks status --porcelain \
+					>"$prefix-miss.out" &&
+				test_cmp ../untracked-snapshot-removed.out \
+					"$prefix-miss.out" &&
+				test_trace2_data status untracked-cache/restore \
+					miss <"$prefix-miss.trace" &&
+				have_t2_data_event fsmonitor \
+					untracked-cache/saved \
+					<"$prefix-miss.trace" &&
+				GIT_TRACE2_EVENT="$PWD/$prefix-hit.trace" \
+					git --no-optional-locks status --porcelain \
+					>"$prefix-hit.out" &&
+				test_cmp "$prefix-miss.out" "$prefix-hit.out" &&
+				test_trace2_data status untracked-cache/restore \
+					hit <"$prefix-hit.trace" &&
+				git hash-object .git/index \
+					>"$prefix-index.after" &&
+				test_cmp "$prefix-index.before" \
+					"$prefix-index.after" || return 1
+			done || return 1
+		done
 	)
 '
 

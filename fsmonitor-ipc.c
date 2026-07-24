@@ -312,6 +312,61 @@ done:
 	return ret;
 }
 
+static const struct object_id *untracked_cache_index_oid(
+	struct index_state *istate, struct object_id *identity)
+{
+	if (!is_null_oid(&istate->oid))
+		return &istate->oid;
+	if (istate->index_file_identity_valid)
+		return is_null_oid(&istate->index_file_identity) ?
+			NULL : &istate->index_file_identity;
+
+#ifdef NO_NSEC
+	(void)identity;
+	return NULL;
+#else
+	{
+		static const char domain[] = "fsmonitor-untracked-index-v1";
+		const struct stat *saved = &istate->index_file_stat;
+		struct stat current;
+		struct git_hash_ctx ctx;
+		unsigned char stable[7 * sizeof(uint64_t)];
+
+		if (!fstat_is_reliable() ||
+		    !istate->index_file_fd_valid ||
+		    !istate->index_file_stat_valid ||
+		    !saved->st_dev || !saved->st_ino || saved->st_size <= 0 ||
+		    fstat(istate->index_file_fd, &current) ||
+		    current.st_dev != saved->st_dev ||
+		    current.st_ino != saved->st_ino ||
+		    current.st_size != saved->st_size ||
+		    current.st_ctime != saved->st_ctime ||
+		    ST_CTIME_NSEC(current) != ST_CTIME_NSEC(*saved) ||
+		    current.st_mtime != saved->st_mtime ||
+		    ST_MTIME_NSEC(current) != ST_MTIME_NSEC(*saved))
+			return NULL;
+
+		put_be64(stable, (uint64_t)saved->st_dev);
+		put_be64(stable + sizeof(uint64_t), (uint64_t)saved->st_ino);
+		put_be64(stable + 2 * sizeof(uint64_t),
+			 (uint64_t)saved->st_size);
+		put_be64(stable + 3 * sizeof(uint64_t),
+			 (uint64_t)saved->st_ctime);
+		put_be64(stable + 4 * sizeof(uint64_t),
+			 (uint64_t)ST_CTIME_NSEC(*saved));
+		put_be64(stable + 5 * sizeof(uint64_t),
+			 (uint64_t)saved->st_mtime);
+		put_be64(stable + 6 * sizeof(uint64_t),
+			 (uint64_t)ST_MTIME_NSEC(*saved));
+		git_hash_init(&ctx, istate->repo->hash_algo);
+		git_hash_update(&ctx, domain, sizeof(domain) - 1);
+		git_hash_update(&ctx, stable, sizeof(stable));
+		git_hash_final_oid(identity, &ctx);
+		return is_null_oid(identity) ? NULL : identity;
+	}
+#endif
+}
+
 enum fsmonitor_untracked_cache_result
 fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 				       const char **restore_reason)
@@ -319,13 +374,18 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
 	struct untracked_cache *candidate;
+	struct object_id generated_index_oid;
+	const struct object_id *index_oid;
 	const char *reason = "ineligible";
 	enum fsmonitor_untracked_cache_result result =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 
 	*restore_reason = NULL;
-	if (!istate->untracked || is_null_oid(&istate->oid) ||
+	if (!istate->untracked ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
+		goto done;
+	index_oid = untracked_cache_index_oid(istate, &generated_index_oid);
+	if (!index_oid)
 		goto done;
 
 	refresh_fsmonitor(istate);
@@ -339,7 +399,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	}
 
 	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
-		    "get %s %s", oid_to_hex(&istate->oid),
+		    "get %s %s", oid_to_hex(index_oid),
 		    istate->fsmonitor_last_update);
 	if (fsmonitor_ipc__send_untracked_cache_command(
 		    command.buf, command.len, &answer)) {
@@ -398,12 +458,17 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
+	struct object_id generated_index_oid;
+	const struct object_id *index_oid;
 	size_t start;
 
 	if (!istate->untracked || !istate->untracked->root ||
 	    !istate->untracked->use_fsmonitor ||
-	    !istate->fsmonitor_last_update || is_null_oid(&istate->oid) ||
+	    !istate->fsmonitor_last_update ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
+		return;
+	index_oid = untracked_cache_index_oid(istate, &generated_index_oid);
+	if (!index_oid)
 		return;
 
 	write_untracked_extension(&snapshot, istate->untracked);
@@ -412,7 +477,7 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 		goto done;
 
 	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
-		    "put %s %s ", oid_to_hex(&istate->oid),
+		    "put %s %s ", oid_to_hex(index_oid),
 		    istate->fsmonitor_last_update);
 	start = command.len;
 	strbuf_grow(&command, snapshot.len * 2);
