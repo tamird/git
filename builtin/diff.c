@@ -11,6 +11,8 @@
 #include "config.h"
 #include "environment.h"
 #include "ewah/ewok.h"
+#include "fsmonitor-ipc.h"
+#include "fsmonitor-settings.h"
 #include "lockfile.h"
 #include "color.h"
 #include "commit.h"
@@ -21,10 +23,13 @@
 #include "diffcore.h"
 #include "preload-index.h"
 #include "read-cache-ll.h"
+#include "repository.h"
 #include "revision.h"
 #include "log-tree.h"
 #include "setup.h"
 #include "oid-array.h"
+#include "strbuf.h"
+#include "trace2.h"
 #include "tree.h"
 
 #define DIFF_NO_INDEX_EXPLICIT 1
@@ -239,16 +244,37 @@ static void builtin_diff_combined(struct rev_info *revs,
 	oid_array_clear(&parents);
 }
 
-static void refresh_index_quietly(const struct pathspec *pathspec)
+static void refresh_index_quietly(const struct pathspec *pathspec,
+				 int allow_index_reuse)
 {
 	struct lock_file lock_file = LOCK_INIT;
+	struct strbuf answer = STRBUF_INIT;
+	struct index_state *istate = the_repository->index;
+	const char *token;
+	int reuse_index = 0;
 	int fd;
 
 	fd = repo_hold_locked_index(the_repository, &lock_file, 0);
 	if (fd < 0)
 		return;
-	discard_index(the_repository->index);
-	repo_read_index(the_repository);
+
+	/* A synchronized, unchanged token proves the first snapshot is current. */
+	token = istate->fsmonitor_last_update;
+	if (allow_index_reuse && !istate->split_index && token &&
+	    fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_IPC &&
+	    repo_verify_index(the_repository) &&
+	    !fsmonitor_ipc__send_query(token, &answer) &&
+	    answer.len == strlen(token) + 1 &&
+	    !memcmp(answer.buf, token, answer.len))
+		reuse_index = 1;
+
+	trace2_data_intmax("index", the_repository,
+			   "refresh/reuse", reuse_index);
+	strbuf_release(&answer);
+	if (!reuse_index) {
+		discard_index(istate);
+		repo_read_index(the_repository);
+	}
 	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED,
 		      pathspec, NULL, NULL);
 	repo_update_index_if_able(the_repository, &lock_file);
@@ -659,7 +685,9 @@ int cmd_diff(int argc,
 				      first_non_parent);
 	result = diff_result_code(&rev);
 	if (1 < rev.diffopt.skip_stat_unmatch)
-		refresh_index_quietly(&rev.prune_data);
+		refresh_index_quietly(&rev.prune_data,
+				      !ent.nr && !blobs &&
+				      !sparse_validation_scoped);
 	else if (!sparse_validation_scoped && !ent.nr && !blobs &&
 		 rev.diffopt.skip_stat_unmatch &&
 		 (the_repository->index->cache_changed & FSMONITOR_CHANGED) &&
