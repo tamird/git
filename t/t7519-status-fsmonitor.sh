@@ -443,9 +443,11 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	mkdir diff-index/clean diff-index/dirty &&
 	echo clean >diff-index/clean/file &&
 	echo base >diff-index/dirty/file &&
+	test-tool chmtime =-60 diff-index/clean/file diff-index/dirty/file &&
 	git -C diff-index add . &&
 	git -C diff-index commit -m base &&
 	printf "tip \n" >diff-index/dirty/file &&
+	test-tool chmtime =-120 diff-index/dirty/file &&
 	git -C diff-index commit -am tip &&
 	test_hook -C diff-index --setup fsmonitor-test <<-\EOF &&
 		printf "last_update_token\0"
@@ -464,19 +466,81 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	grep "^h clean/file$" actual.fsmonitor &&
 	grep "^h dirty/file$" actual.fsmonitor &&
 
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	if test_have_prereq PTHREADS
+	then
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.preloadIndex=false \
+			-C diff-index diff --name-only HEAD^ \
+			>diff-index/.git/fsmonitor-diff-expect &&
+		git -C diff-index update-index --no-fsmonitor-valid -- \
+			clean/file dirty/file &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/diff-index/.git/fsmonitor-diff-first.trace" \
+			git -C diff-index diff --name-only HEAD^ \
+			>diff-index/.git/fsmonitor-diff-actual &&
+		test_cmp diff-index/.git/fsmonitor-diff-expect \
+			diff-index/.git/fsmonitor-diff-actual &&
+		test_trace2_data index preload/sum_lstat 2 \
+			<diff-index/.git/fsmonitor-diff-first.trace &&
+		git -C diff-index ls-files -f >actual.fsmonitor &&
+		grep "^h clean/file$" actual.fsmonitor &&
+		grep "^h dirty/file$" actual.fsmonitor &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/diff-index/.git/fsmonitor-diff-second.trace" \
+			git -C diff-index diff --name-only HEAD^ \
+			>diff-index/.git/fsmonitor-diff-actual &&
+		test_cmp diff-index/.git/fsmonitor-diff-expect \
+			diff-index/.git/fsmonitor-diff-actual &&
+		test_trace2_data index preload/sum_lstat 0 \
+			<diff-index/.git/fsmonitor-diff-second.trace &&
+		for mode in cached optional-locks auto-refresh
+		do
+			git -C diff-index update-index --no-fsmonitor-valid -- \
+				clean/file dirty/file &&
+			cp diff-index/.git/index \
+				diff-index/.git/fsmonitor-diff-index.before &&
+			case "$mode" in
+			cached)
+				GIT_TEST_PRELOAD_INDEX=true \
+					git -C diff-index diff --cached \
+					--name-only HEAD^
+				;;
+			optional-locks)
+				GIT_TEST_PRELOAD_INDEX=true \
+					git -C diff-index --no-optional-locks \
+					diff --name-only HEAD^
+				;;
+			auto-refresh)
+				GIT_TEST_PRELOAD_INDEX=true \
+					git -C diff-index \
+					-c diff.autoRefreshIndex=false \
+					diff --name-only HEAD^
+				;;
+			esac >diff-index/.git/fsmonitor-diff-actual &&
+			test_cmp diff-index/.git/fsmonitor-diff-expect \
+				diff-index/.git/fsmonitor-diff-actual &&
+			test_cmp_bin diff-index/.git/fsmonitor-diff-index.before \
+				diff-index/.git/index || return 1
+		done
+	fi &&
+
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
 	test_cmp expect actual &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff --name-status HEAD^ >expect &&
 	git -C diff-index diff --name-status HEAD^ >actual &&
 	test_cmp expect actual &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff --stat --numstat HEAD^ >expect &&
 	git -C diff-index diff --stat --numstat HEAD^ >actual &&
 	test_cmp expect actual &&
-	test_must_fail git -c core.fsmonitor= -c core.preloadIndex=false \
+	test_must_fail git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff --check HEAD^ >expect &&
 	test_must_fail git -C diff-index diff --check HEAD^ >actual &&
 	test_cmp expect actual &&
@@ -487,22 +551,26 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	git -C diff-index ls-files -f >actual.fsmonitor &&
 	grep "^h clean/file$" actual.fsmonitor &&
 	grep "^h dirty/file$" actual.fsmonitor &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
 	test_cmp expect actual &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff-index -c HEAD^ >expect &&
 	git -C diff-index diff-index -c HEAD^ >actual &&
 	test_cmp expect actual &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff-index --cc HEAD^ >expect &&
 	git -C diff-index diff-index --cc HEAD^ >actual &&
 	test_cmp expect actual &&
 
 	echo worktree-after-staged >diff-index/clean/file &&
 	echo clean/file >diff-index/.git/fsmonitor-dirty &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
 	test_cmp expect actual &&
@@ -510,7 +578,8 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	git -C diff-index reset --hard HEAD &&
 	echo worktree >diff-index/dirty/file &&
 	echo dirty/file >diff-index/.git/fsmonitor-dirty &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
 	test_cmp expect actual &&
@@ -518,7 +587,8 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	git -C diff-index reset --hard HEAD &&
 	rm diff-index/clean/file &&
 	echo clean/file >diff-index/.git/fsmonitor-dirty &&
-	git -c core.fsmonitor= -c core.preloadIndex=false \
+	git --no-optional-locks -c core.fsmonitor=false \
+		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
 	test_cmp expect actual
