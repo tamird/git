@@ -1550,6 +1550,7 @@ struct repository *repo UNUSED)
 	unsigned int progress_flag = 0;
 	enum fsmonitor_untracked_cache_result cache_untracked =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+	int cache_untracked_attempted = 0;
 	int fd;
 	int optional_locks;
 	struct object_id oid;
@@ -1638,9 +1639,11 @@ struct repository *repo UNUSED)
 	repo_read_index(the_repository);
 	if (!optional_locks && !s.pathspec.nr &&
 	    s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES &&
-	    s.show_ignored_mode == SHOW_NO_IGNORED)
+	    s.show_ignored_mode == SHOW_NO_IGNORED) {
+		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
 			the_repository->index);
+	}
 	refresh_index(the_repository->index,
 		      REFRESH_QUIET|REFRESH_UNMERGED|progress_flag,
 		      &s.pathspec, NULL, NULL);
@@ -1649,10 +1652,6 @@ struct repository *repo UNUSED)
 		fd = repo_hold_locked_index(the_repository, &index_lock, 0);
 	else
 		fd = -1;
-	trace2_data_string("status", the_repository, "index/optional-lock",
-			   optional_locks ?
-				   (fd < 0 ? "unavailable" : "acquired") :
-				   "disabled");
 
 	s.is_initial = repo_get_oid(the_repository, s.reference, &oid) ? 1 : 0;
 	if (!s.is_initial)
@@ -1671,6 +1670,21 @@ struct repository *repo UNUSED)
 	}
 
 	wt_status_collect(&s);
+	trace2_data_string("status", the_repository, "index/optional-lock",
+			   optional_locks ?
+				   (fd < 0 ? "unavailable" : "acquired") :
+				   "disabled");
+	trace2_data_intmax("status", the_repository,
+			   "untracked-cache/restore-attempted",
+			   cache_untracked_attempted);
+	if (cache_untracked_attempted)
+		trace2_data_string("status", the_repository,
+				   "untracked-cache/restore",
+				   cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT ?
+					   "hit" :
+				   cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ?
+					   "miss" :
+					   "unsupported");
 	if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ||
 	    (cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT &&
 	     the_repository->index->untracked &&
