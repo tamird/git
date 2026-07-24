@@ -1352,6 +1352,8 @@ test_expect_success UNTRACKED_CACHE 'clearing skip-worktree invalidates cached i
 	) &&
 	test_cmp skip-transition-expect skip-transition-actual &&
 	test_grep "^?? dir/ignored$" skip-transition-actual &&
+	test_grep "gitignore-invalidation-source:dir/.gitignore" \
+		trace-skip-transition &&
 	test_grep "directories-visited:[1-9]" trace-skip-transition
 '
 
@@ -1909,7 +1911,13 @@ test_expect_success UNTRACKED_CACHE 'reuse legacy standard exclude identities' '
 			../standard-excludes-change-actual
 	) &&
 	test_grep "gitignore-invalidation:0" trace-standard-excludes-legacy &&
+	test_grep ! "gitignore-invalidation-source:" \
+		trace-standard-excludes-legacy &&
 	test_grep "gitignore-invalidation:[1-9]" trace-standard-excludes-change &&
+	test_grep "gitignore-invalidation-source:info/exclude" \
+		trace-standard-excludes-change &&
+	test_grep "gitignore-invalidation-source:core.excludesFile" \
+		trace-standard-excludes-change &&
 	test_grep "?? hidden-core/" standard-excludes-change-actual &&
 	test_grep "?? hidden-info/" standard-excludes-change-actual
 '
