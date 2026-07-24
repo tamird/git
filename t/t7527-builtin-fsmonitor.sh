@@ -1539,11 +1539,24 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 		--t2 "$PWD/untracked-snapshot-daemon.trace" &&
 	(
 		cd test_untracked_snapshot &&
-		git status --porcelain >/dev/null &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-locked.trace" \
+			git status --porcelain >/dev/null &&
+		test_trace2_data status index/optional-lock \
+			acquired <../untracked-snapshot-locked.trace &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			0 <../untracked-snapshot-locked.trace &&
+		! have_t2_data_event status untracked-cache/restore \
+			<../untracked-snapshot-locked.trace &&
 		git hash-object .git/index >../untracked-snapshot-index.before &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-first.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-snapshot-first.out &&
+		test_trace2_data status index/optional-lock \
+			disabled <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked-cache/restore \
+			miss <../untracked-snapshot-first.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			miss <../untracked-snapshot-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
@@ -1553,6 +1566,10 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			>../untracked-snapshot-second.out &&
 		test_cmp ../untracked-snapshot-first.out \
 			../untracked-snapshot-second.out &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-second.trace &&
+		test_trace2_data status untracked-cache/restore \
+			hit <../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			hit <../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/hit \
@@ -1569,6 +1586,10 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			git --no-optional-locks -c core.fsmonitor=false \
 			-c core.untrackedCache=false status --porcelain \
 			>../untracked-snapshot-excluded.expect &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-unsupported.trace &&
+		test_trace2_data status untracked-cache/restore \
+			unsupported <../untracked-snapshot-unsupported.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			unsupported <../untracked-snapshot-unsupported.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore-reason \
