@@ -1544,6 +1544,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-first.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-snapshot-first.out &&
+		test_trace2_data fsmonitor untracked-cache/restore \
+			miss <../untracked-snapshot-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-snapshot-first.trace &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-second.trace" \
@@ -1551,6 +1553,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			>../untracked-snapshot-second.out &&
 		test_cmp ../untracked-snapshot-first.out \
 			../untracked-snapshot-second.out &&
+		test_trace2_data fsmonitor untracked-cache/restore \
+			hit <../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/hit \
 			1 <../untracked-snapshot-second.trace &&
 		echo exclude-target >../untracked-snapshot.excludes &&
@@ -1561,9 +1565,14 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-excluded.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-snapshot-excluded.trace &&
-		git --no-optional-locks -c core.fsmonitor=false \
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-unsupported.trace" \
+			git --no-optional-locks -c core.fsmonitor=false \
 			-c core.untrackedCache=false status --porcelain \
 			>../untracked-snapshot-excluded.expect &&
+		test_trace2_data fsmonitor untracked-cache/restore \
+			unsupported <../untracked-snapshot-unsupported.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-reason \
+			ineligible <../untracked-snapshot-unsupported.trace &&
 		test_cmp ../untracked-snapshot-excluded.expect \
 			../untracked-snapshot-excluded.out &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-repaired.trace" \

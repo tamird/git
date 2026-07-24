@@ -316,37 +316,55 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate)
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
 	struct untracked_cache *candidate;
+	const char *reason = "ineligible";
 	enum fsmonitor_untracked_cache_result result =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 
 	if (!istate->untracked || is_null_oid(&istate->oid) ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
-		return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+		goto done;
 
 	refresh_fsmonitor(istate);
-	if (!istate->fsmonitor_last_update ||
-	    !istate->untracked->use_fsmonitor)
-		return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+	if (!istate->fsmonitor_last_update) {
+		reason = "no-current-token";
+		goto done;
+	}
+	if (!istate->untracked->use_fsmonitor) {
+		reason = "fsmonitor-fallback";
+		goto done;
+	}
 
 	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
 		    "get %s %s", oid_to_hex(&istate->oid),
 		    istate->fsmonitor_last_update);
 	if (fsmonitor_ipc__send_untracked_cache_command(
-		    command.buf, command.len, &answer))
+		    command.buf, command.len, &answer)) {
+		reason = "ipc-error";
 		goto done;
+	}
 	if (answer.len == 4 && !memcmp(answer.buf, "miss", 4)) {
 		result = FSMONITOR_UNTRACKED_CACHE_MISS;
 		goto done;
 	}
-	if (answer.len <= 4 ||
-	    answer.len - 4 > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
-	    memcmp(answer.buf, "hit", 4))
+	if (answer.len <= 4) {
+		reason = "short-response";
 		goto done;
+	}
+	if (answer.len - 4 > FSMONITOR_IPC_UNTRACKED_CACHE_MAX) {
+		reason = "oversize-response";
+		goto done;
+	}
+	if (memcmp(answer.buf, "hit", 4)) {
+		reason = "invalid-response";
+		goto done;
+	}
 
 	candidate = read_untracked_extension_bounded(answer.buf + 4,
 						     answer.len - 4);
-	if (!candidate)
+	if (!candidate) {
+		reason = "invalid-snapshot";
 		goto done;
+	}
 	result = FSMONITOR_UNTRACKED_CACHE_HIT;
 	candidate->use_fsmonitor = 1;
 	free_untracked_cache(istate->untracked);
@@ -355,6 +373,14 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate)
 			   "untracked-cache/hit", 1);
 
 done:
+	trace2_data_string("fsmonitor", istate->repo,
+			   "untracked-cache/restore",
+			   result == FSMONITOR_UNTRACKED_CACHE_HIT ? "hit" :
+			   result == FSMONITOR_UNTRACKED_CACHE_MISS ? "miss" :
+			   "unsupported");
+	if (result == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED)
+		trace2_data_string("fsmonitor", istate->repo,
+				   "untracked-cache/restore-reason", reason);
 	strbuf_release(&answer);
 	strbuf_release(&command);
 	return result;
