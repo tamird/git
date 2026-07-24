@@ -1547,6 +1547,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			0 <../untracked-snapshot-locked.trace &&
 		! have_t2_data_event status untracked-cache/restore \
 			<../untracked-snapshot-locked.trace &&
+		! have_t2_data_event status untracked-cache/restore-reason \
+			<../untracked-snapshot-locked.trace &&
 		git hash-object .git/index >../untracked-snapshot-index.before &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-first.trace" \
 			git --no-optional-locks status --porcelain \
@@ -1557,6 +1559,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-first.trace &&
 		test_trace2_data status untracked-cache/restore \
 			miss <../untracked-snapshot-first.trace &&
+		! have_t2_data_event status untracked-cache/restore-reason \
+			<../untracked-snapshot-first.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			miss <../untracked-snapshot-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
@@ -1570,6 +1574,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-second.trace &&
 		test_trace2_data status untracked-cache/restore \
 			hit <../untracked-snapshot-second.trace &&
+		! have_t2_data_event status untracked-cache/restore-reason \
+			<../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			hit <../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/hit \
@@ -1590,6 +1596,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-unsupported.trace &&
 		test_trace2_data status untracked-cache/restore \
 			unsupported <../untracked-snapshot-unsupported.trace &&
+		test_trace2_data status untracked-cache/restore-reason \
+			ineligible <../untracked-snapshot-unsupported.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
 			unsupported <../untracked-snapshot-unsupported.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore-reason \
