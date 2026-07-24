@@ -2078,6 +2078,11 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		ssize_t cno;
 		ssize_t col = -1, icol = -1;
 
+		if (!collect_hits && opt->max_count >= 0 &&
+		    count >= (unsigned)opt->max_count && !show_function &&
+		    (!last_hit || lno > last_hit + opt->post_context))
+			break;
+
 		/*
 		 * look_ahead() skips quickly to the line that possibly
 		 * has the next hit; don't call it if we need to do

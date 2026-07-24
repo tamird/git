@@ -1540,6 +1540,11 @@ test_expect_success 'grep -W' '
 	test_cmp expected actual
 '
 
+test_expect_success 'grep --max-count preserves function context' '
+	git grep --max-count=1 --function-context return -- hello.c >actual &&
+	test_cmp expected actual
+'
+
 cat >expected <<EOF
 hello.c-#include <assert.h>
 hello.c:#include <stdio.h>
