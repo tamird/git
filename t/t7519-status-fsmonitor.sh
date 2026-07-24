@@ -1881,6 +1881,39 @@ test_expect_success UNTRACKED_CACHE 'ls-files validates standard excludes' '
 	test_grep "directories-visited:[1-9]" trace-ls-files-ident
 '
 
+test_expect_success UNTRACKED_CACHE 'reuse legacy standard exclude identities' '
+	(
+		cd ls-files-excludes &&
+		printf "hidden-info/\n\n" >.git/info/exclude &&
+		printf "hidden-core/\n\n" >.git/core-exclude &&
+		git status --porcelain >/dev/null &&
+		printf "hidden-info/\n" >.git/info/exclude &&
+		printf "hidden-core/\n" >.git/core-exclude &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-standard-excludes-legacy" \
+			git --no-optional-locks status --porcelain \
+			>../standard-excludes-legacy-actual &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../standard-excludes-legacy-expect &&
+		test_cmp ../standard-excludes-legacy-expect \
+			../standard-excludes-legacy-actual &&
+		printf "elsewhere-info/\n" >.git/info/exclude &&
+		printf "elsewhere-core/\n" >.git/core-exclude &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-standard-excludes-change" \
+			git --no-optional-locks status --porcelain \
+			>../standard-excludes-change-actual &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../standard-excludes-change-expect &&
+		test_cmp ../standard-excludes-change-expect \
+			../standard-excludes-change-actual
+	) &&
+	test_grep "gitignore-invalidation:0" trace-standard-excludes-legacy &&
+	test_grep "gitignore-invalidation:[1-9]" trace-standard-excludes-change &&
+	test_grep "?? hidden-core/" standard-excludes-change-actual &&
+	test_grep "?? hidden-info/" standard-excludes-change-actual
+'
+
 test_expect_success 'discard_index() also discards fsmonitor info' '
 	test_config core.fsmonitor "$TEST_DIRECTORY/t7519/fsmonitor-all" &&
 	test_might_fail git update-index --refresh &&

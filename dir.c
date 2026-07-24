@@ -1248,8 +1248,7 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 	struct object_id legacy_oid;
 	int has_legacy_oid = 0;
 
-	if (oid_stat && !oid_stat->valid && istate &&
-	    (flags & PATTERN_NOFOLLOW)) {
+	if (oid_stat && !oid_stat->valid) {
 		if (!is_null_oid(&oid_stat->oid)) {
 			oidcpy(&legacy_oid, &oid_stat->oid);
 			has_legacy_oid = 1;
@@ -3941,16 +3940,28 @@ void setup_standard_excludes(struct dir_struct *dir)
 	dir->exclude_per_dir = ".gitignore";
 
 	/* core.excludesfile defaulting to $XDG_CONFIG_HOME/git/ignore */
-	if (excludes_file && !access_or_warn(excludes_file, R_OK, 0))
+	if (excludes_file && !access_or_warn(excludes_file, R_OK, 0)) {
+		if (dir->untracked) {
+			oidcpy(&dir->internal.ss_excludes_file.oid,
+			       &dir->untracked->ss_excludes_file.oid);
+			dir->internal.ss_excludes_file.valid = 0;
+		}
 		add_patterns_from_file_1(dir, excludes_file,
 					 dir->untracked ? &dir->internal.ss_excludes_file : NULL);
+	}
 
 	/* per repository user preference */
 	if (startup_info->have_repository) {
 		const char *path = git_path_info_exclude();
-		if (!access_or_warn(path, R_OK, 0))
+		if (!access_or_warn(path, R_OK, 0)) {
+			if (dir->untracked) {
+				oidcpy(&dir->internal.ss_info_exclude.oid,
+				       &dir->untracked->ss_info_exclude.oid);
+				dir->internal.ss_info_exclude.valid = 0;
+			}
 			add_patterns_from_file_1(dir, path,
 						 dir->untracked ? &dir->internal.ss_info_exclude : NULL);
+		}
 	}
 }
 
