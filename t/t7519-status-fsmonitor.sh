@@ -236,6 +236,42 @@ test_expect_success PTHREADS 'git diff persists a full fsmonitor refresh' '
 	)
 '
 
+test_expect_success UNTRACKED_CACHE \
+	'fsmonitor fallback invalidates persisted untracked directories' '
+	test_when_finished "rm -rf fsmonitor-untracked-fallback" &&
+	test_create_repo fsmonitor-untracked-fallback &&
+	(
+		cd fsmonitor-untracked-fallback &&
+		mkdir -p parent/child &&
+		: >parent/child/tracked &&
+		git add -- parent/child/tracked &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0" &&
+			if test -f .git/fsmonitor-trivial
+			then
+				rm .git/fsmonitor-trivial &&
+				printf "/\0"
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.fsmonitorHookVersion 2 &&
+		git config core.untrackedCache true &&
+		git status --porcelain >.git/status-before &&
+		test_must_be_empty .git/status-before &&
+		: >parent/child/untracked &&
+		: >.git/fsmonitor-trivial &&
+		git update-index --refresh --force-write-index &&
+		test_path_is_missing .git/fsmonitor-trivial &&
+		git status --porcelain >.git/status-actual &&
+		git -c core.fsmonitor=false status --porcelain \
+			>.git/status-expect &&
+		printf "?? parent/child/untracked\n" >.git/status-untracked &&
+		test_cmp .git/status-untracked .git/status-expect &&
+		test_cmp .git/status-expect .git/status-actual
+	)
+'
+
 test_expect_success PTHREADS 'git diff respects fsmonitor refresh write settings' '
 	test_when_finished "rm -rf diff-fsmonitor-optional-locks \
 		diff-fsmonitor-auto-refresh" &&
