@@ -63,9 +63,13 @@ int fsmonitor_ipc__send_query(const char *since_token,
 int fsmonitor_ipc__send_command(const char *command,
 				struct strbuf *answer);
 
-/* Reuse a complete, current-token untracked snapshot without an index lock. */
+/*
+ * Reuse a complete, current-token untracked snapshot without an index lock.
+ * The required restore_reason receives a static unsupported reason or NULL.
+ */
 enum fsmonitor_untracked_cache_result
-fsmonitor_ipc__restore_untracked_cache(struct index_state *istate);
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
+				       const char **restore_reason);
 void fsmonitor_ipc__save_untracked_cache(struct index_state *istate);
 
 #endif /* FSMONITOR_IPC_H */

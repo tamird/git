@@ -51,8 +51,10 @@ int fsmonitor_ipc__send_command(const char *command UNUSED,
 }
 
 enum fsmonitor_untracked_cache_result
-fsmonitor_ipc__restore_untracked_cache(struct index_state *istate UNUSED)
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate UNUSED,
+				       const char **restore_reason)
 {
+	*restore_reason = "backend-unavailable";
 	return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 }
 
@@ -311,7 +313,8 @@ done:
 }
 
 enum fsmonitor_untracked_cache_result
-fsmonitor_ipc__restore_untracked_cache(struct index_state *istate)
+fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
+				       const char **restore_reason)
 {
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
@@ -320,6 +323,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate)
 	enum fsmonitor_untracked_cache_result result =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 
+	*restore_reason = NULL;
 	if (!istate->untracked || is_null_oid(&istate->oid) ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
 		goto done;
@@ -378,9 +382,11 @@ done:
 			   result == FSMONITOR_UNTRACKED_CACHE_HIT ? "hit" :
 			   result == FSMONITOR_UNTRACKED_CACHE_MISS ? "miss" :
 			   "unsupported");
-	if (result == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED)
+	if (result == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED) {
+		*restore_reason = reason;
 		trace2_data_string("fsmonitor", istate->repo,
 				   "untracked-cache/restore-reason", reason);
+	}
 	strbuf_release(&answer);
 	strbuf_release(&command);
 	return result;

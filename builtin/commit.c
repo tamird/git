@@ -1550,6 +1550,7 @@ struct repository *repo UNUSED)
 	unsigned int progress_flag = 0;
 	enum fsmonitor_untracked_cache_result cache_untracked =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
+	const char *cache_untracked_reason = NULL;
 	int cache_untracked_attempted = 0;
 	int fd;
 	int optional_locks;
@@ -1642,7 +1643,7 @@ struct repository *repo UNUSED)
 	    s.show_ignored_mode == SHOW_NO_IGNORED) {
 		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
-			the_repository->index);
+			the_repository->index, &cache_untracked_reason);
 	}
 	refresh_index(the_repository->index,
 		      REFRESH_QUIET|REFRESH_UNMERGED|progress_flag,
@@ -1677,7 +1678,7 @@ struct repository *repo UNUSED)
 	trace2_data_intmax("status", the_repository,
 			   "untracked-cache/restore-attempted",
 			   cache_untracked_attempted);
-	if (cache_untracked_attempted)
+	if (cache_untracked_attempted) {
 		trace2_data_string("status", the_repository,
 				   "untracked-cache/restore",
 				   cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT ?
@@ -1685,6 +1686,11 @@ struct repository *repo UNUSED)
 				   cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ?
 					   "miss" :
 					   "unsupported");
+		if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED)
+			trace2_data_string("status", the_repository,
+					   "untracked-cache/restore-reason",
+					   cache_untracked_reason);
+	}
 	if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ||
 	    (cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT &&
 	     the_repository->index->untracked &&
