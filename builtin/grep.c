@@ -1064,6 +1064,78 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 	return use_oid;
 }
 
+static int grep_cache_query_content_index_oids(
+	struct repository *repo, const struct pathspec *pathspec,
+	int cached, int literal_selected,
+	int **selected, size_t *selected_nr, size_t *selected_alloc,
+	int *use_selected, size_t *queried_nr)
+{
+	struct object_id *oids = NULL;
+	size_t *positions = NULL;
+	unsigned char *maybe = NULL;
+	size_t nr_oids = 0;
+	size_t oids_alloc = 0;
+	size_t positions_alloc = 0;
+	size_t limit = literal_selected ? *selected_nr : repo->index->cache_nr;
+	int query_result;
+	int result = 1;
+
+	for (size_t pos = 0; pos < limit; pos++) {
+		size_t i = literal_selected ? (*selected)[pos] : pos;
+		const struct cache_entry *ce = repo->index->cache[i];
+
+		if (!grep_cache_entry_uses_oid(
+			    repo, pathspec, cached, literal_selected, i))
+			continue;
+		ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
+		ALLOC_GROW(positions, nr_oids + 1, positions_alloc);
+		oidcpy(&oids[nr_oids], &ce->oid);
+		positions[nr_oids++] = i;
+	}
+	*queried_nr = nr_oids;
+	if (!nr_oids)
+		goto cleanup;
+
+	ALLOC_ARRAY(maybe, nr_oids);
+	content_index_ipc_nr = repo->index->cache_nr;
+	CALLOC_ARRAY(content_index_ipc_result, content_index_ipc_nr);
+	trace2_region_enter("grep", "query_content_index_ipc", repo);
+	query_result = grep_index_ipc_query(
+		repo, content_index_query, oids, nr_oids, maybe);
+	trace2_region_leave("grep", "query_content_index_ipc", repo);
+	if (query_result) {
+		FREE_AND_NULL(content_index_ipc_result);
+		content_index_ipc_nr = 0;
+		result = 0;
+		goto cleanup;
+	}
+	for (size_t i = 0; i < nr_oids; i++) {
+		content_index_ipc_result[positions[i]] = maybe[i];
+		if (cached &&
+		    repo->index->sparse_index == INDEX_EXPANDED &&
+		    maybe[i] != GREP_INDEX_IPC_IMPOSSIBLE) {
+			ALLOC_GROW(*selected, *selected_nr + 1, *selected_alloc);
+			(*selected)[(*selected_nr)++] = positions[i];
+		}
+	}
+	if (cached && repo->index->sparse_index == INDEX_EXPANDED) {
+		*use_selected = 1;
+		trace2_data_intmax("grep", repo,
+				   "content_index_ipc_candidates",
+				   *selected_nr);
+		if (*selected_nr &&
+		    *selected_nr < GREP_MIN_FILES_FOR_THREADS &&
+		    num_threads > 1 && threads_auto)
+			num_threads = 1;
+	}
+
+cleanup:
+	free(maybe);
+	free(positions);
+	free(oids);
+	return result;
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1085,6 +1157,7 @@ static int grep_cache(struct grep_opt *opt,
 	int prefix_selected = 0;
 	int skip_cache_setup = 0;
 	int used_index_ipc = 0;
+	int handled_selected_oid_query = 0;
 	int worktree_sidecar_loaded = 0;
 	int index_identity_valid = 0;
 	unsigned int index_identity_computations = 0;
@@ -1614,7 +1687,47 @@ static int grep_cache(struct grep_opt *opt,
 	prepare_index_query =
 		content_index_query &&
 		(!include_untracked || worktree_sidecar_loaded);
-	if (!skip_cache_setup && (!use_selected || literal_selected) &&
+	if (!skip_cache_setup && literal_selected && worktree_cache &&
+	    worktree_sidecar_loaded &&
+	    selected_nr < GREP_INDEX_IPC_PREPARED_MIN_OIDS &&
+	    repo == the_repository && prepare_index_query &&
+	    !recurse_submodules &&
+	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
+	    grep_index_ipc_is_available(repo)) {
+		size_t queried_nr;
+		uint64_t rejected = 0;
+
+		handled_selected_oid_query = grep_cache_query_content_index_oids(
+			repo, pathspec, cached, literal_selected,
+			&selected, &selected_nr, &selected_alloc,
+			&use_selected, &queried_nr);
+		if (handled_selected_oid_query && queried_nr) {
+			for (size_t i = 0; i < selected_nr; i++)
+				if (content_index_ipc_result &&
+				    content_index_ipc_result[selected[i]] ==
+					    GREP_INDEX_IPC_IMPOSSIBLE)
+					rejected++;
+			trace2_data_intmax(
+				"grep", repo,
+				"content_index_literal_path_queried",
+				queried_nr);
+			trace2_data_intmax(
+				"grep", repo,
+				"content_index_literal_path_candidates",
+				selected_nr - rejected);
+			trace2_data_intmax(
+				"grep", repo,
+				"content_index_literal_path_rejected",
+				rejected);
+			if (selected_nr > rejected &&
+			    selected_nr - rejected <
+				    GREP_MIN_FILES_FOR_THREADS &&
+			    num_threads > 1 && threads_auto)
+				num_threads = 1;
+		}
+	}
+	if (!handled_selected_oid_query &&
+	    !skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
 	    prepare_index_query &&
 	    !recurse_submodules &&
@@ -1912,7 +2025,7 @@ static int grep_cache(struct grep_opt *opt,
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
 	    prepare_index_query &&
-	    !used_index_ipc && !content_index) {
+	    !handled_selected_oid_query && !used_index_ipc && !content_index) {
 		trace2_region_enter("grep", "load_content_index", repo);
 		content_index = grep_index_load(repo);
 		trace2_region_leave("grep", "load_content_index", repo);
@@ -1952,80 +2065,17 @@ static int grep_cache(struct grep_opt *opt,
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository && prepare_index_query &&
-	    !used_index_ipc && !content_index_prepared &&
+	    !handled_selected_oid_query && !used_index_ipc &&
+	    !content_index_prepared &&
 	    !recurse_submodules &&
 	    fsm_settings__get_mode(repo) == FSMONITOR_MODE_IPC &&
 	    grep_index_ipc_is_available(repo)) {
-		struct object_id *oids = NULL;
-		size_t *positions = NULL;
-		unsigned char *maybe = NULL;
-		size_t nr_oids = 0;
-		size_t oids_alloc = 0;
-		size_t positions_alloc = 0;
+		size_t queried_nr;
 
-		size_t limit = literal_selected ? selected_nr :
-						  repo->index->cache_nr;
-
-		for (size_t pos = 0; pos < limit; pos++) {
-			size_t i = literal_selected ? selected[pos] : pos;
-			const struct cache_entry *ce = repo->index->cache[i];
-
-			if (!grep_cache_entry_uses_oid(
-				    repo, pathspec, cached, literal_selected, i))
-				continue;
-			ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
-			ALLOC_GROW(positions, nr_oids + 1,
-				   positions_alloc);
-			oidcpy(&oids[nr_oids], &ce->oid);
-			positions[nr_oids++] = i;
-		}
-		if (nr_oids) {
-			ALLOC_ARRAY(maybe, nr_oids);
-			content_index_ipc_nr = repo->index->cache_nr;
-			CALLOC_ARRAY(content_index_ipc_result,
-				     content_index_ipc_nr);
-			if (!grep_index_ipc_query(
-				    repo, content_index_query, oids,
-				    nr_oids, maybe)) {
-				for (size_t i = 0; i < nr_oids; i++) {
-					content_index_ipc_result[positions[i]] =
-						maybe[i];
-					if (cached &&
-					    repo->index->sparse_index ==
-						    INDEX_EXPANDED &&
-					    maybe[i] !=
-						    GREP_INDEX_IPC_IMPOSSIBLE) {
-						ALLOC_GROW(
-							selected,
-							selected_nr + 1,
-							selected_alloc);
-						selected[selected_nr++] =
-							positions[i];
-					}
-				}
-				if (cached &&
-				    repo->index->sparse_index ==
-					    INDEX_EXPANDED) {
-					use_selected = 1;
-					trace2_data_intmax(
-						"grep", repo,
-						"content_index_ipc_candidates",
-						selected_nr);
-					if (selected_nr &&
-					    selected_nr <
-						    GREP_MIN_FILES_FOR_THREADS &&
-					    num_threads > 1 &&
-					    threads_auto)
-						num_threads = 1;
-				}
-			} else {
-				FREE_AND_NULL(content_index_ipc_result);
-				content_index_ipc_nr = 0;
-			}
-		}
-		free(maybe);
-		free(positions);
-		free(oids);
+		grep_cache_query_content_index_oids(
+			repo, pathspec, cached, literal_selected,
+			&selected, &selected_nr, &selected_alloc,
+			&use_selected, &queried_nr);
 	}
 
 	nr = 0;
