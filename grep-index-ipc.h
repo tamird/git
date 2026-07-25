@@ -6,6 +6,8 @@ struct grep_index_query;
 struct object_id;
 struct repository;
 
+#define GREP_INDEX_IPC_PREPARED_MIN_OIDS 4096
+
 char *grep_index_ipc_path(struct repository *repo);
 char *grep_index_ipc_worker_path(struct repository *repo);
 

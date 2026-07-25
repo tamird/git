@@ -1894,14 +1894,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 	test_path_is_missing .git/index.grep-token &&
 	test_region grep load_worktree_cache overlay-literal.trace &&
 	test_region grep query_content_index_ipc overlay-literal.trace &&
-	test_region grep query_content_index_overlay overlay-literal.trace &&
+	test_region ! grep query_content_index_overlay overlay-literal.trace &&
 	test_trace2_data grep index_identity/computations 1 \
 		<overlay-literal.trace &&
 	test_trace2_data grep literal_path_candidates 42 \
 		<overlay-literal.trace &&
-	test_trace2_data grep content_index_overlay_objects 2 \
-		<overlay-literal.trace &&
-	test_trace2_data grep content_index_overlay_rejected 1 \
+	test_trace2_data grep content_index_literal_path_queried 2 \
 		<overlay-literal.trace &&
 	test_trace2_data grep content_index_literal_path_candidates 41 \
 		<overlay-literal.trace &&
@@ -2405,6 +2403,8 @@ test_expect_success FSMONITOR_DAEMON \
 			-- "$@" >actual &&
 	test_cmp expected actual &&
 	test_trace2_data grep literal_path_candidates 40 \
+		<candidate-literal-mixed.trace &&
+	test_trace2_data grep content_index_literal_path_queried 38 \
 		<candidate-literal-mixed.trace &&
 	test_trace2_data grep content_index_literal_path_candidates 3 \
 		<candidate-literal-mixed.trace &&
