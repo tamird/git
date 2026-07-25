@@ -457,6 +457,7 @@ static int check_updates(struct unpack_trees_options *o,
 	if (should_update_submodules())
 		load_gitmodules_file(index, NULL);
 
+	trace2_region_enter("unpack_trees", "remove_entries", index->repo);
 	for (i = 0; i < index->cache_nr; i++) {
 		const struct cache_entry *ce = index->cache[i];
 
@@ -468,6 +469,7 @@ static int check_updates(struct unpack_trees_options *o,
 
 	remove_marked_cache_entries(index, 0);
 	remove_scheduled_dirs();
+	trace2_region_leave("unpack_trees", "remove_entries", index->repo);
 
 	if (should_update_submodules())
 		load_gitmodules_file(index, &state);
@@ -484,6 +486,7 @@ static int check_updates(struct unpack_trees_options *o,
 	enable_delayed_checkout(&state);
 	if (pc_workers > 1)
 		init_parallel_checkout();
+	trace2_region_enter("unpack_trees", "queue_entries", index->repo);
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
@@ -500,6 +503,7 @@ static int check_updates(struct unpack_trees_options *o,
 				display_progress(progress, ++cnt);
 		}
 	}
+	trace2_region_leave("unpack_trees", "queue_entries", index->repo);
 	if (pc_workers > 1)
 		errs |= run_parallel_checkout(&state, pc_workers, pc_threshold,
 					      progress, &cnt);
