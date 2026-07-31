@@ -393,7 +393,9 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		reason = "no-current-token";
 		goto done;
 	}
-	if (!istate->untracked->use_fsmonitor) {
+	/* A restarted daemon can validate snapshots with its new token. */
+	if (!starts_with(istate->fsmonitor_last_update, "builtin:") ||
+	    !strcmp(istate->fsmonitor_last_update, "builtin:fake")) {
 		reason = "fsmonitor-fallback";
 		goto done;
 	}
@@ -463,8 +465,9 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	size_t start;
 
 	if (!istate->untracked || !istate->untracked->root ||
-	    !istate->untracked->use_fsmonitor ||
 	    !istate->fsmonitor_last_update ||
+	    !starts_with(istate->fsmonitor_last_update, "builtin:") ||
+	    !strcmp(istate->fsmonitor_last_update, "builtin:fake") ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
 		return;
 	index_oid = untracked_cache_index_oid(istate, &generated_index_oid);
