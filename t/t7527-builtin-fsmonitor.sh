@@ -1682,6 +1682,67 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 	)
 '
 
+test_expect_success 'lock-free status recovers untracked snapshot after daemon restart' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_restart" &&
+	git init test_untracked_snapshot_restart &&
+	(
+		cd test_untracked_snapshot_restart &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		: >../untracked-restart.excludes &&
+		git config core.excludesFile \
+			"$PWD/../untracked-restart.excludes" &&
+		mkdir nested &&
+		echo original >nested/original
+	) &&
+	start_daemon -C test_untracked_snapshot_restart &&
+	(
+		cd test_untracked_snapshot_restart &&
+		git status --porcelain >../untracked-restart-initial.out &&
+		git hash-object .git/index >../untracked-restart-index.before &&
+		git fsmonitor--daemon stop &&
+		echo modified >>tracked &&
+		echo added >nested/added &&
+		echo ignored >ignored &&
+		echo ignored >../untracked-restart.excludes &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-restart.expect
+	) &&
+	start_daemon -C test_untracked_snapshot_restart &&
+	(
+		cd test_untracked_snapshot_restart &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-first.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-restart-first.out &&
+		test_cmp ../untracked-restart.expect \
+			../untracked-restart-first.out &&
+		test_trace2_data status index/optional-lock disabled \
+			<../untracked-restart-first.trace &&
+		test_trace2_data fsm_client query/trivial-response 1 \
+			<../untracked-restart-first.trace &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../untracked-restart-first.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-restart-first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-second.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-restart-second.out &&
+		test_cmp ../untracked-restart.expect \
+			../untracked-restart-second.out &&
+		test_trace2_data status index/optional-lock disabled \
+			<../untracked-restart-second.trace &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-second.trace &&
+		test_trace2_data fsmonitor untracked-cache/hit 1 \
+			<../untracked-restart-second.trace &&
+		git hash-object .git/index >../untracked-restart-index.after &&
+		test_cmp ../untracked-restart-index.before \
+			../untracked-restart-index.after
+	)
+'
+
 test_expect_success MACOS 'worktree binding rejects same-gitdir aliases' '
 	test_when_finished "git -C binding-a fsmonitor--daemon stop 2>/dev/null || :" &&
 	git init --separate-git-dir="$PWD/binding-gitdir" binding-a &&
