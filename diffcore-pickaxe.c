@@ -566,9 +566,9 @@ void diffcore_pickaxe(struct diff_options *o)
 		}
 		if (index->pairs < min_index_pairs) {
 			size_t remaining = min_index_pairs - index->pairs;
+			size_t queued = diff_queued_diff.nr;
 
-			index->pairs +=
-				MIN((size_t)diff_queued_diff.nr, remaining);
+			index->pairs += queued < remaining ? queued : remaining;
 		}
 		if (!index->tried && index->pairs == min_index_pairs) {
 			struct grep_opt opt;
