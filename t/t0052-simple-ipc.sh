@@ -39,8 +39,14 @@ wait_for_pids () {
 
 test_expect_success 'start simple command server' '
 	test_atexit stop_simple_IPC_server &&
+	GIT_TEST_SIMPLE_IPC_SLOW_STARTUP=1 \
 	GIT_TRACE2_EVENT="$PWD/daemon.trace" \
-		test-tool simple-ipc start-daemon --threads=8
+		test-tool simple-ipc start-daemon --threads=8 &&
+	test_grep \
+		"\"category\":\"test-simple-ipc\".*\"key\":\"startup-probe\"" \
+		daemon.trace >startup-probes &&
+	test_line_count -ge 3 startup-probes &&
+	test_line_count -lt 20 startup-probes
 '
 
 test_expect_success !MINGW 'worker pool starts with one thread' '

@@ -6,8 +6,10 @@
 #include "fsmonitor-ll.h"
 #include "fsmonitor-settings.h"
 #include "gettext.h"
+#include "git-zlib.h"
 #include "hash.h"
 #include "hex.h"
+#include "parse.h"
 #include "read-cache-ll.h"
 #include "simple-ipc.h"
 #include "fsmonitor-ipc.h"
@@ -367,15 +369,98 @@ static const struct object_id *untracked_cache_index_oid(
 #endif
 }
 
+/* Existing daemons keep snapshot bytes opaque and enforce the wire limit. */
+#define FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC "\0UCZ1"
+#define FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN \
+	(sizeof(FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC) - 1)
+#define FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN \
+	(FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN + sizeof(uint32_t))
+#define FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX \
+	(8 * FSMONITOR_IPC_UNTRACKED_CACHE_MAX)
+
+static int compress_untracked_cache(struct strbuf *snapshot)
+{
+	struct strbuf compressed = STRBUF_INIT;
+	git_zstream stream;
+	unsigned long bound;
+	int status;
+
+	if (snapshot->len > FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX)
+		return -1;
+
+	git_deflate_init(&stream, Z_BEST_SPEED);
+	bound = git_deflate_bound(&stream, snapshot->len);
+	if (bound > FSMONITOR_IPC_UNTRACKED_CACHE_MAX -
+		    FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN)
+		bound = FSMONITOR_IPC_UNTRACKED_CACHE_MAX -
+			FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN;
+
+	strbuf_add(&compressed, FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC,
+		   FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN);
+	strbuf_addchars(&compressed, '\0', sizeof(uint32_t));
+	put_be32(compressed.buf + FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN,
+		 snapshot->len);
+	strbuf_grow(&compressed, bound);
+	stream.next_in = (unsigned char *)snapshot->buf;
+	stream.avail_in = snapshot->len;
+	stream.next_out = (unsigned char *)compressed.buf + compressed.len;
+	stream.avail_out = bound;
+	status = git_deflate(&stream, Z_FINISH);
+	if (git_deflate_end_gently(&stream) != Z_OK ||
+	    status != Z_STREAM_END || stream.avail_in) {
+		strbuf_release(&compressed);
+		return -1;
+	}
+	strbuf_setlen(&compressed,
+		      FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN +
+		      stream.total_out);
+	strbuf_swap(snapshot, &compressed);
+	strbuf_release(&compressed);
+	return 0;
+}
+
+static int decompress_untracked_cache(const char *data, size_t len,
+				     struct strbuf *snapshot)
+{
+	git_zstream stream = { 0 };
+	uint32_t expected;
+	int status;
+
+	if (len <= FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN)
+		return -1;
+	expected = get_be32(data +
+			    FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN);
+	if (!expected || expected > FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX)
+		return -1;
+
+	git_inflate_init(&stream);
+	strbuf_grow(snapshot, expected);
+	stream.next_in = (unsigned char *)data +
+		FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN;
+	stream.avail_in = len - FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN;
+	stream.next_out = (unsigned char *)snapshot->buf;
+	stream.avail_out = expected;
+	status = git_inflate(&stream, Z_FINISH);
+	git_inflate_end(&stream);
+	if (status != Z_STREAM_END || stream.avail_in ||
+	    stream.total_out != expected)
+		return -1;
+	strbuf_setlen(snapshot, expected);
+	return 0;
+}
+
 enum fsmonitor_untracked_cache_result
 fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 				       const char **restore_reason)
 {
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
+	struct strbuf snapshot = STRBUF_INIT;
 	struct untracked_cache *candidate;
 	struct object_id generated_index_oid;
 	const struct object_id *index_oid;
+	const char *snapshot_data;
+	size_t snapshot_len;
 	const char *reason = "ineligible";
 	enum fsmonitor_untracked_cache_result result =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
@@ -425,8 +510,24 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		goto done;
 	}
 
-	candidate = read_untracked_extension_bounded(answer.buf + 4,
-						     answer.len - 4);
+	snapshot_data = answer.buf + 4;
+	snapshot_len = answer.len - 4;
+	if (snapshot_len >= FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN &&
+	    !memcmp(snapshot_data, FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC,
+		    FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN)) {
+		if (decompress_untracked_cache(snapshot_data, snapshot_len,
+					       &snapshot)) {
+			reason = "invalid-compressed-snapshot";
+			goto done;
+		}
+		snapshot_data = snapshot.buf;
+		snapshot_len = snapshot.len;
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/decompressed", 1);
+	}
+
+	candidate = read_untracked_extension_bounded(snapshot_data,
+						     snapshot_len);
 	if (!candidate) {
 		reason = "invalid-snapshot";
 		goto done;
@@ -450,6 +551,7 @@ done:
 				   "untracked-cache/restore-reason", reason);
 	}
 	strbuf_release(&answer);
+	strbuf_release(&snapshot);
 	strbuf_release(&command);
 	return result;
 }
@@ -475,9 +577,19 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 		return;
 
 	write_untracked_extension(&snapshot, istate->untracked);
-	if (!snapshot.len || snapshot.len >
-		FSMONITOR_IPC_UNTRACKED_CACHE_MAX)
+	if (!snapshot.len)
 		goto done;
+	if (snapshot.len > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
+	    git_env_bool("GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE", 0)) {
+		if (compress_untracked_cache(&snapshot)) {
+			trace2_data_string("fsmonitor", istate->repo,
+					   "untracked-cache/save-reason",
+					   "oversize-snapshot");
+			goto done;
+		}
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/compressed", 1);
+	}
 
 	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
 		    "put %s %s ", oid_to_hex(index_oid),

@@ -2077,8 +2077,11 @@ wait:
 			time_t now;
 
 			time(&now);
-			if (now < time_limit)
+			if (now < time_limit) {
+				/* Avoid a tight readiness-probe and Trace2 loop. */
+				sleep_millisec(50);
 				goto wait;
+			}
 
 			/*
 			 * Our timeout has expired.  We don't try to

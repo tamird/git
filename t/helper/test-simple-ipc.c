@@ -4,6 +4,7 @@
 
 #include "test-tool.h"
 #include "gettext.h"
+#include "parse.h"
 #include "simple-ipc.h"
 #include "parse-options.h"
 #include "thread-utils.h"
@@ -262,6 +263,9 @@ static int daemon__run_server(void)
 		.max_request_size = 128 * 1024,
 	};
 
+	if (git_env_bool("GIT_TEST_SIMPLE_IPC_SLOW_STARTUP", 0))
+		sleep_millisec(250);
+
 	/*
 	 * Synchronously run the ipc-server.  We don't need any application
 	 * instance data, so pass an arbitrary pointer (that we'll later
@@ -282,6 +286,9 @@ static int bg_wait_cb(const struct child_process *cp UNUSED,
 		      void *cb_data UNUSED)
 {
 	int s = ipc_get_active_state(cl_args.path);
+
+	if (git_env_bool("GIT_TEST_SIMPLE_IPC_SLOW_STARTUP", 0))
+		trace2_data_intmax("test-simple-ipc", NULL, "startup-probe", 1);
 
 	switch (s) {
 	case IPC_STATE__LISTENING:
