@@ -52,7 +52,3 @@ when not explicitly configured.
 +
 * `pack.useBitmapBoundaryTraversal=true` may improve bitmap traversal when
   negated tips have poor bitmap coverage. Explicit settings take precedence.
-+
-* `push.useBitmaps=false` avoids expensive reachability bitmap traversal when
-  pushing from repositories with poor bitmap coverage. Explicit settings take
-  precedence; other operations continue to use bitmaps.

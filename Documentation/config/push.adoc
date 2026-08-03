@@ -137,6 +137,4 @@ This will result in only b (a and c are cleared).
 `push.useBitmaps`::
 	If set to `false`, disable use of bitmaps for `git push` even if
 	`pack.useBitmaps` is `true`, without preventing other git operations
-	from using bitmaps. Defaults to `true` unless `feature.manyFiles` is
-	enabled, in which case the default is `false`. An explicit setting
-	takes precedence.
+	from using bitmaps. Default is `true`.
