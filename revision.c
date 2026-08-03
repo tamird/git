@@ -784,76 +784,38 @@ cleanup:
 	return res;
 }
 
-static int set_revisions_bloom_keyvecs(struct rev_info *revs,
-				       const struct pathspec *pathspec)
+static int build_revisions_bloom_query(struct rev_info *revs,
+				       int prefixes_first)
 {
 	struct hashmap query_map = HASHMAP_INIT(
 		bloom_query_entry_cmp, revs->bloom_filter_settings);
 	int root_count = 0;
 	int last_root = -1;
-	size_t keyvec_nr = 0;
-
-	release_revisions_bloom_keyvecs(revs);
 	revs->bloom_query_root = -1;
 
-	for (size_t nr = 0; nr < pathspec->nr; nr++)
-		if (!(pathspec->items[nr].magic & PATHSPEC_EXCLUDE))
-			revs->bloom_keyvecs_nr++;
-	if (!revs->bloom_keyvecs_nr)
-		return -1;
-
-	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
-	if (revs->bloom_keyvecs_nr > 1 &&
-	    revs->bloom_filter_settings->hash_version == 3)
-		CALLOC_ARRAY(revs->bloom_query_components,
-			     revs->bloom_keyvecs_nr);
-
-	for (int i = 0; i < pathspec->nr; i++) {
-		struct bloom_keyvec *vec;
+	for (size_t query_nr = 0; query_nr < revs->bloom_keyvecs_nr;
+	     query_nr++) {
+		struct bloom_keyvec *vec = revs->bloom_keyvecs[query_nr];
+		struct bloom_keyvec *components =
+			revs->bloom_query_components[query_nr];
+		size_t component_count = components ? components->count : 0;
 		int parent = -1;
-		size_t query_nr;
 
-		if (pathspec->items[i].magic & PATHSPEC_EXCLUDE)
-			continue;
-		query_nr = keyvec_nr++;
-		if (convert_pathspec_to_bloom_keyvec(
-			    &revs->bloom_keyvecs[query_nr],
-			    revs->bloom_query_components ?
-				    &revs->bloom_query_components[query_nr] :
-				    NULL,
-			    &pathspec->items[i],
-			    revs->bloom_filter_settings)) {
-			hashmap_clear_and_free(&query_map,
-					       struct bloom_query_entry, ent);
-			release_revisions_bloom_keyvecs(revs);
-			return -1;
-		}
-		if (!revs->bloom_query_components)
-			continue;
-
-		vec = revs->bloom_keyvecs[query_nr];
 		for (size_t key_nr = 0;
-		     key_nr < vec->count +
-				      (revs->bloom_query_components[query_nr] ?
-					       revs->bloom_query_components[query_nr]->count :
-					       0);
-		     key_nr++) {
+		     key_nr < vec->count + component_count; key_nr++) {
 			struct bloom_query_entry lookup, *entry;
 			struct bloom_key *key;
 			int node;
 
-			if (revs->bloom_query_components[query_nr] &&
-			    key_nr < revs->bloom_query_components[query_nr]->count)
-				key = &revs->bloom_query_components[query_nr]->key[key_nr];
-			else {
-				size_t vec_nr = key_nr -
-						(revs->bloom_query_components[query_nr] ?
-							 revs->bloom_query_components[query_nr]
-								 ->count :
-							 0);
-
-				key = &vec->key[vec->count - vec_nr - 1];
-			}
+			if (prefixes_first && key_nr < vec->count)
+				key = &vec->key[vec->count - key_nr - 1];
+			else if (prefixes_first)
+				key = &components->key[key_nr - vec->count];
+			else if (key_nr < component_count)
+				key = &components->key[key_nr];
+			else
+				key = &vec->key[vec->count -
+						(key_nr - component_count) - 1];
 
 			if (parent >= 0 &&
 			    !memcmp(key->hashes,
@@ -913,14 +875,65 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 		revs->bloom_query[parent].terminal = 1;
 	}
 	hashmap_clear_and_free(&query_map, struct bloom_query_entry, ent);
+	return root_count;
+}
+
+static int set_revisions_bloom_keyvecs(struct rev_info *revs,
+				       const struct pathspec *pathspec)
+{
+	size_t keyvec_nr = 0;
+	int root_count;
+
+	release_revisions_bloom_keyvecs(revs);
+	revs->bloom_query_root = -1;
+
+	for (size_t nr = 0; nr < pathspec->nr; nr++)
+		if (!(pathspec->items[nr].magic & PATHSPEC_EXCLUDE))
+			revs->bloom_keyvecs_nr++;
+	if (!revs->bloom_keyvecs_nr)
+		return -1;
+
+	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
+	if (revs->bloom_keyvecs_nr > 1 &&
+	    revs->bloom_filter_settings->hash_version == 3)
+		CALLOC_ARRAY(revs->bloom_query_components,
+			     revs->bloom_keyvecs_nr);
+
+	for (int i = 0; i < pathspec->nr; i++) {
+		size_t query_nr;
+
+		if (pathspec->items[i].magic & PATHSPEC_EXCLUDE)
+			continue;
+		query_nr = keyvec_nr++;
+		if (convert_pathspec_to_bloom_keyvec(
+			    &revs->bloom_keyvecs[query_nr],
+			    revs->bloom_query_components ?
+				    &revs->bloom_query_components[query_nr] :
+				    NULL,
+			    &pathspec->items[i],
+			    revs->bloom_filter_settings)) {
+			release_revisions_bloom_keyvecs(revs);
+			return -1;
+		}
+	}
+	if (!revs->bloom_query_components)
+		return 0;
+
+	root_count = build_revisions_bloom_query(revs, 0);
 
 	/*
 	 * Each path is an AND of its full path and directory-prefix keys,
 	 * while the pathspec is an OR across paths. Factoring those keys into
 	 * a trie avoids repeating common predicates. Version 3 filters also
-	 * contain every path component as a basename, so put those keys first
-	 * to reject unrelated commits before testing the longer prefixes.
+	 * contain every path component as a basename. Prefer those keys, but
+	 * use directory prefixes when basenames share too few roots.
 	 */
+	if (root_count > revs->bloom_keyvecs_nr / 2) {
+		FREE_AND_NULL(revs->bloom_query);
+		revs->bloom_query_nr = 0;
+		revs->bloom_query_alloc = 0;
+		root_count = build_revisions_bloom_query(revs, 1);
+	}
 	if (root_count > revs->bloom_keyvecs_nr / 2) {
 		FREE_AND_NULL(revs->bloom_query);
 		revs->bloom_query_nr = 0;
