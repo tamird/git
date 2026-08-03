@@ -49,3 +49,6 @@ that mtime is working on your machine.
 +
 * `checkout.workers` defaults to the number of logical cores, capped at eight,
 when not explicitly configured.
++
+* `pack.useBitmapBoundaryTraversal=true` may improve bitmap traversal when
+  negated tips have poor bitmap coverage. Explicit settings take precedence.

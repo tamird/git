@@ -630,6 +630,7 @@ test_expect_success 'boundary-based traversal is used when requested' '
 	for argv in \
 		"git -c pack.useBitmapBoundaryTraversal=true" \
 		"git -c feature.experimental=true" \
+		"git -c feature.manyFiles=true" \
 		"GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL=1 git"
 	do
 		eval "GIT_TRACE2_EVENT=1 $argv rev-list --objects \
@@ -641,6 +642,7 @@ test_expect_success 'boundary-based traversal is used when requested' '
 	for argv in \
 		"git -c pack.useBitmapBoundaryTraversal=false" \
 		"git -c feature.experimental=true -c pack.useBitmapBoundaryTraversal=false" \
+		"git -c feature.manyFiles=true -c pack.useBitmapBoundaryTraversal=false" \
 		"GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL=0 git -c pack.useBitmapBoundaryTraversal=true" \
 		"GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL=0 git -c feature.experimental=true"
 	do

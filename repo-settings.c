@@ -60,6 +60,7 @@ void prepare_repo_settings(struct repository *r)
 		r->settings.index_version = 4;
 		r->settings.index_skip_hash = 1;
 		r->settings.core_untracked_cache = UNTRACKED_CACHE_WRITE;
+		r->settings.pack_use_bitmap_boundary_traversal = 1;
 		r->settings.pack_use_path_walk = 1;
 	}
 
