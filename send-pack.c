@@ -558,9 +558,6 @@ int send_pack(struct repository *r,
 
 	if (!repo_config_get_bool(r, "push.usebitmaps", &use_bitmaps))
 		args->disable_bitmaps = !use_bitmaps;
-	else if (!repo_config_get_bool(r, "feature.manyfiles", &use_bitmaps) &&
-		 use_bitmaps)
-		args->disable_bitmaps = 1;
 
 	repo_config_get_bool(r, "transfer.advertisesid", &advertise_sid);
 
