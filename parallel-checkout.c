@@ -47,6 +47,7 @@ enum pc_status parallel_checkout_status(void)
 
 static const int DEFAULT_THRESHOLD_FOR_PARALLELISM = 100;
 static const int DEFAULT_NUM_WORKERS = 1;
+static const int MAX_MANY_FILES_WORKERS = 8;
 
 void get_parallel_checkout_configs(int *num_workers, int *threshold)
 {
@@ -64,10 +65,21 @@ void get_parallel_checkout_configs(int *num_workers, int *threshold)
 		return;
 	}
 
-	if (repo_config_get_int(the_repository, "checkout.workers", num_workers))
-		*num_workers = DEFAULT_NUM_WORKERS;
-	else if (*num_workers < 1)
+	if (repo_config_get_int(the_repository, "checkout.workers", num_workers)) {
+		int many_files = 0;
+
+		/* Large-worktree opt-in changes the default, not explicit settings. */
+		if (!repo_config_get_bool(the_repository, "feature.manyfiles",
+					  &many_files) && many_files) {
+			*num_workers = online_cpus();
+			if (*num_workers > MAX_MANY_FILES_WORKERS)
+				*num_workers = MAX_MANY_FILES_WORKERS;
+		} else {
+			*num_workers = DEFAULT_NUM_WORKERS;
+		}
+	} else if (*num_workers < 1) {
 		*num_workers = online_cpus();
+	}
 
 	if (repo_config_get_int(the_repository, "checkout.thresholdForParallelism", threshold))
 		*threshold = DEFAULT_THRESHOLD_FOR_PARALLELISM;

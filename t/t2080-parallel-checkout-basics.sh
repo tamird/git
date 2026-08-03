@@ -106,6 +106,53 @@ test_expect_success 'setup repo for checkout with various types of changes' '
 	)
 '
 
+test_expect_success 'feature.manyFiles enables bounded checkout workers' '
+	git init many-files &&
+	(
+		cd many-files &&
+		for i in $(test_seq 1 8)
+		do
+			echo "$i" >"file-$i" || return 1
+		done &&
+		git add . &&
+		git commit -m files &&
+		workers=$(test-tool online-cpus) &&
+		if test "$workers" -gt 8
+		then
+			workers=8
+		fi &&
+		if test "$workers" -eq 1
+		then
+			workers=0
+		fi &&
+
+		rm file-* &&
+		test_checkout_workers 0 git \
+			-c feature.manyFiles=false \
+			-c checkout.thresholdForParallelism=0 checkout . &&
+
+		rm file-* &&
+		test_checkout_workers 0 git \
+			-c feature.manyFiles=true checkout . &&
+
+		rm file-* &&
+		test_checkout_workers "$workers" git \
+			-c feature.manyFiles=true \
+			-c checkout.thresholdForParallelism=0 checkout . &&
+
+		rm file-* &&
+		test_checkout_workers 0 git \
+			-c feature.manyFiles=true \
+			-c checkout.workers=1 \
+			-c checkout.thresholdForParallelism=0 checkout . &&
+
+		rm file-* &&
+		test_checkout_workers 0 env GIT_TEST_CHECKOUT_WORKERS=1 git \
+			-c feature.manyFiles=true \
+			-c checkout.thresholdForParallelism=0 checkout .
+	)
+'
+
 for mode in sequential parallel sequential-fallback
 do
 	case $mode in

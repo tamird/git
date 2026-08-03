@@ -46,3 +46,6 @@ feature.manyFiles::
 +
 * `core.untrackedCache=true` enables the untracked cache. This setting assumes
 that mtime is working on your machine.
++
+* `checkout.workers` defaults to the number of logical cores, capped at eight,
+when not explicitly configured.

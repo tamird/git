@@ -24,11 +24,12 @@ commands or functionality in the future.
 
 `checkout.workers`::
 	The number of parallel workers to use when updating the working tree.
-	The default is one, i.e. sequential execution. If set to a value less
-	than one, Git will use as many workers as the number of logical cores
-	available. This setting and `checkout.thresholdForParallelism` affect
-	all commands that perform checkout. E.g. checkout, clone, reset,
-	sparse-checkout, etc.
+	The default is one, i.e. sequential execution. When `feature.manyFiles`
+	is enabled, the default is the number of available logical cores,
+	capped at eight. An explicitly configured value takes precedence; if
+	it is less than one, Git uses all available logical cores. This setting
+	and `checkout.thresholdForParallelism` affect all commands that perform
+	checkout. E.g. checkout, clone, reset, sparse-checkout, etc.
 +
 NOTE: Parallel checkout usually delivers better performance for repositories
 located on SSDs or over NFS. For repositories on spinning disks and/or machines
