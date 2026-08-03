@@ -416,6 +416,32 @@ test_expect_success 'version 3 factors multi-path Bloom queries' '
 	)
 '
 
+test_expect_success 'version 3 factors distinct basenames by shared directory' '
+	git init shared-prefix-v3 &&
+	(
+		cd shared-prefix-v3 &&
+		test_commit base unrelated &&
+		mkdir shared elsewhere &&
+		test_commit first shared/alpha &&
+		test_commit second shared/beta &&
+		test_commit third shared/gamma &&
+		test_commit other elsewhere/delta &&
+		git -c commitGraph.changedPathsVersion=3 commit-graph write \
+			--reachable --changed-paths &&
+		git -c core.commitGraph=false log --format=%s -- \
+			shared/alpha shared/beta shared/gamma \
+			":(exclude)shared/beta" >expect &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/shared-prefix.perf" \
+			git log --format=%s -- shared/alpha shared/beta \
+			shared/gamma ":(exclude)shared/beta" >actual &&
+		test_cmp expect actual &&
+		test_grep "\"trie_steps\":[1-9]" \
+			"$TRASH_DIRECTORY/shared-prefix.perf" &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/shared-prefix.perf"
+	)
+'
+
 test_expect_success 'mixed version 2 and 3 layers ignore basename filters' '
 	git init basename-mixed &&
 	mkdir -p basename-mixed/nested/target &&
