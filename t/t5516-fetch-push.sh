@@ -1930,7 +1930,26 @@ test_expect_success 'push with config push.useBitmaps' '
 	GIT_TRACE2_EVENT="$PWD/false" \
 	git push --quiet testrepo main:test3 &&
 	test_subcommand git pack-objects --revs --stdout --thin \
-		--delta-base-offset --no-use-bitmap-index --quiet <false
+		--delta-base-offset --no-use-bitmap-index --quiet <false &&
+
+	test_unconfig push.useBitmaps &&
+	GIT_TRACE2_EVENT="$PWD/many-files" \
+	git -c feature.manyFiles=true push --quiet testrepo main:test4 &&
+	test_subcommand git pack-objects --revs --stdout --thin \
+		--delta-base-offset --no-use-bitmap-index --quiet <many-files &&
+
+	GIT_TRACE2_EVENT="$PWD/many-files-true" \
+	git -c feature.manyFiles=true -c push.useBitmaps=true \
+		push --quiet testrepo main:test5 &&
+	test_subcommand git pack-objects --revs --stdout --thin \
+		--delta-base-offset --quiet <many-files-true &&
+
+	GIT_TRACE2_EVENT="$PWD/many-files-false" \
+	git -c feature.manyFiles=true -c push.useBitmaps=false \
+		push --quiet testrepo main:test6 &&
+	test_subcommand git pack-objects --revs --stdout --thin \
+		--delta-base-offset --no-use-bitmap-index --quiet \
+		<many-files-false
 '
 
 test_expect_success 'push with config pack.usePathWalk=true' '
