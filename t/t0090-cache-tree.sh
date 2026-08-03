@@ -226,14 +226,58 @@ test_expect_success 'commit in child dir has cache-tree' '
 
 test_expect_success 'reset --hard gives cache-tree' '
 	test-tool scrap-cache-tree &&
-	git reset --hard &&
+	GIT_TRACE2_EVENT="$PWD/.git/reset-cold.trace" git reset --hard &&
+	test_region cache-tree prime_cache_tree .git/reset-cold.trace &&
 	test_cache_tree
+'
+
+test_expect_success 'reset reuses unchanged cache-tree subtrees' '
+	test_when_finished "rm -rf reset-cache-tree" &&
+	git init reset-cache-tree &&
+	(
+		cd reset-cache-tree &&
+		mkdir -p changed/deep unchanged/deep removed/deep &&
+		echo before >changed/deep/file &&
+		echo unchanged >unchanged/deep/file &&
+		echo removed >removed/deep/file &&
+		git add . &&
+		git commit -m before &&
+		before=$(git rev-parse HEAD) &&
+
+		echo after >changed/deep/file &&
+		git rm -r removed &&
+		git add changed/deep/file &&
+		git commit -m after &&
+		after=$(git rev-parse HEAD) &&
+
+		GIT_TRACE2_EVENT="$PWD/.git/reset-add.trace" \
+			git reset --hard "$before" &&
+		test_region cache_tree update .git/reset-add.trace &&
+		test_region ! cache-tree prime_cache_tree .git/reset-add.trace &&
+		test_path_is_file removed/deep/file &&
+		test-tool dump-cache-tree >.git/reset-add.cache-tree &&
+		test_grep "unchanged/deep/" .git/reset-add.cache-tree &&
+		test_grep "removed/deep/" .git/reset-add.cache-tree &&
+		test "$(git rev-parse HEAD^{tree})" = "$(git write-tree)" &&
+
+		GIT_TRACE2_EVENT="$PWD/.git/reset-remove.trace" \
+			git reset --hard "$after" &&
+		test_region cache_tree update .git/reset-remove.trace &&
+		test_region ! cache-tree prime_cache_tree .git/reset-remove.trace &&
+		test_path_is_missing removed &&
+		test-tool dump-cache-tree >.git/reset-remove.cache-tree &&
+		test_grep "unchanged/deep/" .git/reset-remove.cache-tree &&
+		test_grep ! "removed/" .git/reset-remove.cache-tree &&
+		test "$(git rev-parse HEAD^{tree})" = "$(git write-tree)"
+	)
 '
 
 test_expect_success 'reset --hard without index gives cache-tree' '
 	rm -f .git/index &&
 	git clean -fd &&
-	git reset --hard &&
+	GIT_TRACE2_EVENT="$PWD/.git/reset-no-index.trace" \
+		git reset --hard &&
+	test_region cache-tree prime_cache_tree .git/reset-no-index.trace &&
 	test_cache_tree
 '
 
