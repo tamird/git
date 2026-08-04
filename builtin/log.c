@@ -382,7 +382,10 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 		load_ref_decorations(&decoration_filter, cfg->decoration_style,
 				     !rev->simplify_by_decoration &&
 					     !rev->boundary && !rev->max_count_type &&
-					     ((!rev->no_walk && rev->max_count == 1) ||
+					     ((!rev->no_walk &&
+					       (rev->max_count == 1 ||
+						(rev->max_count < 0 &&
+						 (rev->diffopt.output_format & DIFF_FORMAT_PATCH)))) ||
 					      (rev->no_walk && rev->pending.nr == 1 &&
 					       rev->pending.objects[0].item->type == OBJ_COMMIT)));
 	}
