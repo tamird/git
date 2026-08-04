@@ -1655,6 +1655,15 @@ struct repository *repo UNUSED)
 	else
 		fd = -1;
 
+	if (optional_locks && fd < 0 && !s.pathspec.nr &&
+	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
+	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
+	    s.show_ignored_mode == SHOW_NO_IGNORED) {
+		cache_untracked_attempted = 1;
+		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
+			the_repository->index, &cache_untracked_reason);
+	}
+
 	s.is_initial = repo_get_oid(the_repository, s.reference, &oid) ? 1 : 0;
 	if (!s.is_initial)
 		oidcpy(&s.oid_commit, &oid);
