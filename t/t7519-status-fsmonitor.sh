@@ -594,6 +594,119 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 	test_cmp expect actual
 '
 
+test_expect_success 'diff-index reuses valid cache trees with excluded globs' '
+	test_when_finished "rm -rf diff-index-excludes" &&
+	test_create_repo diff-index-excludes &&
+	(
+		cd diff-index-excludes &&
+		mkdir -p included ignored generated &&
+		echo base >included/file &&
+		echo base >ignored/skip.tmp &&
+		echo base >generated/file.generated &&
+		git add . &&
+		git commit -m base &&
+		echo tip >included/file &&
+		echo hidden-tip >ignored/skip.tmp &&
+		echo generated-tip >generated/file.generated &&
+		git add . &&
+		git commit -m tip &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git update-index --fsmonitor &&
+		git status --porcelain >.git/status &&
+		test_must_be_empty .git/status &&
+		git ls-files -f >.git/fsmonitor-valid &&
+		test_grep "^h included/file$" .git/fsmonitor-valid &&
+		test_grep "^h ignored/skip.tmp$" .git/fsmonitor-valid &&
+		test_grep "^h generated/file.generated$" .git/fsmonitor-valid &&
+		exclude_tmp=":(exclude,glob)**/*.tmp" &&
+		exclude_generated=":(exclude,glob)generated/**" &&
+		exclude_cache=":(exclude,glob)**/*.cache" &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/diff-exclude.trace" \
+			git diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.actual &&
+		test_cmp .git/diff-exclude.expect .git/diff-exclude.actual &&
+		test_grep "^diff --git a/included/file b/included/file$" \
+			.git/diff-exclude.actual &&
+		! grep "ignored/skip.tmp" .git/diff-exclude.actual &&
+		! grep "generated/file.generated" .git/diff-exclude.actual &&
+		cached_traversal=$(sed -n \
+			"s#.*index/cached-traversal[^0-9]*\\([0-9][0-9]*\\).*#\\1#p" \
+			.git/diff-exclude.trace) &&
+		echo "diff index cached traversal: $cached_traversal" &&
+		test_trace2_data diff index/cached-traversal 1 \
+			<.git/diff-exclude.trace &&
+		for mode in --stat -w
+		do
+			git --no-optional-locks \
+				-c core.fsmonitor=false -c core.preloadIndex=false \
+				diff "$mode" HEAD^ -- "$exclude_tmp" \
+				"$exclude_generated" "$exclude_cache" \
+				>.git/diff-exclude.expect &&
+			git diff "$mode" HEAD^ -- "$exclude_tmp" \
+				"$exclude_generated" "$exclude_cache" \
+				>.git/diff-exclude.actual &&
+			test_cmp .git/diff-exclude.expect \
+				.git/diff-exclude.actual || exit 1
+		done &&
+		echo staged >included/file &&
+		git -c core.fsmonitor= add included/file &&
+		git status --porcelain >.git/staged-status &&
+		test_grep "^M  included/file$" .git/staged-status &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/diff-exclude-staged.trace" \
+			git diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.actual &&
+		test_cmp .git/diff-exclude.expect .git/diff-exclude.actual &&
+		test_trace2_data diff index/cached-traversal 1 \
+			<.git/diff-exclude-staged.trace &&
+		echo worktree >included/file &&
+		echo included/file >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/diff-exclude-dirty.trace" \
+			git diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.actual &&
+		test_cmp .git/diff-exclude.expect .git/diff-exclude.actual &&
+		test_trace2_data diff index/cached-traversal 0 \
+			<.git/diff-exclude-dirty.trace &&
+		echo excluded-worktree >ignored/skip.tmp &&
+		printf "included/file\nignored/skip.tmp\n" \
+			>.git/fsmonitor-dirty &&
+		git diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.actual &&
+		! grep "ignored/skip.tmp" .git/diff-exclude.actual &&
+		rm included/file &&
+		echo included/file >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.expect &&
+		git diff HEAD^ -- "$exclude_tmp" "$exclude_generated" \
+			"$exclude_cache" >.git/diff-exclude.actual &&
+		test_cmp .git/diff-exclude.expect .git/diff-exclude.actual &&
+		test_grep "^deleted file mode" .git/diff-exclude.actual
+	)
+'
+
 test_expect_success SYMLINKS 'diff-index handles reported leading symlink' '
 	test_when_finished "rm -rf diff-index-symlink" &&
 	test_create_repo diff-index-symlink &&
