@@ -828,6 +828,8 @@ enum grep_worktree_cache_result grep_worktree_cache_lookup(
 		cache->recovered_split_base++;
 		return GREP_WORKTREE_CACHE_EQUAL;
 	}
+	if (cache->recovered[pos >> 3] & mask)
+		return GREP_WORKTREE_CACHE_EQUAL;
 	if (recovery_contains(cache, cache->istate->cache[pos])) {
 		if (!(cache->recovered[pos >> 3] & mask)) {
 			cache->recovered[pos >> 3] |= mask;
