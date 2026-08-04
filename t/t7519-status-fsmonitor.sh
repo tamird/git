@@ -707,6 +707,88 @@ test_expect_success 'diff-index reuses valid cache trees with excluded globs' '
 	)
 '
 
+test_expect_success 'diff-index skips clean cache-tree entries beside dirty worktrees' '
+	test_when_finished "rm -rf diff-index-clean-entries" &&
+	test_create_repo diff-index-clean-entries &&
+	(
+		cd diff-index-clean-entries &&
+		mkdir bulk changes &&
+		for n in $(test_seq 1 128)
+		do
+			printf "base-%s\n" "$n" >"bulk/clean-$n" ||
+				exit 1
+		done &&
+		echo clean >bulk/dirty &&
+		echo base >changes/file &&
+		git add . &&
+		git commit -m base &&
+		echo tip >changes/file &&
+		git add changes/file &&
+		git commit -m tip &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git update-index --fsmonitor &&
+		git status --porcelain >.git/status &&
+		test_must_be_empty .git/status &&
+		git ls-files -f bulk/clean-1 bulk/dirty >.git/fsmonitor-valid &&
+		test_grep "^h bulk/clean-1$" .git/fsmonitor-valid &&
+		test_grep "^h bulk/dirty$" .git/fsmonitor-valid &&
+		echo worktree >bulk/dirty &&
+		echo bulk/dirty >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ >.git/diff-clean.expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/diff-clean.trace" \
+			git diff HEAD^ >.git/diff-clean.actual &&
+		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
+		test_grep "^diff --git a/bulk/dirty b/bulk/dirty$" \
+			.git/diff-clean.actual &&
+		test_grep "^diff --git a/changes/file b/changes/file$" \
+			.git/diff-clean.actual &&
+		test_trace2_data diff index/cached-traversal 0 \
+			<.git/diff-clean.trace &&
+		callbacks=$(sed -n \
+			"s#.*cache-tree/diff-callbacks[^0-9]*\\([0-9][0-9]*\\).*#\\1#p" \
+			.git/diff-clean.trace) &&
+		test -n "$callbacks" &&
+		echo "cache-tree diff callbacks: $callbacks" &&
+		test "$callbacks" -le 2 &&
+		for option in --stat -w
+		do
+			git --no-optional-locks \
+				-c core.fsmonitor=false -c core.preloadIndex=false \
+				diff "$option" HEAD^ >.git/diff-clean.expect &&
+			git diff "$option" HEAD^ >.git/diff-clean.actual &&
+			test_cmp .git/diff-clean.expect .git/diff-clean.actual ||
+				exit 1
+		done &&
+		echo staged >changes/file &&
+		git -c core.fsmonitor= add changes/file &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ >.git/diff-clean.expect &&
+		git diff HEAD^ >.git/diff-clean.actual &&
+		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
+		rm bulk/dirty &&
+		echo bulk/dirty >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff HEAD^ >.git/diff-clean.expect &&
+		git diff HEAD^ >.git/diff-clean.actual &&
+		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
+		test_grep "^deleted file mode" .git/diff-clean.actual
+	)
+'
+
 test_expect_success SYMLINKS 'diff-index handles reported leading symlink' '
 	test_when_finished "rm -rf diff-index-symlink" &&
 	test_create_repo diff-index-symlink &&
