@@ -22,6 +22,7 @@
 #include "submodule.h"
 #include "symlinks.h"
 #include "trace.h"
+#include "trace2.h"
 #include "dir.h"
 #include "fsmonitor.h"
 #include "commit-reach.h"
@@ -562,6 +563,26 @@ static int oneway_diff(const struct cache_entry * const *src,
 	return 0;
 }
 
+static int only_excluded_pathspec(const struct pathspec *pathspec)
+{
+	int i, positives = 0;
+
+	if (pathspec->nr < 2)
+		return 0;
+
+	for (i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+
+		if (item->magic & PATHSPEC_EXCLUDE)
+			continue;
+		if (!item->original || ++positives > 1 ||
+		    strcmp(item->original, "."))
+			return 0;
+	}
+
+	return positives == 1;
+}
+
 static int diff_cache(struct rev_info *revs,
 		      const struct object_id *tree_oid,
 		      const char *tree_name,
@@ -570,6 +591,7 @@ static int diff_cache(struct rev_info *revs,
 	struct tree *tree;
 	struct tree_desc t;
 	struct unpack_trees_options opts;
+	int ret;
 
 	tree = repo_parse_tree_indirect(the_repository, tree_oid);
 	if (!tree)
@@ -581,8 +603,10 @@ static int diff_cache(struct rev_info *revs,
 	opts.diff_index_cached = (cached &&
 				  !revs->diffopt.flags.find_copies_harder);
 	opts.diff_index_skip_valid = (!cached &&
-				      !revs->diffopt.pathspec.nr &&
-				      !revs->prune_data.nr &&
+				      ((!revs->diffopt.pathspec.nr &&
+					!revs->prune_data.nr) ||
+				       (only_excluded_pathspec(&revs->diffopt.pathspec) &&
+					only_excluded_pathspec(&revs->prune_data))) &&
 				      !revs->diffopt.flags.quick &&
 				      !revs->diffopt.flags.find_copies_harder);
 	opts.merge = 1;
@@ -596,7 +620,10 @@ static int diff_cache(struct rev_info *revs,
 		die(_("max-depth is not supported for index diffs"));
 
 	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
-	return unpack_trees(1, &t, &opts);
+	ret = unpack_trees(1, &t, &opts);
+	trace2_data_intmax("diff", the_repository, "index/cached-traversal",
+			   opts.diff_index_cached);
+	return ret;
 }
 
 void diff_get_merge_base(const struct rev_info *revs, struct object_id *mb)
