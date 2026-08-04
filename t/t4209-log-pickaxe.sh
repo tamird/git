@@ -325,6 +325,39 @@ test_expect_success 'log -S<pat> is not a regex, but -S<pat> --pickaxe-regex is'
 	test_cmp log C-to-D-then-E-log
 '
 
+test_expect_success 'fixed pickaxe caches counts without a content index' '
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+	GIT_TRACE2_EVENT="$PWD/pickaxe-no-index.trace" \
+		git -C GS-plain log --no-renames -S"[b]" -- data.txt >actual &&
+	test_cmp D-then-E-log actual &&
+	test_trace2_data pickaxe content_index/query 1 \
+		<pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/index 0 \
+		<pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/ipc 0 \
+		<pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/count_cache_hits \
+		"[1-9][0-9]*" <pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/count_cache_updates \
+		"[1-9][0-9]*" <pickaxe-no-index.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_ENTRIES=0 \
+	GIT_TRACE2_EVENT="$PWD/pickaxe-no-index-bounded.trace" \
+		git -C GS-plain log --no-renames -S"[b]" -- data.txt >actual &&
+	test_cmp D-then-E-log actual &&
+	test_trace2_data pickaxe content_index/query 1 \
+		<pickaxe-no-index-bounded.trace &&
+	test_trace2_data pickaxe content_index/index 0 \
+		<pickaxe-no-index-bounded.trace &&
+	test_trace2_data pickaxe content_index/ipc 0 \
+		<pickaxe-no-index-bounded.trace &&
+	test_trace2_data pickaxe content_index/count_cache_hits 0 \
+		<pickaxe-no-index-bounded.trace &&
+	test_trace2_data pickaxe content_index/count_cache_updates 0 \
+		<pickaxe-no-index-bounded.trace
+'
+
 test_expect_success 'setup log -[GS] binary & --text' '
 	test_create_repo GS-bin-txt &&
 	test_commit -C GS-bin-txt --printf A data.bin "a\na\0a\n" &&
