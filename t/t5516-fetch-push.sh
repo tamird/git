@@ -1919,6 +1919,48 @@ test_expect_success 'push with config push.useBitmaps' '
 		--thin --delta-base-offset -q --no-use-bitmap-index <false
 '
 
+test_expect_success 'large-worktree push bounds unrelated remote haves' '
+	test_when_finished "rm -rf many-haves-src many-haves-dst.git \
+			    many-haves.trace many-haves-explicit.trace \
+			    many-haves-expect many-haves-actual" &&
+	git init many-haves-src &&
+	git init --bare many-haves-dst.git &&
+	test_commit_bulk -C many-haves-src --notick 32 &&
+	git -C many-haves-src push ../many-haves-dst.git \
+		HEAD:refs/heads/main &&
+	git -C many-haves-src rev-list --max-count=32 HEAD |
+	awk "{ for (i = 0; i < 128; i++)
+		printf \"create refs/heads/noise/%02d-%03d %s\\n\", NR, i, \
+		\$1 }" |
+	git -C many-haves-dst.git update-ref --stdin &&
+	git -C many-haves-src repack -adb &&
+	test_commit -C many-haves-src --no-tag adaptive &&
+	GIT_TRACE2_EVENT="$PWD/many-haves.trace" \
+	git -C many-haves-src -c feature.manyFiles=true \
+		push ../many-haves-dst.git HEAD:refs/heads/main &&
+	test_trace2_data send_pack bounded_haves/retained 16 \
+		<many-haves.trace &&
+	test_trace2_data send_pack bounded_haves/omitted 4080 \
+		<many-haves.trace &&
+	test_subcommand_flex git pack-objects --revs --stdout --thin \
+		--no-use-bitmap-index <many-haves.trace &&
+	grep_wrote 3 many-haves.trace &&
+	test_commit -C many-haves-src --no-tag explicit &&
+	GIT_TRACE2_EVENT="$PWD/many-haves-explicit.trace" \
+	git -C many-haves-src -c feature.manyFiles=true \
+		-c push.useBitmaps=true push ../many-haves-dst.git \
+		HEAD:refs/heads/main &&
+	test_grep ! "bounded_haves/" many-haves-explicit.trace &&
+	test_subcommand_flex ! git pack-objects --no-use-bitmap-index \
+		<many-haves-explicit.trace &&
+	grep_wrote 3 many-haves-explicit.trace &&
+	git -C many-haves-src rev-parse HEAD >many-haves-expect &&
+	git -C many-haves-dst.git rev-parse refs/heads/main \
+		>many-haves-actual &&
+	test_cmp many-haves-expect many-haves-actual &&
+	git -C many-haves-dst.git fsck --full
+'
+
 test_expect_success 'push with config pack.usePathWalk=true' '
 	mk_test testrepo heads/main &&
 	git checkout main &&
