@@ -2475,6 +2475,41 @@ test_expect_success 'show defers unrelated decoration object lookups' '
 	)
 '
 
+test_expect_success 'patch log defers unrelated decoration object lookups' '
+	test_when_finished "rm -rf log-decoration-lookups" &&
+	test_create_repo log-decoration-lookups &&
+	(
+		cd log-decoration-lookups &&
+		test_commit --no-tag base &&
+		test_commit --no-tag middle &&
+		test_commit --no-tag tip &&
+		git tag lightweight HEAD &&
+		git tag -m annotated annotated HEAD &&
+		git log -p --decorate=short >expect &&
+		orphan=$(git commit-tree HEAD^{tree} </dev/null) &&
+		{
+			for i in $(test_seq 1 256)
+			do
+				printf "create refs/heads/log-noise-%03d %s\n" \
+					"$i" "$orphan" &&
+				printf "create refs/remotes/noise/log-%03d %s\n" \
+					"$i" "$orphan" || exit 1
+			done
+		} | git update-ref --stdin &&
+		git commit-graph write --reachable &&
+		GIT_TRACE2_EVENT="$PWD/log.trace" \
+			git log -p --decorate=short >actual &&
+		test_cmp expect actual &&
+		test_grep "tag: annotated" actual &&
+		lookups=$(sed -n \
+			"s#.*\"category\":\"log\",\"key\":\"decorations/object-lookups\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			log.trace) &&
+		test -n "$lookups" &&
+		echo "decoration object lookups: $lookups" &&
+		test "$lookups" -le 8
+	)
+'
+
 test_expect_success 'log decoration handles stale split commit graph entries' '
 	test_when_finished "rm -rf stale-decoration" &&
 	git init stale-decoration &&
