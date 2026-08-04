@@ -95,6 +95,7 @@ struct unpack_trees_options {
 
 		int merge_size; /* used by read-tree debugging */
 		int cache_bottom;
+		uintmax_t cache_tree_diff_callbacks;
 		const char *msgs[NB_UNPACK_TREES_WARNING_TYPES];
 		struct strvec msgs_to_free;
 

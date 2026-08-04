@@ -855,6 +855,11 @@ static int traverse_by_cache_tree(int pos, int nr_entries, int nr_names,
 		int new_ce_len, len, rc;
 
 		src[0] = o->src_index->cache[pos + i];
+		if (o->diff_index_skip_valid &&
+		    is_valid_diff_index_entry(src[0])) {
+			mark_ce_used(src[0], o);
+			continue;
+		}
 
 		len = ce_namelen(src[0]);
 		new_ce_len = cache_entry_size(len);
@@ -876,6 +881,8 @@ static int traverse_by_cache_tree(int pos, int nr_entries, int nr_names,
 		oidcpy(&tree_ce->oid, &src[0]->oid);
 		memcpy(tree_ce->name, src[0]->name, len + 1);
 
+		if (o->diff_index_skip_valid)
+			o->internal.cache_tree_diff_callbacks++;
 		rc = call_unpack_fn((const struct cache_entry * const *)src, o);
 		if (rc < 0) {
 			free(tree_ce);
@@ -2148,6 +2155,10 @@ done:
 		dir_clear(o->internal.dir);
 		o->internal.dir = NULL;
 	}
+	if (o->diff_index_skip_valid)
+		trace2_data_intmax("unpack_trees", repo,
+				   "cache-tree/diff-callbacks",
+				   o->internal.cache_tree_diff_callbacks);
 	trace2_region_leave("unpack_trees", "unpack_trees", repo);
 	trace_performance_leave("unpack_trees");
 	return ret;
