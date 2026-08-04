@@ -17,6 +17,7 @@
 #include "fsck.h"
 #include "strbuf.h"
 #include "thread-utils.h"
+#include "trace2.h"
 #include "packfile.h"
 #include "pack-revindex.h"
 #include "object-file.h"
@@ -165,6 +166,8 @@ static int record_outgoing_links;
 static struct thread_local_data *thread_data;
 static int nr_dispatched;
 static int threads_active;
+static unsigned int delta_workers_active;
+static unsigned int delta_workers_max_active;
 
 static pthread_mutex_t read_mutex;
 #define read_lock()		lock_mutex(&read_mutex)
@@ -175,6 +178,7 @@ static pthread_mutex_t counter_mutex;
 #define counter_unlock()	unlock_mutex(&counter_mutex)
 
 static pthread_mutex_t work_mutex;
+static pthread_cond_t work_cond;
 #define work_lock()		lock_mutex(&work_mutex)
 #define work_unlock()		unlock_mutex(&work_mutex)
 
@@ -205,6 +209,7 @@ static void init_thread(void)
 	init_recursive_mutex(&read_mutex);
 	pthread_mutex_init(&counter_mutex, NULL);
 	pthread_mutex_init(&work_mutex, NULL);
+	pthread_cond_init(&work_cond, NULL);
 	if (show_stat)
 		pthread_mutex_init(&deepest_delta_mutex, NULL);
 	pthread_key_create(&key, NULL);
@@ -224,6 +229,7 @@ static void cleanup_thread(void)
 	threads_active = 0;
 	pthread_mutex_destroy(&read_mutex);
 	pthread_mutex_destroy(&counter_mutex);
+	pthread_cond_destroy(&work_cond);
 	pthread_mutex_destroy(&work_mutex);
 	if (show_stat)
 		pthread_mutex_destroy(&deepest_delta_mutex);
@@ -1109,6 +1115,7 @@ static void *threaded_second_pass(void *data)
 		struct base_data *parent = NULL;
 		struct object_entry *child_obj = NULL;
 		struct base_data *child = NULL;
+		int work_available = 0;
 
 		counter_lock();
 		display_progress(progress, nr_resolved_deltas);
@@ -1123,6 +1130,11 @@ static void *threaded_second_pass(void *data)
 			       is_delta_type(objects[nr_dispatched].type))
 				nr_dispatched++;
 			if (nr_dispatched >= nr_objects) {
+				if (threads_active && delta_workers_active) {
+					pthread_cond_wait(&work_cond, &work_mutex);
+					work_unlock();
+					continue;
+				}
 				work_unlock();
 				break;
 			}
@@ -1177,6 +1189,11 @@ static void *threaded_second_pass(void *data)
 			get_base_data(parent);
 			parent->retain_data++;
 		}
+		if (threads_active && child_obj) {
+			delta_workers_active++;
+			if (delta_workers_max_active < delta_workers_active)
+				delta_workers_max_active = delta_workers_active;
+		}
 		work_unlock();
 
 		if (child_obj) {
@@ -1209,6 +1226,8 @@ static void *threaded_second_pass(void *data)
 			 * This child has its own children, so add it to
 			 * work_head.
 			 */
+			work_available = list_empty(&work_head) &&
+				child->children_remaining > 1;
 			list_add(&child->list, &work_head);
 			base_cache_used += child->size;
 			prune_base_data(NULL);
@@ -1235,6 +1254,13 @@ static void *threaded_second_pass(void *data)
 				p = next_p;
 			}
 			FREE_AND_NULL(child);
+		}
+		if (threads_active && child_obj) {
+			delta_workers_active--;
+			if (work_available ||
+			    (!delta_workers_active && list_empty(&work_head) &&
+			     nr_dispatched >= nr_objects))
+				pthread_cond_broadcast(&work_cond);
 		}
 		work_unlock();
 	}
@@ -1345,6 +1371,8 @@ static void resolve_deltas(struct pack_idx_option *opts)
 	nr_dispatched = 0;
 	base_cache_limit = opts->delta_base_cache_limit * nr_threads;
 	if (nr_threads > 1 || getenv("GIT_FORCE_THREADS")) {
+		delta_workers_active = 0;
+		delta_workers_max_active = 0;
 		init_thread();
 		for (i = 0; i < nr_threads; i++) {
 			int ret = pthread_create(&thread_data[i].thread, NULL,
@@ -1355,6 +1383,9 @@ static void resolve_deltas(struct pack_idx_option *opts)
 		}
 		for (i = 0; i < nr_threads; i++)
 			pthread_join(thread_data[i].thread, NULL);
+		trace2_data_intmax("index-pack", the_repository,
+				   "delta-workers/max-active",
+				   delta_workers_max_active);
 		cleanup_thread();
 		return;
 	}
