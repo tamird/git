@@ -305,6 +305,17 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			if (!count_entries[i])
 				count_entries[i] = oidmap_get(
 					&index->batch_results, &spec->oid);
+			if (!count_entries[i] && index->tried &&
+			    index->direct_tried && !index->ipc &&
+			    !index->index &&
+			    !(o->pickaxe_opts & DIFF_PICKAXE_REGEX) &&
+			    index->results_nr < index->max_results) {
+				CALLOC_ARRAY(count_entries[i], 1);
+				oidcpy(&count_entries[i]->entry.oid, &spec->oid);
+				count_entries[i]->maybe = 1;
+				oidmap_put(&index->results, count_entries[i]);
+				index->results_nr++;
+			}
 			if (count_entries[i] &&
 			    count_entries[i]->deferred_ipc) {
 				void *content = NULL;
