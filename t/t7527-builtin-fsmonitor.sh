@@ -1719,6 +1719,52 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 	)
 '
 
+test_expect_success 'status reuses untracked snapshot when index lock is unavailable' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_lock" &&
+	git init test_untracked_snapshot_lock &&
+	(
+		cd test_untracked_snapshot_lock &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		mkdir -p nested/one nested/two &&
+		echo one >nested/one/untracked &&
+		echo two >nested/two/untracked
+	) &&
+	start_daemon -C test_untracked_snapshot_lock &&
+	(
+		cd test_untracked_snapshot_lock &&
+		git status --porcelain >../untracked-lock-initial.out &&
+		git hash-object .git/index >../untracked-lock-index.before &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-lock-warm.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-lock-warm.out &&
+		test_trace2_data status index/optional-lock \
+			disabled <../untracked-lock-warm.trace &&
+		test_trace2_data status untracked-cache/restore \
+			miss <../untracked-lock-warm.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-lock-warm.trace &&
+		: >.git/index.lock &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-lock-contended.trace" \
+			git status --porcelain >../untracked-lock-contended.out &&
+		rm -f .git/index.lock &&
+		test_cmp ../untracked-lock-warm.out \
+			../untracked-lock-contended.out &&
+		test_trace2_data status index/optional-lock \
+			unavailable <../untracked-lock-contended.trace &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-lock-contended.trace &&
+		test_trace2_data status untracked-cache/restore \
+			hit <../untracked-lock-contended.trace &&
+		test_trace2_data fsmonitor untracked-cache/hit \
+			1 <../untracked-lock-contended.trace &&
+		git hash-object .git/index >../untracked-lock-index.after &&
+		test_cmp ../untracked-lock-index.before \
+			../untracked-lock-index.after
+	)
+'
+
 test_expect_success 'lock-free status recovers untracked snapshot after daemon restart' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_restart" &&
 	git init test_untracked_snapshot_restart &&
