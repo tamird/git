@@ -15,6 +15,7 @@
 #include "version.h"
 #include "oid-array.h"
 #include "gpg-interface.h"
+#include "promisor-remote.h"
 #include "shallow.h"
 #include "parse-options.h"
 #include "trace2.h"
@@ -42,17 +43,62 @@ int option_parse_push_signed(const struct option *opt,
 	die("bad %s argument: %s", opt->long_name, arg);
 }
 
-static void append_negative_object(struct repository *r,
-				   struct oid_array *haves,
-				   const struct object_id *oid)
+#define MANY_FILES_PUSH_MIN_UNRELATED_HAVES 4096
+#define MANY_FILES_PUSH_MAX_UNRELATED_HAVES 16
+
+static int check_to_send_update(const struct ref *ref,
+				const struct send_pack_args *args);
+
+static int append_negative_object(struct repository *r,
+				  struct oid_array *haves,
+				  const struct object_id *oid)
 {
 	/*
 	 * The remote end may have advertised objects that we do not have in
 	 * our object database. Skip those, as we cannot use them as boundary.
 	 */
 	if (!odb_has_object(r->objects, oid, 0))
-		return;
+		return 0;
 	oid_array_append(haves, oid);
+	return 1;
+}
+
+static int should_bound_push_haves(struct repository *r,
+				   const struct send_pack_args *args,
+				   struct ref *refs)
+{
+	struct ref *update = NULL;
+	struct commit *commit;
+	unsigned int unrelated = 0;
+	int many_files = 0;
+
+	if (repo_config_get_bool(r, "feature.manyfiles", &many_files) ||
+	    !many_files || args->send_mirror)
+		return 0;
+
+	for (; refs; refs = refs->next) {
+		if (check_to_send_update(refs, args) >= 0) {
+			if (refs->deletion || is_null_oid(&refs->old_oid) ||
+			    is_null_oid(&refs->new_oid) || update)
+				return 0;
+			update = refs;
+		} else if (!refs->peer_ref && !is_null_oid(&refs->old_oid)) {
+			unrelated++;
+		}
+	}
+
+	if (!update || unrelated < MANY_FILES_PUSH_MIN_UNRELATED_HAVES ||
+	    is_repository_shallow(r) || repo_has_promisor_remote(r))
+		return 0;
+
+	commit = lookup_commit_reference_gently(r, &update->new_oid, 1);
+	if (!commit || !oideq(&commit->object.oid, &update->new_oid) ||
+	    repo_parse_commit_gently(r, commit, 1) || !commit->parents ||
+	    commit->parents->next ||
+	    !oideq(&commit->parents->item->object.oid, &update->old_oid))
+		return 0;
+
+	return 1;
 }
 
 /*
@@ -61,10 +107,11 @@ static void append_negative_object(struct repository *r,
 static int pack_objects(struct repository *r,
 			int fd, struct ref *refs, struct oid_array *advertised,
 			struct oid_array *negotiated,
-			struct send_pack_args *args)
+			struct send_pack_args *args, int bound_haves)
 {
 	struct odb_generate_pack_options opts = ODB_GENERATE_PACK_OPTIONS_INIT;
 	struct odb_pack_generator *generator;
+	unsigned int retained = 0, omitted = 0;
 	int rc;
 
 	trace2_region_enter("send_pack", "pack_objects", r);
@@ -90,11 +137,25 @@ static int pack_objects(struct repository *r,
 		append_negative_object(r, &opts.haves, &negotiated->oid[i]);
 
 	while (refs) {
-		if (!is_null_oid(&refs->old_oid))
-			append_negative_object(r, &opts.haves, &refs->old_oid);
+		if (!is_null_oid(&refs->old_oid)) {
+			if (!bound_haves || refs->peer_ref) {
+				append_negative_object(r, &opts.haves, &refs->old_oid);
+			} else if (retained < MANY_FILES_PUSH_MAX_UNRELATED_HAVES) {
+				retained += append_negative_object(r, &opts.haves,
+							   &refs->old_oid);
+			} else {
+				omitted++;
+			}
+		}
 		if (!is_null_oid(&refs->new_oid))
 			oid_array_append(&opts.wants, &refs->new_oid);
 		refs = refs->next;
+	}
+	if (bound_haves) {
+		trace2_data_intmax("send_pack", r, "bounded_haves/retained",
+				   retained);
+		trace2_data_intmax("send_pack", r, "bounded_haves/omitted",
+				   omitted);
 	}
 
 	if (odb_generate_pack(r->objects, &generator, &opts))
@@ -505,7 +566,8 @@ int send_pack(struct repository *r,
 	struct async demux;
 	char *push_cert_nonce = NULL;
 	struct packet_reader reader;
-	int use_bitmaps;
+	int use_bitmaps, explicit_use_bitmaps;
+	int bound_haves = 0;
 
 	if (!remote_refs) {
 		fprintf(stderr, "No refs in common and none specified; doing nothing.\n"
@@ -524,8 +586,16 @@ int send_pack(struct repository *r,
 		trace2_region_leave("send_pack", "push_negotiate", r);
 	}
 
-	if (!repo_config_get_bool(r, "push.usebitmaps", &use_bitmaps))
+	explicit_use_bitmaps = !repo_config_get_bool(r, "push.usebitmaps",
+						     &use_bitmaps);
+	if (explicit_use_bitmaps)
 		args->disable_bitmaps = !use_bitmaps;
+	if ((!explicit_use_bitmaps || !use_bitmaps) &&
+	    should_bound_push_haves(r, args, remote_refs)) {
+		bound_haves = 1;
+		if (!explicit_use_bitmaps)
+			args->disable_bitmaps = 1;
+	}
 
 	repo_config_get_bool(r, "transfer.advertisesid", &advertise_sid);
 
@@ -713,7 +783,8 @@ int send_pack(struct repository *r,
 			   PACKET_READ_DIE_ON_ERR_PACKET);
 
 	if (need_pack_data && cmds_sent) {
-		if (pack_objects(r, out, remote_refs, extra_have, &commons, args) < 0) {
+		if (pack_objects(r, out, remote_refs, extra_have, &commons, args,
+				 bound_haves) < 0) {
 			if (args->stateless_rpc)
 				close(out);
 			if (git_connection_is_socket(conn))
