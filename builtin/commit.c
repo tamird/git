@@ -1639,7 +1639,8 @@ struct repository *repo UNUSED)
 		progress_flag = REFRESH_PROGRESS;
 	repo_read_index(the_repository);
 	if (!optional_locks && !s.pathspec.nr &&
-	    s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES &&
+	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
+	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
 	    s.show_ignored_mode == SHOW_NO_IGNORED) {
 		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
