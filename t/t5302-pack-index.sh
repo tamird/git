@@ -67,6 +67,47 @@ test_expect_success 'index-pack results should match pack-objects ones' '
 	cmp "test-2-${pack2}.idx" "2.idx"
 '
 
+test_expect_success PTHREADS 'index-pack shares one wide delta root among workers' '
+	test_when_finished "rm -rf parallel-repo" &&
+	test_create_repo parallel-repo &&
+	(
+		cd parallel-repo &&
+		test-tool genrandom parallel-delta-root 8192 >parallel-base &&
+		for round in 1 2 3 4 5 6 7 8
+		do
+			cat parallel-base parallel-base >parallel-next &&
+			mv parallel-next parallel-base || exit 1
+		done &&
+		git hash-object -w parallel-base >parallel-oids &&
+		for variant in $(test_seq 1 16)
+		do
+			{
+				cat parallel-base &&
+				printf "%04d\n" "$variant"
+			} | git hash-object -w --stdin >>parallel-oids || exit 1
+		done &&
+		parallel_pack=$(git pack-objects --index-version=2 --window=32 \
+			--depth=1 parallel-pack <parallel-oids) &&
+		git verify-pack -v "parallel-pack-$parallel_pack.pack" \
+			>parallel-topology &&
+		test_grep "^non delta: 1 object$" parallel-topology &&
+		test_grep "^chain length = 1: 16 objects$" parallel-topology &&
+		git index-pack --threads=1 --no-rev-index --index-version=2 \
+			-o parallel-one.idx "parallel-pack-$parallel_pack.pack" &&
+		GIT_TRACE2_EVENT="$PWD/parallel-workers.trace" \
+			git index-pack --threads=4 --no-rev-index --index-version=2 \
+			-o parallel-four.idx "parallel-pack-$parallel_pack.pack" &&
+		cmp "parallel-pack-$parallel_pack.idx" parallel-one.idx &&
+		cmp parallel-one.idx parallel-four.idx &&
+		parallel_workers=$(sed -n \
+			"s#.*\"category\":\"index-pack\",\"key\":\"delta-workers/max-active\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			parallel-workers.trace) &&
+		echo "maximum concurrent delta workers: $parallel_workers" &&
+		test "$parallel_workers" -ge 2 &&
+		test "$parallel_workers" -le 4
+	)
+'
+
 test_expect_success 'index-pack --verify on index version 1' '
 	git index-pack --verify "test-1-${pack1}.pack"
 '
