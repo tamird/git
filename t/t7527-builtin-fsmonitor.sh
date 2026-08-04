@@ -1585,6 +1585,38 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/hit \
 			1 <../untracked-snapshot-second.trace &&
+		test_grep "nested/$" ../untracked-snapshot-second.out &&
+		test_grep ! "nested/one/untracked" \
+			../untracked-snapshot-second.out &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-all.trace" \
+			git --no-optional-locks status -z -uall \
+			>../untracked-snapshot-all.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status -z -uall \
+			>../untracked-snapshot-all.expect &&
+		test_cmp ../untracked-snapshot-all.expect \
+			../untracked-snapshot-all.out &&
+		nul_to_q <../untracked-snapshot-all.out \
+			>../untracked-snapshot-all.filtered &&
+		test_grep "nested/one/untrackedQ" \
+			../untracked-snapshot-all.filtered &&
+		test_grep "nested/two/untrackedQ" \
+			../untracked-snapshot-all.filtered &&
+		test_grep ! "nested/Q" \
+			../untracked-snapshot-all.filtered &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-all.trace &&
+		test_trace2_data status untracked-cache/restore \
+			hit <../untracked-snapshot-all.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-normal.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-normal.out &&
+		test_cmp ../untracked-snapshot-second.out \
+			../untracked-snapshot-normal.out &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-normal.trace &&
+		test_trace2_data status untracked-cache/restore \
+			hit <../untracked-snapshot-normal.trace &&
 		echo exclude-target >../untracked-snapshot.excludes &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-excluded.trace" \
 			git --no-optional-locks status --porcelain \
