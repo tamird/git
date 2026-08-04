@@ -32,6 +32,7 @@
 #include "help.h"
 #include "range-diff.h"
 #include "strmap.h"
+#include "trace2.h"
 #include "tree.h"
 #include "wildmatch.h"
 #include "write-or-die.h"
@@ -49,6 +50,7 @@ struct decoration_context {
 	struct decoration_filter *filter;
 	int defer_object_lookups;
 	int saw_deferrable_ref;
+	size_t object_lookups;
 };
 
 static char decoration_colors[][COLOR_MAXLEN] = {
@@ -278,6 +280,7 @@ static int collect_ref_decoration(const struct reference *ref, void *cb_data)
 		}
 	}
 
+	context->object_lookups++;
 	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
 	if (objtype < 0)
 		return 0;
@@ -351,6 +354,9 @@ void load_ref_decorations(struct decoration_filter *filter, int flags,
 		}
 		refs_head_ref(get_main_ref_store(the_repository),
 			      collect_ref_decoration, &context);
+		trace2_data_intmax("log", the_repository,
+				   "decorations/object-lookups",
+				   context.object_lookups);
 		for_each_commit_graft(add_graft_decoration, &context);
 	}
 }
