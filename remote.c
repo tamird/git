@@ -26,6 +26,7 @@
 #include "advice.h"
 #include "connect.h"
 #include "parse-options.h"
+#include "trace2.h"
 #include "transport.h"
 
 enum map_direction { FROM_SRC, FROM_DST };
@@ -2638,6 +2639,7 @@ struct stale_heads_info {
 	struct string_list *ref_names;
 	struct ref **stale_refs_tail;
 	struct refspec *rs;
+	size_t candidates;
 };
 
 static int get_stale_heads_cb(const struct reference *ref, void *cb_data)
@@ -2646,6 +2648,8 @@ static int get_stale_heads_cb(const struct reference *ref, void *cb_data)
 	struct string_list matches = STRING_LIST_INIT_DUP;
 	struct refspec_item query;
 	int i, stale = 1;
+
+	info->candidates++;
 	memset(&query, 0, sizeof(struct refspec_item));
 	query.dst = (char *)ref->name;
 
@@ -2681,16 +2685,41 @@ struct ref *get_stale_heads(struct refspec *rs, struct ref *fetch_map)
 {
 	struct ref *ref, *stale_refs = NULL;
 	struct string_list ref_names = STRING_LIST_INIT_NODUP;
+	struct strvec prefixes = STRVEC_INIT;
+	struct refs_for_each_ref_options opts = { 0 };
 	struct stale_heads_info info;
+	int i;
 
 	info.ref_names = &ref_names;
 	info.stale_refs_tail = &stale_refs;
 	info.rs = rs;
+	info.candidates = 0;
 	for (ref = fetch_map; ref; ref = ref->next)
 		string_list_append(&ref_names, ref->name);
 	string_list_sort(&ref_names);
-	refs_for_each_ref(get_main_ref_store(the_repository),
-			  get_stale_heads_cb, &info);
+
+	for (i = 0; i < rs->nr; i++) {
+		struct refspec_item *item = &rs->items[i];
+		const char *glob;
+
+		if (item->negative || !item->dst || !*item->dst)
+			continue;
+		if (!item->pattern) {
+			strvec_push(&prefixes, item->dst);
+			continue;
+		}
+		glob = strchr(item->dst, '*');
+		strvec_pushf(&prefixes, "%.*s",
+			     (int)(glob - item->dst), item->dst);
+	}
+
+	if (prefixes.nr)
+		refs_for_each_ref_in_prefixes(get_main_ref_store(the_repository),
+					      prefixes.v, &opts,
+					      get_stale_heads_cb, &info);
+	trace2_data_intmax("refs", the_repository, "stale_refs/candidates",
+			   info.candidates);
+	strvec_clear(&prefixes);
 	string_list_clear(&ref_names, 0);
 	return stale_refs;
 }
