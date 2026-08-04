@@ -2439,6 +2439,42 @@ test_expect_success 'log --decorate preserves tag order with commit graph' '
 	)
 '
 
+test_expect_success 'show defers unrelated decoration object lookups' '
+	test_when_finished "rm -rf show-decoration-lookups" &&
+	test_create_repo show-decoration-lookups &&
+	(
+		cd show-decoration-lookups &&
+		test_commit --no-tag base &&
+		test_commit --no-tag target &&
+		git tag lightweight HEAD &&
+		git tag -m annotated annotated HEAD &&
+		git show --decorate=short --no-patch HEAD >expect &&
+		git show --decorate=short --no-patch annotated >expect-tag &&
+		base=$(git rev-parse HEAD^) &&
+		{
+			for i in $(test_seq 1 256)
+			do
+				printf "create refs/heads/show-noise-%03d %s\n" \
+					"$i" "$base" &&
+				printf "create refs/remotes/noise/show-%03d %s\n" \
+					"$i" "$base" || exit 1
+			done
+		} | git update-ref --stdin &&
+		git commit-graph write --reachable &&
+		GIT_TRACE2_EVENT="$PWD/show.trace" \
+			git show --decorate=short --no-patch HEAD >actual &&
+		test_cmp expect actual &&
+		git show --decorate=short --no-patch annotated >actual-tag &&
+		test_cmp expect-tag actual-tag &&
+		lookups=$(sed -n \
+			"s#.*\"category\":\"log\",\"key\":\"decorations/object-lookups\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			show.trace) &&
+		test -n "$lookups" &&
+		echo "decoration object lookups: $lookups" &&
+		test "$lookups" -le 8
+	)
+'
+
 test_expect_success 'log decoration handles stale split commit graph entries' '
 	test_when_finished "rm -rf stale-decoration" &&
 	git init stale-decoration &&
