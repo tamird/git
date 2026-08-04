@@ -16,6 +16,10 @@ test_lazy_prereq MULTI_CPU '
 	test "$(test-tool online-cpus)" -gt 1
 '
 
+test_lazy_prereq GREP_IPC_FANOUT '
+	test "$(test-tool online-cpus)" -gt 2
+'
+
 test_lazy_prereq PCRE2_UTF8_LOCALE '
 	test_have_prereq LIBPCRE2 &&
 	LC_ALL=en_US.UTF-8 git -C "$TRASH_DIRECTORY" grep --cached \
@@ -323,6 +327,47 @@ test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
 	wait "$grep_worker_7" &&
 	wait "$grep_worker_8" &&
 	grep_worker_pids=
+'
+
+test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
+	'daemon bounds worktree content-index request fanout' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    test_might_fail git config --unset core.fsmonitor &&
+			    git read-tree HEAD &&
+			    rm -f worktree-fanout.trace cached-fanout.trace \
+				worktree-point.trace fanout-events" &&
+	test_config grep.worktreeBlobCache true &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	test_path_is_missing .git/objects/info/grep-index/chain &&
+	oid=$(git rev-parse :short) &&
+	{
+		test_seq -f "100644 $oid\tgrep-fanout/broad/%05g" 1 32768 &&
+		test_seq -f "100644 $oid\tgrep-fanout/point/%03g" 1 92
+	} | git -c core.ignorestat=true update-index --add --index-info &&
+	worker_events="\"event\":\"region_enter\".*\"thread\":\"th[0-9].*\"label\":\"send-command\"" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/worktree-fanout.trace" \
+		git grep -F "absent daemon fanout" -- grep-fanout/broad \
+		>actual &&
+	test_must_be_empty actual &&
+	test_grep "$worker_events" worktree-fanout.trace >fanout-events &&
+	test_line_count = 2 fanout-events &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/worktree-point.trace" \
+		git grep -F "absent daemon fanout" -- grep-fanout/point \
+		>actual &&
+	test_must_be_empty actual &&
+	test_grep ! "$worker_events" worktree-point.trace &&
+	fanout_workers=$(test-tool online-cpus) &&
+	if test "$fanout_workers" -gt 8
+	then
+		fanout_workers=8
+	fi &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/cached-fanout.trace" \
+		git grep --cached -F "absent daemon fanout" -- grep-fanout/broad \
+		>actual &&
+	test_must_be_empty actual &&
+	test_grep "$worker_events" cached-fanout.trace >fanout-events &&
+	test_line_count = "$fanout_workers" fanout-events
 '
 
 test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in memory' '
