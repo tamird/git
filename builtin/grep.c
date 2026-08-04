@@ -1100,8 +1100,9 @@ static int grep_cache_query_content_index_oids(
 	content_index_ipc_nr = repo->index->cache_nr;
 	CALLOC_ARRAY(content_index_ipc_result, content_index_ipc_nr);
 	trace2_region_enter("grep", "query_content_index_ipc", repo);
-	query_result = grep_index_ipc_query(
-		repo, content_index_query, oids, nr_oids, maybe);
+	query_result = grep_index_ipc_query_with_max_parallel_requests(
+		repo, content_index_query, oids, nr_oids, maybe,
+		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS);
 	trace2_region_leave("grep", "query_content_index_ipc", repo);
 	if (query_result) {
 		FREE_AND_NULL(content_index_ipc_result);
