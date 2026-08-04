@@ -289,7 +289,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	if (textconv_one == textconv_two && diff_unmodified_pair(p))
 		return 0;
 
-	if (index && index->query &&
+	if (index && kws &&
 	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
 	    !textconv_one && !textconv_two) {
 		struct diff_filespec *specs[] = { p->one, p->two };
@@ -305,10 +305,10 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 			if (!count_entries[i])
 				count_entries[i] = oidmap_get(
 					&index->batch_results, &spec->oid);
-			if (!count_entries[i] && index->tried &&
-			    index->direct_tried && !index->ipc &&
-			    !index->index &&
-			    !(o->pickaxe_opts & DIFF_PICKAXE_REGEX) &&
+			if (!count_entries[i] &&
+			    (!index->query ||
+			     (index->tried && index->direct_tried &&
+			      !index->ipc && !index->index)) &&
 			    index->results_nr < index->max_results) {
 				CALLOC_ARRAY(count_entries[i], 1);
 				oidcpy(&count_entries[i]->entry.oid, &spec->oid);

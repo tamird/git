@@ -325,6 +325,43 @@ test_expect_success 'log -S<pat> is not a regex, but -S<pat> --pickaxe-regex is'
 	test_cmp log C-to-D-then-E-log
 '
 
+test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
+	git -C GS-plain log --grep="[DE]" -p >pickaxe-default-patch.expect &&
+	GIT_TRACE2_EVENT="$PWD/pickaxe-default-patch.trace" \
+		git -C GS-plain log -S"[b]" -p >actual &&
+	test_cmp pickaxe-default-patch.expect actual &&
+	test_trace2_data pickaxe content_index/query 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data pickaxe content_index/index 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data pickaxe content_index/ipc 0 \
+		<pickaxe-default-patch.trace &&
+	pickaxe_count_hits=$(sed -n \
+		"s#.*\"category\":\"pickaxe\",\"key\":\"content_index/count_cache_hits\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+		pickaxe-default-patch.trace) &&
+	test -n "$pickaxe_count_hits" &&
+	echo "pickaxe count cache hits: $pickaxe_count_hits" &&
+	test_trace2_data pickaxe content_index/count_cache_hits \
+		"[1-9][0-9]*" <pickaxe-default-patch.trace &&
+	test_trace2_data pickaxe content_index/count_cache_updates \
+		"[1-9][0-9]*" <pickaxe-default-patch.trace &&
+
+	GIT_TEST_PICKAXE_CONTENT_INDEX_MAX_ENTRIES=0 \
+	GIT_TRACE2_EVENT="$PWD/pickaxe-default-patch-bounded.trace" \
+		git -C GS-plain log -S"[b]" -p >actual &&
+	test_cmp pickaxe-default-patch.expect actual &&
+	test_trace2_data pickaxe content_index/query 0 \
+		<pickaxe-default-patch-bounded.trace &&
+	test_trace2_data pickaxe content_index/index 0 \
+		<pickaxe-default-patch-bounded.trace &&
+	test_trace2_data pickaxe content_index/ipc 0 \
+		<pickaxe-default-patch-bounded.trace &&
+	test_trace2_data pickaxe content_index/count_cache_hits 0 \
+		<pickaxe-default-patch-bounded.trace &&
+	test_trace2_data pickaxe content_index/count_cache_updates 0 \
+		<pickaxe-default-patch-bounded.trace
+'
+
 test_expect_success 'fixed pickaxe caches counts without a content index' '
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 	GIT_TRACE2_EVENT="$PWD/pickaxe-no-index.trace" \
