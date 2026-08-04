@@ -397,6 +397,52 @@ test_expect_success 'fetch --prune with a namespace keeps other namespaces' '
 	)
 '
 
+test_expect_success 'fetch --all --prune limits stale-ref scans to each remote' '
+	test_when_finished "rm -rf prune-prefixes" &&
+	test_create_repo prune-prefixes &&
+	(
+		cd prune-prefixes &&
+		git remote add origin .. &&
+		git remote add secondary .. &&
+		git fetch --all &&
+		base=$(git rev-parse refs/remotes/origin/main) &&
+		{
+			printf "create refs/remotes/origin/stale %s\n" "$base" &&
+			printf "create refs/remotes/secondary/stale %s\n" "$base" &&
+			for i in $(test_seq 1 22)
+			do
+				printf "create refs/heads/prune-noise-%03d %s\n" \
+					"$i" "$base" &&
+				printf "create refs/tags/prune-noise-%03d %s\n" \
+					"$i" "$base" &&
+				printf "create refs/remotes/unrelated/noise-%03d %s\n" \
+					"$i" "$base" || exit 1
+			done
+		} | git update-ref --stdin &&
+		for remote in origin secondary
+		do
+			git for-each-ref --format="%(refname)" \
+				"refs/remotes/$remote/" |
+				wc -l | tr -d " " || exit 1
+		done | sort -n >expect &&
+		GIT_TRACE2_EVENT="$PWD/prune.trace" \
+			git fetch --all --prune --tags &&
+		test_must_fail git show-ref --verify --quiet \
+			refs/remotes/origin/stale &&
+		test_must_fail git show-ref --verify --quiet \
+			refs/remotes/secondary/stale &&
+		git show-ref --verify --quiet refs/heads/prune-noise-001 &&
+		git show-ref --verify --quiet refs/tags/prune-noise-001 &&
+		git show-ref --verify --quiet \
+			refs/remotes/unrelated/noise-001 &&
+		sed -n \
+			"s#.*\"category\":\"refs\",\"key\":\"stale_refs/candidates\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			prune.trace | sort -n >actual &&
+		test_line_count = 2 actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'fetch --prune handles overlapping refspecs' '
 	git update-ref refs/pull/42/head main &&
 	git clone . prune-overlapping &&
