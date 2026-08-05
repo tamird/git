@@ -45,6 +45,16 @@ test_expect_success 'verify that the running shell supports "local"' '
 	test_cmp expected2 actual2
 '
 
+test_expect_success 'Frankengit identifies itself in version output' '
+	git version >actual &&
+	test_grep -E "^git version [^[:space:]]*\\.frankengit(\\.dirty)?$" actual &&
+	git --version >same &&
+	test_cmp actual same &&
+	git version --build-options >build &&
+	sed -n "1p" build >first &&
+	test_cmp actual first
+'
+
 ################################################################
 # git init has been done in an empty repository.
 # make sure it is empty.

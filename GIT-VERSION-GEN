@@ -60,6 +60,17 @@ then
 	GIT_VERSION=$(expr "$VN" : v*'\(.*\)')
 fi
 
+case "$GIT_VERSION" in
+*.frankengit|*.frankengit.dirty)
+	;;
+*.dirty)
+	GIT_VERSION="${GIT_VERSION%.dirty}.frankengit.dirty"
+	;;
+*)
+	GIT_VERSION="$GIT_VERSION.frankengit"
+	;;
+esac
+
 if test -z "$GIT_BUILT_FROM_COMMIT"
 then
 	GIT_BUILT_FROM_COMMIT=$(git -C "$SOURCE_DIR" rev-parse -q --verify HEAD 2>/dev/null)
