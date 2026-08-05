@@ -269,6 +269,7 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 {
 	struct userformat_want w;
 	int quiet = 0, source = 0, mailmap;
+	int bare_log = argc == 1;
 	static struct line_opt_callback_data line_cb = {NULL, NULL, STRING_LIST_INIT_DUP};
 	struct decoration_filter decoration_filter = {
 		.exclude_ref_pattern = &decorate_refs_exclude,
@@ -385,7 +386,11 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 					     ((!rev->no_walk &&
 					       (rev->max_count == 1 ||
 						(rev->max_count < 0 &&
-						 (rev->diffopt.output_format & DIFF_FORMAT_PATCH)))) ||
+						 ((rev->diffopt.output_format & DIFF_FORMAT_PATCH) ||
+						  (bare_log && session_is_interactive() &&
+						   !rev->prune_data.nr &&
+						   rev->pending.nr == 1 &&
+						   !rev->reflog_info && !rev->diff))))) ||
 					      (rev->no_walk && rev->pending.nr == 1 &&
 					       rev->pending.objects[0].item->type == OBJ_COMMIT)));
 	}
