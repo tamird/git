@@ -451,6 +451,58 @@ test_expect_success 'git branch --list -v with --abbrev' '
 
 '
 
+test_expect_success 'verbose branches reuse matching upstream comparisons' '
+	test_when_finished "rm -rf branch-tracking-cache" &&
+	test_create_repo branch-tracking-cache &&
+	(
+		cd branch-tracking-cache &&
+		test_commit --no-tag upstream &&
+		git branch upstream &&
+		test_commit --no-tag local &&
+		local_tip=$(git rev-parse HEAD) &&
+		{
+			for i in $(test_seq 1 32)
+			do
+				printf "create refs/heads/shared-%03d %s\n" \
+					"$i" "$local_tip" || exit 1
+			done &&
+			printf "create refs/heads/gone %s\n" "$local_tip" &&
+			printf "create refs/heads/no-upstream %s\n" "$local_tip"
+		} | git update-ref --stdin &&
+		{
+			for i in $(test_seq 1 32)
+			do
+				printf "[branch \"shared-%03d\"]\n" "$i" &&
+				printf "\tremote = .\n" &&
+				printf "\tmerge = refs/heads/upstream\n" || exit 1
+			done &&
+			printf "[branch \"gone\"]\n" &&
+			printf "\tremote = .\n" &&
+			printf "\tmerge = refs/heads/missing\n"
+		} >>.git/config &&
+		git branch --verbose >expect &&
+		GIT_TRACE2_EVENT="$PWD/branch.trace" \
+			git branch --verbose >actual &&
+		test_cmp expect actual &&
+		test_line_count = 36 actual &&
+		test_grep "\[ahead 1\]" actual &&
+		test_grep "gone.*\[gone\]" actual &&
+		test_grep "no-upstream" actual &&
+		graph_walks=$(sed -n \
+			"s#.*\"category\":\"ref-filter\",\"key\":\"tracking/graph-walks\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			branch.trace) &&
+		cache_hits=$(sed -n \
+			"s#.*\"category\":\"ref-filter\",\"key\":\"tracking/cache-hits\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			branch.trace) &&
+		test -n "$graph_walks" &&
+		test -n "$cache_hits" &&
+		echo "tracking graph walks: $graph_walks" &&
+		echo "tracking cache hits: $cache_hits" &&
+		test "$graph_walks" -le 2 &&
+		test "$cache_hits" -ge 31
+	)
+'
+
 test_expect_success 'git branch --column' '
 	COLUMNS=81 git branch --column=column >actual &&
 	cat >expect <<-\EOF &&

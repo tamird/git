@@ -105,11 +105,24 @@ struct ref_filter_object_metadata {
 };
 
 #define REF_FILTER_OBJECT_METADATA_MAX_ENTRIES (1U << 20)
+#define REF_FILTER_TRACKING_MAX_ENTRIES 4096
+
+struct ref_filter_tracking_entry {
+	struct oidmap_entry ent;
+	struct object_id upstream;
+	int num_ours;
+	int num_theirs;
+	unsigned int push : 1;
+};
 
 static struct oidmap ref_filter_object_metadata = OIDMAP_INIT;
+static struct oidmap ref_filter_tracking_cache = OIDMAP_INIT;
 static size_t ref_filter_object_metadata_entries;
 static size_t ref_filter_object_metadata_hits;
+static size_t ref_filter_tracking_cache_entries;
 static int ref_filter_object_metadata_enabled = -1;
+static uint64_t ref_filter_tracking_graph_walks;
+static uint64_t ref_filter_tracking_cache_hits;
 
 struct ref_to_worktree_entry {
 	struct hashmap_entry ent;
@@ -2262,16 +2275,79 @@ static const char *show_ref(struct refname_atom *atom, const char *refname)
 		return xstrdup(refname);
 }
 
-static void fill_remote_ref_details(struct used_atom *atom, const char *refname,
+static int stat_tracking_info_cached(struct ref_array_item *ref,
+				     const char *refname, struct branch *branch,
+				     int for_push, int *num_ours, int *num_theirs)
+{
+	struct ref_filter_tracking_entry *entry = NULL;
+	struct object_id local_oid, upstream_oid;
+	char *local_ref, *upstream_ref = NULL;
+	int cacheable = 0;
+	int cache_hit = 0;
+	int result;
+
+	local_ref = refs_resolve_refdup(get_main_ref_store(the_repository),
+					branch->refname, RESOLVE_REF_READING,
+					&local_oid, NULL);
+	if (local_ref && oideq(&local_oid, &ref->objectname)) {
+		upstream_ref = refs_resolve_refdup(
+			get_main_ref_store(the_repository), refname,
+			RESOLVE_REF_READING, &upstream_oid, NULL);
+		if (upstream_ref) {
+			entry = oidmap_get(&ref_filter_tracking_cache,
+					   &local_oid);
+			if (entry && oideq(&entry->upstream, &upstream_oid) &&
+			    entry->push == !!for_push) {
+				*num_ours = entry->num_ours;
+				*num_theirs = entry->num_theirs;
+				cache_hit = 1;
+			} else if (!entry &&
+				   ref_filter_tracking_cache_entries <
+					   REF_FILTER_TRACKING_MAX_ENTRIES) {
+				cacheable = 1;
+			}
+		}
+	}
+	free(upstream_ref);
+	free(local_ref);
+
+	if (cache_hit) {
+		ref_filter_tracking_cache_hits++;
+		return 0;
+	}
+
+	result = stat_tracking_info(branch, num_ours, num_theirs, NULL,
+				    for_push, AHEAD_BEHIND_FULL);
+	if (result >= 0 && (*num_ours || *num_theirs)) {
+		ref_filter_tracking_graph_walks++;
+		if (cacheable) {
+			CALLOC_ARRAY(entry, 1);
+			oidcpy(&entry->ent.oid, &local_oid);
+			oidcpy(&entry->upstream, &upstream_oid);
+			entry->num_ours = *num_ours;
+			entry->num_theirs = *num_theirs;
+			entry->push = !!for_push;
+			oidmap_put(&ref_filter_tracking_cache, entry);
+			ref_filter_tracking_cache_entries++;
+		}
+	}
+
+	return result;
+}
+
+static void fill_remote_ref_details(struct ref_array_item *ref,
+				    struct used_atom *atom, const char *refname,
 				    struct branch *branch, const char **s)
 {
 	int num_ours, num_theirs;
 	if (atom->u.remote_ref.option == RR_REF)
 		*s = show_ref(&atom->u.remote_ref.refname, refname);
 	else if (atom->u.remote_ref.option == RR_TRACK) {
-		if (stat_tracking_info(branch, &num_ours, &num_theirs,
-				       NULL, atom->u.remote_ref.push,
-				       AHEAD_BEHIND_FULL) < 0) {
+		int tracking_result = stat_tracking_info_cached(
+			ref, refname, branch, atom->u.remote_ref.push,
+			&num_ours, &num_theirs);
+
+		if (tracking_result < 0) {
 			*s = xstrdup(msgs.gone);
 		} else if (!num_ours && !num_theirs)
 			*s = xstrdup("");
@@ -2519,7 +2595,8 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 
 			refname = branch_get_upstream(branch, NULL);
 			if (refname)
-				fill_remote_ref_details(atom, refname, branch, &v->s);
+				fill_remote_ref_details(ref, atom, refname, branch,
+						&v->s);
 			else
 				v->s = xstrdup("");
 			continue;
@@ -2540,7 +2617,8 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 			}
 			/* We will definitely re-init v->s on the next line. */
 			free((char *)v->s);
-			fill_remote_ref_details(atom, refname, branch, &v->s);
+			fill_remote_ref_details(ref, atom, refname, branch,
+						&v->s);
 			continue;
 		} else if (atom_type == ATOM_COLOR) {
 			v->s = xstrdup(atom->u.color);
@@ -3256,10 +3334,20 @@ void ref_array_clear(struct ref_array *array)
 	trace2_data_intmax("ref-filter", the_repository,
 			   "object_metadata/hits",
 			   ref_filter_object_metadata_hits);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "tracking/graph-walks",
+			   ref_filter_tracking_graph_walks);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "tracking/cache-hits",
+			   ref_filter_tracking_cache_hits);
 	oidmap_clear(&ref_filter_object_metadata, 1);
+	oidmap_clear(&ref_filter_tracking_cache, 1);
 	ref_filter_object_metadata_entries = 0;
 	ref_filter_object_metadata_hits = 0;
+	ref_filter_tracking_cache_entries = 0;
 	ref_filter_object_metadata_enabled = -1;
+	ref_filter_tracking_graph_walks = 0;
+	ref_filter_tracking_cache_hits = 0;
 
 	if (ref_to_worktree_map.worktrees) {
 		hashmap_clear_and_free(&(ref_to_worktree_map.map),
