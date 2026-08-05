@@ -3365,7 +3365,7 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 static void collect_worktree_oids(struct repository *repo,
 				  struct oid_array *oids)
 {
-	struct worktree **worktrees = get_worktrees_without_reading_head();
+	struct worktree **worktrees = get_worktrees_without_reading_head(repo);
 
 	for (struct worktree **p = worktrees; *p; p++) {
 		struct index_state istate = INDEX_STATE_INIT(repo);

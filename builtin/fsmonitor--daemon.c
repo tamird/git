@@ -1887,7 +1887,7 @@ static int fsmonitor_run_daemon(void)
 		coordinator.main_worktree = real_pathdup(path.buf, 0);
 		strbuf_release(&path);
 	} else {
-		worktrees = get_worktrees_without_reading_head();
+		worktrees = get_worktrees_without_reading_head(the_repository);
 		coordinator.main_worktree =
 			real_pathdup(worktrees[0]->path, 0);
 		free_worktrees(worktrees);
