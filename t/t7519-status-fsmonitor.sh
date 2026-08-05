@@ -437,6 +437,86 @@ test_expect_success PTHREADS 'fsmonitor preloads only dirty index entries' '
 	)
 '
 
+test_expect_success PTHREADS 'bare diff avoids preload for one fsmonitor-dirty path' '
+	test_when_finished "rm -rf bare-diff-fsmonitor-preload" &&
+	test_create_repo bare-diff-fsmonitor-preload &&
+	(
+		cd bare-diff-fsmonitor-preload &&
+		for n in $(test_seq 1 128)
+		do
+			printf "clean-%s\n" "$n" >"clean-$n" || exit 1
+		done &&
+		echo one >dirty-one &&
+		echo two >dirty-two &&
+		echo base >staged &&
+		git add . &&
+		git commit -m initial &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			if test -f .git/fsmonitor-dirty
+			then
+				while read path
+				do
+					printf "%s\0" "$path"
+				done <.git/fsmonitor-dirty
+			fi
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		GIT_TEST_PRELOAD_INDEX=true \
+			git status --porcelain >.git/status &&
+		test_must_be_empty .git/status &&
+		echo modified-one >dirty-one &&
+		echo dirty-one >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff >.git/diff.expect &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/.git/diff-one.trace" \
+			git diff >.git/diff.actual &&
+		test_cmp .git/diff.expect .git/diff.actual &&
+		test_grep "^diff --git a/dirty-one b/dirty-one$" \
+			.git/diff.actual &&
+		test_region ! index preload "$PWD/.git/diff-one.trace" &&
+		for option in --stat -w
+		do
+			git --no-optional-locks \
+				-c core.fsmonitor=false -c core.preloadIndex=false \
+				diff "$option" >.git/diff.expect &&
+			GIT_TEST_PRELOAD_INDEX=true \
+				git diff "$option" >.git/diff.actual &&
+			test_cmp .git/diff.expect .git/diff.actual || exit 1
+		done &&
+		echo modified-two >dirty-two &&
+		printf "%s\n" dirty-one dirty-two >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff >.git/diff.expect &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/.git/diff-multiple.trace" \
+			git diff >.git/diff.actual &&
+		test_cmp .git/diff.expect .git/diff.actual &&
+		test_region index preload "$PWD/.git/diff-multiple.trace" &&
+		rm dirty-one &&
+		printf "%s\n" dirty-one dirty-two >.git/fsmonitor-dirty &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff >.git/diff.expect &&
+		GIT_TEST_PRELOAD_INDEX=true git diff >.git/diff.actual &&
+		test_cmp .git/diff.expect .git/diff.actual &&
+		test_grep "^deleted file mode" .git/diff.actual &&
+		echo staged-change >staged &&
+		git -c core.fsmonitor= add staged &&
+		git diff --cached --name-only >.git/staged.actual &&
+		echo staged >.git/staged.expect &&
+		test_cmp .git/staged.expect .git/staged.actual &&
+		git --no-optional-locks \
+			-c core.fsmonitor=false -c core.preloadIndex=false \
+			diff >.git/diff.expect &&
+		GIT_TEST_PRELOAD_INDEX=true git diff >.git/diff.actual &&
+		test_cmp .git/diff.expect .git/diff.actual
+	)
+'
+
 test_expect_success 'diff-index honors fsmonitor validity' '
 	test_when_finished "rm -rf diff-index" &&
 	test_create_repo diff-index &&
