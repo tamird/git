@@ -150,6 +150,32 @@ test_expect_success '--no-optional-locks skips cache-tree persistence' '
 	test_cache_tree expected.status
 '
 
+test_expect_success 'write-tree configuration can skip cache-tree persistence' '
+	test_when_finished "rm -f .git/index.lock && git reset --hard" &&
+	echo configured >foo.t &&
+	git add foo.t &&
+	test-tool scrap-cache-tree &&
+	test_no_cache_tree &&
+	test_set_magic_mtime .git/index &&
+	>.git/index.lock &&
+	tree=$(git -c writeTree.persistCacheTree=false write-tree) &&
+	test_is_magic_mtime .git/index &&
+	test_no_cache_tree &&
+	override_tree=$(git -c writeTree.persistCacheTree=true \
+		--no-optional-locks write-tree) &&
+	test "$tree" = "$override_tree" &&
+	test_is_magic_mtime .git/index &&
+	test_no_cache_tree &&
+	rm .git/index.lock &&
+	git diff-index --cached --quiet "$tree" -- &&
+	default_tree=$(git write-tree) &&
+	test "$tree" = "$default_tree" &&
+	cat >expected.status <<-\EOF &&
+	M  foo.t
+	EOF
+	test_cache_tree expected.status
+'
+
 test_expect_success 'threaded read discards deferred cache-tree' '
 	test_config index.threads 2 &&
 	git read-tree HEAD &&

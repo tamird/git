@@ -1,0 +1,5 @@
+writeTree.persistCacheTree::
+	Whether linkgit:git-write-tree[1] writes a rebuilt cache tree back to
+	the index. Disabling this avoids the optional index rewrite, but later
+	cache-tree consumers may need to rebuild it again. Defaults to true.
+	`--no-optional-locks` disables the write regardless of this setting.
