@@ -289,7 +289,7 @@ static int pickaxe_match(struct diff_filepair *p, struct diff_options *o,
 	if (textconv_one == textconv_two && diff_unmodified_pair(p))
 		return 0;
 
-	if (index && kws &&
+	if (index && (kws || (regexp && index->query)) &&
 	    (o->pickaxe_opts & DIFF_PICKAXE_KIND_S) &&
 	    !textconv_one && !textconv_two) {
 		struct diff_filespec *specs[] = { p->one, p->two };
