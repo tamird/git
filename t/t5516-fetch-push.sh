@@ -1919,6 +1919,58 @@ test_expect_success 'push with config push.useBitmaps' '
 		--thin --delta-base-offset -q --no-use-bitmap-index <false
 '
 
+test_expect_success 'large-worktree protected pushes disable bitmaps without pruning haves' '
+	test_when_finished "rm -rf lease-bitmap-src lease-bitmap-dst.git \
+			    lease-bitmap-plain.trace lease-bitmap-default.trace \
+			    lease-bitmap-explicit.trace lease-bitmap-expect \
+			    lease-bitmap-actual" &&
+	git init lease-bitmap-src &&
+	git init --bare lease-bitmap-dst.git &&
+	git -C lease-bitmap-src remote add origin ../lease-bitmap-dst.git &&
+	test_commit -C lease-bitmap-src --no-tag lease-base &&
+	git -C lease-bitmap-src push origin HEAD:refs/heads/main &&
+	test_commit -C lease-bitmap-src --no-tag lease-remote &&
+	GIT_TRACE2_EVENT="$PWD/lease-bitmap-plain.trace" \
+	git -C lease-bitmap-src -c feature.manyFiles=true \
+		push origin HEAD:refs/heads/main &&
+	test_subcommand_flex git pack-objects --revs --stdout --thin \
+		<lease-bitmap-plain.trace &&
+	test_subcommand_flex ! git pack-objects --no-use-bitmap-index \
+		<lease-bitmap-plain.trace &&
+	test_grep ! "bounded_haves/" lease-bitmap-plain.trace &&
+	git -C lease-bitmap-src reset --hard HEAD^ &&
+	test_commit -C lease-bitmap-src --no-tag lease-local &&
+	GIT_TRACE2_EVENT="$PWD/lease-bitmap-default.trace" \
+	git -C lease-bitmap-src -c feature.manyFiles=true \
+		push --force-with-lease origin HEAD:refs/heads/main &&
+	test_subcommand_flex git pack-objects --revs --stdout --thin \
+		--no-use-bitmap-index <lease-bitmap-default.trace &&
+	test_grep ! "bounded_haves/" lease-bitmap-default.trace &&
+	git -C lease-bitmap-src rev-parse HEAD >lease-bitmap-expect &&
+	git -C lease-bitmap-dst.git rev-parse refs/heads/main \
+		>lease-bitmap-actual &&
+	test_cmp lease-bitmap-expect lease-bitmap-actual &&
+	git -C lease-bitmap-dst.git fsck --full &&
+	test_commit -C lease-bitmap-src --no-tag lease-remote-explicit &&
+	git -C lease-bitmap-src push origin HEAD:refs/heads/main &&
+	git -C lease-bitmap-src reset --hard HEAD^ &&
+	test_commit -C lease-bitmap-src --no-tag lease-local-explicit &&
+	GIT_TRACE2_EVENT="$PWD/lease-bitmap-explicit.trace" \
+	git -C lease-bitmap-src -c feature.manyFiles=true \
+		-c push.useBitmaps=true push --force-with-lease origin \
+		HEAD:refs/heads/main &&
+	test_subcommand_flex git pack-objects --revs --stdout --thin \
+		<lease-bitmap-explicit.trace &&
+	test_subcommand_flex ! git pack-objects --no-use-bitmap-index \
+		<lease-bitmap-explicit.trace &&
+	test_grep ! "bounded_haves/" lease-bitmap-explicit.trace &&
+	git -C lease-bitmap-src rev-parse HEAD >lease-bitmap-expect &&
+	git -C lease-bitmap-dst.git rev-parse refs/heads/main \
+		>lease-bitmap-actual &&
+	test_cmp lease-bitmap-expect lease-bitmap-actual &&
+	git -C lease-bitmap-dst.git fsck --full
+'
+
 test_expect_success 'large-worktree push bounds unrelated remote haves' '
 	test_when_finished "rm -rf many-haves-src many-haves-dst.git \
 			    many-haves.trace many-haves-explicit.trace \

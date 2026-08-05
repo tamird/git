@@ -100,6 +100,29 @@ static int should_bound_push_haves(struct repository *r,
 	return 1;
 }
 
+static int should_disable_bitmap_for_lease_push(struct repository *r,
+						const struct send_pack_args *args,
+						struct ref *refs)
+{
+	struct ref *update = NULL;
+	int many_files = 0;
+
+	if (repo_config_get_bool(r, "feature.manyfiles", &many_files) ||
+	    !many_files || args->send_mirror)
+		return 0;
+
+	for (; refs; refs = refs->next) {
+		if (check_to_send_update(refs, args) < 0)
+			continue;
+		if (refs->deletion || is_null_oid(&refs->old_oid) ||
+		    is_null_oid(&refs->new_oid) || update)
+			return 0;
+		update = refs;
+	}
+
+	return update && update->expect_old_sha1;
+}
+
 /*
  * Make a pack stream and spit it out into file descriptor fd
  */
@@ -621,6 +644,8 @@ int send_pack(struct repository *r,
 						     &use_bitmaps);
 	if (explicit_use_bitmaps)
 		args->disable_bitmaps = !use_bitmaps;
+	else if (should_disable_bitmap_for_lease_push(r, args, remote_refs))
+		args->disable_bitmaps = 1;
 	if ((!explicit_use_bitmaps || !use_bitmaps) &&
 	    should_bound_push_haves(r, args, remote_refs)) {
 		bound_haves = 1;
