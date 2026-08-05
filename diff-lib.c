@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "hex.h"
 #include "object-name.h"
+#include "preload-index.h"
 #include "read-cache.h"
 #include "revision.h"
 #include "cache-tree.h"
@@ -113,6 +114,7 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 	int diff_unmerged_stage = revs->max_count;
 	unsigned ce_option = ((option & DIFF_RACY_IS_MODIFIED)
 			      ? CE_MATCH_RACY_IS_DIRTY : 0);
+	unsigned int preload_candidates = 0;
 	uint64_t start = getnanotime();
 	struct index_state *istate = revs->diffopt.repo->index;
 
@@ -226,6 +228,14 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 			if (ce_stage(ce) != diff_unmerged_stage)
 				continue;
 		}
+
+		if ((option & DIFF_DEFER_PRELOAD) &&
+		    preload_candidates < 2 &&
+		    !ce_stage(ce) && !S_ISGITLINK(ce->ce_mode) &&
+		    !ce_uptodate(ce) && !ce_skip_worktree(ce) &&
+		    !(ce->ce_flags & (CE_VALID | CE_FSMONITOR_VALID)) &&
+		    ++preload_candidates == 2)
+			preload_index(istate, &revs->diffopt.pathspec, 0);
 
 		if (ce_uptodate(ce) || ce_skip_worktree(ce)) {
 			if (revs->diffopt.flags.find_copies_harder)

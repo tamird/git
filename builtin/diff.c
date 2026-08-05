@@ -13,6 +13,7 @@
 #include "ewah/ewok.h"
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
+#include "fsmonitor.h"
 #include "lockfile.h"
 #include "color.h"
 #include "commit.h"
@@ -321,7 +322,14 @@ static void builtin_diff_files(struct rev_info *revs, int argc,
 		    sparse_validation_scoped) < 0) {
 		die_errno("repo_read_index_preload");
 	}
-	preload_index(the_repository->index, &revs->diffopt.pathspec, 0);
+	if (!revs->diffopt.pathspec.nr &&
+	    !revs->diffopt.flags.quick &&
+	    !revs->diffopt.flags.find_copies_harder &&
+	    fsm_settings__get_mode(the_repository) > FSMONITOR_MODE_DISABLED &&
+	    is_fsmonitor_refreshed(the_repository->index))
+		options |= DIFF_DEFER_PRELOAD;
+	else
+		preload_index(the_repository->index, &revs->diffopt.pathspec, 0);
 	run_diff_files(revs, options);
 }
 
