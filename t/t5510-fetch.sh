@@ -443,6 +443,72 @@ test_expect_success 'fetch --all --prune limits stale-ref scans to each remote' 
 	)
 '
 
+test_expect_success 'fetch --all --prune limits auto-follow scans to local tags' '
+	test_when_finished "rm -rf auto-tags-prefixes" &&
+	mkdir auto-tags-prefixes &&
+	test_create_repo auto-tags-prefixes/upstream &&
+	(
+		cd auto-tags-prefixes/upstream &&
+		echo base >tracked &&
+		git add tracked &&
+		git commit -m base &&
+		git tag existing
+	) &&
+	git clone auto-tags-prefixes/upstream auto-tags-prefixes/client &&
+	(
+		cd auto-tags-prefixes/client &&
+		git remote add secondary ../upstream &&
+		git fetch secondary &&
+		base=$(git rev-parse HEAD) &&
+		{
+			printf "create refs/remotes/origin/stale %s\n" "$base" &&
+			printf "create refs/remotes/secondary/stale %s\n" "$base" &&
+			for i in $(test_seq 1 32)
+			do
+				printf "create refs/heads/auto-noise-%03d %s\n" \
+					"$i" "$base" &&
+				printf "create refs/remotes/unrelated/auto-noise-%03d %s\n" \
+					"$i" "$base" || exit 1
+			done
+		} | git update-ref --stdin &&
+		git for-each-ref --format="%(refname)" >refs.before &&
+		(
+			cd ../upstream &&
+			echo next >>tracked &&
+			git commit -a -m next &&
+			git tag lightweight &&
+			git tag -a annotated -m annotated
+		) &&
+		{
+			sed \
+				-e "/^refs\/remotes\/origin\/stale$/d" \
+				-e "/^refs\/remotes\/secondary\/stale$/d" \
+				refs.before &&
+			printf "%s\n" refs/tags/annotated refs/tags/lightweight
+		} | sort >refs.expected &&
+		GIT_TRACE2_EVENT="$PWD/auto-tags.trace" \
+			git fetch --all --prune >fetch.out 2>fetch.err &&
+		test_grep "^Fetching origin$" fetch.out &&
+		test_grep "^Fetching secondary$" fetch.out &&
+		test_grep "origin/stale" fetch.err &&
+		test_grep "secondary/stale" fetch.err &&
+		git for-each-ref --format="%(refname)" | sort >refs.actual &&
+		test_cmp refs.expected refs.actual &&
+		test "$(git cat-file -t refs/tags/annotated)" = tag &&
+		test "$(git rev-parse refs/tags/annotated^{})" = \
+			"$(git rev-parse refs/tags/lightweight)" &&
+		sed -n \
+			"s#.*\"category\":\"fetch\",\"key\":\"auto_tags/local_refs\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+			auto-tags.trace >auto-tags.counts &&
+		test_line_count = 4 auto-tags.counts &&
+		while read count
+		do
+			echo "auto-follow local refs: $count" &&
+			test "$count" -le 3 || exit 1
+		done <auto-tags.counts
+	)
+'
+
 test_expect_success 'fetch --prune handles overlapping refspecs' '
 	git update-ref refs/pull/42/head main &&
 	git clone . prune-overlapping &&

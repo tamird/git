@@ -348,6 +348,9 @@ static void find_non_local_tags(const struct ref *refs,
 {
 	struct hashmap existing_refs;
 	struct hashmap remote_refs;
+	struct refs_for_each_ref_options ref_options = {
+		.prefix = "refs/tags/",
+	};
 	struct oidset fetch_oids = OIDSET_INIT;
 	struct string_list remote_refs_list = STRING_LIST_INIT_NODUP;
 	struct string_list_item *remote_ref_item;
@@ -358,8 +361,10 @@ static void find_non_local_tags(const struct ref *refs,
 	refname_hash_init(&remote_refs);
 	create_fetch_oidset(head, &fetch_oids);
 
-	refs_for_each_ref(get_main_ref_store(the_repository), add_one_refname,
-			  &existing_refs);
+	refs_for_each_ref_ext(get_main_ref_store(the_repository),
+			      add_one_refname, &existing_refs, &ref_options);
+	trace2_data_intmax("fetch", the_repository, "auto_tags/local_refs",
+			   hashmap_get_size(&existing_refs));
 
 	/*
 	 * If we already have a transaction, then we need to filter out all
