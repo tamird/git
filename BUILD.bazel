@@ -482,6 +482,12 @@ cc_library(
 )
 
 cc_library(
+    name = "blob",
+    hdrs = ["blob.h"],
+    deps = [":object"],
+)
+
+cc_library(
     name = "chdir_notify",
     hdrs = ["chdir-notify.h"],
 )
@@ -822,6 +828,12 @@ cc_library(
 )
 
 cc_library(
+    name = "promisor_remote",
+    hdrs = ["promisor-remote.h"],
+    deps = [":repository"],
+)
+
+cc_library(
     name = "quote",
     hdrs = ["quote.h"],
 )
@@ -834,6 +846,15 @@ cc_library(
         ":object_name",
         ":repo_settings",
         ":repository",
+    ],
+)
+
+cc_library(
+    name = "repack",
+    hdrs = ["repack.h"],
+    deps = [
+        ":list_objects_filter_options",
+        ":string_list",
     ],
 )
 
@@ -1023,6 +1044,12 @@ cc_library(
 cc_library(
     name = "trace2",
     hdrs = ["trace2.h"],
+)
+
+cc_library(
+    name = "tree",
+    hdrs = ["tree.h"],
+    deps = [":object"],
 )
 
 cc_library(
