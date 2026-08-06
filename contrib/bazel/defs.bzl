@@ -22,7 +22,7 @@ _GIT_BASE_COPTS = [
     '-DDEFAULT_GIT_TEMPLATE_DIR=\\"share/git-core/templates\\"',
     '-DETC_GITCONFIG=\\"etc/gitconfig\\"',
     '-DETC_GITATTRIBUTES=\\"etc/gitattributes\\"',
-    '-DPAGER_ENV=\\"LESS=FRX\\040LV=-c\\"',
+    "-DPAGER_ENV='\"LESS=FRX LV=-c\"'",
     "-DNO_GETTEXT",
     "-DRUNTIME_PREFIX",
     "-DWITH_RUST",
