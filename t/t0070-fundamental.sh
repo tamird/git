@@ -8,6 +8,36 @@ Verify wrappers and compatibility functions.
 
 . ./test-lib.sh
 
+test_expect_success 'cgroup CPU quotas cap and round available workers' '
+	test 29 = "$(test-tool online-cpus --quota 64 "2900000 100000")" &&
+	test 2 = "$(test-tool online-cpus --quota 64 "150000 100000")" &&
+	test 1 = "$(test-tool online-cpus --quota 64 "1 100000")" &&
+	test 64 = "$(test-tool online-cpus --quota 64 "12800000 100000")"
+'
+
+test_expect_success 'unlimited and whitespace-delimited CPU quotas' '
+	whitespace=$(printf "\t 2900000\t100000 \t") &&
+	test 29 = "$(test-tool online-cpus --quota 64 "$whitespace")" &&
+	test 64 = "$(test-tool online-cpus --quota 64 "max 100000")"
+'
+
+test_expect_success 'malformed CPU quotas leave available workers unchanged' '
+	for quota in \
+		"" \
+		"2900000" \
+		"0 100000" \
+		"2900000 0" \
+		"-1 100000" \
+		"2900000 -1" \
+		"2900000 100000 extra" \
+		"18446744073709551616 100000" \
+		"2900000 18446744073709551616"
+	do
+		test 64 = "$(test-tool online-cpus --quota 64 "$quota")" ||
+			return 1
+	done
+'
+
 test_expect_success 'mktemp to nonexistent directory prints filename' '
 	test_must_fail test-tool mktemp doesnotexist/testXXXXXX 2>err &&
 	test_grep "doesnotexist/test" err

@@ -51,6 +51,10 @@ int dummy_pthread_init(void *);
 #endif
 
 int online_cpus(void);
+
+/* Apply a finite cgroup-v2 cpu.max quota, leaving invalid input unchanged. */
+int online_cpus_with_cgroup_quota(int available, const char *cpu_max);
+
 int init_recursive_mutex(pthread_mutex_t*);
 
 

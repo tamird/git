@@ -1,6 +1,10 @@
 #include "git-compat-util.h"
 #include "thread-utils.h"
 
+#if defined(__linux__) && !defined(NO_PTHREADS)
+#  include <sched.h>
+#endif
+
 #if defined(hpux) || defined(__hpux) || defined(_hpux)
 #  include <sys/pstat.h>
 #endif
@@ -16,6 +20,66 @@
 #  elif defined _SC_CRAY_NCPU
 #    define _SC_NPROCESSORS_ONLN _SC_CRAY_NCPU
 #  endif
+#endif
+
+int online_cpus_with_cgroup_quota(int available, const char *cpu_max)
+{
+	const char *p;
+	char *end;
+	uintmax_t quota, period, limited;
+
+	if (available < 1 || !cpu_max)
+		return available;
+
+	p = cpu_max + strspn(cpu_max, " \t\r\n");
+	if (*p < '0' || *p > '9')
+		return available;
+
+	errno = 0;
+	quota = strtoumax(p, &end, 10);
+	if (errno == ERANGE || !quota || !*end ||
+	    !strchr(" \t\r\n", *end))
+		return available;
+
+	p = end + strspn(end, " \t\r\n");
+	if (*p < '0' || *p > '9')
+		return available;
+
+	errno = 0;
+	period = strtoumax(p, &end, 10);
+	if (errno == ERANGE || !period ||
+	    end[strspn(end, " \t\r\n")])
+		return available;
+
+	limited = (quota - 1) / period + 1;
+	return limited < (uintmax_t)available ? (int)limited : available;
+}
+
+#if defined(__linux__) && !defined(NO_PTHREADS)
+static int constrained_online_cpus(int available)
+{
+	cpu_set_t affinity;
+	FILE *cpu_max;
+	char quota[128];
+
+	CPU_ZERO(&affinity);
+	if (!sched_getaffinity(0, sizeof(affinity), &affinity)) {
+		int allowed = CPU_COUNT(&affinity);
+
+		if (allowed > 0 && allowed < available)
+			available = allowed;
+	}
+
+	cpu_max = fopen("/sys/fs/cgroup/cpu.max", "r");
+	if (cpu_max) {
+		if (fgets(quota, sizeof(quota), cpu_max))
+			available = online_cpus_with_cgroup_quota(available,
+							  quota);
+		fclose(cpu_max);
+	}
+
+	return available;
+}
 #endif
 
 int online_cpus(void)
@@ -57,8 +121,13 @@ int online_cpus(void)
 #endif /* defined(HAVE_BSD_SYSCTL) && defined(HW_NCPU) */
 
 #ifdef _SC_NPROCESSORS_ONLN
-	if ((ncpus = (long)sysconf(_SC_NPROCESSORS_ONLN)) > 0)
+	if ((ncpus = (long)sysconf(_SC_NPROCESSORS_ONLN)) > 0) {
+#if defined(__linux__) && !defined(NO_PTHREADS)
+		return constrained_online_cpus((int)ncpus);
+#else
 		return (int)ncpus;
+#endif
+	}
 #endif
 
 	return 1;
