@@ -4160,6 +4160,13 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 	uint8_t varint_len;
 	const unsigned hashsz = the_hash_algo->rawsz;
 
+	/* Never persist retained summaries before a full resync is validated. */
+	if (untracked->fsmonitor_resync) {
+		if (untracked->root && !untracked->root->valid)
+			do_invalidate_gitignore(untracked->root);
+		untracked->fsmonitor_resync = 0;
+	}
+
 	CALLOC_ARRAY(ouc, 1);
 	stat_data_to_disk(&ouc->info_exclude_stat, &untracked->ss_info_exclude.stat);
 	stat_data_to_disk(&ouc->excludes_file_stat, &untracked->ss_excludes_file.stat);
@@ -4603,7 +4610,9 @@ void untracked_cache_invalidate_all(struct index_state *istate)
 	if (!uc || !uc->root)
 		return;
 
-	invalidate_one_directory(uc, uc->root, 1);
+	/* An invalid root persists the resync without discarding its children. */
+	invalidate_one_directory(uc, uc->root, 0);
+	uc->fsmonitor_resync = 1;
 	istate->cache_changed |= UNTRACKED_CHANGED;
 }
 

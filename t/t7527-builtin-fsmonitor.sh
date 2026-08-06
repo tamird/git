@@ -173,6 +173,39 @@ test_expect_success 'implicit daemon start' '
 	test_must_fail git -C test_implicit fsmonitor--daemon status
 '
 
+test_expect_success SYMLINKS 'daemon startup does not follow directory symlinks' '
+	test_when_finished "stop_daemon_delete_repo test_startup_symlinks" &&
+	test_when_finished "rm -rf test_startup_symlinks_outside" &&
+	git init test_startup_symlinks &&
+	mkdir -p test_startup_symlinks/real/nested \
+		test_startup_symlinks_outside &&
+	echo tracked >test_startup_symlinks/real/nested/tracked &&
+	ln -s . test_startup_symlinks/loop &&
+	ln -s ../test_startup_symlinks_outside \
+		test_startup_symlinks/outside &&
+	(
+		cd test_startup_symlinks &&
+		git add real/nested/tracked loop outside &&
+		git commit -m initial &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true
+	) &&
+	start_daemon -C test_startup_symlinks &&
+	echo visible >test_startup_symlinks/real/nested/visible &&
+	echo outside >test_startup_symlinks_outside/untracked &&
+	(
+		cd test_startup_symlinks &&
+		git status --porcelain >../startup-symlinks.actual &&
+		git -c core.fsmonitor=false -c core.untrackedCache=false \
+			status --porcelain >../startup-symlinks.expect &&
+		test_cmp ../startup-symlinks.expect \
+			../startup-symlinks.actual &&
+		test_grep "^?? real/nested/visible$" \
+			../startup-symlinks.actual &&
+		test_grep ! "outside" ../startup-symlinks.actual
+	)
+'
+
 # Verify that the daemon has shutdown.  Spin a few seconds to
 # make the test a little more robust during CI testing.
 #
@@ -1823,6 +1856,150 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 		git hash-object .git/index >../untracked-restart-index.after &&
 		test_cmp ../untracked-restart-index.before \
 			../untracked-restart-index.after
+	)
+'
+
+test_expect_success PTHREADS \
+	'parallel directory validation recovers after daemon restart' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_revalidate" &&
+	git init test_untracked_revalidate &&
+	(
+		cd test_untracked_revalidate &&
+		mkdir -p nested/deleted nested/renamed \
+			nested/ignored nested/steady &&
+		for dir in deleted renamed ignored steady
+		do
+			echo tracked >nested/$dir/tracked || return 1
+		done &&
+		echo hidden-before >nested/ignored/.gitignore &&
+		git add nested &&
+		git commit -m initial &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		: >../untracked-revalidate.excludes &&
+		git config core.excludesFile \
+			"$PWD/../untracked-revalidate.excludes" &&
+		echo deleted >nested/deleted/remove &&
+		echo renamed >nested/renamed/before &&
+		echo steady >nested/steady/keep &&
+		echo hidden >nested/ignored/hidden-before
+	) &&
+	start_daemon -C test_untracked_revalidate &&
+	(
+		cd test_untracked_revalidate &&
+		git status --porcelain >../untracked-revalidate.initial &&
+		git hash-object .git/index >../untracked-revalidate.index-before &&
+		git fsmonitor--daemon stop &&
+		rm nested/deleted/remove &&
+		echo added >nested/deleted/added &&
+		mv nested/renamed/before nested/renamed/after &&
+		echo hidden-after >nested/ignored/.gitignore &&
+		echo hidden >nested/ignored/hidden-after &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-revalidate.expect
+	) &&
+	start_daemon -C test_untracked_revalidate &&
+	(
+		cd test_untracked_revalidate &&
+		GIT_TEST_UNTRACKED_CACHE_THREADS=1 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-revalidate.trace" \
+		GIT_TRACE2_PERF="$PWD/../untracked-revalidate.perf" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-revalidate.actual &&
+		test_cmp ../untracked-revalidate.expect \
+			../untracked-revalidate.actual &&
+		test_trace2_data fsm_client query/trivial-response 1 \
+			<../untracked-revalidate.trace &&
+		test_grep "parallel-lstat:[1-9]" \
+			../untracked-revalidate.perf &&
+		test_grep "nested/deleted/added" \
+			../untracked-revalidate.actual &&
+		test_grep "nested/renamed/after" \
+			../untracked-revalidate.actual &&
+		test_grep "nested/ignored/hidden-before" \
+			../untracked-revalidate.actual &&
+		test_grep ! "nested/deleted/remove" \
+			../untracked-revalidate.actual &&
+		test_grep ! "nested/renamed/before" \
+			../untracked-revalidate.actual &&
+		test_grep ! "nested/ignored/hidden-after" \
+			../untracked-revalidate.actual &&
+		git hash-object .git/index >../untracked-revalidate.index-after &&
+		test_cmp ../untracked-revalidate.index-before \
+			../untracked-revalidate.index-after &&
+		git status --porcelain >../untracked-revalidate.warmup &&
+		echo modified >>nested/steady/tracked &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-revalidate.warm-expect &&
+		GIT_TEST_UNTRACKED_CACHE_THREADS=1 \
+		GIT_TRACE2_PERF="$PWD/../untracked-revalidate.warm-perf" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-revalidate.warm-actual &&
+		test_cmp ../untracked-revalidate.warm-expect \
+			../untracked-revalidate.warm-actual &&
+		test_grep ! "parallel-lstat:[1-9]" \
+			../untracked-revalidate.warm-perf
+	)
+'
+
+test_expect_success 'daemon restart revalidates hidden skipped subtrees' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_skipped" &&
+	git init test_untracked_skipped &&
+	(
+		cd test_untracked_skipped &&
+		echo tracked >tracked &&
+		git add tracked &&
+		git commit -m initial &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		mkdir -p u/a-visible &&
+		mkdir -p u/z-hidden &&
+		printf ".gitignore\\nitem\\n" >u/z-hidden/.gitignore &&
+		echo hidden >u/z-hidden/item
+	) &&
+	start_daemon -C test_untracked_skipped &&
+	(
+		cd test_untracked_skipped &&
+		git status --porcelain >../untracked-skipped.initial &&
+		test_must_be_empty ../untracked-skipped.initial &&
+		echo visible >u/a-visible/file &&
+		git status --porcelain >../untracked-skipped.visible &&
+		test_grep "^?? u/$" ../untracked-skipped.visible &&
+		GIT_TRACE2_PERF="$PWD/../untracked-skipped.prime-perf" \
+			git ls-files --others --exclude-standard \
+			>../untracked-skipped.prime &&
+		test_grep "^u/a-visible/file$" \
+			../untracked-skipped.prime &&
+		test_grep ! "u/z-hidden/item" \
+			../untracked-skipped.prime &&
+		git fsmonitor--daemon stop &&
+		printf ".gitignore\\n" >u/z-hidden/.gitignore
+	) &&
+	start_daemon -C test_untracked_skipped &&
+	(
+		cd test_untracked_skipped &&
+		git status --porcelain >../untracked-skipped.first &&
+		test_grep "^?? u/$" ../untracked-skipped.first &&
+		git update-index --force-write-index &&
+		GIT_TRACE2_PERF="$PWD/../untracked-skipped.detail-perf" \
+			git ls-files --others --exclude-standard \
+			>../untracked-skipped.detail-actual &&
+		git -c core.fsmonitor=false -c core.untrackedCache=false \
+			ls-files --others --exclude-standard \
+			>../untracked-skipped.detail-expect &&
+		test_cmp ../untracked-skipped.detail-expect \
+			../untracked-skipped.detail-actual &&
+		test_grep "^u/z-hidden/item$" \
+			../untracked-skipped.detail-actual &&
+		rm u/a-visible/file &&
+		git status --porcelain >../untracked-skipped.actual &&
+		git -c core.fsmonitor=false -c core.untrackedCache=false \
+			status --porcelain >../untracked-skipped.expect &&
+		test_cmp ../untracked-skipped.expect \
+			../untracked-skipped.actual &&
+		test_grep "^?? u/$" ../untracked-skipped.actual
 	)
 '
 
