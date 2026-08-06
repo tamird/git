@@ -274,6 +274,7 @@ static int register_inotify(const char *path,
 	struct strbuf current = STRBUF_INIT;
 	struct dirent *de;
 	struct stat fs;
+	size_t prefix_len;
 	int ret = -1;
 
 	dir = opendir(path);
@@ -283,18 +284,27 @@ static int register_inotify(const char *path,
 		return error_errno(_("opendir('%s') failed"), path);
 	}
 
+	strbuf_addf(&current, "%s/", path);
+	prefix_len = current.len;
+
 	while ((de = readdir_skip_dot_and_dotdot(dir)) != NULL) {
-		strbuf_reset(&current);
-		strbuf_addf(&current, "%s/%s", path, de->d_name);
-		if (lstat(current.buf, &fs)) {
-			if (errno == ENOENT)
-				continue; /* file was deleted */
-			error_errno(_("lstat('%s') failed"), current.buf);
-			goto failed;
+		unsigned char dtype = DTYPE(de);
+
+		strbuf_setlen(&current, prefix_len);
+		strbuf_addstr(&current, de->d_name);
+		if (dtype == DT_UNKNOWN) {
+			if (lstat(current.buf, &fs)) {
+				if (errno == ENOENT)
+					continue; /* file was deleted */
+				error_errno(_("lstat('%s') failed"), current.buf);
+				goto failed;
+			}
+			if (S_ISDIR(fs.st_mode))
+				dtype = DT_DIR;
 		}
 
 		/* recurse into directory */
-		if (S_ISDIR(fs.st_mode)) {
+		if (dtype == DT_DIR) {
 			if (add_watch(current.buf, state->listen_data))
 				goto failed;
 			if (register_inotify(current.buf, state, batch))

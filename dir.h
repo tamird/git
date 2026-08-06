@@ -213,6 +213,8 @@ struct untracked_cache {
 	int dir_opened;
 	/* fsmonitor invalidation data */
 	unsigned int use_fsmonitor : 1;
+	/* Transient: cached descendants await validation after a resync. */
+	unsigned int fsmonitor_resync : 1;
 };
 
 /**
