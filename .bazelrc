@@ -1,0 +1,13 @@
+common --@curl//:ssl_lib=openssl
+common --incompatible_autoload_externally=+@rules_cc
+build --workspace_status_command=contrib/bazel/workspace_status.sh
+build --bes_backend=grpcs://openai.buildbuddy.io
+build --bes_results_url=https://openai.buildbuddy.io/invocation/
+build --remote_cache=grpcs://openai.buildbuddy.io
+build --remote_executor=grpcs://openai.buildbuddy.io
+build --remote_download_toplevel
+build --remote_download_regex=.*/(frankengit_linux_x86_64|frankengit_macos_arm64)/[^/]+
+build --strategy=remote
+build --modify_execution_info=Rustc=-supports-path-mapping
+build --extra_execution_platforms=//:rbe
+build --jobs=800
