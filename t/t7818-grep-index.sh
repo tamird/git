@@ -255,7 +255,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
 			release-1 release-2 release-3 worker-start-over \
 			acquired-4 acquired-5 acquired-6 acquired-7 \
 			acquired-8 release-4 release-5 release-6 release-7 \
-			release-8" &&
+			release-8 worker-progress-1 worker-progress-2 \
+			worker-progress-1.trace worker-progress-2.trace" &&
 	git config core.fsmonitor true &&
 	GIT_TEST_GREP_WORKER_CAPACITY=4 \
 		git fsmonitor--daemon start &&
@@ -310,14 +311,60 @@ test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
 			acquired-7 release-7 &
 		grep_worker_7=$!
 	} &&
+	grep_worker_pids="$grep_worker_4 $grep_worker_5 $grep_worker_6 \
+		$grep_worker_7" &&
+	touch worker-start-over &&
+	wait_for_file_value acquired-4 1 &&
+	wait_for_file_value acquired-5 1 &&
+	wait_for_file_value acquired-6 1 &&
+	wait_for_file_value acquired-7 1 &&
+	wait_for_file_sum 4 acquired-4 acquired-5 acquired-6 acquired-7 &&
+	if test_have_prereq MULTI_CPU
+	then
+		{
+			GIT_TRACE2_EVENT="$PWD/worker-progress-1.trace" \
+				git grep --cached --no-content-index --threads=0 \
+					"present needle" >worker-progress-1 &
+			grep_progress_1=$!
+		} &&
+		grep_worker_pids="$grep_worker_pids $grep_progress_1" &&
+		{
+			GIT_TRACE2_EVENT="$PWD/worker-progress-2.trace" \
+				git grep --cached --no-content-index --threads=0 \
+					"present needle" >worker-progress-2 &
+			grep_progress_2=$!
+		} &&
+		grep_worker_pids="$grep_worker_pids $grep_progress_2" &&
+		wait_for_file_value worker-progress-1 \
+			"present:present needle" &&
+		wait_for_file_value worker-progress-2 \
+			"present:present needle" &&
+		wait "$grep_progress_1" &&
+		wait "$grep_progress_2" &&
+		test_trace2_data grep worker_lease/granted 0 \
+			<worker-progress-1.trace &&
+		test_trace2_data grep worker_lease/target 1 \
+			<worker-progress-1.trace &&
+		if test_trace2_data grep worker_lease/granted 0 \
+			<worker-progress-2.trace
+		then
+			test_trace2_data grep worker_lease/target 1 \
+				<worker-progress-2.trace
+		else
+			test_trace2_data grep worker_lease/granted 1 \
+				<worker-progress-2.trace
+		fi &&
+		grep_worker_pids="$grep_worker_4 $grep_worker_5 \
+			$grep_worker_6 $grep_worker_7" &&
+		wait_for_file_sum 4 acquired-4 acquired-5 \
+			acquired-6 acquired-7
+	fi &&
 	{
 		test-tool grep-index-ipc 4 worker-start-over \
 			acquired-8 release-8 &
 		grep_worker_8=$!
 	} &&
-	grep_worker_pids="$grep_worker_4 $grep_worker_5 $grep_worker_6 \
-		$grep_worker_7 $grep_worker_8" &&
-	touch worker-start-over &&
+	grep_worker_pids="$grep_worker_pids $grep_worker_8" &&
 	wait_for_file_sum 4 acquired-4 acquired-5 acquired-6 \
 		acquired-7 acquired-8 &&
 	touch release-4 release-5 release-6 release-7 release-8 &&

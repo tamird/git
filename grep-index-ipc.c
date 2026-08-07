@@ -196,6 +196,7 @@ struct grep_index_ipc_worker_lease {
 	struct grep_index_ipc_worker_lease *next;
 	uint64_t id;
 	uint64_t last_seen;
+	uint64_t wait_sequence;
 	pid_t pid;
 	uint32_t requested;
 	uint32_t held;
@@ -222,6 +223,7 @@ struct grep_index_ipc_server {
 	uint64_t object_store_released_at;
 	uint64_t memory_idle_at;
 	uint64_t memory_idle_ns;
+	uint64_t next_wait_sequence;
 	uint32_t worker_capacity;
 	int memory_idle_stop;
 	int memory_idle_started;
@@ -534,6 +536,42 @@ static void grep_index_ipc_expire_worker_leases(
 	}
 }
 
+static uint64_t grep_index_ipc_next_wait_sequence(
+	struct grep_index_ipc_server *server)
+{
+	if (!++server->next_wait_sequence)
+		++server->next_wait_sequence;
+	return server->next_wait_sequence;
+}
+
+static void grep_index_ipc_prioritize_waiting_lease(
+	struct grep_index_ipc_server *server)
+{
+	struct grep_index_ipc_worker_lease **p;
+	struct grep_index_ipc_worker_lease **waiting = NULL;
+	struct grep_index_ipc_worker_lease *lease;
+	uint32_t active = 0;
+
+	for (p = &server->worker_leases; *p; p = &(*p)->next) {
+		lease = *p;
+		active++;
+		if (lease->held || !lease->wait_sequence)
+			continue;
+		if (!waiting ||
+		    lease->wait_sequence < (*waiting)->wait_sequence)
+			waiting = p;
+	}
+
+	if (active <= server->worker_capacity || !waiting ||
+	    waiting == &server->worker_leases)
+		return;
+
+	lease = *waiting;
+	*waiting = lease->next;
+	lease->next = server->worker_leases;
+	server->worker_leases = lease;
+}
+
 static int grep_index_ipc_handle_worker_request(
 	void *data,
 	const char *request, size_t request_len,
@@ -635,6 +673,8 @@ static int grep_index_ipc_handle_worker_request(
 		}
 		if (!lease)
 			unknown_response = 1;
+		else
+			grep_index_ipc_prioritize_waiting_lease(server);
 	} else if (signature == GREP_INDEX_IPC_WORKER_RELEASE_SIGNATURE) {
 		uint64_t id;
 		uint32_t pid;
@@ -689,8 +729,12 @@ allocate:
 		} while (remaining && progress);
 		for (candidate = server->worker_leases; candidate;
 		     candidate = candidate->next) {
-			if (candidate->target > candidate->desired)
+			if (candidate->target > candidate->desired) {
 				candidate->target = candidate->desired;
+				if (!candidate->target && !candidate->wait_sequence)
+					candidate->wait_sequence =
+						grep_index_ipc_next_wait_sequence(server);
+			}
 			reserved += candidate->held > candidate->target ?
 					    candidate->held :
 					    candidate->target;
@@ -719,6 +763,11 @@ allocate:
 		target = lease->target;
 		if (lease->held < target)
 			lease->held = target;
+		if (target)
+			lease->wait_sequence = 0;
+		else if (!lease->wait_sequence)
+			lease->wait_sequence =
+				grep_index_ipc_next_wait_sequence(server);
 	}
 
 unlock:
