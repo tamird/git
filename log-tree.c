@@ -1321,6 +1321,33 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	diff_free(&diff_opts);
 }
 
+static int can_skip_final_follow_rename(const struct rev_info *opt,
+					const struct commit *commit,
+					const struct commit_list *parents)
+{
+	return opt->follow_bloom_elision != FOLLOW_BLOOM_ELISION_DISABLED &&
+		opt->diffopt.flags.follow_renames &&
+		opt->max_count == 0 &&
+		!opt->max_count_type && !opt->max_count_stage &&
+		parents && !parents->next &&
+		commit->parents && !commit->parents->next &&
+		commit->parents->item == parents->item &&
+		!opt->prune && !opt->always_show_header &&
+		!opt->graph && !opt->boundary && !opt->reflog_info &&
+		!opt->topo_walk_info && !opt->limited && !opt->no_walk &&
+		!opt->reverse && !opt->reverse_output_stage &&
+		opt->skip_count < 0 && !opt->line_level_traverse &&
+		!opt->rewrite_parents && !opt->children.name &&
+		!opt->track_linear && !opt->count && !opt->full_diff &&
+		!opt->remerge_diff &&
+		!(opt->diffopt.output_format & ~DIFF_FORMAT_NO_OUTPUT) &&
+		!opt->diffopt.filter && !opt->diffopt.filter_not &&
+		!(opt->diffopt.pickaxe_opts & DIFF_PICKAXE_KINDS_MASK) &&
+		!opt->diffopt.objfind &&
+		!opt->diffopt.flags.exit_with_status &&
+		!opt->diffopt.format_callback;
+}
+
 /*
  * Show the diff of a commit.
  *
@@ -1401,9 +1428,17 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 		if (bloom_ret != REVISION_BLOOM_FILTER_DEFINITELY_NOT &&
 		    diff_pickaxe_edge_maybe_contains(
 			    &opt->diffopt, &commit->object.oid,
-			    &parent->object.oid))
+			    &parent->object.oid)) {
+			int skip_follow =
+				can_skip_final_follow_rename(opt, commit, parents);
+
+			if (skip_follow)
+				opt->diffopt.flags.follow_renames = 0;
 			diff_tree_oid(get_commit_tree_oid(parent),
 				      oid, "", &opt->diffopt);
+			if (skip_follow)
+				opt->diffopt.flags.follow_renames = 1;
+		}
 
 		revision_bloom_filter_finish_diff(
 			opt, bloom_ret, diff_queue_is_empty(&opt->diffopt));

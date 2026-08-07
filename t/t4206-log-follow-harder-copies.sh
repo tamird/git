@@ -54,6 +54,39 @@ test_expect_success 'validate the output.' '
 	compare_diff_patch current expected
 '
 
+test_expect_success 'metadata-only final --follow commit skips harder copy detection' '
+	printf "%s\n" "Copy path1 from path0" >expect &&
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/follow-final-explicit.event" \
+		git log --follow --format=%s -n1 -- path1 >actual &&
+	test_cmp expect actual &&
+	test_region ! diff "exact renames" \
+		"$TRASH_DIRECTORY/follow-final-explicit.event"
+'
+
+test_expect_success 'implicit follow skips harder copy detection for final commit' '
+	printf "%s\n" "Copy path1 from path0" >expect &&
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/follow-final-implicit.event" \
+		git -c log.follow=true log --format=%s -n1 -- path1 >actual &&
+	test_cmp expect actual &&
+	test_region ! diff "exact renames" \
+		"$TRASH_DIRECTORY/follow-final-implicit.event"
+'
+
+test_expect_success 'following a second commit still detects the harder copy' '
+	printf "%s\n" "Copy path1 from path0" "Change path0" >expect &&
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/follow-more.event" \
+		git log --follow --format=%s -n2 -- path1 >actual &&
+	test_cmp expect actual &&
+	test_region diff "exact renames" "$TRASH_DIRECTORY/follow-more.event"
+'
+
+test_expect_success 'visible final copy still reports its harder-copy status' '
+	printf "%s\n\n" "Copy path1 from path0" >expect &&
+	printf "C100\tpath0\tpath1\n" >>expect &&
+	git log --follow --name-status --format=%s -n1 -- path1 >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'log --follow -B does not BUG' '
 	git switch --orphan break_and_follow_are_icky_so_use_both &&
 
