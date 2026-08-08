@@ -330,6 +330,12 @@ test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
 	GIT_TRACE2_EVENT="$PWD/pickaxe-default-patch.trace" \
 		git -C GS-plain log -S"[b]" -p >actual &&
 	test_cmp pickaxe-default-patch.expect actual &&
+	test_trace2_data pickaxe content_index/pairs_seen \
+		"[1-9][0-9]*" <pickaxe-default-patch.trace &&
+	test_trace2_data pickaxe content_index/min_pairs 4096 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data pickaxe content_index/activation_attempted 0 \
+		<pickaxe-default-patch.trace &&
 	test_trace2_data pickaxe content_index/query 0 \
 		<pickaxe-default-patch.trace &&
 	test_trace2_data pickaxe content_index/index 0 \
@@ -367,6 +373,12 @@ test_expect_success 'fixed pickaxe caches counts without a content index' '
 	GIT_TRACE2_EVENT="$PWD/pickaxe-no-index.trace" \
 		git -C GS-plain log --no-renames -S"[b]" -- data.txt >actual &&
 	test_cmp D-then-E-log actual &&
+	test_trace2_data pickaxe content_index/pairs_seen 0 \
+		<pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/min_pairs 0 \
+		<pickaxe-no-index.trace &&
+	test_trace2_data pickaxe content_index/activation_attempted 1 \
+		<pickaxe-no-index.trace &&
 	test_trace2_data pickaxe content_index/query 1 \
 		<pickaxe-no-index.trace &&
 	test_trace2_data pickaxe content_index/index 0 \
