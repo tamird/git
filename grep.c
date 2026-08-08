@@ -741,6 +741,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	int have_literal = 0;
 	struct strbuf lookahead_pattern = STRBUF_INIT;
 	struct strbuf group_literal_prefix = STRBUF_INIT;
+	struct strbuf group_literal_all_branches = STRBUF_INIT;
 
 	/*
 	 * POSIX matching can be slow on long buffers. Compile the supported
@@ -876,25 +877,33 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '(') {
 				strbuf_addch(&group_literal_prefix, have_literal);
+				strbuf_addch(&group_literal_all_branches, 1);
 				group_depth++;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
-			    ch == ')' && group_depth &&
-			    (have_literal ||
-			     group_literal_prefix.buf[group_depth - 1])) {
-				/* A zero-width inner alternative retains its enclosing literal. */
-				have_literal |= group_literal_prefix.buf[group_depth - 1];
+			    ch == ')' && group_depth) {
+				/* A group supplies a literal only if every alternative does. */
+				have_literal &=
+					group_literal_all_branches.buf[group_depth - 1];
 				group_depth--;
 				strbuf_setlen(&group_literal_prefix, group_depth);
+				strbuf_setlen(&group_literal_all_branches, group_depth);
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
-			    ch == '|' && have_literal &&
+			    ch == '|' && (have_literal || group_depth) &&
 			    i + 1 < p->patternlen) {
-				have_literal = 0;
+				if (group_depth) {
+					group_literal_all_branches.buf[group_depth - 1] &=
+						have_literal;
+					have_literal =
+						group_literal_prefix.buf[group_depth - 1];
+				} else {
+					have_literal = 0;
+				}
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
@@ -921,6 +930,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	}
 	strbuf_release(&lookahead_pattern);
 	strbuf_release(&group_literal_prefix);
+	strbuf_release(&group_literal_all_branches);
 #endif
 }
 
