@@ -809,13 +809,20 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 	if (!content_index_checked) {
 		if (!content_index && content_index_query &&
 		    opt->repo == the_repository) {
+			trace2_region_enter("grep", "load_content_index", opt->repo);
 			content_index = grep_index_load(the_repository);
+			trace2_region_leave("grep", "load_content_index", opt->repo);
 			if (!content_index) {
 				grep_index_query_free(content_index_query);
 				content_index_query = NULL;
-			} else
+			} else {
+				trace2_region_enter("grep", "prepare_content_index",
+						    opt->repo);
 				content_index_prepared = grep_index_prepare(
 					content_index, content_index_query);
+				trace2_region_leave("grep", "prepare_content_index",
+						    opt->repo);
+			}
 		}
 		if (!(content_index_prepared ?
 			      grep_index_prepared_maybe_contains(
@@ -2300,16 +2307,24 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 		CALLOC_ARRAY(results, oids.nr);
 	}
 	query->objects += batch->nr;
-	if (oids.nr &&
-	    !grep_index_ipc_query_with_max_parallel_requests(
-		    batch->opt->repo, content_index_query, oids.oid, oids.nr,
-		    results, GREP_TREE_INDEX_MAX_REQUESTS)) {
-		query->queried += oids.nr;
-		query->batches++;
-		queried = 1;
-	} else if (oids.nr) {
-		batch->enabled = 0;
-		query->ipc_available = 0;
+	if (oids.nr) {
+		int query_result;
+
+		trace2_region_enter("grep", "query_content_index_ipc",
+				    batch->opt->repo);
+		query_result = grep_index_ipc_query_with_max_parallel_requests(
+			batch->opt->repo, content_index_query, oids.oid, oids.nr,
+			results, GREP_TREE_INDEX_MAX_REQUESTS);
+		trace2_region_leave("grep", "query_content_index_ipc",
+				    batch->opt->repo);
+		if (!query_result) {
+			query->queried += oids.nr;
+			query->batches++;
+			queried = 1;
+		} else {
+			batch->enabled = 0;
+			query->ipc_available = 0;
+		}
 	}
 
 	for (size_t i = 0; i < batch->nr; i++) {
