@@ -310,7 +310,8 @@ test_expect_success ENHANCED_BRE,LIBPCRE2 \
 '
 
 test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
-	test_when_finished "rm -f ere-lookahead ere-quoted-lookahead.trace" &&
+	test_when_finished "rm -f ere-lookahead ere-quoted-lookahead.trace \
+		ere-comma-lookahead.trace" &&
 	cat >ere-lookahead <<-\EOF &&
 	load_graph(
 	direct_dependencies
@@ -330,6 +331,9 @@ test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
 	secondary="value"
 	primary="different"
 	unrelated
+	primary,value
+	secondary,value
+	primary,different
 	EOF
 	cat >expect <<-\EOF &&
 	ere-lookahead:1:primary="value"
@@ -341,7 +345,18 @@ test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
 			-- ere-lookahead >actual &&
 	test_cmp expect actual &&
 	test_trace2_data grep pcre2_lookahead 1 \
-		<ere-quoted-lookahead.trace
+		<ere-quoted-lookahead.trace &&
+
+	cat >expect <<-\EOF &&
+	ere-lookahead:5:primary,value
+	ere-lookahead:6:secondary,value
+	EOF
+	GIT_TRACE2_EVENT="$PWD/ere-comma-lookahead.trace" \
+		git grep --no-index -n -E "(primary|secondary),value" \
+			-- ere-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-comma-lookahead.trace
 '
 
 test_expect_success LIBPCRE2 \

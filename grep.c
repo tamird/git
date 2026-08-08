@@ -765,7 +765,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				continue;
 			}
 			if (ch < 0x80 &&
-			    (isalnum(ch) || strchr("_ =-/@:>\"", ch))) {
+			    (isalnum(ch) || strchr("_ =-/@:>,\"", ch))) {
 				have_literal = 1;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
