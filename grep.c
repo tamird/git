@@ -773,7 +773,8 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			}
 			if (ch == '^' || ch == '$') {
 				if (opt->pattern_type_option ==
-				    GREP_PATTERN_TYPE_ERE)
+				    GREP_PATTERN_TYPE_ERE ||
+				    (ch == '^' && i == 0))
 					strbuf_addch(&lookahead_pattern, ch);
 				else
 					/* BRE anchor syntax is contextual. */
@@ -927,6 +928,11 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		lookahead_opt.ignore_locale = 1;
 		compile_pcre2_pattern(p->pcre2_lookahead, &lookahead_opt);
 		trace2_data_intmax("grep", opt->repo, "pcre2_lookahead", 1);
+		if (opt->pattern_type_option == GREP_PATTERN_TYPE_BRE &&
+		    p->patternlen && p->pattern[0] == '^' &&
+		    p->pcre2_lookahead->pattern[0] == '^')
+			trace2_data_intmax("grep", opt->repo,
+					   "pcre2_lookahead_bre_start_anchor", 1);
 	}
 	strbuf_release(&lookahead_pattern);
 	strbuf_release(&group_literal_prefix);
