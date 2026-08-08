@@ -890,13 +890,23 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == ')' && group_depth) {
+				int prefix = group_literal_prefix.buf[group_depth - 1];
+				int optional = prefix && i + 1 < p->patternlen &&
+					p->pattern[i + 1] == '?';
+
 				/* A group supplies a literal only if every alternative does. */
 				have_literal &=
 					group_literal_all_branches.buf[group_depth - 1];
+				if (optional)
+					have_literal = prefix;
 				group_depth--;
 				strbuf_setlen(&group_literal_prefix, group_depth);
 				strbuf_setlen(&group_literal_all_branches, group_depth);
 				strbuf_addch(&lookahead_pattern, ch);
+				if (optional) {
+					strbuf_addch(&lookahead_pattern, '?');
+					i++;
+				}
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
