@@ -514,7 +514,7 @@ test_expect_success LIBPCRE2 \
 '
 
 test_expect_success LIBPCRE2 'ERE bracket classes preserve matches' '
-	test_when_finished "rm -f ere-class-lookahead" &&
+	test_when_finished "rm -f ere-class-lookahead ere-class-lookahead.trace" &&
 	cat >ere-class-lookahead <<-\EOF &&
 	constraints_file(a
 	constraints_file()
@@ -527,7 +527,53 @@ test_expect_success LIBPCRE2 'ERE bracket classes preserve matches' '
 	EOF
 	git grep --no-index -n -E "constraints_file\\([^)]" \
 		-- ere-class-lookahead >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+
+	cat >ere-class-lookahead <<-\EOF &&
+	anchorxtail
+	anchor.tail
+	anchorYtail
+	anchor
+	tail
+	EOF
+	printf "anchor\rtail\nanchorxtail\r\nanchor\200tail\n" \
+		>>ere-class-lookahead &&
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:anchorxtail
+	ere-class-lookahead:2:anchor.tail
+	EOF
+	printf "ere-class-lookahead:7:anchorxtail\r\n" >>expect &&
+	GIT_TRACE2_EVENT="$PWD/ere-class-lookahead.trace" LC_ALL=C \
+		git grep --no-index -n -E "anchor[x\\.]tail" \
+			-- ere-class-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-class-lookahead.trace &&
+
+	cat >expect <<-\EOF &&
+	ere-class-lookahead:1:anchorxtail
+	ere-class-lookahead:3:anchorYtail
+	EOF
+	printf "ere-class-lookahead:6:anchor\rtail\n" >>expect &&
+	printf "ere-class-lookahead:7:anchorxtail\r\n" >>expect &&
+	printf "ere-class-lookahead:8:anchor\200tail\n" >>expect &&
+	>ere-class-lookahead.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-class-lookahead.trace" LC_ALL=C \
+		git grep --no-index -n -E "anchor[^\\.]*tail" \
+			-- ere-class-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-class-lookahead.trace &&
+
+	echo "ere-class-lookahead:2:anchor.tail" >expect &&
+	printf "ere-class-lookahead:6:anchor\rtail\n" >>expect &&
+	>ere-class-lookahead.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-class-lookahead.trace" LC_ALL=C \
+		git grep --no-index -n -E "anchor[[:space:]\\.]tail" \
+			-- ere-class-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 \
+		<ere-class-lookahead.trace
 '
 
 test_expect_success LIBPCRE2 'ERE POSIX space classes preserve matches' '

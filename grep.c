@@ -840,6 +840,8 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 				size_t end = i + 1;
 				size_t start;
 				int has_space_class = 0;
+				int has_escaped_ascii = 0;
+				int escaped_ascii_safe = 1;
 
 				if (end < p->patternlen && p->pattern[end] == '^')
 					end++;
@@ -849,15 +851,40 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 					if (p->pattern[end] == '[' &&
 					    starts_with(p->pattern + end,
 							"[:space:]")) {
+						if (has_escaped_ascii)
+							break;
 						has_space_class = 1;
 						end += strlen("[:space:]");
 						continue;
 					}
+					if (p->pattern[end] == '\\') {
+						unsigned char escaped;
+
+						if (!have_literal ||
+						    !escaped_ascii_safe ||
+						    has_escaped_ascii ||
+						    has_space_class ||
+						    end + 1 >= p->patternlen)
+							break;
+						escaped = p->pattern[end + 1];
+						if (escaped != '"' && escaped != '.')
+							break;
+						has_escaped_ascii = 1;
+						end += 2;
+						continue;
+					}
 					if ((unsigned char)p->pattern[end] >= 0x80 ||
 					    p->pattern[end] == '\n' ||
-					    p->pattern[end] == '[' ||
-					    p->pattern[end] == '\\')
+					    p->pattern[end] == '[')
 						break;
+					if ((unsigned char)p->pattern[end] < ' ' ||
+					    p->pattern[end] == 0x7f ||
+					    p->pattern[end] == '-' ||
+					    p->pattern[end] == '^') {
+						if (has_escaped_ascii)
+							break;
+						escaped_ascii_safe = 0;
+					}
 					end++;
 				}
 				if (end > start && end < p->patternlen &&
