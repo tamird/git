@@ -18,6 +18,12 @@ bazel_dep(name = "libexpat", version = "2.7.1.bcr.1")
 bazel_dep(name = "openssl", version = "3.5.4.bcr.0")
 bazel_dep(name = "pcre2", version = "10.45")
 
+pcre2_jit_repository = use_repo_rule(
+    "//contrib/bazel:pcre2_jit.bzl",
+    "pcre2_jit_repository",
+)
+pcre2_jit_repository(name = "git_pcre2_jit")
+
 rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
 use_repo(rules_rust, "rules_rust")
 
