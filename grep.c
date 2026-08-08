@@ -9,6 +9,7 @@
 #include "object-file.h"
 #include "odb.h"
 #include "pretty.h"
+#include "trace2.h"
 #include "userdiff.h"
 #include "xdiff-interface.h"
 #include "diff.h"
@@ -739,6 +740,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 	int group_depth = 0;
 	int have_literal = 0;
 	struct strbuf lookahead_pattern = STRBUF_INIT;
+	struct strbuf group_literal_prefix = STRBUF_INIT;
 
 	/*
 	 * POSIX matching can be slow on long buffers. Compile the supported
@@ -873,13 +875,19 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
 			    ch == '(') {
+				strbuf_addch(&group_literal_prefix, have_literal);
 				group_depth++;
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
 			if (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
-			    ch == ')' && group_depth && have_literal) {
+			    ch == ')' && group_depth &&
+			    (have_literal ||
+			     group_literal_prefix.buf[group_depth - 1])) {
+				/* A zero-width inner alternative retains its enclosing literal. */
+				have_literal |= group_literal_prefix.buf[group_depth - 1];
 				group_depth--;
+				strbuf_setlen(&group_literal_prefix, group_depth);
 				strbuf_addch(&lookahead_pattern, ch);
 				continue;
 			}
@@ -909,8 +917,10 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 		p->pcre2_lookahead->pcre2_newline_lf = 1;
 		lookahead_opt.ignore_locale = 1;
 		compile_pcre2_pattern(p->pcre2_lookahead, &lookahead_opt);
+		trace2_data_intmax("grep", opt->repo, "pcre2_lookahead", 1);
 	}
 	strbuf_release(&lookahead_pattern);
+	strbuf_release(&group_literal_prefix);
 #endif
 }
 

@@ -328,7 +328,8 @@ test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
 
 test_expect_success LIBPCRE2 \
 	'ERE grouped literal alternatives preserve matches' '
-	test_when_finished "rm -f ere-group-lookahead" &&
+	test_when_finished "rm -f ere-group-lookahead \
+		ere-group-lookahead.trace ere-nullable.trace" &&
 	cat >ere-group-lookahead <<-\EOF &&
 	load_graph(
 	direct_dependencies(
@@ -341,7 +342,36 @@ test_expect_success LIBPCRE2 \
 	git grep --no-index -n -E \
 		"(load_graph|direct_dependencies)\\(" \
 		-- ere-group-lookahead >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+
+	cat >ere-group-lookahead <<-\EOF &&
+	primaryprefix
+	primaryprefixoptional
+	secondarytarget
+	thirdtarget
+	optional
+	unrelated
+	EOF
+	cat >expect <<-\EOF &&
+	ere-group-lookahead:1:primaryprefix
+	ere-group-lookahead:2:primaryprefixoptional
+	ere-group-lookahead:3:secondarytarget
+	ere-group-lookahead:4:thirdtarget
+	EOF
+	GIT_TRACE2_EVENT="$PWD/ere-group-lookahead.trace" \
+		git grep --no-index -n -E \
+			"(primaryprefix(optional|$)|secondarytarget|thirdtarget)" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-group-lookahead.trace &&
+
+	git grep --no-index -n -E "." -- ere-group-lookahead >expect &&
+	GIT_TRACE2_EVENT="$PWD/ere-nullable.trace" \
+		git grep --no-index -n -E "(optional|$)" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 <ere-nullable.trace
 '
 
 test_expect_success LIBPCRE2 \
