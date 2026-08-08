@@ -425,6 +425,15 @@ test_expect_success LIBPCRE2 \
 	test_trace2_data grep pcre2_lookahead 1 \
 		<ere-group-lookahead.trace &&
 
+	>ere-group-lookahead.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-group-lookahead.trace" \
+		git grep --no-index -n -E \
+			"(primaryprefix(optional)?|secondarytarget)|thirdtarget" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-group-lookahead.trace &&
+
 	cat >expect <<-\EOF &&
 	ere-group-lookahead:7:required
 	ere-group-lookahead:8:xrequired
@@ -444,14 +453,39 @@ test_expect_success LIBPCRE2 \
 	test_trace2_data grep pcre2_lookahead 1 \
 		<ere-leading-anchor.trace &&
 
+	cat >expect <<-\EOF &&
+	ere-group-lookahead:7:required
+	ere-group-lookahead:8:xrequired
+	EOF
+	>ere-leading-anchor.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-leading-anchor.trace" \
+		git grep --no-index -n -E "(^|[x])?required" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 \
+		<ere-leading-anchor.trace &&
+
 	git grep --no-index -n -E "." -- ere-group-lookahead >expect &&
 	GIT_TRACE2_EVENT="$PWD/ere-nullable.trace" \
 		git grep --no-index -n -E "(optional|$)" \
 			-- ere-group-lookahead >actual &&
 	test_cmp expect actual &&
 	! test_trace2_data grep pcre2_lookahead 1 <ere-nullable.trace &&
+	>ere-nullable.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-nullable.trace" \
+		git grep --no-index -n -E "(optional)?" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 <ere-nullable.trace &&
 	GIT_TRACE2_EVENT="$PWD/ere-leading-nullable.trace" \
 		git grep --no-index -n -E "(^|[x])" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 \
+		<ere-leading-nullable.trace &&
+	>ere-leading-nullable.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-leading-nullable.trace" \
+		git grep --no-index -n -E "(^|[x])?" \
 			-- ere-group-lookahead >actual &&
 	test_cmp expect actual &&
 	! test_trace2_data grep pcre2_lookahead 1 \
