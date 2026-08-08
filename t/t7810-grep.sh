@@ -269,7 +269,8 @@ test_expect_success LIBPCRE2 'POSIX anchors preserve matches' '
 '
 
 test_expect_success LIBPCRE2 'escaped literal preserves matches' '
-	test_when_finished "rm -f escaped-literal-lookahead" &&
+	test_when_finished "rm -f escaped-literal-lookahead \
+		escaped-literal-lookahead.trace" &&
 	cat >escaped-literal-lookahead <<-\EOF &&
 	.repo_root
 	x.repo_root
@@ -280,7 +281,49 @@ test_expect_success LIBPCRE2 'escaped literal preserves matches' '
 	test_file_not_empty expect &&
 	git grep --no-index -n "\\.repo_root" \
 		-- escaped-literal-lookahead >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+
+	cat >escaped-literal-lookahead <<-\EOF &&
+	prefix+suffix
+	prefix++suffix
+	prefixsuffix
+	prefixxxsuffix
+	secondary
+	tertiary
+	prefix+
+	suffix
+	EOF
+	printf "prefix+suffix\r\n\200prefix+suffix\n" \
+		>>escaped-literal-lookahead &&
+	cat >expect <<-\EOF &&
+	escaped-literal-lookahead:1:prefix+suffix
+	escaped-literal-lookahead:5:secondary
+	escaped-literal-lookahead:6:tertiary
+	EOF
+	printf "escaped-literal-lookahead:9:prefix+suffix\r\n" >>expect &&
+	printf "escaped-literal-lookahead:10:\200prefix+suffix\n" >>expect &&
+	GIT_TRACE2_EVENT="$PWD/escaped-literal-lookahead.trace" LC_ALL=C \
+		git grep --no-index -n -E \
+			"(prefix\\+suffix|secondary)|tertiary" \
+			-- escaped-literal-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<escaped-literal-lookahead.trace &&
+
+	if test_have_prereq ENHANCED_BRE
+	then
+		cat >expect <<-\EOF &&
+		escaped-literal-lookahead:3:prefixsuffix
+		escaped-literal-lookahead:4:prefixxxsuffix
+		EOF
+		>escaped-literal-lookahead.trace &&
+		GIT_TRACE2_EVENT="$PWD/escaped-literal-lookahead.trace" \
+			LC_ALL=C git grep --no-index -n "prefix\\+suffix" \
+				-- escaped-literal-lookahead >actual &&
+		test_cmp expect actual &&
+		! test_trace2_data grep pcre2_lookahead 1 \
+			<escaped-literal-lookahead.trace
+	fi
 '
 
 test_expect_success LIBPCRE2 \
