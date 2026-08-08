@@ -790,7 +790,7 @@ static void compile_regexp(struct grep_pat *p, struct grep_opt *opt)
 			    (p->pattern[i + 1] == '.' ||
 			     p->pattern[i + 1] == '\\' ||
 			     (opt->pattern_type_option == GREP_PATTERN_TYPE_ERE &&
-			      strchr("()", p->pattern[i + 1])))) {
+			      strchr("()+", p->pattern[i + 1])))) {
 				have_literal = 1;
 				strbuf_add(&lookahead_pattern, p->pattern + i, 2);
 				i++;
