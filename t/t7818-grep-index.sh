@@ -1491,6 +1491,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_queried 3 <tree.trace &&
 	test_trace2_data grep content_index_tree_rejected 6 <tree.trace &&
 	test_trace2_data grep content_index_tree_batches 2 <tree.trace &&
+	test_region grep query_content_index_ipc tree.trace &&
 	git grep --no-content-index "present needle" HEAD HEAD^ -- present \
 		>expect-tree-positive &&
 	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
@@ -1567,6 +1568,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-fallback.trace &&
 	test_trace2_data grep content_index_tree_batches 0 \
 		<tree-fallback.trace &&
+	test_region grep query_content_index_ipc tree-fallback.trace &&
+	test_region grep load_content_index tree-fallback.trace &&
 	git replace -d "$replaced_oid" &&
 	printf "nested/binary -diff\nnested/text diff\n" >.gitattributes &&
 	test_when_finished "rm -f .gitattributes" &&
