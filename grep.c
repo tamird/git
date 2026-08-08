@@ -388,6 +388,11 @@ static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt
 			 */
 			p->pcre2_jit_on = 0;
 			return;
+#ifdef PCRE2_ERROR_JIT_UNSUPPORTED
+		} else if (jitret == PCRE2_ERROR_JIT_UNSUPPORTED) {
+			p->pcre2_jit_on = 0;
+			return;
+#endif
 		} else if (jitret) {
 			int need_clip = p->patternlen > 64;
 			int clip_len = need_clip ? 64 : p->patternlen;

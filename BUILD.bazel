@@ -935,7 +935,7 @@ cc_library(
     deps = [
         ":thread_utils",
         ":userdiff",
-        "@pcre2//:pcre2",
+        "@git_pcre2_jit//:pcre2",
     ],
 )
 
@@ -1331,7 +1331,7 @@ cc_library(
         "//xdiff",
         "@curl",
         "@openssl//:ssl",
-        "@pcre2//:pcre2",
+        "@git_pcre2_jit//:pcre2",
         "@zlib",
     ],
     alwayslink = True,

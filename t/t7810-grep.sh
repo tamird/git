@@ -202,6 +202,11 @@ test_expect_success LIBPCRE2 \
 '
 
 test_expect_success LIBPCRE2 'POSIX anchors preserve matches' '
+	if test "${GIT_TEST_REQUIRE_PCRE2_JIT:-0}" = 1
+	then
+		test-tool pcre2-config has-jit &&
+		test-tool pcre2-config jit-functional
+	fi &&
 	test_when_finished "rm -f anchor-lookahead anchor-literal anchor-crlf \
 		anchor-multi.trace anchor-interior.trace" &&
 	printf "partial\npartial suffix\nprefix partial\n" >anchor-lookahead &&
@@ -2376,8 +2381,14 @@ test_expect_success PCRE 'grep -P pattern' '
 
 test_expect_success LIBPCRE2 "grep -P with (*NO_JIT) doesn't error out" '
 	git grep -P "(*NO_JIT)\p{Ps}.*?\p{Pe}" hello.c >actual &&
-	test_cmp expected actual
-
+	test_cmp expected actual &&
+	if test "${GIT_TEST_REQUIRE_PCRE2_JIT:-0}" = 1
+	then
+		test_have_prereq MB_REGEX &&
+		LC_ALL=en_US.UTF-8 git grep -P \
+			"\C\p{Ps}.*?\p{Pe}" hello.c >actual &&
+		test_cmp expected actual
+	fi
 '
 
 test_expect_success !FAIL_PREREQS,!PCRE 'grep -P pattern errors without PCRE' '
