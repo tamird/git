@@ -2982,6 +2982,17 @@ static void close_cached_dir(struct cached_dir *cdir)
 	}
 }
 
+static void invalidate_skipped_resync_descendants(
+	struct dir_struct *dir, struct untracked_cache_dir *untracked)
+{
+	if (!dir->untracked || !dir->untracked->fsmonitor_resync ||
+	    !untracked)
+		return;
+
+	for (size_t i = 0; i < untracked->dirs_nr; i++)
+		do_invalidate_gitignore(untracked->dirs[i]);
+}
+
 static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 	struct untracked_cache_dir *untracked,
 	struct cached_dir *cdir,
@@ -3129,6 +3140,8 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 				 */
 				if (dir_state >= path_excluded) {
 					dir_state = path_excluded;
+					invalidate_skipped_resync_descendants(
+						dir, untracked);
 					break;
 				}
 			}
@@ -3137,6 +3150,7 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 			if (dir_state == path_untracked) {
 				if (cdir.fdir)
 					add_untracked(untracked, path.buf + baselen);
+				invalidate_skipped_resync_descendants(dir, untracked);
 				break;
 			}
 			/* skip the add_path_to_appropriate_result_list() */
