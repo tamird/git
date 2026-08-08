@@ -49,6 +49,7 @@ struct diff_pickaxe_index {
 	struct oidmap batch_results;
 	char *needle;
 	size_t pairs;
+	size_t min_pairs;
 	size_t results_nr;
 	size_t max_results;
 	size_t commit_backoff_edges;
@@ -566,6 +567,7 @@ void diffcore_pickaxe(struct diff_options *o)
 			CALLOC_ARRAY(index, 1);
 			index->repo = o->repo;
 			index->needle = xstrdup(needle);
+			index->min_pairs = min_index_pairs;
 			index->pickaxe_opts = query_opts;
 			index->text = o->flags.text;
 			index->max_results = git_env_ulong(
@@ -946,6 +948,12 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 
 	if (!index)
 		return;
+	trace2_data_intmax("pickaxe", index->repo, "content_index/pairs_seen",
+			   index->pairs);
+	trace2_data_intmax("pickaxe", index->repo, "content_index/min_pairs",
+			   index->min_pairs);
+	trace2_data_intmax("pickaxe", index->repo,
+			   "content_index/activation_attempted", !!index->tried);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/tested",
 			   index->tested);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/prepared",
