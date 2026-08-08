@@ -362,7 +362,8 @@ test_expect_success LIBPCRE2 'ERE literal alternatives preserve matches' '
 test_expect_success LIBPCRE2 \
 	'ERE grouped literal alternatives preserve matches' '
 	test_when_finished "rm -f ere-group-lookahead \
-		ere-group-lookahead.trace ere-nullable.trace" &&
+		ere-group-lookahead.trace ere-nullable.trace \
+		ere-leading-anchor.trace ere-leading-nullable.trace" &&
 	cat >ere-group-lookahead <<-\EOF &&
 	load_graph(
 	direct_dependencies(
@@ -384,6 +385,9 @@ test_expect_success LIBPCRE2 \
 	thirdtarget
 	optional
 	unrelated
+	required
+	xrequired
+	qrequired
 	EOF
 	cat >expect <<-\EOF &&
 	ere-group-lookahead:1:primaryprefix
@@ -399,12 +403,37 @@ test_expect_success LIBPCRE2 \
 	test_trace2_data grep pcre2_lookahead 1 \
 		<ere-group-lookahead.trace &&
 
+	cat >expect <<-\EOF &&
+	ere-group-lookahead:7:required
+	ere-group-lookahead:8:xrequired
+	EOF
+	GIT_TRACE2_EVENT="$PWD/ere-leading-anchor.trace" \
+		git grep --no-index -n -E "(^|[x])required" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-leading-anchor.trace &&
+
+	>ere-leading-anchor.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-leading-anchor.trace" \
+		git grep --no-index -n -E "(^|[x])(required|target)" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep pcre2_lookahead 1 \
+		<ere-leading-anchor.trace &&
+
 	git grep --no-index -n -E "." -- ere-group-lookahead >expect &&
 	GIT_TRACE2_EVENT="$PWD/ere-nullable.trace" \
 		git grep --no-index -n -E "(optional|$)" \
 			-- ere-group-lookahead >actual &&
 	test_cmp expect actual &&
-	! test_trace2_data grep pcre2_lookahead 1 <ere-nullable.trace
+	! test_trace2_data grep pcre2_lookahead 1 <ere-nullable.trace &&
+	GIT_TRACE2_EVENT="$PWD/ere-leading-nullable.trace" \
+		git grep --no-index -n -E "(^|[x])" \
+			-- ere-group-lookahead >actual &&
+	test_cmp expect actual &&
+	! test_trace2_data grep pcre2_lookahead 1 \
+		<ere-leading-nullable.trace
 '
 
 test_expect_success LIBPCRE2 \
