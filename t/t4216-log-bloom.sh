@@ -168,7 +168,8 @@ test_expect_success 'git log -- folder works with and without the trailing slash
 '
 
 test_expect_success 'git log for path that does not exist. ' '
-	test_bloom_filters_used "-- path_does_not_exist"
+	test_bloom_filters_used "-- path_does_not_exist" &&
+	test_grep "active:1" "$TRASH_DIRECTORY/trace.perf"
 '
 
 test_expect_success '--follow skips commits using Bloom filters' '
@@ -327,7 +328,8 @@ test_expect_success '--follow does not elide remerge-diff commits' '
 '
 
 test_expect_success 'git log with --walk-reflogs does not use Bloom filters' '
-	test_bloom_filters_not_used "--walk-reflogs -- A"
+	test_bloom_filters_not_used "--walk-reflogs -- A" &&
+	test_grep "active:0" "$TRASH_DIRECTORY/trace.perf"
 '
 
 test_expect_success 'git log -- "." pathspec at root does not use Bloom filters' '

@@ -4373,6 +4373,11 @@ int prepare_revision_walk(struct rev_info *revs)
 
 	if (!revs->reflog_info)
 		prepare_to_use_bloom_filter(revs);
+	if (revs->pruning.pathspec.nr)
+		trace2_data_intmax("bloom", revs->repo, "active",
+				   !revs->reflog_info &&
+				   !!revs->bloom_filter_settings &&
+				   !!revs->bloom_keyvecs_nr);
 	if (!revs->unsorted_input)
 		commit_list_sort_by_date(&revs->commits);
 	if (revs->no_walk)
