@@ -1783,6 +1783,10 @@ test_expect_success UNTRACKED_CACHE 'normal cache prunes all status' '
 	EOF
 	test_cmp expect actual &&
 	test_cmp normal-cache actual-cache &&
+	test_grep "requested-flags:0" trace-normal-to-all &&
+	test_grep "stored-flags:6" trace-normal-to-all &&
+	test_grep "cache-present:1" trace-normal-to-all &&
+	test_grep "negative-only:1" trace-normal-to-all &&
 	test_grep "subtrees-pruned:[1-9]" trace-normal-to-all &&
 	test_grep "directories-visited:[1-9]" trace-normal-to-all
 '
@@ -1829,6 +1833,10 @@ test_expect_success UNTRACKED_CACHE 'all cache prunes normal status' '
 	echo "?? results/" >expect &&
 	test_cmp expect actual &&
 	test_cmp all-cache actual-cache &&
+	test_grep "requested-flags:6" trace-all-to-normal &&
+	test_grep "stored-flags:0" trace-all-to-normal &&
+	test_grep "cache-present:1" trace-all-to-normal &&
+	test_grep "negative-only:1" trace-all-to-normal &&
 	test_grep "subtrees-pruned:[1-9]" trace-all-to-normal &&
 	test_grep "directories-visited:[1-9]" trace-all-to-normal
 '
