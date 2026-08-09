@@ -1706,6 +1706,16 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 		git grep --cached -F "conts|needle" -- ordinary &&
 	test_trace2_data grep content_index_negative_cache_hits 0 \
 		<negative-alt-fixed.trace &&
+	if test_have_prereq LIBPCRE2
+	then
+		test_trace2_data grep matcher/pcre2 1 \
+			<negative-alt-fixed.trace
+	else
+		test_trace2_data grep matcher/pcre2 0 \
+			<negative-alt-fixed.trace
+	fi &&
+	test_grep "\"key\":\"matcher/jit\",\"value\":\"[01]\"" \
+		negative-alt-fixed.trace &&
 	printf "foo\0" >negative-binary &&
 	git add negative-binary &&
 	binary_oid=$(git rev-parse :negative-binary) &&

@@ -3265,6 +3265,20 @@ int cmd_grep(int argc,
 			BUG("Somebody got num_threads calculation wrong!");
 	}
 	compile_grep_patterns(&opt);
+	if (opt.pattern_type_option == GREP_PATTERN_TYPE_FIXED &&
+	    opt.pattern_list && !opt.pattern_list->next) {
+		int matcher_pcre2 = 0, matcher_jit = 0;
+
+#ifdef USE_LIBPCRE2
+		matcher_pcre2 = !!opt.pattern_list->pcre2_pattern;
+		matcher_jit = matcher_pcre2 &&
+			      !!opt.pattern_list->pcre2_jit_on;
+#endif
+		trace2_data_intmax("grep", the_repository, "matcher/pcre2",
+				   matcher_pcre2);
+		trace2_data_intmax("grep", the_repository, "matcher/jit",
+				   matcher_jit);
+	}
 	if (num_threads > 1 && recurse_submodules)
 		start_threads(&opt);
 
