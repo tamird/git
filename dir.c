@@ -3562,6 +3562,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
 	int negative_only = has_pathspec || dir->untracked_cache_negative_only;
+	int cache_present = !!dir->untracked;
+	unsigned int stored_flags = cache_present ? dir->untracked->dir_flags : 0;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
 	dir->internal.visited_paths = 0;
@@ -3578,6 +3580,14 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 
 	untracked = validate_untracked_cache(dir, len, istate, pathspec,
 					     &negative_only);
+	trace2_data_intmax("untracked_cache", istate->repo, "requested-flags",
+			   dir->flags);
+	trace2_data_intmax("untracked_cache", istate->repo, "stored-flags",
+			   stored_flags);
+	trace2_data_intmax("untracked_cache", istate->repo, "cache-present",
+			   cache_present);
+	trace2_data_intmax("untracked_cache", istate->repo, "negative-only",
+			   negative_only);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
