@@ -330,6 +330,38 @@ test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
 	GIT_TRACE2_EVENT="$PWD/pickaxe-default-patch.trace" \
 		git -C GS-plain log -S"[b]" -p >actual &&
 	test_cmp pickaxe-default-patch.expect actual &&
+	test_trace2_data log setup-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log prepare-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log history-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log output-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log finalize-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log execution-us "[0-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log count/returned "[1-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log count/shown "[1-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log count/pending "[1-9][0-9]*" \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log count/pathspecs 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/pickaxe 1 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/follow 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/first-parent 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/reflog 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/no-walk 0 \
+		<pickaxe-default-patch.trace &&
+	test_trace2_data log mode/patch 1 \
+		<pickaxe-default-patch.trace &&
 	test_trace2_data pickaxe content_index/pairs_seen \
 		"[1-9][0-9]*" <pickaxe-default-patch.trace &&
 	test_trace2_data pickaxe content_index/min_pairs 4096 \

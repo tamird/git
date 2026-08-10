@@ -169,7 +169,17 @@ test_expect_success 'git log -- folder works with and without the trailing slash
 
 test_expect_success 'git log for path that does not exist. ' '
 	test_bloom_filters_used "-- path_does_not_exist" &&
-	test_grep "active:1" "$TRASH_DIRECTORY/trace.perf"
+	test_grep "active:1" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "prepare-us:[0-9][0-9]*" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "history-us:[0-9][0-9]*" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "output-us:[0-9][0-9]*" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "execution-us:[0-9][0-9]*" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "count/returned:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "count/shown:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "count/pathspecs:1" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "mode/pickaxe:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "mode/reflog:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "mode/patch:0" "$TRASH_DIRECTORY/trace.perf"
 '
 
 test_expect_success '--follow skips commits using Bloom filters' '
@@ -329,7 +339,10 @@ test_expect_success '--follow does not elide remerge-diff commits' '
 
 test_expect_success 'git log with --walk-reflogs does not use Bloom filters' '
 	test_bloom_filters_not_used "--walk-reflogs -- A" &&
-	test_grep "active:0" "$TRASH_DIRECTORY/trace.perf"
+	test_grep "active:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "mode/reflog:1" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "mode/pickaxe:0" "$TRASH_DIRECTORY/trace.perf" &&
+	test_grep "count/pathspecs:1" "$TRASH_DIRECTORY/trace.perf"
 '
 
 test_expect_success 'git log -- "." pathspec at root does not use Bloom filters' '
