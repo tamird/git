@@ -42,6 +42,7 @@
 #include "path.h"
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
+#include "trace.h"
 #include "trace2.h"
 #include "wrapper.h"
 #include "write-or-die.h"
@@ -2959,6 +2960,13 @@ int cmd_grep(int argc,
 	int use_index = 1;
 	int allow_revs;
 	int ret;
+	uint64_t t_begin = getnanotime();
+	uint64_t t_compile_begin = 0, t_compile_end = 0;
+	uint64_t t_dispatch_end = 0;
+	int phases_ready = 0;
+	int requested_threads = 0, selected_threads = 0;
+	int matcher_type = 0;
+	size_t revision_count = 0, pathspec_count = 0;
 
 	struct option options[] = {
 		OPT_BOOL(0, "cached", &cached,
@@ -3241,6 +3249,7 @@ int cmd_grep(int argc,
 		goto out;
 	}
 
+	requested_threads = num_threads;
 	threads_auto = num_threads == 0;
 	if (show_in_pager) {
 		if (num_threads > 1)
@@ -3264,7 +3273,13 @@ int cmd_grep(int argc,
 		if (!HAVE_THREADS)
 			BUG("Somebody got num_threads calculation wrong!");
 	}
+	t_compile_begin = getnanotime();
 	compile_grep_patterns(&opt);
+	t_compile_end = getnanotime();
+	revision_count = list.nr;
+	pathspec_count = pathspec.nr;
+	matcher_type = opt.pattern_type_option;
+	phases_ready = 1;
 	if (opt.pattern_type_option == GREP_PATTERN_TYPE_FIXED &&
 	    opt.pattern_list && !opt.pattern_list->next) {
 		int matcher_pcre2 = 0, matcher_jit = 0;
@@ -3335,6 +3350,8 @@ int cmd_grep(int argc,
 
 	if (threads_started)
 		hit |= wait_all();
+	t_dispatch_end = getnanotime();
+	selected_threads = num_threads;
 	if (content_index_negative_entries) {
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_negative_cache_entries",
@@ -3383,5 +3400,40 @@ out:
 	content_index_negative_nr = 0;
 	content_index_negative_entries = 0;
 	free_repos();
+	if (phases_ready) {
+		uint64_t t_end = getnanotime();
+
+		trace2_data_intmax("grep", the_repository, "setup-us",
+				   (t_compile_begin - t_begin) / 1000);
+		trace2_data_intmax("grep", the_repository, "compile-us",
+				   (t_compile_end - t_compile_begin) / 1000);
+		trace2_data_intmax("grep", the_repository, "dispatch-us",
+				   (t_dispatch_end - t_compile_end) / 1000);
+		trace2_data_intmax("grep", the_repository, "finalize-us",
+				   (t_end - t_dispatch_end) / 1000);
+		trace2_data_intmax("grep", the_repository, "execution-us",
+				   (t_end - t_begin) / 1000);
+		trace2_data_intmax("grep", the_repository, "mode/no-index",
+				   !use_index);
+		trace2_data_intmax("grep", the_repository, "mode/cached",
+				   !!cached);
+		trace2_data_intmax("grep", the_repository, "mode/untracked",
+				   !!untracked);
+		trace2_data_intmax("grep", the_repository, "mode/revisions",
+				   !!revision_count);
+		trace2_data_intmax("grep", the_repository, "mode/worktree",
+				   use_index && !cached && !untracked &&
+				   !revision_count);
+		trace2_data_intmax("grep", the_repository, "count/revisions",
+				   revision_count);
+		trace2_data_intmax("grep", the_repository, "count/pathspecs",
+				   pathspec_count);
+		trace2_data_intmax("grep", the_repository, "matcher/type",
+				   matcher_type);
+		trace2_data_intmax("grep", the_repository, "threads/requested",
+				   requested_threads);
+		trace2_data_intmax("grep", the_repository, "threads/selected",
+				   selected_threads);
+	}
 	return ret;
 }
