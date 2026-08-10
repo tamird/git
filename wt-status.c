@@ -808,6 +808,7 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	int i;
 	struct dir_struct dir = DIR_INIT;
 	uint64_t t_begin = getnanotime();
+	uint64_t t_fill_begin, t_fill_end, t_end;
 	struct index_state *istate = s->repo->index;
 
 	if (!s->show_untracked_files)
@@ -827,7 +828,9 @@ static void wt_status_collect_untracked(struct wt_status *s)
 
 	setup_standard_excludes(&dir);
 
+	t_fill_begin = getnanotime();
 	fill_directory(&dir, istate, &s->pathspec);
+	t_fill_end = getnanotime();
 
 	for (i = 0; i < dir.nr; i++) {
 		struct dir_entry *ent = dir.entries[i];
@@ -847,6 +850,16 @@ static void wt_status_collect_untracked(struct wt_status *s)
 
 	if (advice_enabled(ADVICE_STATUS_U_OPTION))
 		s->untracked_in_ms = (getnanotime() - t_begin) / 1000000;
+
+	t_end = getnanotime();
+	trace2_data_intmax("status", s->repo, "untracked/all",
+			   s->show_untracked_files == SHOW_ALL_UNTRACKED_FILES);
+	trace2_data_intmax("status", s->repo, "untracked/fill-us",
+			   (t_fill_end - t_fill_begin) / 1000);
+	trace2_data_intmax("status", s->repo, "untracked/materialize-us",
+			   (t_end - t_fill_end) / 1000);
+	trace2_data_intmax("status", s->repo, "untracked/duration-us",
+			   (t_end - t_begin) / 1000);
 }
 
 static int has_unmerged(struct wt_status *s)

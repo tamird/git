@@ -456,6 +456,8 @@ int cmd_diff(int argc,
 	int worktree_diff = 0;
 	int result;
 	struct symdiff sdiff;
+	uint64_t t_begin = getnanotime();
+	uint64_t t_dispatch_begin, t_dispatch_end, t_end;
 
 	/*
 	 * We could get N tree-ish in the rev.pending_objects list.
@@ -658,6 +660,7 @@ int cmd_diff(int argc,
 	/*
 	 * Now, do the arguments look reasonable?
 	 */
+	t_dispatch_begin = getnanotime();
 	if (!ent.nr) {
 		switch (blobs) {
 		case 0:
@@ -695,6 +698,7 @@ int cmd_diff(int argc,
 				      ent.objects, ent.nr,
 				      first_non_parent);
 	result = diff_result_code(&rev);
+	t_dispatch_end = getnanotime();
 	if (1 < rev.diffopt.skip_stat_unmatch)
 		refresh_index_quietly(&rev.prune_data,
 				      !ent.nr && !blobs &&
@@ -711,5 +715,14 @@ int cmd_diff(int argc,
 	release_revisions(&rev);
 	object_array_clear(&ent);
 	symdiff_release(&sdiff);
+	t_end = getnanotime();
+	trace2_data_intmax("diff", the_repository, "setup-us",
+			   (t_dispatch_begin - t_begin) / 1000);
+	trace2_data_intmax("diff", the_repository, "dispatch-us",
+			   (t_dispatch_end - t_dispatch_begin) / 1000);
+	trace2_data_intmax("diff", the_repository, "finalize-us",
+			   (t_end - t_dispatch_end) / 1000);
+	trace2_data_intmax("diff", the_repository, "execution-us",
+			   (t_end - t_begin) / 1000);
 	return result;
 }
