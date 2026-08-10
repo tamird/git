@@ -48,6 +48,8 @@
 #include "promisor-remote.h"
 #include "range-diff.h"
 #include "tmp-objdir.h"
+#include "trace.h"
+#include "trace2.h"
 #include "tree.h"
 #include "userdiff.h"
 #include "write-or-die.h"
@@ -409,15 +411,37 @@ static void cmd_log_init(int argc, const char **argv, const char *prefix,
 	cmd_log_init_finish(argc, argv, prefix, rev, opt, cfg);
 }
 
-static int cmd_log_walk_no_free(struct rev_info *rev)
+struct log_trace2_state {
+	uint64_t begin;
+	uint64_t prepare_begin;
+	uint64_t prepare_end;
+	uint64_t output_ns;
+	uint64_t returned;
+	uint64_t shown;
+	int pending;
+	int pathspecs;
+	int pickaxe;
+	int follow;
+	int first_parent;
+	int reflog;
+	int no_walk;
+	int patch;
+};
+
+static int cmd_log_walk_no_free(struct rev_info *rev,
+				struct log_trace2_state *trace)
 {
 	struct commit *commit;
 	int saved_nrl = 0;
 	int saved_dcctc = 0;
 	int result;
 
+	if (trace)
+		trace->prepare_begin = getnanotime();
 	if (prepare_revision_walk(rev))
 		die(_("revision walk setup failed"));
+	if (trace)
+		trace->prepare_end = getnanotime();
 
 	/*
 	 * For --check and --exit-code, the exit code is based on CHECK_FAILED
@@ -425,7 +449,18 @@ static int cmd_log_walk_no_free(struct rev_info *rev)
 	 * retain that state information if replacing rev->diffopt in this loop
 	 */
 	while ((commit = get_revision(rev)) != NULL) {
-		if (!log_tree_commit(rev, commit) && rev->max_count >= 0)
+		uint64_t output_begin = 0;
+		int shown;
+
+		if (trace)
+			output_begin = getnanotime();
+		shown = log_tree_commit(rev, commit);
+		if (trace) {
+			trace->output_ns += getnanotime() - output_begin;
+			trace->returned++;
+			trace->shown += !!shown;
+		}
+		if (!shown && rev->max_count >= 0)
 			/*
 			 * We decremented max_count in get_revision,
 			 * but we didn't actually show the commit.
@@ -461,12 +496,13 @@ static int cmd_log_walk_no_free(struct rev_info *rev)
 	return result;
 }
 
-static int cmd_log_walk(struct rev_info *rev)
+static int cmd_log_walk(struct rev_info *rev,
+			struct log_trace2_state *trace)
 {
 	int retval;
 
 	rev->diffopt.no_free = 1;
-	retval = cmd_log_walk_no_free(rev);
+	retval = cmd_log_walk_no_free(rev, trace);
 	rev->diffopt.no_free = 0;
 	diff_free(&rev->diffopt);
 	return retval;
@@ -572,7 +608,7 @@ int cmd_whatchanged(int argc,
 	if (!rev.diffopt.output_format)
 		rev.diffopt.output_format = DIFF_FORMAT_RAW;
 
-	ret = cmd_log_walk(&rev);
+	ret = cmd_log_walk(&rev, NULL);
 
 	release_revisions(&rev);
 	log_config_release(&cfg);
@@ -706,7 +742,7 @@ int cmd_show(int argc,
 	cmd_log_init(argc, argv, prefix, &rev, &opt, &cfg);
 
 	if (!rev.no_walk) {
-		ret = cmd_log_walk(&rev);
+		ret = cmd_log_walk(&rev, NULL);
 		release_revisions(&rev);
 		log_config_release(&cfg);
 		return ret;
@@ -763,7 +799,7 @@ int cmd_show(int argc,
 			memcpy(&rev.pending, &blank, sizeof(rev.pending));
 
 			add_object_array(o, name, &rev.pending);
-			ret = cmd_log_walk_no_free(&rev);
+			ret = cmd_log_walk_no_free(&rev, NULL);
 
 			/*
 			 * No need for
@@ -817,7 +853,7 @@ int cmd_log_reflog(int argc,
 	rev.always_show_header = 1;
 	cmd_log_init_finish(argc, argv, prefix, &rev, &opt, &cfg);
 
-	ret = cmd_log_walk(&rev);
+	ret = cmd_log_walk(&rev, NULL);
 
 	release_revisions(&rev);
 	log_config_release(&cfg);
@@ -842,7 +878,15 @@ int cmd_log(int argc,
 	struct log_config cfg;
 	struct rev_info rev;
 	struct setup_revision_opt opt;
+	struct log_trace2_state state = { 0 };
+	struct log_trace2_state *trace = NULL;
+	uint64_t walk_end = 0;
 	int ret;
+
+	if (trace2_is_enabled()) {
+		trace = &state;
+		trace->begin = getnanotime();
+	}
 
 	log_config_init(&cfg);
 	init_diff_ui_defaults();
@@ -859,10 +903,66 @@ int cmd_log(int argc,
 	cmd_log_init(argc, argv, prefix, &rev, &opt, &cfg);
 	rev.follow_bloom_elision = FOLLOW_BLOOM_ELISION_WAITING;
 
-	ret = cmd_log_walk(&rev);
+	if (trace) {
+		trace->pending = rev.pending.nr;
+		trace->pathspecs = rev.prune_data.nr;
+		trace->pickaxe = !!(rev.diffopt.pickaxe_opts &
+				    DIFF_PICKAXE_KINDS_MASK);
+		trace->follow = !!rev.diffopt.flags.follow_renames;
+		trace->first_parent = !!rev.first_parent_only;
+		trace->reflog = !!rev.reflog_info;
+		trace->no_walk = !!rev.no_walk;
+		trace->patch = !!(rev.diffopt.output_format & DIFF_FORMAT_PATCH);
+	}
+
+	ret = cmd_log_walk(&rev, trace);
+	if (trace)
+		walk_end = getnanotime();
 
 	release_revisions(&rev);
 	log_config_release(&cfg);
+	if (trace) {
+		uint64_t end = getnanotime();
+		uint64_t history_ns = walk_end - trace->prepare_end;
+
+		if (history_ns >= trace->output_ns)
+			history_ns -= trace->output_ns;
+		else
+			history_ns = 0;
+
+		trace2_data_intmax("log", the_repository, "setup-us",
+				   (trace->prepare_begin - trace->begin) / 1000);
+		trace2_data_intmax("log", the_repository, "prepare-us",
+				   (trace->prepare_end - trace->prepare_begin) / 1000);
+		trace2_data_intmax("log", the_repository, "history-us",
+				   history_ns / 1000);
+		trace2_data_intmax("log", the_repository, "output-us",
+				   trace->output_ns / 1000);
+		trace2_data_intmax("log", the_repository, "finalize-us",
+				   (end - walk_end) / 1000);
+		trace2_data_intmax("log", the_repository, "execution-us",
+				   (end - trace->begin) / 1000);
+		trace2_data_intmax("log", the_repository, "count/returned",
+				   trace->returned);
+		trace2_data_intmax("log", the_repository, "count/shown",
+				   trace->shown);
+		trace2_data_intmax("log", the_repository, "count/pending",
+				   trace->pending);
+		trace2_data_intmax("log", the_repository, "count/pathspecs",
+				   trace->pathspecs);
+		trace2_data_intmax("log", the_repository, "mode/pickaxe",
+				   trace->pickaxe);
+		trace2_data_intmax("log", the_repository, "mode/follow",
+				   trace->follow);
+		trace2_data_intmax("log", the_repository, "mode/first-parent",
+				   trace->first_parent);
+		trace2_data_intmax("log", the_repository, "mode/reflog",
+				   trace->reflog);
+		trace2_data_intmax("log", the_repository, "mode/no-walk",
+				   trace->no_walk);
+		trace2_data_intmax("log", the_repository, "mode/patch",
+				   trace->patch);
+	}
 	return ret;
 }
 
