@@ -477,6 +477,14 @@ test_expect_success PTHREADS 'bare diff avoids preload for one fsmonitor-dirty p
 		test_grep "^diff --git a/dirty-one b/dirty-one$" \
 			.git/diff.actual &&
 		test_region ! index preload "$PWD/.git/diff-one.trace" &&
+		test_grep "\"key\":\"setup-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-one.trace &&
+		test_grep "\"key\":\"dispatch-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-one.trace &&
+		test_grep "\"key\":\"finalize-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-one.trace &&
+		test_grep "\"key\":\"execution-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-one.trace &&
 		for option in --stat -w
 		do
 			git --no-optional-locks \
@@ -729,6 +737,14 @@ test_expect_success 'diff-index reuses valid cache trees with excluded globs' '
 		echo "diff index cached traversal: $cached_traversal" &&
 		test_trace2_data diff index/cached-traversal 1 \
 			<.git/diff-exclude.trace &&
+		test_grep "\"key\":\"setup-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-exclude.trace &&
+		test_grep "\"key\":\"dispatch-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-exclude.trace &&
+		test_grep "\"key\":\"finalize-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-exclude.trace &&
+		test_grep "\"key\":\"execution-us\",\"value\":\"[0-9][0-9]*\"" \
+			.git/diff-exclude.trace &&
 		for mode in --stat -w
 		do
 			git --no-optional-locks \
@@ -1788,7 +1804,11 @@ test_expect_success UNTRACKED_CACHE 'normal cache prunes all status' '
 	test_grep "cache-present:1" trace-normal-to-all &&
 	test_grep "negative-only:1" trace-normal-to-all &&
 	test_grep "subtrees-pruned:[1-9]" trace-normal-to-all &&
-	test_grep "directories-visited:[1-9]" trace-normal-to-all
+	test_grep "directories-visited:[1-9]" trace-normal-to-all &&
+	test_grep "untracked/all:1" trace-normal-to-all &&
+	test_grep "untracked/fill-us:[0-9][0-9]*" trace-normal-to-all &&
+	test_grep "untracked/materialize-us:[0-9][0-9]*" trace-normal-to-all &&
+	test_grep "untracked/duration-us:[0-9][0-9]*" trace-normal-to-all
 '
 
 test_expect_success UNTRACKED_CACHE 'prune git add with wildcard pathspec' '
@@ -1838,7 +1858,11 @@ test_expect_success UNTRACKED_CACHE 'all cache prunes normal status' '
 	test_grep "cache-present:1" trace-all-to-normal &&
 	test_grep "negative-only:1" trace-all-to-normal &&
 	test_grep "subtrees-pruned:[1-9]" trace-all-to-normal &&
-	test_grep "directories-visited:[1-9]" trace-all-to-normal
+	test_grep "directories-visited:[1-9]" trace-all-to-normal &&
+	test_grep "untracked/all:0" trace-all-to-normal &&
+	test_grep "untracked/fill-us:[0-9][0-9]*" trace-all-to-normal &&
+	test_grep "untracked/materialize-us:[0-9][0-9]*" trace-all-to-normal &&
+	test_grep "untracked/duration-us:[0-9][0-9]*" trace-all-to-normal
 '
 
 test_expect_success UNTRACKED_CACHE 'ls-files replays all-mode cache' '
