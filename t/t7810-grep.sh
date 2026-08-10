@@ -1704,6 +1704,29 @@ test_expect_success 'grep with CE_VALID file' '
 		git grep test -- t/t >actual &&
 	test_cmp expect actual &&
 	test_grep ! "literal_path_candidates" grep-literal-trace-valid &&
+	test_trace2_data grep mode/no-index 0 <grep-literal-trace-valid &&
+	test_trace2_data grep mode/cached 0 <grep-literal-trace-valid &&
+	test_trace2_data grep mode/untracked 0 <grep-literal-trace-valid &&
+	test_trace2_data grep mode/revisions 0 <grep-literal-trace-valid &&
+	test_trace2_data grep mode/worktree 1 <grep-literal-trace-valid &&
+	test_trace2_data grep count/revisions 0 <grep-literal-trace-valid &&
+	test_trace2_data grep count/pathspecs 1 <grep-literal-trace-valid &&
+	test_grep "\"key\":\"matcher/type\",\"value\":\"[1-4]\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"threads/requested\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"threads/selected\",\"value\":\"[1-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"setup-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"compile-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"dispatch-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"finalize-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
+	test_grep "\"key\":\"execution-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-literal-trace-valid &&
 	git update-index --no-assume-unchanged t/t &&
 	git checkout t/t
 '
@@ -5457,6 +5480,15 @@ test_expect_success 'grep of revision in partial clone batches prefetch and hono
 	GIT_TRACE2_EVENT="$(pwd)/grep-trace-pathspec" \
 		git -C grep-partial grep -c "needle" HEAD -- "a/*.txt" >result &&
 	test_region grep prefetch_blobs grep-trace-pathspec &&
+	test_trace2_data grep mode/revisions 1 <grep-trace-pathspec &&
+	test_trace2_data grep mode/worktree 0 <grep-trace-pathspec &&
+	test_trace2_data grep mode/cached 0 <grep-trace-pathspec &&
+	test_trace2_data grep count/revisions 1 <grep-trace-pathspec &&
+	test_trace2_data grep count/pathspecs 1 <grep-trace-pathspec &&
+	test_grep "\"key\":\"dispatch-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-trace-pathspec &&
+	test_grep "\"key\":\"execution-us\",\"value\":\"[0-9][0-9]*\"" \
+		grep-trace-pathspec &&
 
 	# Only a/matches.txt contains "needle" among the matched paths.
 	test_line_count = 1 result &&

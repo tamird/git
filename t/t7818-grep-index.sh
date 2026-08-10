@@ -1716,6 +1716,18 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 	fi &&
 	test_grep "\"key\":\"matcher/jit\",\"value\":\"[01]\"" \
 		negative-alt-fixed.trace &&
+	test_trace2_data grep mode/cached 1 <negative-alt-fixed.trace &&
+	test_trace2_data grep mode/worktree 0 <negative-alt-fixed.trace &&
+	test_trace2_data grep mode/revisions 0 <negative-alt-fixed.trace &&
+	test_trace2_data grep count/revisions 0 <negative-alt-fixed.trace &&
+	test_trace2_data grep count/pathspecs 1 <negative-alt-fixed.trace &&
+	test_trace2_data grep matcher/type 3 <negative-alt-fixed.trace &&
+	test_grep "\"key\":\"compile-us\",\"value\":\"[0-9][0-9]*\"" \
+		negative-alt-fixed.trace &&
+	test_grep "\"key\":\"dispatch-us\",\"value\":\"[0-9][0-9]*\"" \
+		negative-alt-fixed.trace &&
+	test_grep "\"key\":\"execution-us\",\"value\":\"[0-9][0-9]*\"" \
+		negative-alt-fixed.trace &&
 	printf "foo\0" >negative-binary &&
 	git add negative-binary &&
 	binary_oid=$(git rev-parse :negative-binary) &&
