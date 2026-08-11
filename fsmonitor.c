@@ -827,9 +827,35 @@ void refresh_fsmonitor(struct index_state *istate)
 			strbuf_addstr(&last_update_token, buf);
 			bol = last_update_token.len + 1;
 			is_trivial = query_result.buf[bol] == '/';
-			if (is_trivial)
+			if (is_trivial) {
+				const char *requested = istate->fsmonitor_last_update;
+				const char *requested_id, *response_id;
+				const char *requested_seq, *response_seq;
+				const char *trivial_reason;
+
+				if (!requested || !strcmp(requested, "builtin:fake")) {
+					trivial_reason = "initial-token";
+				} else if (!skip_prefix(requested, "builtin:", &requested_id) ||
+					   !skip_prefix(last_update_token.buf, "builtin:", &response_id) ||
+					   !(requested_seq = strchr(requested_id, ':')) ||
+					   requested_seq == requested_id || !requested_seq[1] ||
+					   !(response_seq = strchr(response_id, ':')) ||
+					   response_seq == response_id || !response_seq[1]) {
+					trivial_reason = "invalid-token";
+				} else if (requested_seq - requested_id !=
+					   response_seq - response_id ||
+					   memcmp(requested_id, response_id,
+						  requested_seq - requested_id)) {
+					trivial_reason = "token-generation-changed";
+				} else {
+					trivial_reason = "same-token-generation";
+				}
+
 				trace2_data_intmax("fsm_client", NULL,
 						   "query/trivial-response", 1);
+				trace2_data_string("fsm_client", NULL,
+						   "query/trivial-reason", trivial_reason);
+			}
 		} else {
 			/*
 			 * The builtin daemon is not available on this
