@@ -2254,6 +2254,7 @@ struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
 	int ipc_available;
+	int recursive_basename_pathspec;
 	size_t batch_size;
 	size_t batch_max_bytes;
 	uint64_t objects;
@@ -2423,6 +2424,24 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			break;
 		}
 		te_len = tree_entry_len(&entry);
+
+		if (query && query->recursive_basename_pathspec &&
+		    S_ISREG(entry.mode) &&
+		    !starts_with(base->buf + tn_len, "**/")) {
+			int basename_matches = 0;
+
+			for (size_t i = 0; i < pathspec->nr; i++) {
+				const struct pathspec_item *item = &pathspec->items[i];
+
+				if (te_len == item->len - 3 &&
+				    !memcmp(entry.path, item->match + 3, te_len)) {
+					basename_matches = 1;
+					break;
+				}
+			}
+			if (!basename_matches)
+				continue;
+		}
 
 		if (match != all_entries_interesting) {
 			strbuf_addstr(&name, base->buf + tn_len);
@@ -2747,6 +2766,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		.impossible = OIDSET_INIT,
 		.maybe = OIDSET_INIT,
 		.ipc_available = -1,
+		.recursive_basename_pathspec =
+			!recurse_submodules && pathspec->nr &&
+			!(pathspec->magic & ~PATHSPEC_GLOB),
 		.batch_size = git_env_ulong("GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE",
 					    GREP_TREE_INDEX_BATCH_SIZE),
 		.batch_max_bytes = git_env_ulong(
@@ -2757,6 +2779,14 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	int hit = 0;
 	const unsigned int nr = list->nr;
 
+	for (i = 0; query.recursive_basename_pathspec && i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		const char *basename;
+
+		if (item->prefix || (item->magic & ~PATHSPEC_GLOB) ||
+		    !pathspec_item_get_recursive_basename(item, &basename))
+			query.recursive_basename_pathspec = 0;
+	}
 	if (!query.batch_size)
 		query.batch_size = GREP_TREE_INDEX_BATCH_SIZE;
 	else if (query.batch_size > GREP_TREE_INDEX_BATCH_SIZE)
