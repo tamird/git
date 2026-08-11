@@ -133,6 +133,12 @@ test_expect_success '--follow follows renames through a fork in a single history
 	test_cmp expect actual.sorted
 '
 
+test_expect_success '--follow honors the rename threshold across a merge' '
+	printf "%s\n" "Z: modify path" >expect &&
+	git -C diamond log --follow -M100% --pretty=tformat:%s path >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success '--follow refreshes Bloom keys for each history line' '
 	git -C diamond -c core.commitGraph=false log \
 		--follow --pretty=tformat:%s path >expect &&

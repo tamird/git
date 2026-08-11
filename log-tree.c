@@ -1308,6 +1308,9 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	diff_opts.flags.recursive = 1;
 	diff_opts.flags.follow_renames = 1;
 	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
+	diff_opts.break_opt = opt->diffopt.break_opt;
+	diff_opts.rename_score = opt->diffopt.rename_score;
+	diff_opts.rename_limit = opt->diffopt.rename_limit;
 	diff_setup_done(&diff_opts);
 	diff_tree_oid(get_commit_tree_oid(parent),
 		      get_commit_tree_oid(commit),
@@ -1488,9 +1491,12 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 		struct commit_list *parents = get_saved_parents(opt, commit);
 		if (parents && parents->next) {
 			struct commit_list *p;
-			for (p = parents; p; p = p->next)
+			for (p = parents; p; p = p->next) {
 				propagate_follow_pathspec_to_parent(opt, commit,
 								    p->item);
+				if (opt->first_parent_only)
+					break;
+			}
 		} else if (parents)
 			record_follow_pathspec(opt, parents->item);
 	}

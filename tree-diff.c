@@ -635,6 +635,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_opts.single_follow = opt->pathspec.items[0].match;
 	diff_opts.break_opt = opt->break_opt;
 	diff_opts.rename_score = opt->rename_score;
+	diff_opts.rename_limit = opt->rename_limit;
 	diff_setup_done(&diff_opts);
 	ll_diff_tree_oid(old_oid, new_oid, base, &diff_opts);
 	diffcore_std(&diff_opts);
