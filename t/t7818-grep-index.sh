@@ -1485,13 +1485,15 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_must_fail env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
 		GIT_TRACE2_EVENT="$PWD/tree.trace" \
 		git grep "absent pattern" HEAD HEAD^ -- \
-			short ordinary present 2>err-tree &&
+			":(glob)**/short" ":(glob)**/ordinary" \
+			":(glob)**/present" 2>err-tree &&
 	test_must_be_empty err-tree &&
 	test_trace2_data grep content_index_tree_objects 6 <tree.trace &&
 	test_trace2_data grep content_index_tree_queried 3 <tree.trace &&
 	test_trace2_data grep content_index_tree_rejected 6 <tree.trace &&
 	test_trace2_data grep content_index_tree_batches 2 <tree.trace &&
 	test_region grep query_content_index_ipc tree.trace &&
+	test_must_fail git grep "present needle" HEAD -- "**/present" &&
 	git grep --no-content-index "present needle" HEAD HEAD^ -- present \
 		>expect-tree-positive &&
 	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=2 \
@@ -1571,6 +1573,17 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_region grep query_content_index_ipc tree-fallback.trace &&
 	test_region grep load_content_index tree-fallback.trace &&
 	git replace -d "$replaced_oid" &&
+	literal_glob_child=$(printf "100644 blob %s\tchild\n" \
+		"$replacement_oid" | git mktree) &&
+	literal_glob_parent=$(printf "040000 tree %s\tpresent\n" \
+		"$literal_glob_child" | git mktree) &&
+	literal_glob_tree=$(printf "040000 tree %s\t**\n" \
+		"$literal_glob_parent" | git mktree) &&
+	printf "%s:**/present/child:present needle\n" "$literal_glob_tree" \
+		>expect-tree-positive &&
+	git grep "present needle" "$literal_glob_tree" -- "**/present" \
+		>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
 	printf "nested/binary -diff\nnested/text diff\n" >.gitattributes &&
 	test_when_finished "rm -f .gitattributes" &&
 	nested_tree=$({
