@@ -1838,6 +1838,8 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-first.trace &&
 		test_trace2_data fsm_client query/trivial-response 1 \
 			<../untracked-restart-first.trace &&
+		test_trace2_data fsm_client query/trivial-reason \
+			token-generation-changed <../untracked-restart-first.trace &&
 		test_trace2_data status untracked-cache/restore miss \
 			<../untracked-restart-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
