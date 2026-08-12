@@ -1584,6 +1584,7 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			<../untracked-snapshot-locked.trace &&
 		git hash-object .git/index >../untracked-snapshot-index.before &&
 		GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE=1 \
+		GIT_TRACE2_EVENT_NESTING=2 \
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-first.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-snapshot-first.out &&
@@ -1593,6 +1594,22 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-first.trace &&
 		test_trace2_data status untracked-cache/restore \
 			miss <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/cache-present \
+			1 <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/requested-flags \
+			6 <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/stored-flags \
+			6 <../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/directories-visited \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/paths-visited \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-opendir \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-directory-invalidated \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-gitignore-invalidated \
+			<../untracked-snapshot-first.trace &&
 		! have_t2_data_event status untracked-cache/restore-reason \
 			<../untracked-snapshot-first.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \
@@ -1601,6 +1618,7 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-snapshot-first.trace &&
+		GIT_TRACE2_EVENT_NESTING=2 \
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-second.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-snapshot-second.out &&
@@ -1610,6 +1628,18 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-second.trace &&
 		test_trace2_data status untracked-cache/restore \
 			hit <../untracked-snapshot-second.trace &&
+		test_trace2_data status untracked/cache-present \
+			1 <../untracked-snapshot-second.trace &&
+		test_trace2_data status untracked/requested-flags \
+			6 <../untracked-snapshot-second.trace &&
+		test_trace2_data status untracked/stored-flags \
+			6 <../untracked-snapshot-second.trace &&
+		have_t2_data_event status untracked/directories-visited \
+			<../untracked-snapshot-second.trace &&
+		have_t2_data_event status untracked/subtrees-pruned \
+			<../untracked-snapshot-second.trace &&
+		have_t2_data_event status untracked/cache-opendir \
+			<../untracked-snapshot-second.trace &&
 		! have_t2_data_event status untracked-cache/restore-reason \
 			<../untracked-snapshot-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/restore \

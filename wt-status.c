@@ -810,6 +810,8 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	uint64_t t_begin = getnanotime();
 	uint64_t t_fill_begin, t_fill_end, t_end;
 	struct index_state *istate = s->repo->index;
+	int cache_present;
+	unsigned int stored_flags;
 
 	if (!s->show_untracked_files)
 		return;
@@ -825,6 +827,8 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	} else {
 		dir.untracked = istate->untracked;
 	}
+	cache_present = !!dir.untracked;
+	stored_flags = cache_present ? dir.untracked->dir_flags : 0;
 
 	setup_standard_excludes(&dir);
 
@@ -845,6 +849,34 @@ static void wt_status_collect_untracked(struct wt_status *s)
 			string_list_append(&s->ignored, ent->name);
 	}
 	string_list_sort_u(&s->ignored, 0);
+
+	trace2_data_intmax("status", s->repo, "untracked/cache-present",
+			   cache_present);
+	trace2_data_intmax("status", s->repo, "untracked/requested-flags",
+			   dir.flags);
+	trace2_data_intmax("status", s->repo, "untracked/stored-flags",
+			   stored_flags);
+	trace2_data_intmax("status", s->repo, "untracked/directories-visited",
+			   dir.internal.visited_directories);
+	trace2_data_intmax("status", s->repo, "untracked/paths-visited",
+			   dir.internal.visited_paths);
+	trace2_data_intmax("status", s->repo, "untracked/subtrees-pruned",
+			   dir.internal.pruned_subtrees);
+	trace2_data_intmax("status", s->repo, "untracked/subtrees-repaired",
+			   dir.internal.repaired_subtrees);
+	if (istate->untracked) {
+		trace2_data_intmax("status", s->repo, "untracked/cache-opendir",
+				   istate->untracked->dir_opened);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-directory-invalidated",
+				   istate->untracked->dir_invalidated);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-gitignore-invalidated",
+				   istate->untracked->gitignore_invalidated);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-node-created",
+				   istate->untracked->dir_created);
+	}
 
 	dir_clear(&dir);
 
