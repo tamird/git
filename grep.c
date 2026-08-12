@@ -1943,9 +1943,11 @@ static int should_lookahead(struct grep_opt *opt)
 static int look_ahead(struct grep_opt *opt,
 		      unsigned long *left_p,
 		      unsigned *lno_p,
-		      const char **bol_p)
+		      const char **bol_p,
+		      unsigned *dense_hits)
 {
 	unsigned lno = *lno_p;
+	unsigned misses = 0;
 	const char *bol = *bol_p;
 	struct grep_pat *p;
 	const char *sp, *last_bol;
@@ -1964,7 +1966,11 @@ static int look_ahead(struct grep_opt *opt,
 			hit = patmatch(lookahead, bol, bol + *left_p, &m, 0);
 		if (hit < 0)
 			return -1;
-		if (!hit || m.rm_so < 0 || m.rm_eo < 0)
+		if (!hit) {
+			misses++;
+			continue;
+		}
+		if (m.rm_so < 0 || m.rm_eo < 0)
 			continue;
 		if (earliest < 0 || m.rm_so < earliest)
 			earliest = m.rm_so;
@@ -1975,6 +1981,10 @@ static int look_ahead(struct grep_opt *opt,
 		*left_p = 0;
 		return 1;
 	}
+	if (misses >= 2 && !memchr(bol, '\n', earliest))
+		(*dense_hits)++;
+	else
+		*dense_hits = 0;
 	for (sp = bol + earliest; bol < sp && sp[-1] != '\n'; sp--)
 		; /* find the beginning of the line */
 	last_bol = sp;
@@ -2065,6 +2075,7 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	unsigned last_hit = 0;
 	int binary_match_only = 0;
 	unsigned count = 0;
+	unsigned dense_lookahead = 0;
 	int try_lookahead = 0;
 	int show_function = 0;
 	struct userdiff_driver *textconv = NULL;
@@ -2164,11 +2175,14 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		    && !(last_hit
 			 && (show_function ||
 			     lno <= last_hit + opt->post_context))) {
-			hit = look_ahead(opt, &left, &lno, &bol);
+			hit = look_ahead(opt, &left, &lno, &bol,
+					 &dense_lookahead);
 			if (hit < 0)
 				try_lookahead = 0;
 			else if (hit)
 				break;
+			else if (dense_lookahead >= 3)
+				try_lookahead = 0;
 		}
 		eol = end_of_line(bol, &left);
 
