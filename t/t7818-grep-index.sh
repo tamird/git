@@ -1641,6 +1641,26 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_grep "\"key\":\"content_index_tree_${phase}_us\",\"value\":\"[0-9][0-9]*\"" \
 			tree-attributes.trace || return 1
 	done &&
+	git grep --no-content-index "present needle" "$attributes_commit" -- \
+		":(glob)nested/**/te*" >expect-tree-positive &&
+	>tree-positive.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+		git grep "present needle" "$attributes_commit" -- \
+			":(glob)nested/**/te*" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_entries 3 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_pathspec_checks 2 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_basename_rejected 1 \
+		<tree-positive.trace &&
+	git grep --no-content-index "present needle" "$attributes_commit" -- \
+		":(glob)nested/**/text" >expect-tree-positive &&
+	git grep "present needle" "$attributes_commit" -- \
+		":(glob)nested/**/text" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_must_fail git grep "present needle" "$attributes_commit" -- \
+		":(glob)other/**/te*" &&
 	positive_oid=$(git rev-parse :present) &&
 	positive_object=.git/objects/$(test_oid_to_path "$positive_oid") &&
 	mv "$positive_object" "$positive_object.save" &&

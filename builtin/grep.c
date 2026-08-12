@@ -2255,6 +2255,7 @@ struct grep_tree_query_context {
 	struct oidset maybe;
 	int ipc_available;
 	int recursive_basename_pathspec;
+	int rooted_recursive_basename_pathspec;
 	int trace_enabled;
 	size_t batch_size;
 	size_t batch_max_bytes;
@@ -2286,6 +2287,22 @@ struct grep_tree_batch {
 	int check_attr;
 	int enabled;
 };
+
+static int grep_tree_rooted_recursive_basename(
+	const struct pathspec_item *item, const char **basename)
+{
+	const char *recursive;
+
+	if (item->prefix || item->magic != PATHSPEC_GLOB)
+		return 0;
+	recursive = strstr(item->match, "/**/");
+	if (!recursive || recursive == item->match ||
+	    item->nowildcard_len != recursive - item->match + 1)
+		return 0;
+	*basename = recursive + 4;
+	return **basename && !strchr(*basename, '/') &&
+	       !strchr(*basename, '\\');
+}
 
 static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 {
@@ -2467,6 +2484,28 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 				if (te_len == item->len - 3 &&
 				    !memcmp(entry.path, item->match + 3, te_len)) {
+					basename_matches = 1;
+					break;
+				}
+			}
+			if (!basename_matches) {
+				if (query->trace_enabled)
+					query->basename_rejected++;
+				continue;
+			}
+		}
+		if (query && query->rooted_recursive_basename_pathspec &&
+		    S_ISREG(entry.mode) &&
+		    !starts_with(base->buf + tn_len, "**/") &&
+		    !strstr(base->buf + tn_len, "/**/")) {
+			int basename_matches = 0;
+
+			for (size_t i = 0; i < pathspec->nr; i++) {
+				const struct pathspec_item *item = &pathspec->items[i];
+				const char *basename;
+
+				if (grep_tree_rooted_recursive_basename(item, &basename) &&
+				    !git_fnmatch(item, basename, entry.path, 0)) {
 					basename_matches = 1;
 					break;
 				}
@@ -2819,6 +2858,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		.recursive_basename_pathspec =
 			!recurse_submodules && pathspec->nr &&
 			!(pathspec->magic & ~PATHSPEC_GLOB),
+		.rooted_recursive_basename_pathspec =
+			!recurse_submodules && pathspec->nr &&
+			!(pathspec->magic & ~PATHSPEC_GLOB),
 		.trace_enabled = trace2_is_enabled(),
 		.batch_size = git_env_ulong("GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE",
 					    GREP_TREE_INDEX_BATCH_SIZE),
@@ -2837,6 +2879,14 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		if (item->prefix || (item->magic & ~PATHSPEC_GLOB) ||
 		    !pathspec_item_get_recursive_basename(item, &basename))
 			query.recursive_basename_pathspec = 0;
+	}
+	for (i = 0; query.rooted_recursive_basename_pathspec &&
+			    i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		const char *basename;
+
+		if (!grep_tree_rooted_recursive_basename(item, &basename))
+			query.rooted_recursive_basename_pathspec = 0;
 	}
 	if (!query.batch_size)
 		query.batch_size = GREP_TREE_INDEX_BATCH_SIZE;
