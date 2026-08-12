@@ -1509,6 +1509,22 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_batches 1 \
 		<tree-positive.trace &&
+	git grep --no-content-index "present needle" HEAD HEAD^ -- \
+		ordinary present >expect-tree-positive &&
+	>tree-positive.trace &&
+	env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=4 \
+		GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+		git grep "present needle" HEAD HEAD^ -- ordinary present \
+		>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_objects 4 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_queried 2 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_rejected 2 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_batches 1 \
+		<tree-positive.trace &&
 	git grep --no-content-index -F -e "import sample_ext.__private" \
 		-e "ordinary contents" -e "present needle" HEAD HEAD^ -- \
 		escaped-dot ordinary present \
