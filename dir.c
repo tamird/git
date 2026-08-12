@@ -3625,9 +3625,25 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 				 */
 				trace2_region_enter("dir", "skip-worktree-scan",
 						    istate->repo);
-				for (i = 0; i < istate->cache_nr; i++)
-					if (ce_skip_worktree(istate->cache[i]))
+				for (i = 0; i < istate->cache_nr; i++) {
+					const struct cache_entry *ce = istate->cache[i];
+					size_t name_len, exclude_len;
+
+					if (!ce_skip_worktree(ce))
+						continue;
+					if (S_ISSPARSEDIR(ce->ce_mode) ||
+					    !dir->exclude_per_dir ||
+					    !*dir->exclude_per_dir)
 						break;
+					name_len = ce_namelen(ce);
+					exclude_len = strlen(dir->exclude_per_dir);
+					if (name_len >= exclude_len &&
+					    (name_len == exclude_len ||
+					     ce->name[name_len - exclude_len - 1] == '/') &&
+					    !fspathcmp(ce->name + name_len - exclude_len,
+						       dir->exclude_per_dir))
+						break;
+				}
 				trace2_region_leave("dir", "skip-worktree-scan",
 						    istate->repo);
 				trace2_data_intmax("untracked_cache", istate->repo,

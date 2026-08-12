@@ -1346,10 +1346,18 @@ test_expect_success UNTRACKED_CACHE 'skip traversal of empty untracked cache' '
 		git status --porcelain &&
 		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-empty" \
 			git status --porcelain >../actual &&
+		test_must_be_empty ../actual &&
+		git update-index --skip-worktree dir1/dir2/tracked &&
+		git status --porcelain >../actual &&
+		test_must_be_empty ../actual &&
+		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-empty-skip-worktree" \
+			git --no-optional-locks status -z -uall >../actual &&
 		test_must_be_empty ../actual
 	) &&
 	test_grep "directories-visited:0" trace-empty &&
-	test_grep "subtrees-pruned:1" trace-empty
+	test_grep "subtrees-pruned:1" trace-empty &&
+	test_grep "directories-visited:0" trace-empty-skip-worktree &&
+	test_grep "subtrees-pruned:1" trace-empty-skip-worktree
 '
 
 test_expect_success UNTRACKED_CACHE 'keep tracked ignore identity with fsmonitor' '
