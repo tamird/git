@@ -2323,6 +2323,17 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 			query->queried += oids.nr;
 			query->batches++;
 			queried = 1;
+			for (size_t i = 0; i < oids.nr; i++) {
+				if (oidset_size(&query->impossible) +
+					    oidset_size(&query->maybe) >=
+				    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
+					break;
+				if (results[i] == GREP_INDEX_IPC_IMPOSSIBLE)
+					oidset_insert(&query->impossible,
+						      &oids.oid[i]);
+				else if (results[i] == GREP_INDEX_IPC_MAYBE)
+					oidset_insert(&query->maybe, &oids.oid[i]);
+			}
 		} else {
 			batch->enabled = 0;
 			query->ipc_available = 0;
@@ -2348,16 +2359,7 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 		if (result == GREP_INDEX_IPC_IMPOSSIBLE) {
 			query->rejected++;
 			rejected++;
-			if (oidset_size(&query->impossible) +
-				    oidset_size(&query->maybe) <
-			    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
-				oidset_insert(&query->impossible, &item->oid);
 		} else {
-			if (result == GREP_INDEX_IPC_MAYBE &&
-			    oidset_size(&query->impossible) +
-					    oidset_size(&query->maybe) <
-				    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
-				oidset_insert(&query->maybe, &item->oid);
 			hit |= grep_oid(batch->opt, &item->oid, item->filename,
 					batch->tree_name_len,
 					batch->check_attr ?
