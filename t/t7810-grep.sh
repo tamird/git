@@ -263,6 +263,20 @@ test_expect_success LIBPCRE2 'POSIX anchors preserve matches' '
 	test_cmp expect-literal actual &&
 	! test_trace2_data grep pcre2_lookahead_bre_start_anchor 1 \
 		<anchor-interior.trace &&
+	cat >expect <<-\EOF &&
+	anchor-literal:1:literal^anchor
+	anchor-literal:2:literal$anchor
+	anchor-literal:3:literal anchor
+	anchor-lookahead:1:partial
+	anchor-lookahead:2:partial suffix
+	anchor-lookahead:3:prefix partial
+	anchor-lookahead:4:prefix partial suffix
+	anchor-lookahead:5:partial
+	EOF
+	git grep --no-index -n -e "^missing" -e "^absent" \
+		-e "^partial" -e "[^@-~]" -e "^literal" \
+		-- anchor-lookahead anchor-literal >actual &&
+	test_cmp expect actual &&
 	printf "partial\r\n" >anchor-crlf &&
 	test_must_fail git grep --no-index -q "partial$" -- anchor-crlf &&
 	test_must_fail git grep --no-index -q -E "partial$" -- anchor-crlf
