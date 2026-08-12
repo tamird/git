@@ -1008,6 +1008,9 @@ TEST_DATA_BY_TEST = {
         "//t:lib-httpd",
     ],
     "t5550-http-fetch-dumb": [
+        "//:git_sh_i18n",
+        "//:git_sh_setup",
+        "//:git_submodule",
         "//t:lib-httpd",
     ],
     "t5551-http-fetch-smart": [
@@ -2253,6 +2256,11 @@ sh_library(
     name = "lib-httpd",
     srcs = [
         "lib-httpd.sh",
+    ],
+    data = glob(["lib-httpd/**"]) + [
+        "//:git-http-backend",
+        "//:git-http-fetch",
+        "//:git-remote-http",
     ],
 )
 
