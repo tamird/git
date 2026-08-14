@@ -1596,6 +1596,18 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			miss <../untracked-snapshot-first.trace &&
 		test_trace2_data status untracked/cache-present \
 			1 <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/cache-root-present \
+			1 <../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-root-valid \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-root-dirs \
+			<../untracked-snapshot-first.trace &&
+		have_t2_data_event status untracked/cache-root-can-skip \
+			<../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/cache-use-fsmonitor \
+			1 <../untracked-snapshot-first.trace &&
+		test_trace2_data status untracked/cache-resync \
+			0 <../untracked-snapshot-first.trace &&
 		test_trace2_data status untracked/requested-flags \
 			6 <../untracked-snapshot-first.trace &&
 		test_trace2_data status untracked/stored-flags \
