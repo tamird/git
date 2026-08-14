@@ -156,7 +156,7 @@ enum ipc_active_state ipc_client_try_connect(
 	struct ipc_client_connection **p_connection)
 {
 	enum ipc_active_state state = IPC_STATE__OTHER_ERROR;
-	int fd = -1;
+	int fd = -1, saved_errno;
 
 	*p_connection = NULL;
 
@@ -165,10 +165,16 @@ enum ipc_active_state ipc_client_try_connect(
 
 	state = connect_to_server(path, MY_CONNECTION_TIMEOUT_MS,
 				  options, &fd);
+	saved_errno = errno;
 
 	trace2_data_intmax("ipc-client", NULL, "try-connect/state",
 			   (intmax_t)state);
 	trace2_region_leave("ipc-client", "try-connect", NULL);
+	if (state == IPC_STATE__OTHER_ERROR) {
+		trace2_data_intmax("ipc-client", NULL, "try-connect/errno",
+				   saved_errno);
+		errno = saved_errno;
+	}
 
 	if (state == IPC_STATE__LISTENING) {
 		(*p_connection) = xcalloc(1, sizeof(struct ipc_client_connection));
