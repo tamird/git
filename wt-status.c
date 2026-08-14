@@ -811,6 +811,13 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	uint64_t t_fill_begin, t_fill_end, t_end;
 	struct index_state *istate = s->repo->index;
 	int cache_present;
+	int trace_cache_state;
+	int cache_root_present = 0;
+	int cache_root_valid = 0;
+	unsigned int cache_root_dirs = 0;
+	int cache_root_can_skip = 0;
+	int cache_use_fsmonitor = 0;
+	int cache_resync = 0;
 	unsigned int stored_flags;
 
 	if (!s->show_untracked_files)
@@ -829,6 +836,19 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	}
 	cache_present = !!dir.untracked;
 	stored_flags = cache_present ? dir.untracked->dir_flags : 0;
+	trace_cache_state = trace2_is_enabled();
+	if (trace_cache_state && dir.untracked) {
+		struct untracked_cache_dir *root = dir.untracked->root;
+
+		cache_root_present = !!root;
+		if (root) {
+			cache_root_valid = root->valid;
+			cache_root_dirs = root->dirs_nr;
+			cache_root_can_skip = root->can_skip_replay;
+		}
+		cache_use_fsmonitor = dir.untracked->use_fsmonitor;
+		cache_resync = dir.untracked->fsmonitor_resync;
+	}
 
 	setup_standard_excludes(&dir);
 
@@ -852,6 +872,23 @@ static void wt_status_collect_untracked(struct wt_status *s)
 
 	trace2_data_intmax("status", s->repo, "untracked/cache-present",
 			   cache_present);
+	if (trace_cache_state) {
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-root-present",
+				   cache_root_present);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-root-valid", cache_root_valid);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-root-dirs", cache_root_dirs);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-root-can-skip",
+				   cache_root_can_skip);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-use-fsmonitor",
+				   cache_use_fsmonitor);
+		trace2_data_intmax("status", s->repo,
+				   "untracked/cache-resync", cache_resync);
+	}
 	trace2_data_intmax("status", s->repo, "untracked/requested-flags",
 			   dir.flags);
 	trace2_data_intmax("status", s->repo, "untracked/stored-flags",
