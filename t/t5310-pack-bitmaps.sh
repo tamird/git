@@ -706,7 +706,38 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 
 		git rev-list --count --objects --use-bitmap-index HEAD >actual &&
 		git rev-list --count --objects HEAD >expect &&
-		test_cmp expect actual
+		test_cmp expect actual &&
+
+		git rev-parse HEAD~63 >in &&
+		test-tool bitmap write "$(basename $pack)" <in &&
+		test_commit packed &&
+		git rev-list --objects --no-object-names HEAD ^HEAD^ \
+			>packed.objects &&
+		git pack-objects .git/objects/pack/pack \
+			<packed.objects >/dev/null &&
+		git multi-pack-index write --no-bitmap &&
+		test_path_is_file "${pack%.pack}.bitmap" &&
+		test_path_is_file "$midx" &&
+		test_path_is_missing "$midx-$(midx_checksum "$objdir").bitmap" &&
+		base=$(git rev-parse HEAD) &&
+		test_commit unindexed-have &&
+		have=$(git rev-parse HEAD) &&
+		git checkout -b unindexed-want "$base" &&
+		test_commit unindexed-want &&
+		want=$(git rev-parse HEAD) &&
+		printf "%s\n%s\n" "$want" "^$have" >in &&
+		git rev-list --objects --no-object-names "$want" "^$have" |
+			sort >expect.objects &&
+		GIT_TRACE2_EVENT="$PWD/boundary.trace" \
+		GIT_TRACE2_EVENT_NESTING=4 \
+			git -c pack.useBitmapBoundaryTraversal=true \
+			pack-objects --stdout --revs <in >out.pack &&
+		git index-pack out.pack &&
+		list_packed_objects out.idx >actual.objects &&
+		test_cmp expect.objects actual.objects &&
+		test_line_count = 3 actual.objects &&
+		test_grep ! "\"label\":\"haves/boundary\"" boundary.trace &&
+		test_grep ! "\"key\":\"bitmap/misses\"" boundary.trace
 	)
 '
 
