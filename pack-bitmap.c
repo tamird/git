@@ -2182,15 +2182,16 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 		use_boundary_traversal = revs->repo->settings.pack_use_bitmap_boundary_traversal;
 	}
 
-	if (!use_boundary_traversal) {
-		/*
-		 * if we have a HAVES list, but none of those haves is contained
-		 * in the packfile that has a bitmap, we don't have anything to
-		 * optimize here
-		 */
-		if (haves && !in_bitmapped_pack(bitmap_git, haves))
-			goto cleanup;
-	}
+	/*
+	 * The classic walk cannot benefit from haves outside its bitmap.
+	 * A per-pack fallback for a multi-pack index likewise cannot cover
+	 * haves outside that pack without an expensive boundary traversal.
+	 */
+	if (haves &&
+	    (!use_boundary_traversal ||
+	     (bitmap_git->pack && bitmap_git->pack->multi_pack_index)) &&
+	    !in_bitmapped_pack(bitmap_git, haves))
+		goto cleanup;
 
 	/* if we don't want anything, we're done here */
 	if (!wants)
