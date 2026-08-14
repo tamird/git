@@ -217,12 +217,16 @@ test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long gitdir witho
 	long_component=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx &&
 	long_git_dir=long-git-$long_component$long_component &&
 	long_worktree=long-worktree &&
-	test_when_finished "test_might_fail env \
+	test_when_finished "test_might_fail git -C \"$long_worktree\" \
+				config --unset fsmonitor.socketDir &&
+			    test_might_fail env \
 				HOME=\"$grep_index_socket_dir\" \
 				git -C \"$long_worktree\" \
 				fsmonitor--daemon stop &&
 			    rm -rf \"$long_git_dir\" \"$long_worktree\" \
-				long-path.trace" &&
+				\"$grep_index_socket_dir/x\" long-path.trace \
+				long-path-terminal.trace long-path-terminal.expect \
+				long-path-terminal.actual long-path-terminal.errors" &&
 	(
 		HOME="$grep_index_socket_dir" &&
 		export HOME &&
@@ -237,7 +241,25 @@ test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long gitdir witho
 			git -C "$long_worktree" grep --cached \
 				"absent long path" &&
 		test_trace2_data grep content_index_ipc_candidates 0 \
-			<long-path.trace
+			<long-path.trace &&
+		: >"$grep_index_socket_dir/x" &&
+		git -C "$long_worktree" config fsmonitor.socketDir \
+			"$grep_index_socket_dir/x" &&
+		git -C "$long_worktree" grep --threads=1 --no-content-index \
+			-F "long path contents" "HEAD^{tree}" \
+			>long-path-terminal.expect &&
+		GIT_TRACE2_EVENT="$PWD/long-path-terminal.trace" \
+			git -C "$long_worktree" grep --threads=1 \
+				-F "long path contents" "HEAD^{tree}" \
+				>long-path-terminal.actual &&
+		test_cmp long-path-terminal.expect long-path-terminal.actual &&
+		test_trace2_data ipc-client try-connect/errno 20 \
+			<long-path-terminal.trace >long-path-terminal.errors &&
+		test_line_count = 1 long-path-terminal.errors &&
+		test_grep "\"key\":\"try-connect/path\".*\\.git-grep-index-" \
+			long-path-terminal.trace &&
+		test_grep ! "\"key\":\"try-connect/path\".*\\.git-fsmonitor" \
+			long-path-terminal.trace
 	)
 '
 

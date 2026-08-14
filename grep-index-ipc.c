@@ -339,7 +339,7 @@ char *grep_index_ipc_worker_path(struct repository *repo)
 						 "grep-workers");
 }
 
-static int grep_index_ipc_path_is_available(const char *path)
+static enum ipc_active_state grep_index_ipc_path_state(const char *path)
 {
 	struct ipc_client_connect_options options =
 		IPC_CLIENT_CONNECT_OPTIONS_INIT;
@@ -349,7 +349,7 @@ static int grep_index_ipc_path_is_available(const char *path)
 	options.uds_disallow_chdir = 1;
 	state = ipc_client_try_connect(path, &options, &connection);
 	ipc_client_close_connection(connection);
-	return state == IPC_STATE__LISTENING;
+	return state;
 }
 
 static int grep_index_ipc_ensure_path(
@@ -359,9 +359,13 @@ static int grep_index_ipc_ensure_path(
 		IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	struct ipc_client_connection *connection = NULL;
 	struct strbuf response = STRBUF_INIT;
-	int available = grep_index_ipc_path_is_available(path);
+	enum ipc_active_state state = grep_index_ipc_path_state(path);
 
-	if (!available) {
+	switch (state) {
+	case IPC_STATE__LISTENING:
+		return 1;
+	case IPC_STATE__NOT_LISTENING:
+	case IPC_STATE__PATH_NOT_FOUND:
 		options.wait_if_busy = 1;
 		options.uds_disallow_chdir = 1;
 		if (ipc_client_try_connect(
@@ -371,10 +375,15 @@ static int grep_index_ipc_ensure_path(
 				connection, "start-grep-index", 16,
 				&response);
 		ipc_client_close_connection(connection);
-		available = grep_index_ipc_path_is_available(path);
+		state = grep_index_ipc_path_state(path);
+		break;
+	case IPC_STATE__INVALID_PATH:
+	case IPC_STATE__OTHER_ERROR:
+	default:
+		return 0;
 	}
 	strbuf_release(&response);
-	return available;
+	return state == IPC_STATE__LISTENING;
 }
 
 int grep_index_ipc_is_available(struct repository *repo)
