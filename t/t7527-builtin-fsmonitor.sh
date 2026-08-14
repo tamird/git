@@ -1834,6 +1834,9 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 	(
 		cd test_untracked_snapshot_restart &&
 		test_commit base tracked &&
+		mkdir -p steady/deep &&
+		test_commit clean-one steady/deep/tracked &&
+		test_commit clean-two &&
 		git config core.fsmonitor true &&
 		git config core.untrackedCache true &&
 		: >../untracked-restart.excludes &&
@@ -1859,6 +1862,7 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 	start_daemon -C test_untracked_snapshot_restart &&
 	(
 		cd test_untracked_snapshot_restart &&
+		GIT_TEST_PRELOAD_INDEX=true \
 		GIT_TRACE2_EVENT="$PWD/../untracked-restart-first.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-restart-first.out &&
@@ -1872,8 +1876,11 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			token-generation-changed <../untracked-restart-first.trace &&
 		test_trace2_data status untracked-cache/restore miss \
 			<../untracked-restart-first.trace &&
+		test_trace2_data index preload/sum_lstat 2 \
+			<../untracked-restart-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-first.trace &&
+		GIT_TEST_PRELOAD_INDEX=true \
 		GIT_TRACE2_EVENT="$PWD/../untracked-restart-second.trace" \
 			git --no-optional-locks status --porcelain \
 			>../untracked-restart-second.out &&
@@ -1885,6 +1892,46 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-second.trace &&
 		test_trace2_data fsmonitor untracked-cache/hit 1 \
 			<../untracked-restart-second.trace &&
+		test_trace2_data fsmonitor tracked-cache/restored 2 \
+			<../untracked-restart-second.trace &&
+		test_trace2_data index refresh/sum_lstat 1 \
+			<../untracked-restart-second.trace &&
+		! have_t2_data_event index preload/sum_lstat \
+			<../untracked-restart-second.trace &&
+		GIT_TRACE2_EVENT_NESTING=4 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-all.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-all.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -uall \
+			>../untracked-restart-all.expect &&
+		test_cmp ../untracked-restart-all.expect \
+			../untracked-restart-all.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-all.trace &&
+		test_trace2_data status untracked/requested-flags 0 \
+			<../untracked-restart-all.trace &&
+		test_trace2_data status untracked/stored-flags 6 \
+			<../untracked-restart-all.trace &&
+		test_trace2_data untracked_cache negative-only 1 \
+			<../untracked-restart-all.trace &&
+		have_t2_data_event status untracked/subtrees-pruned \
+			<../untracked-restart-all.trace &&
+		! test_trace2_data status untracked/subtrees-pruned 0 \
+			<../untracked-restart-all.trace &&
+		echo changed >>steady/deep/tracked &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../untracked-restart-changed.expect &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-changed.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-restart-changed.out &&
+		test_cmp ../untracked-restart-changed.expect \
+			../untracked-restart-changed.out &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../untracked-restart-changed.trace &&
+		! have_t2_data_event fsmonitor tracked-cache/restored \
+			<../untracked-restart-changed.trace &&
 		git hash-object .git/index >../untracked-restart-index.after &&
 		test_cmp ../untracked-restart-index.before \
 			../untracked-restart-index.after

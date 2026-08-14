@@ -9,6 +9,7 @@
 #include "git-zlib.h"
 #include "hash.h"
 #include "hex.h"
+#include "object.h"
 #include "parse.h"
 #include "read-cache-ll.h"
 #include "simple-ipc.h"
@@ -377,6 +378,97 @@ static const struct object_id *untracked_cache_index_oid(
 	(FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN + sizeof(uint32_t))
 #define FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX \
 	(8 * FSMONITOR_IPC_UNTRACKED_CACHE_MAX)
+#define FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC "\0UCF1"
+#define FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN \
+	(sizeof(FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC) - 1)
+#define FSMONITOR_IPC_TRACKED_SNAPSHOT_HEADER_LEN \
+	(FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN + 2 * sizeof(uint32_t))
+
+static int tracked_snapshot_entry_is_eligible(const struct cache_entry *ce)
+{
+	return !(ce->ce_flags & CE_REMOVE) && !ce_stage(ce) &&
+		!S_ISGITLINK(ce->ce_mode) && !S_ISSPARSEDIR(ce->ce_mode);
+}
+
+static int add_tracked_snapshot(struct index_state *istate,
+				struct strbuf *snapshot)
+{
+	struct strbuf wrapped = STRBUF_INIT;
+	size_t bitmap_len, header_len;
+
+	if (istate->split_index || !istate->cache_nr)
+		return 0;
+	if (snapshot->len > UINT32_MAX)
+		return -1;
+
+	bitmap_len = ((size_t)istate->cache_nr + 7) / 8;
+	header_len = FSMONITOR_IPC_TRACKED_SNAPSHOT_HEADER_LEN;
+	if (snapshot->len > FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX - header_len ||
+	    bitmap_len > FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX - header_len -
+			 snapshot->len)
+		return -1;
+
+	strbuf_add(&wrapped, FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC,
+		   FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN);
+	strbuf_addchars(&wrapped, '\0', 2 * sizeof(uint32_t));
+	put_be32(wrapped.buf + FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN,
+		 istate->cache_nr);
+	put_be32(wrapped.buf + FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN +
+		 sizeof(uint32_t), snapshot->len);
+	strbuf_addbuf(&wrapped, snapshot);
+	strbuf_addchars(&wrapped, '\0', bitmap_len);
+
+	for (size_t i = 0; i < istate->cache_nr; i++) {
+		const struct cache_entry *ce = istate->cache[i];
+
+		if ((ce->ce_flags & CE_FSMONITOR_VALID) &&
+		    tracked_snapshot_entry_is_eligible(ce))
+			wrapped.buf[header_len + snapshot->len + i / 8] |=
+				1u << (i % 8);
+	}
+
+	strbuf_swap(snapshot, &wrapped);
+	strbuf_release(&wrapped);
+	return 0;
+}
+
+static int parse_tracked_snapshot(struct index_state *istate,
+				  const char **data, size_t *len,
+				  const unsigned char **bitmap)
+{
+	uint32_t cache_nr, untracked_len;
+	size_t bitmap_len, header_len;
+
+	*bitmap = NULL;
+	if (*len < FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN ||
+	    memcmp(*data, FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC,
+		   FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN))
+		return 0;
+	if (*len < FSMONITOR_IPC_TRACKED_SNAPSHOT_HEADER_LEN ||
+	    istate->split_index)
+		return -1;
+
+	cache_nr = get_be32(*data + FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN);
+	untracked_len = get_be32(*data +
+				 FSMONITOR_IPC_TRACKED_SNAPSHOT_MAGIC_LEN +
+				 sizeof(uint32_t));
+	if (!cache_nr || cache_nr != istate->cache_nr || !untracked_len)
+		return -1;
+
+	bitmap_len = ((size_t)cache_nr + 7) / 8;
+	header_len = FSMONITOR_IPC_TRACKED_SNAPSHOT_HEADER_LEN;
+	if ((size_t)untracked_len > *len - header_len ||
+	    bitmap_len != *len - header_len - untracked_len)
+		return -1;
+	if (cache_nr % 8 &&
+	    ((unsigned char)(*data)[*len - 1] >> (cache_nr % 8)))
+		return -1;
+
+	*bitmap = (const unsigned char *)*data + header_len + untracked_len;
+	*data += header_len;
+	*len = untracked_len;
+	return 0;
+}
 
 static int compress_untracked_cache(struct strbuf *snapshot)
 {
@@ -460,6 +552,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	struct object_id generated_index_oid;
 	const struct object_id *index_oid;
 	const char *snapshot_data;
+	const unsigned char *tracked_bitmap;
 	size_t snapshot_len;
 	const char *reason = "ineligible";
 	enum fsmonitor_untracked_cache_result result =
@@ -525,6 +618,11 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "untracked-cache/decompressed", 1);
 	}
+	if (parse_tracked_snapshot(istate, &snapshot_data, &snapshot_len,
+				   &tracked_bitmap)) {
+		reason = "invalid-tracked-snapshot";
+		goto done;
+	}
 
 	candidate = read_untracked_extension_bounded(snapshot_data,
 						     snapshot_len);
@@ -536,6 +634,21 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	candidate->use_fsmonitor = 1;
 	free_untracked_cache(istate->untracked);
 	istate->untracked = candidate;
+	if (tracked_bitmap) {
+		unsigned int restored = 0;
+
+		for (size_t i = 0; i < istate->cache_nr; i++) {
+			struct cache_entry *ce = istate->cache[i];
+
+			if ((tracked_bitmap[i / 8] & (1u << (i % 8))) &&
+			    tracked_snapshot_entry_is_eligible(ce)) {
+				ce->ce_flags |= CE_FSMONITOR_VALID;
+				restored++;
+			}
+		}
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "tracked-cache/restored", restored);
+	}
 	trace2_data_intmax("fsmonitor", istate->repo,
 			   "untracked-cache/hit", 1);
 
@@ -579,6 +692,12 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	write_untracked_extension(&snapshot, istate->untracked);
 	if (!snapshot.len)
 		goto done;
+	if (add_tracked_snapshot(istate, &snapshot)) {
+		trace2_data_string("fsmonitor", istate->repo,
+				   "untracked-cache/save-reason",
+				   "oversize-snapshot");
+		goto done;
+	}
 	if (snapshot.len > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
 	    git_env_bool("GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE", 0)) {
 		if (compress_untracked_cache(&snapshot)) {
