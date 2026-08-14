@@ -179,4 +179,18 @@ test_expect_success 'stop-daemon works' '
 	test_must_fail test-tool simple-ipc send --token=ping
 '
 
+test_expect_success !MINGW,FSMONITOR_DAEMON 'connection errors report their original errno' '
+	test_when_finished "rm -rf invalid-socket-repo invalid-socket-parent invalid-socket.trace" &&
+	git init invalid-socket-repo &&
+	: >invalid-socket-parent &&
+	git -C invalid-socket-repo config fsmonitor.socketDir \
+		"$PWD/invalid-socket-parent" &&
+	GIT_TRACE2_EVENT="$PWD/invalid-socket.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		test_must_fail test-tool -C invalid-socket-repo \
+			fsmonitor-client query --token 0 &&
+	test_trace2_data ipc-client try-connect/errno 20 \
+		<invalid-socket.trace
+'
+
 test_done
