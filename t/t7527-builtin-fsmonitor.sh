@@ -1946,7 +1946,68 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-changed.trace &&
 		git hash-object .git/index >../untracked-restart-index.after &&
 		test_cmp ../untracked-restart-index.before \
-			../untracked-restart-index.after
+			../untracked-restart-index.after &&
+		rm nested/original nested/added &&
+		git checkout -- tracked steady/deep/tracked &&
+		git status --porcelain >../untracked-restart-clean.out &&
+		test_must_be_empty ../untracked-restart-clean.out &&
+		test_path_is_file ignored &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -uall \
+			>../untracked-restart-clean.expect &&
+		test_must_be_empty ../untracked-restart-clean.expect &&
+		git hash-object .git/index >../untracked-restart-clean-index.before &&
+		git fsmonitor--daemon stop &&
+		start_daemon -C . &&
+		GIT_TRACE2_EVENT_NESTING=4 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-first.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-clean-first.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-clean-first.out &&
+		test_trace2_data fsm_client query/trivial-response 1 \
+			<../untracked-restart-clean-first.trace &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../untracked-restart-clean-first.trace &&
+		test_trace2_data status untracked/cache-root-valid 0 \
+			<../untracked-restart-clean-first.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-restart-clean-first.trace &&
+		GIT_TRACE2_EVENT_NESTING=4 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-second.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-clean-second.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-clean-second.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-clean-second.trace &&
+		test_trace2_data status untracked/cache-root-valid 0 \
+			<../untracked-restart-clean-second.trace &&
+		test_trace2_data untracked_cache negative-only 1 \
+			<../untracked-restart-clean-second.trace &&
+		have_t2_data_event status untracked/subtrees-repaired \
+			<../untracked-restart-clean-second.trace &&
+		! test_trace2_data status untracked/subtrees-repaired 0 \
+			<../untracked-restart-clean-second.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-restart-clean-second.trace &&
+		GIT_TRACE2_EVENT_NESTING=4 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-third.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-clean-third.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-clean-third.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-clean-third.trace &&
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<../untracked-restart-clean-third.trace &&
+		test_trace2_data status untracked/subtrees-pruned 1 \
+			<../untracked-restart-clean-third.trace &&
+		test_trace2_data status untracked/directories-visited 0 \
+			<../untracked-restart-clean-third.trace &&
+		git hash-object .git/index >../untracked-restart-clean-index.after &&
+		test_cmp ../untracked-restart-clean-index.before \
+			../untracked-restart-clean-index.after
 	)
 '
 
