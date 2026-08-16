@@ -65,6 +65,8 @@ _GIT_OS_DEFINES = select({
     "@platforms//os:macos": [
         "-DHAVE_PATHS_H",
         "-DHAVE_DEV_TTY",
+        "-DHAVE_CLOCK_GETTIME",
+        "-DHAVE_CLOCK_MONOTONIC",
         "-DHAVE_GETDELIM",
         "-DFREAD_READS_DIRECTORIES",
         "-DNO_MEMMEM",

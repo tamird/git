@@ -156,6 +156,16 @@ static uint32_t input_crc32;
 static int input_fd, output_fd;
 static const char *curr_pack;
 
+static struct {
+	uint64_t calls;
+	uint64_t bytes;
+	int enabled;
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	uint64_t wait_ns;
+	int wait_valid;
+#endif
+} input_read_trace;
+
 /*
  * outgoing_links is guarded by read_mutex, and record_outgoing_links is
  * read-only in a thread.
@@ -313,6 +323,31 @@ static void flush(void)
 	}
 }
 
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+static int monotonic_input_read_time(uint64_t *now)
+{
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &timestamp) ||
+	    timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+
+	*now = seconds + nanoseconds;
+	return 0;
+}
+#endif
+
 /*
  * Make sure at least "min" bytes are available in the buffer, and
  * return the pointer to the buffer.
@@ -328,12 +363,41 @@ static void *fill(int min)
 		    min);
 	flush();
 	do {
-		ssize_t ret = xread(input_fd, input_buffer + input_len,
-				sizeof(input_buffer) - input_len);
+		ssize_t ret;
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		uint64_t read_started = 0;
+
+		if (input_read_trace.wait_valid &&
+		    monotonic_input_read_time(&read_started))
+			input_read_trace.wait_valid = 0;
+#endif
+		ret = xread(input_fd, input_buffer + input_len,
+			    sizeof(input_buffer) - input_len);
 		if (ret <= 0) {
 			if (!ret)
 				die(_("early EOF"));
 			die_errno(_("read error on input"));
+		}
+		if (input_read_trace.enabled) {
+			input_read_trace.calls++;
+			input_read_trace.bytes += ret;
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+			if (input_read_trace.wait_valid) {
+				uint64_t read_finished, elapsed;
+
+				if (monotonic_input_read_time(&read_finished) ||
+				    read_finished < read_started) {
+					input_read_trace.wait_valid = 0;
+				} else {
+					elapsed = read_finished - read_started;
+					if (unsigned_add_overflows(
+						    input_read_trace.wait_ns, elapsed))
+						input_read_trace.wait_valid = 0;
+					else
+						input_read_trace.wait_ns += elapsed;
+				}
+			}
+#endif
 		}
 		input_len += ret;
 		if (from_stdin)
@@ -1933,6 +1997,7 @@ int cmd_index_pack(int argc,
 	unsigned foreign_nr = 1;	/* zero is a "good" value, assume bad */
 	int report_end_of_input = 0;
 	int hash_algo = 0;
+	int quiet_parse, quiet_delta;
 
 	/*
 	 * index-pack never needs to fetch missing objects except when
@@ -2109,17 +2174,56 @@ int cmd_index_pack(int argc,
 			nr_threads = 20; /* hard cap */
 	}
 
+	input_read_trace.enabled = from_stdin && trace2_is_enabled();
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	input_read_trace.wait_valid = input_read_trace.enabled;
+#endif
+	quiet_parse = !verbose;
+	quiet_delta = !(verbose || show_resolving_progress);
 	curr_pack = open_pack_file(pack_name);
+	if (quiet_parse)
+		trace2_region_enter("index-pack", "parse-pack", the_repository);
 	parse_pack_header();
 	CALLOC_ARRAY(objects, st_add(nr_objects, 1));
 	if (show_stat)
 		CALLOC_ARRAY(obj_stat, st_add(nr_objects, 1));
 	CALLOC_ARRAY(ofs_deltas, nr_objects);
 	parse_pack_objects(pack_hash);
+	if (quiet_parse)
+		trace2_region_leave("index-pack", "parse-pack", the_repository);
+	trace2_data_intmax("index-pack", the_repository, "objects", nr_objects);
+	trace2_data_intmax("index-pack", the_repository,
+			   "deltas/ofs", nr_ofs_deltas);
+	trace2_data_intmax("index-pack", the_repository,
+			   "deltas/ref", nr_ref_deltas);
+	if (input_read_trace.enabled) {
+		trace2_data_intmax("index-pack", the_repository,
+				   "input/read-calls", input_read_trace.calls);
+		trace2_data_intmax("index-pack", the_repository,
+				   "input/read-bytes", input_read_trace.bytes);
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		if (input_read_trace.wait_valid)
+			trace2_data_intmax("index-pack", the_repository,
+					   "input/read-wait-ns",
+					   input_read_trace.wait_ns);
+#endif
+	}
 	if (report_end_of_input)
 		write_in_full(2, "\0", 1);
+	if (quiet_delta)
+		trace2_region_enter("index-pack", "resolve-deltas",
+				    the_repository);
 	resolve_deltas(&opts);
+	if (quiet_delta) {
+		trace2_region_leave("index-pack", "resolve-deltas",
+				    the_repository);
+		trace2_region_enter("index-pack", "conclude-pack",
+				    the_repository);
+	}
 	conclude_pack(fix_thin_pack, curr_pack, pack_hash);
+	if (quiet_delta)
+		trace2_region_leave("index-pack", "conclude-pack",
+				    the_repository);
 	free(ofs_deltas);
 	free(ref_deltas);
 	if (strict)
@@ -2128,6 +2232,8 @@ int cmd_index_pack(int argc,
 	if (show_stat)
 		show_pack_info(stat_only);
 
+	if (quiet_delta)
+		trace2_region_enter("index-pack", "write-index", the_repository);
 	ALLOC_ARRAY(idx_objects, nr_objects);
 	for (i = 0; i < nr_objects; i++)
 		idx_objects[i] = &objects[i].idx;
@@ -2138,6 +2244,8 @@ int cmd_index_pack(int argc,
 						idx_objects, nr_objects,
 						pack_hash, opts.flags);
 	free(idx_objects);
+	if (quiet_delta)
+		trace2_region_leave("index-pack", "write-index", the_repository);
 
 	if (!verify)
 		final(pack_name, curr_pack,
