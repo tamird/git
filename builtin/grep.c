@@ -1145,6 +1145,42 @@ cleanup:
 	return result;
 }
 
+static int grep_recursive_basename(const struct pathspec_item *item,
+				   const char **basename)
+{
+	if (item->prefix || (item->magic & ~PATHSPEC_GLOB))
+		return 0;
+	if (pathspec_item_get_recursive_basename(item, basename))
+		return 1;
+	if (item->magic != PATHSPEC_GLOB ||
+	    !skip_prefix(item->match, "**/", basename))
+		return 0;
+	return **basename && !strchr(*basename, '/') &&
+	       !strchr(*basename, '\\');
+}
+
+static int grep_recursive_basename_matches(const struct pathspec_item *item,
+					   const char *path, size_t path_len)
+{
+	const char *basename = item->match + 3;
+	size_t basename_len = item->len - 3;
+	const char *path_basename;
+
+	if (no_wildcard(basename)) {
+		if (path_len < basename_len ||
+		    memcmp(path + path_len - basename_len, basename, basename_len))
+			return 0;
+		return path_len == basename_len ||
+		       path[path_len - basename_len - 1] == '/';
+	}
+	path_basename = strrchr(path, '/');
+	if (path_basename)
+		path_basename++;
+	else
+		path_basename = path;
+	return !git_fnmatch(item, basename, path_basename, 0);
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1176,6 +1212,7 @@ static int grep_cache(struct grep_opt *opt,
 	int untracked_scope_qualified = full_worktree;
 	int recursive_basename_pathspec =
 		pathspec->nr && !(pathspec->magic & ~PATHSPEC_GLOB);
+	int has_recursive_basename = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	if (repo->submodule_prefix) {
@@ -1290,12 +1327,23 @@ static int grep_cache(struct grep_opt *opt,
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
-		if (item->prefix || (item->magic & ~PATHSPEC_GLOB) ||
-		    !pathspec_item_get_recursive_basename(item, &basename)) {
+		if (item->prefix || (item->magic & ~PATHSPEC_GLOB)) {
+			recursive_basename_pathspec = 0;
+			break;
+		}
+		if (grep_recursive_basename(item, &basename)) {
+			has_recursive_basename = 1;
+			continue;
+		}
+		if (item->magic || !item->len ||
+		    item->match[item->len - 1] == '/' ||
+		    item->nowildcard_len != item->len) {
 			recursive_basename_pathspec = 0;
 			break;
 		}
 	}
+	if (!has_recursive_basename)
+		recursive_basename_pathspec = 0;
 	/*
 	 * Whole-index pathspec walks cost more than resolving explicitly named
 	 * worktree files directly.
@@ -1455,21 +1503,20 @@ static int grep_cache(struct grep_opt *opt,
 					     j++) {
 						const struct pathspec_item *item =
 							&pathspec->items[j];
-						const char *basename =
-							item->match + 3;
-						size_t basename_len =
-							item->len - 3;
 
-						if (name_len < basename_len ||
-						    memcmp(ce->name + name_len -
-								   basename_len,
-							   basename,
-							   basename_len))
+						if (item->nowildcard_len == item->len) {
+							if (name_len >= item->len &&
+							    !memcmp(ce->name, item->match,
+								    item->len) &&
+							    (name_len == item->len ||
+							     ce->name[item->len] == '/'))
+								matches = 1;
+							if (matches)
+								break;
 							continue;
-						if (name_len == basename_len ||
-							ce->name[name_len -
-								 basename_len -
-								 1] == '/')
+						}
+						if (grep_recursive_basename_matches(
+							    item, ce->name, name_len))
 							matches = 1;
 						if (matches)
 							break;
@@ -2482,8 +2529,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			for (size_t i = 0; i < pathspec->nr; i++) {
 				const struct pathspec_item *item = &pathspec->items[i];
 
-				if (te_len == item->len - 3 &&
-				    !memcmp(entry.path, item->match + 3, te_len)) {
+				if (grep_recursive_basename_matches(
+					    item, entry.path, te_len)) {
 					basename_matches = 1;
 					break;
 				}
@@ -2876,8 +2923,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
-		if (item->prefix || (item->magic & ~PATHSPEC_GLOB) ||
-		    !pathspec_item_get_recursive_basename(item, &basename))
+		if (!grep_recursive_basename(item, &basename))
 			query.recursive_basename_pathspec = 0;
 	}
 	for (i = 0; query.rooted_recursive_basename_pathspec &&
