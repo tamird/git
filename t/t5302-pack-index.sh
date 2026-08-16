@@ -104,7 +104,45 @@ test_expect_success PTHREADS 'index-pack shares one wide delta root among worker
 			parallel-workers.trace) &&
 		echo "maximum concurrent delta workers: $parallel_workers" &&
 		test "$parallel_workers" -ge 2 &&
-		test "$parallel_workers" -le 4
+		test "$parallel_workers" -le 4 &&
+		GIT_TRACE2_EVENT="$PWD/parallel-stdin.trace" \
+			git index-pack --stdin --fix-thin --threads=4 \
+			--no-rev-index --index-version=2 -o parallel-stdin.idx \
+			<"parallel-pack-$parallel_pack.pack" \
+			>parallel-stdin.out 2>parallel-stdin.err &&
+		test_must_be_empty parallel-stdin.err &&
+		printf "pack\t%s\n" "$parallel_pack" >parallel-stdin.expect &&
+		test_cmp parallel-stdin.expect parallel-stdin.out &&
+		cmp parallel-one.idx parallel-stdin.idx &&
+		sed -n \
+			"s#.*\"event\":\"\\(region_[a-z]*\\)\".*\"category\":\"index-pack\",\"label\":\"\\([^\"]*\\)\".*#\\1 \\2#p" \
+			parallel-stdin.trace >parallel-phases.actual &&
+		cat >parallel-phases.expect <<-\EOF &&
+		region_enter parse-pack
+		region_leave parse-pack
+		region_enter resolve-deltas
+		region_leave resolve-deltas
+		region_enter conclude-pack
+		region_leave conclude-pack
+		region_enter write-index
+		region_leave write-index
+		EOF
+		test_cmp parallel-phases.expect parallel-phases.actual &&
+		sed -n \
+			"s#.*\"category\":\"index-pack\",\"key\":\"\\([^\"]*\\)\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1 \\2#p" \
+			parallel-stdin.trace >parallel-data &&
+		test_grep "^objects 17$" parallel-data &&
+		test_grep "^deltas/ofs [0-9][0-9]*$" parallel-data &&
+		test_grep "^deltas/ref [0-9][0-9]*$" parallel-data &&
+		ofs_deltas=$(sed -n "s#^deltas/ofs ##p" parallel-data) &&
+		ref_deltas=$(sed -n "s#^deltas/ref ##p" parallel-data) &&
+		test "$((ofs_deltas + ref_deltas))" -eq 16 &&
+		read_calls=$(sed -n "s#^input/read-calls ##p" parallel-data) &&
+		test "$read_calls" -gt 0 &&
+		read_bytes=$(sed -n "s#^input/read-bytes ##p" parallel-data) &&
+		test "$read_bytes" -eq \
+			"$(test_file_size "parallel-pack-$parallel_pack.pack")" &&
+		test_grep "^input/read-wait-ns [0-9][0-9]*$" parallel-data
 	)
 '
 
@@ -321,9 +359,24 @@ test_expect_success 'index-pack --fsck-objects also warns upon missing tagger in
 
 test_expect_success 'index-pack -v --stdin produces progress for both phases' '
 	pack=$(git pack-objects --all pack </dev/null) &&
-	GIT_PROGRESS_DELAY=0 git index-pack -v --stdin <pack-$pack.pack 2>err &&
+	GIT_TRACE2_EVENT="$PWD/verbose-index-pack.trace" GIT_PROGRESS_DELAY=0 \
+		git index-pack -v --stdin <pack-$pack.pack 2>err &&
 	test_grep "Receiving objects" err &&
-	test_grep "Resolving deltas" err
+	test_grep "Resolving deltas" err &&
+	sed -n \
+		"s#.*\"event\":\"\\(region_[a-z]*\\)\".*\"category\":\"progress\",\"label\":\"\\([^\"]*\\)\".*#\\1 \\2#p" \
+		verbose-index-pack.trace >verbose-progress.actual &&
+	cat >verbose-progress.expect <<-\EOF &&
+	region_enter Receiving objects
+	region_leave Receiving objects
+	region_enter Resolving deltas
+	region_leave Resolving deltas
+	EOF
+	test_cmp verbose-progress.expect verbose-progress.actual &&
+	sed -n \
+		"s#.*\"category\":\"progress\",\"key\":\"total_objects\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+		verbose-index-pack.trace >verbose-progress-counts &&
+	test_line_count = 2 verbose-progress-counts
 '
 
 test_expect_success 'too-large packs report the breach' '
