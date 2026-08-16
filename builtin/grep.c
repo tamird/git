@@ -1181,6 +1181,34 @@ static int grep_recursive_basename_matches(const struct pathspec_item *item,
 	return !git_fnmatch(item, basename, path_basename, 0);
 }
 
+static int grep_tree_recursive_basename(const struct pathspec_item *item,
+					const char **basename)
+{
+	const char *slash;
+
+	if (grep_recursive_basename(item, basename))
+		return 1;
+	if (item->prefix || item->magic != PATHSPEC_GLOB ||
+	    !starts_with(item->match, "**/") ||
+	    strchr(item->match, '\\'))
+		return 0;
+	slash = strrchr(item->match, '/');
+	if (!slash || !slash[1])
+		return 0;
+	*basename = slash + 1;
+	return 1;
+}
+
+static int grep_tree_recursive_basename_matches(
+	const struct pathspec_item *item, const char *path, size_t path_len)
+{
+	const char *basename = strrchr(item->match, '/');
+
+	if (basename == item->match + 2)
+		return grep_recursive_basename_matches(item, path, path_len);
+	return !git_fnmatch(item, basename + 1, path, 0);
+}
+
 static int grep_tree_literal_path_matches(const struct pathspec_item *item,
 					  const char *base, size_t base_len,
 					  const char *path, size_t path_len)
@@ -2556,7 +2584,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 					}
 					continue;
 				}
-				if (grep_recursive_basename_matches(
+				if (grep_tree_recursive_basename_matches(
 					    item, entry.path, te_len)) {
 					basename_matches = 1;
 					break;
@@ -2951,7 +2979,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
-		if (grep_recursive_basename(item, &basename)) {
+		if (grep_tree_recursive_basename(item, &basename)) {
 			has_recursive_basename = 1;
 			continue;
 		}
