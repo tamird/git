@@ -1181,6 +1181,23 @@ static int grep_recursive_basename_matches(const struct pathspec_item *item,
 	return !git_fnmatch(item, basename, path_basename, 0);
 }
 
+static int grep_tree_literal_path_matches(const struct pathspec_item *item,
+					  const char *base, size_t base_len,
+					  const char *path, size_t path_len)
+{
+	size_t literal_len = item->len;
+
+	if (literal_len <= base_len &&
+	    !memcmp(base, item->match, literal_len) &&
+	    (item->match[literal_len - 1] == '/' ||
+	     base[literal_len] == '/'))
+		return 1;
+
+	return literal_len == base_len + path_len &&
+	       !memcmp(item->match, base, base_len) &&
+	       !memcmp(item->match + base_len, path, path_len);
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -2529,6 +2546,16 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			for (size_t i = 0; i < pathspec->nr; i++) {
 				const struct pathspec_item *item = &pathspec->items[i];
 
+				if (item->nowildcard_len == item->len) {
+					if (grep_tree_literal_path_matches(
+						    item, base->buf + tn_len,
+						    base->len - tn_len, entry.path,
+						    te_len)) {
+						basename_matches = 1;
+						break;
+					}
+					continue;
+				}
 				if (grep_recursive_basename_matches(
 					    item, entry.path, te_len)) {
 					basename_matches = 1;
@@ -2917,15 +2944,23 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	};
 	unsigned int i;
 	int hit = 0;
+	int has_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
 	for (i = 0; query.recursive_basename_pathspec && i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
-		if (!grep_recursive_basename(item, &basename))
+		if (grep_recursive_basename(item, &basename)) {
+			has_recursive_basename = 1;
+			continue;
+		}
+		if (item->prefix || item->magic || !item->len ||
+		    item->nowildcard_len != item->len)
 			query.recursive_basename_pathspec = 0;
 	}
+	if (!has_recursive_basename)
+		query.recursive_basename_pathspec = 0;
 	for (i = 0; query.rooted_recursive_basename_pathspec &&
 			    i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
