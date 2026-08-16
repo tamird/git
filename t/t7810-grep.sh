@@ -514,6 +514,11 @@ test_expect_success LIBPCRE2 \
 	ere-group-lookahead:7:required
 	ere-group-lookahead:8:xrequired
 	EOF
+	if test-tool regex --silent "(^|[x])?required" \
+		qrequired EXTENDED NEWLINE
+	then
+		echo "ere-group-lookahead:9:qrequired" >>expect
+	fi &&
 	>ere-leading-anchor.trace &&
 	GIT_TRACE2_EVENT="$PWD/ere-leading-anchor.trace" \
 		git grep --no-index -n -E "(^|[x])?required" \
@@ -3062,6 +3067,34 @@ test_expect_success 'grep selects literal pathsets directly' '
 	test_cmp basenames-expected actual &&
 	test_trace2_data grep recursive_basename_path_candidates 4 \
 		<grep-literal-trace-glob-basenames &&
+	cat >recursive-mixed-expected <<-\EOF &&
+	grep-literal-base:recursive needle base
+	grep-literal-component:recursive needle root
+	grep-literal-recursive/a/grep-literal-component:recursive needle file
+	grep-literal-recursive/b/grep-literal-component-suffix:recursive needle suffix
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-mixed-basename" \
+		git grep "recursive needle" -- \
+			":(glob)**/grep-literal-comp*" \
+			":(glob)**/grep-literal-component" \
+			grep-literal-base grep-literal-component >actual &&
+	test_cmp recursive-mixed-expected actual &&
+	test_trace2_data grep recursive_basename_path_candidates 4 \
+		<grep-literal-trace-mixed-basename &&
+	cat >recursive-directory-expected <<-\EOF &&
+	grep-literal-component:recursive needle root
+	grep-literal-recursive/a/grep-literal-base:recursive needle nested base
+	grep-literal-recursive/a/grep-literal-component:recursive needle file
+	grep-literal-recursive/b/grep-literal-component-suffix:recursive needle suffix
+	EOF
+	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-mixed-directory" \
+		git grep "recursive needle" -- \
+			":(glob)**/grep-literal-comp*" \
+			":(glob)**/grep-literal-component" \
+			grep-literal-recursive/a >actual &&
+	test_cmp recursive-directory-expected actual &&
+	test_trace2_data grep recursive_basename_path_candidates 4 \
+		<grep-literal-trace-mixed-directory &&
 	mkdir -p grep-literal-root/a grep-literal-root/adjacent \
 		grep-literal-root/b \
 		grep-literal-root.sibling/a grep-literal-other/a &&
