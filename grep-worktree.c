@@ -38,6 +38,18 @@ enum grep_worktree_cache_section {
 	GREP_WORKTREE_CACHE_SPLIT_BASE = 2,
 };
 
+enum grep_worktree_write_outcome {
+	GREP_WORKTREE_WRITE_UNSET = 0,
+	GREP_WORKTREE_WRITE_OPTIONAL_LOCKS_DISABLED,
+	GREP_WORKTREE_WRITE_NO_CHANGES,
+	GREP_WORKTREE_WRITE_LOCK_CONTENDED,
+	GREP_WORKTREE_WRITE_LOCK_FAILED,
+	GREP_WORKTREE_WRITE_GENERATION_REJECTED,
+	GREP_WORKTREE_WRITE_ABORTED,
+	GREP_WORKTREE_WRITE_COMMIT_FAILED,
+	GREP_WORKTREE_WRITE_COMMITTED,
+};
+
 /*
  * The sidecar contains:
  *
@@ -142,6 +154,7 @@ struct grep_worktree_cache {
 	uint64_t recovered_split_base;
 	uint64_t direct_write;
 	uint64_t negative_noop;
+	enum grep_worktree_write_outcome write_outcome;
 	int split_index;
 	int recovery_checksum_checked;
 	int recovery_checksum_valid;
@@ -1066,8 +1079,14 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	int source_matches;
 	int split_base_matches;
 
-	if (!cache || !use_optional_locks())
+	if (!cache)
 		return;
+	cache->write_outcome = GREP_WORKTREE_WRITE_ABORTED;
+	if (!use_optional_locks()) {
+		cache->write_outcome =
+			GREP_WORKTREE_WRITE_OPTIONAL_LOCKS_DISABLED;
+		return;
+	}
 	update_recovery =
 		!cache->split_index &&
 		(is_null_oid(&cache->recovery_checksum) ||
@@ -1129,8 +1148,10 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	negative_safe = !cache->recorded_different;
 	if (!cache->exact_changed && !persist_recovered &&
 	    !cache->split_base_changed && !update_recovery &&
-	    !cache->recovery_invalid && !cache->recorded_different)
+	    !cache->recovery_invalid && !cache->recorded_different) {
+		cache->write_outcome = GREP_WORKTREE_WRITE_NO_CHANGES;
 		return;
+	}
 	wait_for_test_write_phase("prelock");
 	if (update_recovery &&
 	    prepare_recovery(cache, &recovery_lock,
@@ -1157,8 +1178,12 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 			GREP_WORKTREE_LOCK_TIMEOUT_MS :
 			0,
 		0444);
-	if (fd < 0)
+	if (fd < 0) {
+		cache->write_outcome = errno == EEXIST ?
+			GREP_WORKTREE_WRITE_LOCK_CONTENDED :
+			GREP_WORKTREE_WRITE_LOCK_FAILED;
 		goto done;
+	}
 	index_result = invalidation_marker_exists(cache->repo);
 	if (index_result) {
 		/*
@@ -1166,16 +1191,22 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		 * generation while holding this lock, so an existing marker
 		 * already covers every negative observation from this writer.
 		 */
-		if (index_result > 0)
+		if (index_result > 0) {
 			negative_safe = 1;
+			cache->write_outcome =
+				GREP_WORKTREE_WRITE_GENERATION_REJECTED;
+		}
 		goto done;
 	}
 	index_result = load_observation_generation(
 		cache->repo, &current.observation_generation);
 	if (index_result ||
 	    !oideq(&current.observation_generation,
-		   &cache->observation_generation))
+		   &cache->observation_generation)) {
+		cache->write_outcome =
+			GREP_WORKTREE_WRITE_GENERATION_REJECTED;
 		goto done;
+	}
 	if (cache->istate->index_file_stat_valid) {
 		const unsigned char *map = NULL;
 		const struct stat *old = &cache->istate->index_file_stat;
@@ -1216,6 +1247,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		 */
 		negative_safe = 1;
 		cache->negative_noop++;
+		cache->write_outcome = GREP_WORKTREE_WRITE_NO_CHANGES;
 		goto done;
 	}
 	if (same_index && !update_recovery) {
@@ -1583,10 +1615,12 @@ merge_current:
 	finalize_hashfile(f, NULL, FSYNC_COMPONENT_NONE, CSUM_HASH_IN_STREAM);
 	f = NULL;
 	if (commit_lock_file(&lock)) {
+		cache->write_outcome = GREP_WORKTREE_WRITE_COMMIT_FAILED;
 		if (cache->recorded_different)
 			negative_safe = 0;
 		goto done;
 	}
+	cache->write_outcome = GREP_WORKTREE_WRITE_COMMITTED;
 
 done:
 	if (!negative_safe &&
@@ -1629,6 +1663,15 @@ void grep_worktree_cache_free(struct grep_worktree_cache *cache)
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/direct_write",
 			   cache->direct_write);
+	trace2_data_intmax("grep", cache->repo,
+			   "worktree_blob/write_outcome",
+			   cache->write_outcome);
+	trace2_data_intmax("grep", cache->repo,
+			   "worktree_blob/compact_loaded",
+			   cache->compact_loaded);
+	trace2_data_intmax("grep", cache->repo,
+			   "worktree_blob/recovery_entries",
+			   cache->recovery_entries_nr);
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/negative_noop",
 			   cache->negative_noop);
