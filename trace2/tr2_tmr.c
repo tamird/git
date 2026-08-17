@@ -92,6 +92,27 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "filter",
 		.want_per_thread_events = 0,
 	},
+	/* Sorting includes lazy atom loading; format-output includes stdio. */
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE] = {
+		.category = "ref-filter",
+		.name = "materialized/prepare",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT] = {
+		.category = "ref-filter",
+		.name = "materialized/sort",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_FORMAT_OUTPUT] = {
+		.category = "ref-filter",
+		.name = "materialized/format-output",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_CLEANUP] = {
+		.category = "ref-filter",
+		.name = "materialized/cleanup",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

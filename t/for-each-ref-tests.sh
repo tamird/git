@@ -544,6 +544,22 @@ test_expect_success 'cache object metadata shared by refs' '
 		<metadata-cache.trace &&
 	test_trace2_data ref-filter object_metadata/hits 1 \
 		<metadata-cache.trace &&
+	for phase in prepare sort format-output cleanup
+	do
+		name=materialized/$phase &&
+		test "$(grep -c \
+			"\"event\":\"timer\".*\"category\":\"ref-filter\",\"name\":\"$name\"," \
+			metadata-cache.trace)" = 1 &&
+		test_grep \
+			"\"event\":\"timer\".*\"category\":\"ref-filter\",\"name\":\"$name\",\"intervals\":1," \
+			metadata-cache.trace &&
+		test_grep ! \
+			"\"event\":\"th_timer\".*\"category\":\"ref-filter\",\"name\":\"$name\"" \
+			metadata-cache.trace &&
+		test_grep ! \
+			"\"event\":\"region_[^\"]*\".*\"category\":\"ref-filter\",\"label\":\"$name\"" \
+			metadata-cache.trace || return 1
+	done &&
 	git commit-graph write --reachable &&
 	GIT_TRACE2_EVENT="$PWD/metadata-graph.trace" \
 		${git_for_each_ref} --format="%(refname)" \
@@ -586,9 +602,21 @@ EOF
 test_expect_success 'exercise patterns with prefixes' '
 	git tag testtag-2 &&
 	test_when_finished "git tag -d testtag-2" &&
-	${git_for_each_ref} --format="%(refname)" \
+	test_when_finished "rm -f refname-iterative.trace" &&
+	GIT_TRACE2_EVENT="$PWD/refname-iterative.trace" \
+		${git_for_each_ref} --format="%(refname)" \
 		refs/tags/testtag refs/tags/testtag-2 >actual &&
-	test_cmp expected actual
+	test_cmp expected actual &&
+	for phase in prepare sort format-output cleanup
+	do
+		name=materialized/$phase &&
+		test_grep ! \
+			"\"category\":\"ref-filter\",\"name\":\"$name\"" \
+			refname-iterative.trace &&
+		test_grep ! \
+			"\"category\":\"ref-filter\",\"label\":\"$name\"" \
+			refname-iterative.trace || return 1
+	done
 '
 
 cat >expected <<\EOF
