@@ -513,7 +513,11 @@ static struct discovery *discover_refs(const char *service, int for_push)
 	http_options.initial_request = 1;
 	http_options.no_cache = 1;
 
+	trace2_region_enter("remote-curl", "discover-refs-request",
+			    the_repository);
 	http_ret = http_get_strbuf(refs_url.buf, &buffer, &http_options);
+	trace2_region_leave("remote-curl", "discover-refs-request",
+			    the_repository);
 	switch (http_ret) {
 	case HTTP_OK:
 		break;
@@ -552,11 +556,15 @@ static struct discovery *discover_refs(const char *service, int for_push)
 		free(u);
 	}
 
+	trace2_data_intmax("remote-curl", the_repository,
+			   "advertised-refs/bytes", buffer.len);
 	last= xcalloc(1, sizeof(*last_discovery));
 	last->service = xstrdup(service);
 	last->buf_alloc = strbuf_detach(&buffer, &last->len);
 	last->buf = last->buf_alloc;
 
+	trace2_region_enter("remote-curl", "discover-refs-parse",
+			    the_repository);
 	if (maybe_smart)
 		check_smart_http(last, service, &type);
 
@@ -564,6 +572,8 @@ static struct discovery *discover_refs(const char *service, int for_push)
 		last->refs = parse_git_refs(last, for_push);
 	else
 		last->refs = parse_info_refs(last);
+	trace2_region_leave("remote-curl", "discover-refs-parse",
+			    the_repository);
 
 	strbuf_release(&refs_url);
 	strbuf_release(&type);
@@ -591,6 +601,9 @@ static struct ref *get_refs(int for_push)
 static void output_refs(struct ref *refs)
 {
 	struct ref *posn;
+	size_t count = 0;
+
+	trace2_region_enter("remote-curl", "output-refs", the_repository);
 	if (options.object_format && options.hash_algo) {
 		printf(":object-format %s\n", options.hash_algo->name);
 		repo_set_hash_algo(the_repository,
@@ -603,9 +616,13 @@ static void output_refs(struct ref *refs)
 			printf("%s %s\n", hash_to_hex_algop(posn->old_oid.hash,
 							    options.hash_algo),
 					  posn->name);
+		count++;
 	}
 	printf("\n");
 	fflush(stdout);
+	trace2_data_intmax("remote-curl", the_repository,
+			   "advertised-refs/count", count);
+	trace2_region_leave("remote-curl", "output-refs", the_repository);
 }
 
 struct rpc_state {

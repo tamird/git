@@ -719,7 +719,14 @@ test_expect_success 'access using three-legged auth' '
 	EOF
 '
 
-test_lazy_prereq SPNEGO 'curl --version | grep -qi "SPNEGO\|GSS-API\|Kerberos\|negotiate"'
+test_lazy_prereq SPNEGO '
+	printf "\n" |
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/curl-features.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		git remote-http probe "$HTTPD_URL" >/dev/null &&
+	test_trace2_data http features/spnego 1 \
+		<"$TRASH_DIRECTORY/curl-features.trace" >/dev/null
+'
 
 test_expect_success SPNEGO 'http.emptyAuth=auto attempts Negotiate before credential_fill' '
 	test_when_finished "per_test_cleanup" &&

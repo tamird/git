@@ -18,6 +18,12 @@ bazel_dep(name = "libexpat", version = "2.7.1.bcr.1")
 bazel_dep(name = "openssl", version = "3.5.4.bcr.0")
 bazel_dep(name = "pcre2", version = "10.45")
 
+single_version_override(
+    module_name = "curl",
+    patches = ["//contrib/bazel:curl-zlib.patch"],
+    patch_strip = 1,
+)
+
 pcre2_jit_repository = use_repo_rule(
     "//contrib/bazel:pcre2_jit.bzl",
     "pcre2_jit_repository",
