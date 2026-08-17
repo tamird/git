@@ -1725,8 +1725,15 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-repaired.trace &&
 		mkdir added &&
 		echo added >added/untracked &&
-		git --no-optional-locks status --porcelain \
+		>../untracked-snapshot-repaired.trace &&
+		GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-repaired.trace" \
+			git --no-optional-locks status --porcelain \
 			>../untracked-snapshot-added.out &&
+		test_trace2_data fsmonitor apply_count "[1-9][0-9]*" \
+			<../untracked-snapshot-repaired.trace &&
+		test_trace2_data fsmonitor untracked-cache/directory-invalidated \
+			"[1-9][0-9]*" <../untracked-snapshot-repaired.trace &&
 		git --no-optional-locks -c core.fsmonitor=false \
 			-c core.untrackedCache=false status --porcelain \
 			>../untracked-snapshot-added.expect &&
