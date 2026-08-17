@@ -771,7 +771,9 @@ void diffcore_pickaxe(struct diff_options *o)
 				grep_index_prepare(index->index, index->query);
 	}
 
+	trace2_timer_start(TRACE2_TIMER_ID_PICKAXE_FILTER);
 	pickaxe(&diff_queued_diff, o, regexp, kws, fn);
+	trace2_timer_stop(TRACE2_TIMER_ID_PICKAXE_FILTER);
 	if (index)
 		oidmap_clear(&index->batch_results, 1);
 

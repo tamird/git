@@ -26,9 +26,23 @@ test_expect_success 'setup subtree-merged repository' '
 '
 
 test_expect_success '--follow finds the pre-merge commit through a subtree merge' '
-	git -C outer log --follow --pretty=tformat:%s inner/inner.txt >actual &&
+	test_when_finished "rm -f log-follow-merge.trace" &&
+	GIT_TRACE2_EVENT="$PWD/log-follow-merge.trace" \
+		git -C outer log --follow --pretty=tformat:%s inner/inner.txt >actual &&
 	echo "inner init" >expect &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	test "$(grep -c \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent\"," \
+		log-follow-merge.trace)" = 1 &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent\",\"intervals\":2," \
+		log-follow-merge.trace &&
+	test_grep ! \
+		"\"event\":\"th_timer\".*\"category\":\"log\",\"name\":\"follow-parent\"" \
+		log-follow-merge.trace &&
+	test_grep ! \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"log\",\"label\":\"follow-parent\"" \
+		log-follow-merge.trace
 '
 
 test_expect_success 'setup merge of two branches that both renamed a file to README' '

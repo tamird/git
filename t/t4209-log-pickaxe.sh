@@ -330,6 +330,18 @@ test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
 	GIT_TRACE2_EVENT="$PWD/pickaxe-default-patch.trace" \
 		git -C GS-plain log -S"[b]" -p >actual &&
 	test_cmp pickaxe-default-patch.expect actual &&
+	test "$(grep -c \
+		"\"event\":\"timer\".*\"category\":\"pickaxe\",\"name\":\"filter\"," \
+		pickaxe-default-patch.trace)" = 1 &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"pickaxe\",\"name\":\"filter\",\"intervals\":5," \
+		pickaxe-default-patch.trace &&
+	test_grep ! \
+		"\"event\":\"th_timer\".*\"category\":\"pickaxe\",\"name\":\"filter\"" \
+		pickaxe-default-patch.trace &&
+	test_grep ! \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"pickaxe\",\"label\":\"filter\"" \
+		pickaxe-default-patch.trace &&
 	test_trace2_data log setup-us "[0-9][0-9]*" \
 		<pickaxe-default-patch.trace &&
 	test_trace2_data log prepare-us "[0-9][0-9]*" \

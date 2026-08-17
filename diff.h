@@ -640,6 +640,13 @@ int git_config_rename(const char *var, const char *value);
 
 #define DIFF_PICKAXE_IGNORE_CASE	32
 
+/* --follow's unrestricted rename search uses fresh single_follow options. */
+static inline int diff_has_follow_or_pickaxe(const struct diff_options *options)
+{
+	return options->flags.follow_renames || options->single_follow ||
+	       (options->pickaxe_opts & DIFF_PICKAXE_KINDS_MASK);
+}
+
 void init_diffstat_widths(struct diff_options *);
 void diffcore_std(struct diff_options *);
 void diffcore_fix_diff_index(void);

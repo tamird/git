@@ -45,6 +45,7 @@
 #include "read-cache-ll.h"
 #include "setup.h"
 #include "strmap.h"
+#include "trace2.h"
 #include "ws.h"
 
 #ifdef NO_FAST_WORKING_DIRECTORY
@@ -7567,7 +7568,10 @@ void diffcore_std(struct diff_options *options)
 		DIFF_FORMAT_PATCH |
 		DIFF_FORMAT_SHORTSTAT |
 		DIFF_FORMAT_DIRSTAT;
+	const int trace_follow_pickaxe = diff_has_follow_or_pickaxe(options);
 
+	if (trace_follow_pickaxe)
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_DIFFCORE);
 	/*
 	 * Check if the user requested a blob-data-requiring diff output and/or
 	 * break-rewrite detection (which requires blob data). If yes, prefetch
@@ -7611,6 +7615,8 @@ void diffcore_std(struct diff_options *options)
 		options->flags.has_changes = 0;
 
 	options->found_follow = 0;
+	if (trace_follow_pickaxe)
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_DIFFCORE);
 }
 
 int diff_result_code(struct rev_info *revs)

@@ -184,6 +184,23 @@ test_expect_success 'git log --follow' '
 		test_grep ! \
 			"\"event\":\"region_enter\".*\"category\":\"diff\",\"label\":\"$phase\"" \
 			log-follow.trace || return 1
+	done &&
+	for phase in tree-paths diffcore
+	do
+		name=follow-pickaxe/$phase &&
+		test "$(grep -c \
+			"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"$name\"," \
+			log-follow.trace)" = 1 &&
+		intervals=$(sed -n \
+			"s#.*\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"$name\",\"intervals\":\\([0-9][0-9]*\\),.*#\\1#p" \
+			log-follow.trace) &&
+		test "$intervals" -ge 2 &&
+		test_grep ! \
+			"\"event\":\"th_timer\".*\"category\":\"diff\",\"name\":\"$name\"" \
+			log-follow.trace &&
+		test_grep ! \
+			"\"event\":\"region_[^\"]*\".*\"category\":\"diff\",\"label\":\"$name\"" \
+			log-follow.trace || return 1
 	done
 '
 
@@ -2512,6 +2529,18 @@ test_expect_success 'patch log defers unrelated decoration object lookups' '
 			git log -p --decorate=short >actual &&
 		test_cmp expect actual &&
 		test_grep "tag: annotated" actual &&
+		for timer in diff:follow-pickaxe/tree-paths \
+			diff:follow-pickaxe/diffcore log:follow-parent pickaxe:filter
+		do
+			category=${timer%%:*} &&
+			name=${timer#*:} &&
+			test_grep ! \
+				"\"category\":\"$category\",\"name\":\"$name\"" \
+				log.trace &&
+			test_grep ! \
+				"\"category\":\"$category\",\"label\":\"$name\"" \
+				log.trace || exit 1
+		done &&
 		lookups=$(sed -n \
 			"s#.*\"category\":\"log\",\"key\":\"decorations/object-lookups\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
 			log.trace) &&

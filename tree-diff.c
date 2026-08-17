@@ -8,6 +8,7 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "hash.h"
+#include "trace2.h"
 #include "tree.h"
 #include "tree-walk.h"
 #include "repository.h"
@@ -702,7 +703,10 @@ static void ll_diff_tree_oid(const struct object_id *old_oid,
 {
 	struct combine_diff_path *paths, *p;
 	pathchange_fn_t pathchange_old = opt->pathchange;
+	const int trace_follow_pickaxe = diff_has_follow_or_pickaxe(opt);
 
+	if (trace_follow_pickaxe)
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_TREE_PATHS);
 	opt->pathchange = emit_diff_first_parent_only;
 	paths = diff_tree_paths(new_oid, &old_oid, 1, base, opt);
 
@@ -713,6 +717,8 @@ static void ll_diff_tree_oid(const struct object_id *old_oid,
 	}
 
 	opt->pathchange = pathchange_old;
+	if (trace_follow_pickaxe)
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_TREE_PATHS);
 }
 
 void diff_tree_oid(const struct object_id *old_oid,
