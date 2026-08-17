@@ -1302,6 +1302,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	struct diff_options diff_opts;
 	const char *path;
 
+	trace2_timer_start(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
 	parse_commit_or_die(parent);
 	repo_diff_setup(opt->diffopt.repo, &diff_opts);
 	copy_pathspec(&diff_opts.pathspec, &opt->diffopt.pathspec);
@@ -1322,6 +1323,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 
 	diff_queue_clear(&diff_queued_diff);
 	diff_free(&diff_opts);
+	trace2_timer_stop(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
 }
 
 static int can_skip_final_follow_rename(const struct rev_info *opt,

@@ -71,6 +71,27 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "update-head",
 		.want_per_thread_events = 0,
 	},
+	/* Follow-parent and diffcore include their nested phase timers. */
+	[TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_TREE_PATHS] = {
+		.category = "diff",
+		.name = "follow-pickaxe/tree-paths",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_DIFFCORE] = {
+		.category = "diff",
+		.name = "follow-pickaxe/diffcore",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_LOG_FOLLOW_PARENT] = {
+		.category = "log",
+		.name = "follow-parent",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_PICKAXE_FILTER] = {
+		.category = "pickaxe",
+		.name = "filter",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };
