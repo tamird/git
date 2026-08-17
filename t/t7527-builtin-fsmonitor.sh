@@ -1978,6 +1978,8 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-first.trace &&
 		test_trace2_data status untracked/cache-root-valid 0 \
 			<../untracked-restart-clean-first.trace &&
+		test_trace2_data untracked_cache serialize/resync-invalidated-nodes \
+			"[0-9][0-9]*" <../untracked-restart-clean-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-first.trace &&
 		GIT_TRACE2_EVENT_NESTING=4 \
