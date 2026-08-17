@@ -789,6 +789,11 @@ void refresh_fsmonitor(struct index_state *istate)
 	char *buf;
 	unsigned int i;
 	int is_trivial = 0;
+	int count = 0;
+	struct untracked_cache *observed_untracked = NULL;
+	uintmax_t directory_invalidated_before = 0;
+	uintmax_t directory_invalidated = 0;
+	int have_directory_invalidated = 0;
 	struct repository *r = istate->repo;
 	enum fsmonitor_mode fsm_mode = fsm_settings__get_mode(r);
 	enum fsmonitor_reason reason = fsm_settings__get_reason(r);
@@ -964,13 +969,16 @@ apply_results:
 		 *
 		 * This updates both the cache-entries and the untracked-cache.
 		 */
-		int count = 0;
 		struct fsmonitor_icase_stats icase_stats = {
 			.exact_dirs = STRSET_INIT,
 			.rejected_paths = STRSET_INIT,
 		};
 
 		buf = query_result.buf;
+		observed_untracked = istate->untracked;
+		if (observed_untracked)
+			directory_invalidated_before =
+				observed_untracked->dir_invalidated;
 		for (i = bol; i < query_result.len; i++) {
 			if (buf[i] != '\0')
 				continue;
@@ -983,6 +991,15 @@ apply_results:
 			fsmonitor_refresh_callback(
 				istate, buf + bol, &icase_stats);
 			count++;
+		}
+		if (observed_untracked &&
+		    observed_untracked == istate->untracked &&
+		    (uintmax_t)observed_untracked->dir_invalidated >=
+			    directory_invalidated_before) {
+			directory_invalidated =
+				(uintmax_t)observed_untracked->dir_invalidated -
+				directory_invalidated_before;
+			have_directory_invalidated = 1;
 		}
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "icase_index/scans", icase_stats.scans);
@@ -1004,9 +1021,6 @@ apply_results:
 
 		if (count > fsmonitor_force_update_threshold)
 			istate->cache_changed |= FSMONITOR_CHANGED;
-
-		trace2_data_intmax("fsmonitor", istate->repo, "apply_count",
-				   count);
 
 	} else {
 		/*
@@ -1039,6 +1053,14 @@ apply_results:
 		}
 	}
 	trace2_region_leave("fsmonitor", "apply_results", istate->repo);
+	if (query_success && !is_trivial) {
+		trace2_data_intmax("fsmonitor", istate->repo, "apply_count",
+				   count);
+		if (have_directory_invalidated)
+			trace2_data_intmax("fsmonitor", istate->repo,
+					   "untracked-cache/directory-invalidated",
+					   directory_invalidated);
+	}
 
 	strbuf_release(&query_result);
 
