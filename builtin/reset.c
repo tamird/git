@@ -28,7 +28,6 @@
 #include "object-name.h"
 #include "parse-options.h"
 #include "path.h"
-#include "promisor-remote.h"
 #include "repository.h"
 #include "unpack-trees.h"
 #include "cache-tree.h"
@@ -119,23 +118,12 @@ static int reset_index(const char *ref, const struct object_id *oid, int reset_t
 		goto out;
 
 	if (reset_type == MIXED || reset_type == HARD) {
-		struct index_state *index = the_repository->index;
-		struct cache_tree *cache_tree;
-
 		tree = repo_parse_tree_indirect(the_repository, oid);
 		if (!tree) {
 			error(_("unable to read tree (%s)"), oid_to_hex(oid));
 			goto out;
 		}
-		if (index->sparse_index ||
-		    repo_has_promisor_remote(the_repository) ||
-		    !(cache_tree = cache_tree_get(index)) ||
-		    cache_tree_update(index, WRITE_TREE_SILENT |
-				      WRITE_TREE_REPAIR | WRITE_TREE_MISSING_OK) ||
-		    !(cache_tree = cache_tree_get(index)) ||
-		    !cache_tree_fully_valid(cache_tree) ||
-		    !oideq(&cache_tree->oid, &tree->object.oid))
-			prime_cache_tree(the_repository, index, tree);
+		prime_cache_tree(the_repository, the_repository->index, tree);
 	}
 
 	ret = 0;
