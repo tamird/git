@@ -55,9 +55,39 @@ test_expect_success 'push to remote repository (standard)' '
 	test_tick &&
 	git commit -m path2 &&
 	HEAD=$(git rev-parse --verify HEAD) &&
-	GIT_TRACE_CURL=true git push -v -v 2>err &&
+	GIT_TRACE2_EVENT="$PWD/http-push.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 GIT_TRACE_CURL=true \
+		git push -v -v 2>err &&
 	test_grep ! "Expect: 100-continue" err &&
 	test_grep "POST git-receive-pack ([0-9]* bytes)" err &&
+	test_region remote-curl discover-refs-request http-push.trace &&
+	test_region remote-curl discover-refs-parse http-push.trace &&
+	test_region remote-curl output-refs http-push.trace &&
+	test_trace2_data http features/gzip "[01]" \
+		<http-push.trace >/dev/null &&
+	test_trace2_data http features/spnego "[01]" \
+		<http-push.trace >/dev/null &&
+	test_trace2_data http response/http-code 200 \
+		<http-push.trace >http-success &&
+	test_line_count -ge 2 http-success &&
+	if test_trace2_data http timing/total-us "[0-9][0-9]*" \
+		<http-push.trace >/dev/null
+	then
+		for phase in dns tcp tls pretransfer first-byte total
+		do
+			test_trace2_data http "timing/$phase-us" "[0-9][0-9]*" \
+				<http-push.trace >/dev/null || return 1
+		done &&
+		test_trace2_data http response/download-bytes "[0-9][0-9]*" \
+			<http-push.trace >/dev/null
+	fi &&
+	test_trace2_data http response/redirect-count "[0-9][0-9]*" \
+		<http-push.trace >/dev/null &&
+	for field in bytes count
+	do
+		test_trace2_data remote-curl "advertised-refs/$field" \
+			"[1-9][0-9]*" <http-push.trace >/dev/null || return 1
+	done &&
 	(cd "$HTTPD_DOCUMENT_ROOT_PATH"/test_repo.git &&
 	 test $HEAD = $(git rev-parse --verify HEAD))
 '

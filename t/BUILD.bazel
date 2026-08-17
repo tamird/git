@@ -5,12 +5,12 @@ package(default_visibility = ["//visibility:public"])
 
 COMMON_TEST_DATA = [
     "//:git",
+    "//:git_perl_toolchain",
     "//:git_receive_pack",
     "//:git_upload_archive",
     "//:git_upload_pack",
     "//t:test-lib",
     "@bazel_tools//tools/bash/runfiles",
-    "@rules_perl//:current_toolchain",
     "@rules_python//python:current_py_toolchain",
 ]
 
@@ -1014,6 +1014,9 @@ TEST_DATA_BY_TEST = {
         "//t:lib-httpd",
     ],
     "t5551-http-fetch-smart": [
+        "//:git_sh_i18n",
+        "//:git_sh_setup",
+        "//:git_submodule",
         "//t:lib-httpd",
     ],
     "t5557-http-get": [

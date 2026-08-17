@@ -333,6 +333,55 @@ static void closedown_active_slot(struct active_request_slot *slot)
 	slot->in_use = 0;
 }
 
+static void trace_active_slot(struct active_request_slot *slot)
+{
+#if LIBCURL_VERSION_NUM >= 0x073d00
+	static const struct {
+		CURLINFO info;
+		const char *key;
+	} timings[] = {
+		{ CURLINFO_NAMELOOKUP_TIME_T, "timing/dns-us" },
+		{ CURLINFO_CONNECT_TIME_T, "timing/tcp-us" },
+		{ CURLINFO_APPCONNECT_TIME_T, "timing/tls-us" },
+		{ CURLINFO_PRETRANSFER_TIME_T, "timing/pretransfer-us" },
+		{ CURLINFO_STARTTRANSFER_TIME_T, "timing/first-byte-us" },
+		{ CURLINFO_TOTAL_TIME_T, "timing/total-us" },
+	};
+	curl_off_t value;
+#elif LIBCURL_VERSION_NUM >= 0x073700
+	curl_off_t value;
+#endif
+	long redirects;
+	int saved_errno;
+
+	if (!trace2_is_enabled())
+		return;
+
+	saved_errno = errno;
+#if LIBCURL_VERSION_NUM >= 0x073d00
+	for (size_t i = 0; i < ARRAY_SIZE(timings); i++) {
+		if (curl_easy_getinfo(slot->curl, timings[i].info, &value) ==
+		    CURLE_OK && value >= 0)
+			trace2_data_intmax("http", the_repository,
+					   timings[i].key, value);
+	}
+#endif
+#if LIBCURL_VERSION_NUM >= 0x073700
+	if (curl_easy_getinfo(slot->curl, CURLINFO_SIZE_DOWNLOAD_T,
+			      &value) == CURLE_OK && value >= 0)
+		trace2_data_intmax("http", the_repository,
+				   "response/download-bytes", value);
+#endif
+	if (curl_easy_getinfo(slot->curl, CURLINFO_REDIRECT_COUNT,
+			      &redirects) == CURLE_OK && redirects >= 0)
+		trace2_data_intmax("http", the_repository,
+				   "response/redirect-count", redirects);
+	if (slot->http_code > 0)
+		trace2_data_intmax("http", the_repository,
+				   "response/http-code", slot->http_code);
+	errno = saved_errno;
+}
+
 static void finish_active_slot(struct active_request_slot *slot)
 {
 	closedown_active_slot(slot);
@@ -351,6 +400,8 @@ static void finish_active_slot(struct active_request_slot *slot)
 		curl_easy_getinfo(slot->curl, CURLINFO_HTTP_CONNECTCODE,
 			&slot->results->http_connectcode);
 	}
+
+	trace_active_slot(slot);
 
 	/* Run callback if appropriate */
 	if (slot->callback_func)
@@ -1431,6 +1482,20 @@ void http_init(struct remote *remote, const char *url, int proactive_auth)
 
 	if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK)
 		die("curl_global_init failed");
+
+	if (trace2_is_enabled()) {
+		int saved_errno = errno;
+		curl_version_info_data *version =
+			curl_version_info(CURLVERSION_NOW);
+
+		if (version) {
+			trace2_data_intmax("http", the_repository, "features/gzip",
+					   !!(version->features & CURL_VERSION_LIBZ));
+			trace2_data_intmax("http", the_repository, "features/spnego",
+					   !!(version->features & CURL_VERSION_SPNEGO));
+		}
+		errno = saved_errno;
+	}
 
 #ifdef GIT_CURL_HAVE_GLOBAL_TRACE
 	{
