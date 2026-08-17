@@ -16,6 +16,7 @@
 #include "pack-objects.h"
 #include "packfile.h"
 #include "repository.h"
+#include "trace.h"
 #include "trace2.h"
 #include "odb.h"
 #include "list-objects-filter-options.h"
@@ -1321,6 +1322,22 @@ struct bitmap_boundary_cb {
 	struct object_array boundary;
 };
 
+struct bitmap_boundary_stats {
+	intmax_t roots_with_bitmap;
+	intmax_t roots_without_bitmap;
+	intmax_t roots_already_covered;
+	intmax_t roots_noncommit;
+	uint64_t prepare_us;
+	uint64_t traverse_us;
+	uint64_t fill_in_us;
+};
+
+enum bitmap_trace_source_kind {
+	BITMAP_TRACE_SOURCE_PACK = 0,
+	BITMAP_TRACE_SOURCE_MIDX = 1,
+	BITMAP_TRACE_SOURCE_MIDX_PACK = 2,
+};
+
 static void show_boundary_commit(struct commit *commit, void *_data)
 {
 	struct bitmap_boundary_cb *data = _data;
@@ -1360,13 +1377,16 @@ static unsigned cascade_pseudo_merges_1(struct bitmap_index *bitmap_git,
 
 static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 					    struct rev_info *revs,
-					    struct object_list *roots)
+					    struct object_list *roots,
+					    struct bitmap_boundary_stats *stats)
 {
 	struct bitmap_boundary_cb cb;
 	struct object_list *root;
 	struct repository *repo;
+	uint64_t phase_started = 0;
 	unsigned int i;
 	unsigned int tmp_blobs, tmp_trees, tmp_tags;
+	int trace_timings = trace2_is_enabled();
 	int any_missing = 0;
 	int existing_bitmaps = 0;
 
@@ -1403,16 +1423,23 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 	 */
 	for (root = roots; root; root = root->next) {
 		struct object *object = root->item;
-		if (object->type != OBJ_COMMIT ||
-		    bitmap_walk_contains(bitmap_git, cb.base, &object->oid))
+		if (object->type != OBJ_COMMIT) {
+			stats->roots_noncommit++;
 			continue;
+		}
+		if (bitmap_walk_contains(bitmap_git, cb.base, &object->oid)) {
+			stats->roots_already_covered++;
+			continue;
+		}
 
 		if (add_commit_to_bitmap(bitmap_git, &cb.base,
 					 (struct commit *)object)) {
+			stats->roots_with_bitmap++;
 			existing_bitmaps = 1;
 			continue;
 		}
 
+		stats->roots_without_bitmap++;
 		any_missing = 1;
 	}
 
@@ -1435,17 +1462,25 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 	 * between the tips and boundary, and (b) record the boundary.
 	 */
 	trace2_region_enter("pack-bitmap", "boundary-prepare", repo);
+	if (trace_timings)
+		phase_started = getnanotime();
 	if (prepare_revision_walk(revs))
 		die("revision walk setup failed");
+	if (trace_timings)
+		stats->prepare_us = (getnanotime() - phase_started) / 1000;
 	trace2_region_leave("pack-bitmap", "boundary-prepare", repo);
 
 	trace2_region_enter("pack-bitmap", "boundary-traverse", repo);
+	if (trace_timings)
+		phase_started = getnanotime();
 	revs->boundary = 1;
 	traverse_commit_list_filtered(revs,
 				      show_boundary_commit,
 				      show_boundary_object,
 				      &cb, NULL);
 	revs->boundary = 0;
+	if (trace_timings)
+		stats->traverse_us = (getnanotime() - phase_started) / 1000;
 	trace2_region_leave("pack-bitmap", "boundary-traverse", repo);
 
 	revs->blob_objects = tmp_blobs;
@@ -1459,6 +1494,8 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 	 * Then add the boundary commit(s) as fill-in traversal tips.
 	 */
 	trace2_region_enter("pack-bitmap", "boundary-fill-in", repo);
+	if (trace_timings)
+		phase_started = getnanotime();
 	for (i = 0; i < cb.boundary.nr; i++) {
 		struct object *obj = cb.boundary.objects[i].item;
 		if (bitmap_walk_contains(bitmap_git, cb.base, &obj->oid))
@@ -1468,6 +1505,8 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 	}
 	if (revs->pending.nr)
 		cb.base = fill_in_bitmap(bitmap_git, revs, cb.base, NULL);
+	if (trace_timings)
+		stats->fill_in_us = (getnanotime() - phase_started) / 1000;
 	trace2_region_leave("pack-bitmap", "boundary-fill-in", repo);
 
 cleanup:
@@ -2125,6 +2164,7 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 {
 	unsigned int i;
 	int use_boundary_traversal;
+	intmax_t have_roots = 0, want_roots = 0;
 
 	struct object_list *wants = NULL;
 	struct object_list *haves = NULL;
@@ -2132,6 +2172,7 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 	struct bitmap *wants_bitmap = NULL;
 	struct bitmap *haves_bitmap = NULL;
 
+	struct bitmap_boundary_stats boundary_stats = { 0 };
 	struct bitmap_index *bitmap_git;
 	struct repository *repo;
 
@@ -2158,6 +2199,11 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 		if (object->type == OBJ_NONE)
 			parse_object_or_die(revs->repo, &object->oid, NULL);
 
+		if (object->flags & UNINTERESTING)
+			have_roots++;
+		else
+			want_roots++;
+
 		while (object->type == OBJ_TAG) {
 			struct tag *tag = (struct tag *) object;
 
@@ -2175,6 +2221,14 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 		else
 			object_list_insert(object, &wants);
 	}
+
+	trace2_data_intmax("bitmap", revs->repo, "source/kind",
+			   bitmap_is_midx(bitmap_git) ? BITMAP_TRACE_SOURCE_MIDX :
+			   bitmap_git->pack->multi_pack_index ?
+				   BITMAP_TRACE_SOURCE_MIDX_PACK :
+				   BITMAP_TRACE_SOURCE_PACK);
+	trace2_data_intmax("bitmap", revs->repo, "roots/haves", have_roots);
+	trace2_data_intmax("bitmap", revs->repo, "roots/wants", want_roots);
 
 	use_boundary_traversal = git_env_bool(GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL, -1);
 	if (use_boundary_traversal < 0) {
@@ -2213,8 +2267,27 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 	if (haves) {
 		if (use_boundary_traversal) {
 			trace2_region_enter("pack-bitmap", "haves/boundary", repo);
-			haves_bitmap = find_boundary_objects(bitmap_git, revs, haves);
+			haves_bitmap = find_boundary_objects(bitmap_git, revs, haves,
+							     &boundary_stats);
 			trace2_region_leave("pack-bitmap", "haves/boundary", repo);
+			trace2_data_intmax("bitmap", repo, "haves/root-with-bitmap",
+					   boundary_stats.roots_with_bitmap);
+			trace2_data_intmax("bitmap", repo, "haves/root-without-bitmap",
+					   boundary_stats.roots_without_bitmap);
+			trace2_data_intmax("bitmap", repo,
+					   "haves/root-already-covered",
+					   boundary_stats.roots_already_covered);
+			trace2_data_intmax("bitmap", repo, "haves/root-noncommit",
+					   boundary_stats.roots_noncommit);
+			trace2_data_intmax("bitmap", repo,
+					   "haves/boundary-prepare-us",
+					   boundary_stats.prepare_us);
+			trace2_data_intmax("bitmap", repo,
+					   "haves/boundary-traverse-us",
+					   boundary_stats.traverse_us);
+			trace2_data_intmax("bitmap", repo,
+					   "haves/boundary-fill-in-us",
+					   boundary_stats.fill_in_us);
 		} else {
 			trace2_region_enter("pack-bitmap", "haves/classic", repo);
 			revs->ignore_missing_links = 1;

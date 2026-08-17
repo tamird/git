@@ -1999,12 +1999,35 @@ test_expect_success 'large-worktree push bounds unrelated remote haves' '
 	grep_wrote 3 many-haves.trace &&
 	test_commit -C many-haves-src --no-tag explicit &&
 	GIT_TRACE2_EVENT="$PWD/many-haves-explicit.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 \
 	git -C many-haves-src -c feature.manyFiles=true \
 		-c push.useBitmaps=true push ../many-haves-dst.git \
 		HEAD:refs/heads/main &&
 	test_grep ! "bounded_haves/" many-haves-explicit.trace &&
 	test_subcommand_flex ! git pack-objects --no-use-bitmap-index \
 		<many-haves-explicit.trace &&
+	test_region pack-bitmap haves/boundary many-haves-explicit.trace \
+		>/dev/null &&
+	test_trace2_data bitmap source/kind 0 \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap roots/haves "[1-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap roots/wants 1 \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/root-with-bitmap "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/root-without-bitmap "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/root-already-covered "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/root-noncommit "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/boundary-prepare-us "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/boundary-traverse-us "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
+	test_trace2_data bitmap haves/boundary-fill-in-us "[0-9][0-9]*" \
+		<many-haves-explicit.trace >/dev/null &&
 	grep_wrote 3 many-haves-explicit.trace &&
 	git -C many-haves-src rev-parse HEAD >many-haves-expect &&
 	git -C many-haves-dst.git rev-parse refs/heads/main \
