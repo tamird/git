@@ -30,6 +30,16 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "test2",
 		.want_per_thread_events = 1,
 	},
+	[TRACE2_TIMER_ID_DIFF_SETUP] = {
+		.category = "diff",
+		.name = "setup",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_DIFF_WRITEBACK] = {
+		.category = "diff",
+		.name = "write back to queue",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

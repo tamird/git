@@ -1404,7 +1404,7 @@ void diffcore_rename_extended(struct diff_options *options,
 		.repo = options->repo
 	};
 
-	trace2_region_enter("diff", "setup", options->repo);
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_SETUP);
 	info.setup = 0;
 	ASSERT(!dir_rename_count || strmap_empty(dir_rename_count));
 	want_copies = (detect_rename == DIFF_DETECT_COPY);
@@ -1430,6 +1430,7 @@ void diffcore_rename_extended(struct diff_options *options,
 				warning("skipping rename detection, detected"
 					" duplicate destination '%s'",
 					p->two->path);
+				trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SETUP);
 				goto cleanup;
 			}
 		}
@@ -1457,7 +1458,7 @@ void diffcore_rename_extended(struct diff_options *options,
 			register_rename_src(p);
 		}
 	}
-	trace2_region_leave("diff", "setup", options->repo);
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SETUP);
 	if (rename_dst_nr == 0 || rename_src_nr == 0)
 		goto cleanup; /* nothing to do */
 
@@ -1637,7 +1638,7 @@ void diffcore_rename_extended(struct diff_options *options,
 	/* At this point, we have found some renames and copies and they
 	 * are recorded in rename_dst.  The original list is still in *q.
 	 */
-	trace2_region_enter("diff", "write back to queue", options->repo);
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_WRITEBACK);
 	for (i = 0; i < q->nr; i++) {
 		struct diff_filepair *p = q->queue[i];
 		struct diff_filepair *pair_to_free = NULL;
@@ -1714,7 +1715,7 @@ void diffcore_rename_extended(struct diff_options *options,
 		strintmap_clear(break_idx);
 		FREE_AND_NULL(break_idx);
 	}
-	trace2_region_leave("diff", "write back to queue", options->repo);
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_WRITEBACK);
 	return;
 }
 

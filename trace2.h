@@ -510,6 +510,8 @@ enum trace2_timer_id {
 	 */
 	TRACE2_TIMER_ID_TEST1 = 0, /* emits summary event only */
 	TRACE2_TIMER_ID_TEST2,     /* emits summary and thread events */
+	TRACE2_TIMER_ID_DIFF_SETUP,
+	TRACE2_TIMER_ID_DIFF_WRITEBACK,
 
 	/* Add additional timer definitions before here. */
 	TRACE2_NUMBER_OF_TIMERS
