@@ -942,6 +942,22 @@ void prime_cache_tree(struct repository *r,
 		      struct tree *tree)
 {
 	struct strbuf tree_path = STRBUF_INIT;
+	struct cache_tree *root;
+
+	/*
+	 * Repair and validation still use the main repository's object
+	 * database. Reuse its full, non-promisor indexes only when repair
+	 * proves the cache tree is valid and matches the target tree.
+	 */
+	if (r == the_repository && istate->repo == r &&
+	    !istate->sparse_index && !repo_has_promisor_remote(r) &&
+	    cache_tree_get(istate) &&
+	    !cache_tree_update(istate, WRITE_TREE_SILENT |
+			       WRITE_TREE_REPAIR | WRITE_TREE_MISSING_OK) &&
+	    (root = cache_tree_get(istate)) &&
+	    cache_tree_fully_valid(root) &&
+	    oideq(&root->oid, &tree->object.oid))
+		return;
 
 	trace2_region_enter("cache-tree", "prime_cache_tree", r);
 	cache_tree_discard(istate);
