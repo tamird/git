@@ -90,8 +90,24 @@ test_expect_success 'HEAD was detached during rebase' '
 '
 
 test_expect_success 'rebase from ambiguous branch name' '
+	test_when_finished "rm -f rebase.trace" &&
 	git checkout -b topic side &&
-	git rebase main
+	GIT_TRACE2_EVENT="$PWD/rebase.trace" git rebase main &&
+	for phase in rebase:1 checkout-onto:1 pick:2 empty-check:2 \
+		commit-object:2 update-head:2
+	do
+		name=${phase%:*} &&
+		intervals=${phase#*:} &&
+		test "$(grep -c \
+			"\"event\":\"timer\".*\"category\":\"sequencer\",\"name\":\"$name\",\"intervals\":$intervals," \
+			rebase.trace)" = 1 &&
+		test_grep ! \
+			"\"event\":\"th_timer\".*\"category\":\"sequencer\",\"name\":\"$name\"" \
+			rebase.trace &&
+		test_grep ! \
+			"\"event\":\"region_[^\"]*\".*\"category\":\"sequencer\",\"label\":\"$name\"" \
+			rebase.trace || return 1
+	done
 '
 
 test_expect_success 'rebase off of the previous branch using "-"' '
