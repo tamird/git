@@ -1691,7 +1691,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_cmp expect-tree-positive actual-tree-positive &&
 	test_trace2_data grep content_index_tree_entries 3 \
 		<tree-positive.trace &&
-	test_trace2_data grep content_index_tree_pathspec_checks 2 \
+	test_trace2_data grep content_index_tree_pathspec_checks 1 \
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
 		<tree-positive.trace &&
@@ -1726,7 +1726,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_cmp expect-tree-attributes actual-tree-positive &&
 	test_trace2_data grep content_index_tree_entries 3 \
 		<tree-positive.trace &&
-	test_trace2_data grep content_index_tree_pathspec_checks 3 \
+	test_trace2_data grep content_index_tree_pathspec_checks 2 \
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 0 \
 		<tree-positive.trace &&

@@ -2347,6 +2347,7 @@ struct grep_tree_query_context {
 	struct oidset maybe;
 	int ipc_available;
 	int recursive_basename_pathspec;
+	int recursive_basename_all_directories;
 	int rooted_recursive_basename_pathspec;
 	int trace_enabled;
 	size_t batch_size;
@@ -2630,13 +2631,18 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		}
 
 		if (match != all_entries_interesting) {
-			if (query && query->trace_enabled)
-				query->pathspec_checks++;
-			strbuf_addstr(&name, base->buf + tn_len);
-			match = tree_entry_interesting(repo->index,
-						       &entry, &name,
-						       pathspec);
-			strbuf_setlen(&name, name_base_len);
+			if (query && query->recursive_basename_all_directories &&
+			    S_ISDIR(entry.mode)) {
+				match = entry_interesting;
+			} else {
+				if (query && query->trace_enabled)
+					query->pathspec_checks++;
+				strbuf_addstr(&name, base->buf + tn_len);
+				match = tree_entry_interesting(repo->index,
+							       &entry, &name,
+							       pathspec);
+				strbuf_setlen(&name, name_base_len);
+			}
 
 			if (match == all_entries_not_interesting) {
 				if (query && query->trace_enabled)
@@ -2983,6 +2989,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	unsigned int i;
 	int hit = 0;
 	int has_recursive_basename = 0;
+	int has_exact_recursive_literal_basename = 0;
 	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
@@ -2992,6 +2999,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (grep_tree_recursive_basename(item, &basename)) {
 			has_recursive_basename = 1;
+			if (item->magic == PATHSPEC_GLOB && !item->prefix &&
+			    pathspec_item_get_recursive_basename(item, &basename))
+				has_exact_recursive_literal_basename = 1;
 			continue;
 		}
 		if (item->prefix || item->magic || !item->len ||
@@ -3000,6 +3010,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	}
 	if (!has_recursive_basename)
 		query.recursive_basename_pathspec = 0;
+	query.recursive_basename_all_directories =
+		query.recursive_basename_pathspec &&
+		has_exact_recursive_literal_basename;
 	for (i = 0; query.rooted_recursive_basename_pathspec &&
 			    i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
