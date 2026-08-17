@@ -4237,8 +4237,14 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 
 	/* Never persist retained summaries before a full resync is validated. */
 	if (untracked->fsmonitor_resync) {
-		if (untracked->root && !untracked->root->valid)
-			do_invalidate_gitignore(untracked->root);
+		if (untracked->root && !untracked->root->valid) {
+			uintmax_t invalidated =
+				do_invalidate_gitignore(untracked->root);
+
+			trace2_data_intmax("untracked_cache", the_repository,
+					   "serialize/resync-invalidated-nodes",
+					   invalidated);
+		}
 		untracked->fsmonitor_resync = 0;
 	}
 
