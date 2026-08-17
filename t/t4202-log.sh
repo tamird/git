@@ -171,9 +171,20 @@ test_expect_success 'diff-filter=C' '
 
 test_expect_success 'git log --follow' '
 
-	git log --follow --pretty="format:%s" ichi >actual &&
+	test_when_finished "rm -f log-follow.trace" &&
+	GIT_TRACE2_EVENT="$PWD/log-follow.trace" \
+		git log --follow --pretty="format:%s" ichi >actual &&
 	printf "third\nsecond\ninitial" >expect &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	for phase in setup "write back to queue"
+	do
+		test "$(grep -c \
+			"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"$phase\",\"intervals\":[1-9][0-9]*" \
+			log-follow.trace)" = 1 &&
+		test_grep ! \
+			"\"event\":\"region_enter\".*\"category\":\"diff\",\"label\":\"$phase\"" \
+			log-follow.trace || return 1
+	done
 '
 
 test_expect_success 'git config log.follow works like --follow' '
