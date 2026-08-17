@@ -492,8 +492,11 @@ test_expect_success 'fetch --all --prune limits auto-follow scans to local tags'
 		test_region rev-list setup_revisions auto-tags.trace >/dev/null &&
 		test_region rev-list prepare_revision_walk auto-tags.trace \
 			>/dev/null &&
+		test_region rev-list mark_edges_uninteresting auto-tags.trace \
+			>/dev/null &&
 		test_region rev-list traverse_commit_list auto-tags.trace \
 			>/dev/null &&
+		test_region rev-list release_revisions auto-tags.trace >/dev/null &&
 		test_region revision all_refs auto-tags.trace >/dev/null &&
 		test_region revision alternate_refs auto-tags.trace >/dev/null &&
 		test_trace2_data revision all_refs/pending "[1-9][0-9]*" \

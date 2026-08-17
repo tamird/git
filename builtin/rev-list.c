@@ -940,8 +940,13 @@ int cmd_rev_list(int argc,
 
 	prepare_maximal_independent(&revs);
 
-	if (revs.tree_objects)
+	if (revs.tree_objects) {
+		trace2_region_enter("rev-list", "mark_edges_uninteresting",
+				    the_repository);
 		mark_edges_uninteresting(&revs, show_edge, 0);
+		trace2_region_leave("rev-list", "mark_edges_uninteresting",
+				    the_repository);
+	}
 
 	if (bisect_list) {
 		int reaches, all;
@@ -1034,6 +1039,8 @@ int cmd_rev_list(int argc,
 		print_disk_usage(total_disk_usage);
 
 cleanup:
+	trace2_region_enter("rev-list", "release_revisions", the_repository);
 	release_revisions(&revs);
+	trace2_region_leave("rev-list", "release_revisions", the_repository);
 	return ret;
 }
