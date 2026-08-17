@@ -2606,6 +2606,16 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				const struct pathspec_item *item = &pathspec->items[i];
 				const char *basename;
 
+				if (item->nowildcard_len == item->len) {
+					if (grep_tree_literal_path_matches(
+						    item, base->buf + tn_len,
+						    base->len - tn_len, entry.path,
+						    te_len)) {
+						basename_matches = 1;
+						break;
+					}
+					continue;
+				}
 				if (grep_tree_rooted_recursive_basename(item, &basename) &&
 				    !git_fnmatch(item, basename, entry.path, 0)) {
 					basename_matches = 1;
@@ -2973,6 +2983,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	unsigned int i;
 	int hit = 0;
 	int has_recursive_basename = 0;
+	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
 	for (i = 0; query.recursive_basename_pathspec && i < pathspec->nr; i++) {
@@ -2994,9 +3005,16 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
-		if (!grep_tree_rooted_recursive_basename(item, &basename))
+		if (grep_tree_rooted_recursive_basename(item, &basename)) {
+			has_rooted_recursive_basename = 1;
+			continue;
+		}
+		if (item->prefix || item->magic || !item->len ||
+		    item->nowildcard_len != item->len)
 			query.rooted_recursive_basename_pathspec = 0;
 	}
+	if (!has_rooted_recursive_basename)
+		query.rooted_recursive_basename_pathspec = 0;
 	if (!query.batch_size)
 		query.batch_size = GREP_TREE_INDEX_BATCH_SIZE;
 	else if (query.batch_size > GREP_TREE_INDEX_BATCH_SIZE)

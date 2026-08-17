@@ -1633,11 +1633,13 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	attributes_commit=$(echo attributes |
 		git commit-tree "$attributes_tree") &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
-		nested >expect-tree-attributes &&
+		nested ":(glob)other/**/text" ":(glob)another/**/text" \
+		>expect-tree-attributes &&
 	env GIT_TRACE2_EVENT="$PWD/tree-attributes.trace" \
 		GIT_TRACE2_EVENT_NESTING=2 \
-		git grep "present needle" "$attributes_commit" -- nested \
-		>actual-tree-attributes &&
+		git grep "present needle" "$attributes_commit" -- \
+			nested ":(glob)other/**/text" ":(glob)another/**/text" \
+			>actual-tree-attributes &&
 	test_cmp expect-tree-attributes actual-tree-attributes &&
 	test_grep "Binary file .*:nested/binary matches" \
 		expect-tree-attributes &&
@@ -1664,10 +1666,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 			tree-attributes.trace || return 1
 	done &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
+		absent ":(glob)nested/**/text" ":(glob)other/**/text" \
 		":(glob)nested/**/te*" >expect-tree-positive &&
 	>tree-positive.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 		git grep "present needle" "$attributes_commit" -- \
+			absent ":(glob)nested/**/text" ":(glob)other/**/text" \
 			":(glob)nested/**/te*" >actual-tree-positive &&
 	test_cmp expect-tree-positive actual-tree-positive &&
 	test_trace2_data grep content_index_tree_entries 3 \
