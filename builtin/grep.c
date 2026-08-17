@@ -2989,7 +2989,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	unsigned int i;
 	int hit = 0;
 	int has_recursive_basename = 0;
-	int has_exact_recursive_literal_basename = 0;
+	int has_exact_recursive_glob_basename = 0;
 	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
@@ -2999,9 +2999,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (grep_tree_recursive_basename(item, &basename)) {
 			has_recursive_basename = 1;
-			if (item->magic == PATHSPEC_GLOB && !item->prefix &&
-			    pathspec_item_get_recursive_basename(item, &basename))
-				has_exact_recursive_literal_basename = 1;
+			if (item->magic == PATHSPEC_GLOB &&
+			    grep_recursive_basename(item, &basename))
+				has_exact_recursive_glob_basename = 1;
 			continue;
 		}
 		if (item->prefix || item->magic || !item->len ||
@@ -3012,7 +3012,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		query.recursive_basename_pathspec = 0;
 	query.recursive_basename_all_directories =
 		query.recursive_basename_pathspec &&
-		has_exact_recursive_literal_basename;
+		has_exact_recursive_glob_basename;
 	for (i = 0; query.rooted_recursive_basename_pathspec &&
 			    i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
