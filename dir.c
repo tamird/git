@@ -1182,34 +1182,44 @@ static struct untracked_cache_dir *lookup_untracked(struct untracked_cache *uc,
 	return d;
 }
 
-static void do_invalidate_gitignore(struct untracked_cache_dir *dir)
+static uintmax_t do_invalidate_gitignore(struct untracked_cache_dir *dir)
 {
+	uintmax_t invalidated = dir->valid;
 	int i;
+
 	dir->valid = 0;
 	dir->can_skip_replay = 0;
 	for (size_t i = 0; i < dir->untracked_nr; i++)
 		free(dir->untracked[i]);
 	dir->untracked_nr = 0;
 	for (i = 0; i < dir->dirs_nr; i++)
-		do_invalidate_gitignore(dir->dirs[i]);
+		invalidated += do_invalidate_gitignore(dir->dirs[i]);
+	return invalidated;
 }
 
-static void trace_gitignore_invalidation(struct untracked_cache *uc,
-					 const char *source)
-{
-	if (uc->gitignore_invalidated < 64)
-		trace2_printf("untracked_cache/gitignore-invalidation-source:%s",
-			      source);
-	else if (uc->gitignore_invalidated == 64)
-		trace2_printf("untracked_cache/gitignore-invalidation-truncated:%d",
-			      64);
-}
+enum gitignore_invalidation_source {
+	GITIGNORE_INVALIDATION_GLOBAL,
+	GITIGNORE_INVALIDATION_PER_DIRECTORY,
+};
 
 static void invalidate_gitignore(struct untracked_cache *uc,
-				 struct untracked_cache_dir *dir)
+				 struct untracked_cache_dir *dir,
+				 enum gitignore_invalidation_source source,
+				 const struct object_id *old_oid,
+				 const struct object_id *new_oid)
 {
 	uc->gitignore_invalidated++;
-	do_invalidate_gitignore(dir);
+	if (source == GITIGNORE_INVALIDATION_GLOBAL)
+		uc->gitignore_global_invalidated++;
+	else
+		uc->gitignore_per_directory_invalidated++;
+	if (is_null_oid(old_oid))
+		uc->gitignore_added++;
+	else if (is_null_oid(new_oid))
+		uc->gitignore_removed++;
+	else
+		uc->gitignore_changed++;
+	uc->gitignore_nodes_invalidated += do_invalidate_gitignore(dir);
 }
 
 static void invalidate_directory(struct untracked_cache *uc,
@@ -1906,10 +1916,10 @@ static void prep_exclude(struct dir_struct *dir,
 		 */
 		if (untracked &&
 		    !oideq(&oid_stat.oid, &untracked->exclude_oid)) {
-			trace_gitignore_invalidation(dir->untracked,
-					     pl->src ? pl->src :
-					     dir->internal.basebuf.buf);
-			invalidate_gitignore(dir->untracked, untracked);
+			invalidate_gitignore(dir->untracked, untracked,
+					     GITIGNORE_INVALIDATION_PER_DIRECTORY,
+					     &untracked->exclude_oid,
+					     &oid_stat.oid);
 			oidcpy(&untracked->exclude_oid, &oid_stat.oid);
 		}
 		dir->internal.exclude_stack = stk;
@@ -3497,15 +3507,18 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		return NULL;
 	if (!oideq(&dir->internal.ss_info_exclude.oid,
 		   &dir->untracked->ss_info_exclude.oid)) {
-		trace_gitignore_invalidation(dir->untracked, "info/exclude");
-		invalidate_gitignore(dir->untracked, root);
+		invalidate_gitignore(dir->untracked, root,
+				     GITIGNORE_INVALIDATION_GLOBAL,
+				     &dir->untracked->ss_info_exclude.oid,
+				     &dir->internal.ss_info_exclude.oid);
 		dir->untracked->ss_info_exclude = dir->internal.ss_info_exclude;
 	}
 	if (!oideq(&dir->internal.ss_excludes_file.oid,
 		   &dir->untracked->ss_excludes_file.oid)) {
-		trace_gitignore_invalidation(dir->untracked,
-					     "core.excludesFile");
-		invalidate_gitignore(dir->untracked, root);
+		invalidate_gitignore(dir->untracked, root,
+				     GITIGNORE_INVALIDATION_GLOBAL,
+				     &dir->untracked->ss_excludes_file.oid,
+				     &dir->internal.ss_excludes_file.oid);
 		dir->untracked->ss_excludes_file = dir->internal.ss_excludes_file;
 	}
 
@@ -3673,6 +3686,28 @@ done:
 	emit_traversal_statistics(dir, istate->repo, path, len);
 
 	trace2_region_leave("dir", "read_directory", istate->repo);
+	if (dir->untracked && dir->untracked->gitignore_invalidated) {
+		struct untracked_cache *uc = dir->untracked;
+
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/global",
+				   uc->gitignore_global_invalidated);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/per-directory",
+				   uc->gitignore_per_directory_invalidated);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/added",
+				   uc->gitignore_added);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/removed",
+				   uc->gitignore_removed);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/changed",
+				   uc->gitignore_changed);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "gitignore-invalidation/nodes-invalidated",
+				   uc->gitignore_nodes_invalidated);
+	}
 	if (dir->untracked) {
 		static int force_untracked_cache = -1;
 
