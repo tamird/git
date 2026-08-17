@@ -3670,12 +3670,29 @@ void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 		save_commit_buffer = save_commit_buffer_orig;
 	} else {
 		struct ref_array array = { 0 };
+
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE);
 		filter_refs(&array, filter, type);
 		filter_ahead_behind(the_repository, &array);
 		filter_is_base(the_repository, &array);
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE);
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
 		ref_array_sort(sorting, &array);
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_FORMAT_OUTPUT);
 		print_formatted_ref_array(&array, format);
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_FORMAT_OUTPUT);
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_CLEANUP);
 		ref_array_clear(&array);
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_CLEANUP);
 	}
 }
 
