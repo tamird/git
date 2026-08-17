@@ -661,7 +661,7 @@ test_expect_success 'fetch --atomic prunes references' '
 '
 
 test_expect_success 'fetch --atomic aborts with non-fast-forward update' '
-	test_when_finished "rm -rf atomic" &&
+	test_when_finished "rm -rf atomic fetch-non-fast-forward.trace" &&
 
 	git branch atomic-non-ff &&
 	git clone . atomic &&
@@ -671,7 +671,15 @@ test_expect_success 'fetch --atomic aborts with non-fast-forward update' '
 	parent_commit=$(git rev-parse atomic-non-ff~) &&
 	git update-ref refs/heads/atomic-non-ff $parent_commit &&
 
-	test_must_fail git -C atomic fetch --atomic origin refs/heads/*:refs/remotes/origin/* &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/fetch-non-fast-forward.trace" \
+		GIT_TRACE2_EVENT_NESTING=2 \
+		git -C atomic fetch --atomic origin \
+			refs/heads/*:refs/remotes/origin/* &&
+	test_trace2_data fetch ref_updates/rejected 1 \
+		<fetch-non-fast-forward.trace &&
+	test_trace2_data fetch ref_updates/rejected-non-fast-forward 1 \
+		<fetch-non-fast-forward.trace &&
 	test_must_fail git -C atomic rev-parse refs/remotes/origin/atomic-new-branch &&
 	git -C atomic rev-parse refs/remotes/origin/atomic-non-ff >expected &&
 	test_cmp expected actual &&
@@ -2010,7 +2018,7 @@ test_expect_success 'fetch --tags fetches existing tags' '
 '
 
 test_expect_success 'fetch --tags fetches non-conflicting tags' '
-	test_when_finished rm -rf base repo &&
+	test_when_finished rm -rf base repo fetch-tag-clobber.trace &&
 
 	git init base &&
 	git -C base commit --allow-empty -m "empty-commit" &&
@@ -2025,8 +2033,14 @@ test_expect_success 'fetch --tags fetches non-conflicting tags' '
 	git -C base commit --allow-empty -m "second empty-commit" &&
 	git -C base tag -f tag-1 &&
 
-	test_must_fail git -C repo fetch --tags 2>out &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/fetch-tag-clobber.trace" \
+		GIT_TRACE2_EVENT_NESTING=2 \
+		git -C repo fetch --tags 2>out &&
 	test_grep "tag-1  (would clobber existing tag)" out &&
+	test_trace2_data fetch ref_updates/rejected 1 \
+		<fetch-tag-clobber.trace &&
+	test_trace2_data fetch ref_updates/rejected-tag-clobber 1 \
+		<fetch-tag-clobber.trace &&
 	git -C repo for-each-ref >out &&
 	test_grep "tag-2" out
 '

@@ -961,11 +961,18 @@ static void ref_update_display_info_display(struct ref_update_display_info *info
 			   &info->new_oid, summary_width);
 }
 
+struct fetch_ref_update_rejections {
+	intmax_t checked_out;
+	intmax_t tag_clobber;
+	intmax_t non_fast_forward;
+};
+
 static int update_local_ref(struct ref *ref,
 			    struct ref_transaction *transaction,
 			    const struct ref *remote_ref,
 			    const struct fetch_config *config,
-			    struct ref_update_display_info_array *display_array)
+			    struct ref_update_display_info_array *display_array,
+			    struct fetch_ref_update_rejections *rejections)
 {
 	struct commit *current = NULL, *updated;
 	int fast_forward = 0;
@@ -998,6 +1005,7 @@ static int update_local_ref(struct ref *ref,
 						      ref->name, remote_ref->name,
 						      &ref->old_oid, &ref->new_oid);
 		ref_update_display_info_set_failed(info);
+		rejections->checked_out++;
 		return 1;
 	}
 
@@ -1026,6 +1034,7 @@ static int update_local_ref(struct ref *ref,
 							      ref->name, remote_ref->name,
 							      &ref->old_oid, &ref->new_oid);
 			ref_update_display_info_set_failed(info);
+			rejections->tag_clobber++;
 			return 1;
 		}
 	}
@@ -1128,6 +1137,7 @@ static int update_local_ref(struct ref *ref,
 						      ref->name, remote_ref->name,
 						      &ref->old_oid, &ref->new_oid);
 		ref_update_display_info_set_failed(info);
+		rejections->non_fast_forward++;
 		return 1;
 	}
 }
@@ -1242,7 +1252,8 @@ static int store_updated_refs(struct display_state *display_state,
 			      struct ref_transaction *transaction, struct ref *ref_map,
 			      struct fetch_head *fetch_head,
 			      const struct fetch_config *config,
-			      struct ref_update_display_info_array *display_array)
+			      struct ref_update_display_info_array *display_array,
+			      struct fetch_ref_update_rejections *rejections)
 {
 	int rc = 0;
 	struct strbuf note = STRBUF_INIT;
@@ -1354,7 +1365,7 @@ static int store_updated_refs(struct display_state *display_state,
 
 			if (ref) {
 				rc |= update_local_ref(ref, transaction, rm,
-						       config, display_array);
+						       config, display_array, rejections);
 				free(ref);
 			} else if (write_fetch_head || dry_run) {
 				/*
@@ -1438,6 +1449,7 @@ static int fetch_and_consume_refs(struct display_state *display_state,
 				  const struct fetch_config *config,
 				  struct ref_update_display_info_array *display_array)
 {
+	struct fetch_ref_update_rejections rejections = { 0 };
 	int connectivity_checked = 1;
 	int ret;
 
@@ -1459,8 +1471,28 @@ static int fetch_and_consume_refs(struct display_state *display_state,
 	trace2_region_enter("fetch", "consume_refs", the_repository);
 	ret = store_updated_refs(display_state, connectivity_checked,
 				 transaction, ref_map, fetch_head, config,
-				 display_array);
+				 display_array, &rejections);
 	trace2_region_leave("fetch", "consume_refs", the_repository);
+
+	if (rejections.checked_out || rejections.tag_clobber ||
+	    rejections.non_fast_forward) {
+		trace2_data_intmax("fetch", the_repository,
+				   "ref_updates/rejected",
+				   rejections.checked_out + rejections.tag_clobber +
+				   rejections.non_fast_forward);
+		if (rejections.checked_out)
+			trace2_data_intmax("fetch", the_repository,
+					   "ref_updates/rejected-checked-out",
+					   rejections.checked_out);
+		if (rejections.tag_clobber)
+			trace2_data_intmax("fetch", the_repository,
+					   "ref_updates/rejected-tag-clobber",
+					   rejections.tag_clobber);
+		if (rejections.non_fast_forward)
+			trace2_data_intmax("fetch", the_repository,
+					   "ref_updates/rejected-non-fast-forward",
+					   rejections.non_fast_forward);
+	}
 
 out:
 	transport_unlock_pack(transport, 0);
