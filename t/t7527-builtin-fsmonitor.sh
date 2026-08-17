@@ -2070,6 +2070,14 @@ test_expect_success PTHREADS \
 			../untracked-revalidate.actual &&
 		test_trace2_data fsm_client query/trivial-response 1 \
 			<../untracked-revalidate.trace &&
+		test_trace2_data untracked_cache \
+			gitignore-invalidation/per-directory "[1-9][0-9]*" \
+			<../untracked-revalidate.trace &&
+		test_trace2_data untracked_cache \
+			gitignore-invalidation/changed "[1-9][0-9]*" \
+			<../untracked-revalidate.trace &&
+		test_grep ! "gitignore-invalidation-source:" \
+			../untracked-revalidate.trace &&
 		test_grep "parallel-lstat:[1-9]" \
 			../untracked-revalidate.perf &&
 		test_grep "nested/deleted/added" \

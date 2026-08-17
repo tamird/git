@@ -209,6 +209,13 @@ struct untracked_cache {
 	/* Statistics */
 	int dir_created;
 	int gitignore_invalidated;
+	/* Transient privacy-safe ignore-invalidation diagnostics. */
+	int gitignore_global_invalidated;
+	int gitignore_per_directory_invalidated;
+	int gitignore_added;
+	int gitignore_removed;
+	int gitignore_changed;
+	uintmax_t gitignore_nodes_invalidated;
 	int dir_invalidated;
 	int dir_opened;
 	/* fsmonitor invalidation data */
