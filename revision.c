@@ -3159,6 +3159,9 @@ static int handle_revision_pseudo_opt(struct rev_info *revs,
 	 * register it in the list at the top of handle_revision_opt.
 	 */
 	if (!strcmp(arg, "--all")) {
+		unsigned int pending_before = revs->pending.nr;
+
+		trace2_region_enter("revision", "all_refs", revs->repo);
 		handle_refs(refs, revs, *flags, refs_for_each_ref);
 		handle_refs(refs, revs, *flags, refs_head_ref);
 		if (!revs->single_worktree) {
@@ -3168,6 +3171,9 @@ static int handle_revision_pseudo_opt(struct rev_info *revs,
 			other_head_refs(the_repository, handle_one_ref, &cb);
 		}
 		clear_ref_exclusions(&revs->ref_excludes);
+		trace2_region_leave("revision", "all_refs", revs->repo);
+		trace2_data_intmax("revision", revs->repo, "all_refs/pending",
+				   revs->pending.nr - pending_before);
 	} else if (!strcmp(arg, "--branches")) {
 		if (revs->ref_excludes.hidden_refs_configured)
 			return error(_("options '%s' and '%s' cannot be used together"),
@@ -3255,7 +3261,13 @@ static int handle_revision_pseudo_opt(struct rev_info *revs,
 	} else if (!strcmp(arg, "--indexed-objects")) {
 		add_index_objects_to_pending(revs, *flags);
 	} else if (!strcmp(arg, "--alternate-refs")) {
+		unsigned int pending_before = revs->pending.nr;
+
+		trace2_region_enter("revision", "alternate_refs", revs->repo);
 		add_alternate_refs_to_pending(revs, *flags);
+		trace2_region_leave("revision", "alternate_refs", revs->repo);
+		trace2_data_intmax("revision", revs->repo, "alternate_refs/pending",
+				   revs->pending.nr - pending_before);
 	} else if (!strcmp(arg, "--not")) {
 		*flags ^= UNINTERESTING | BOTTOM;
 	} else if (!strcmp(arg, "--no-walk")) {

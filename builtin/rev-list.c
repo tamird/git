@@ -28,6 +28,7 @@
 #include "commit-reach.h"
 #include "quote.h"
 #include "strbuf.h"
+#include "trace2.h"
 
 struct rev_list_info {
 	struct rev_info *revs;
@@ -762,7 +763,9 @@ int cmd_rev_list(int argc,
 	if (arg_missing_action)
 		revs.do_not_die_on_missing_objects = 1;
 
+	trace2_region_enter("rev-list", "setup_revisions", the_repository);
 	argc = setup_revisions(argc, argv, &revs, &s_r_opt);
+	trace2_region_leave("rev-list", "setup_revisions", the_repository);
 
 	memset(&info, 0, sizeof(info));
 	info.revs = &revs;
@@ -929,7 +932,10 @@ int cmd_rev_list(int argc,
 			goto cleanup;
 	}
 
-	if (prepare_revision_walk(&revs))
+	trace2_region_enter("rev-list", "prepare_revision_walk", the_repository);
+	ret = prepare_revision_walk(&revs);
+	trace2_region_leave("rev-list", "prepare_revision_walk", the_repository);
+	if (ret)
 		die("revision walk setup failed");
 
 	prepare_maximal_independent(&revs);
@@ -982,9 +988,11 @@ int cmd_rev_list(int argc,
 		oidset_clear(&revs.missing_commits);
 	}
 
+	trace2_region_enter("rev-list", "traverse_commit_list", the_repository);
 	traverse_commit_list_filtered(
 		&revs, show_commit, show_object, &info,
 		(arg_print_omitted ? &omitted_objects : NULL));
+	trace2_region_leave("rev-list", "traverse_commit_list", the_repository);
 
 	if (arg_print_omitted) {
 		struct oidset_iter iter;
