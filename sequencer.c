@@ -33,6 +33,7 @@
 #include "sparse-index.h"
 #include "strvec.h"
 #include "quote.h"
+#include "trace2.h"
 #include "trailer.h"
 #include "log-tree.h"
 #include "wt-status.h"
@@ -1686,14 +1687,20 @@ static int try_to_commit(struct repository *r,
 		free(email);
 	}
 
-	if (commit_tree_extended(msg->buf, msg->len, &tree, parents, oid,
-				 author, committer, opts->gpg_sign, extra)) {
+	trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_COMMIT_OBJECT);
+	res = commit_tree_extended(msg->buf, msg->len, &tree, parents, oid,
+				   author, committer, opts->gpg_sign, extra);
+	trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_COMMIT_OBJECT);
+	if (res) {
 		res = error(_("failed to write commit object"));
 		goto out;
 	}
 
-	if (update_head_with_reflog(current_head, oid, reflog_action,
-				    msg, &err)) {
+	trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_UPDATE_HEAD);
+	res = update_head_with_reflog(current_head, oid, reflog_action,
+				      msg, &err);
+	trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_UPDATE_HEAD);
+	if (res) {
 		res = error("%s", err.buf);
 		goto out;
 	}
@@ -2526,7 +2533,9 @@ static enum pick_result do_pick_commit(struct repository *r,
 		goto leave;
 	}
 
+	trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CHECK);
 	allow = allow_empty(r, opts, commit);
+	trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CHECK);
 	if (allow < 0) {
 		res = allow;
 		goto leave;
@@ -4948,7 +4957,12 @@ static int checkout_onto(struct repository *r, struct replay_opts *opts,
 					   onto_name),
 		.default_reflog_action = sequencer_reflog_action(opts)
 	};
-	if (reset_working_tree(r, &ropts)) {
+	int ret;
+
+	trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_CHECKOUT);
+	ret = reset_working_tree(r, &ropts);
+	trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_CHECKOUT);
+	if (ret) {
 		apply_autostash(rebase_path_autostash());
 		sequencer_remove_state(opts);
 		return error(_("could not detach HEAD"));
@@ -5150,8 +5164,10 @@ static int pick_commits(struct repository *r,
 		strbuf_reset(&ctx->message);
 		ctx->have_message = 0;
 		if (item->command <= TODO_SQUASH) {
+			trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_PICK);
 			res = pick_one_commit(r, todo_list, opts, &check_todo,
 					      &reschedule);
+			trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_PICK);
 			if (!res && item->command == TODO_EDIT)
 				return 0;
 		} else if (item->command == TODO_EXEC) {
@@ -5700,7 +5716,9 @@ int sequencer_pick_revisions(struct repository *r,
 		if (get_revision(opts->revs))
 			BUG("unexpected extra commit from walk");
 
+		trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_PICK);
 		res = single_pick(r, cmit, opts);
+		trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_PICK);
 		goto out;
 	}
 

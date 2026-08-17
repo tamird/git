@@ -40,6 +40,37 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "write back to queue",
 		.want_per_thread_events = 0,
 	},
+	/* Rebase and pick are inclusive; their phase timers overlap them. */
+	[TRACE2_TIMER_ID_SEQUENCER_REBASE] = {
+		.category = "sequencer",
+		.name = "rebase",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SEQUENCER_CHECKOUT] = {
+		.category = "sequencer",
+		.name = "checkout-onto",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SEQUENCER_PICK] = {
+		.category = "sequencer",
+		.name = "pick",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SEQUENCER_EMPTY_CHECK] = {
+		.category = "sequencer",
+		.name = "empty-check",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SEQUENCER_COMMIT_OBJECT] = {
+		.category = "sequencer",
+		.name = "commit-object",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SEQUENCER_UPDATE_HEAD] = {
+		.category = "sequencer",
+		.name = "update-head",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

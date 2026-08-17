@@ -754,7 +754,9 @@ static int run_specific_rebase(struct rebase_options *opts)
 			opts->gpg_sign_opt = tmp;
 		}
 
+		trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_REBASE);
 		status = run_sequencer_rebase(opts);
+		trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_REBASE);
 	} else if (opts->type == REBASE_APPLY)
 		status = run_am(opts);
 	else
