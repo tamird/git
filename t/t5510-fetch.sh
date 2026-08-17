@@ -487,7 +487,19 @@ test_expect_success 'fetch --all --prune limits auto-follow scans to local tags'
 			printf "%s\n" refs/tags/annotated refs/tags/lightweight
 		} | sort >refs.expected &&
 		GIT_TRACE2_EVENT="$PWD/auto-tags.trace" \
+		GIT_TRACE2_EVENT_NESTING=2 \
 			git fetch --all --prune >fetch.out 2>fetch.err &&
+		test_region rev-list setup_revisions auto-tags.trace >/dev/null &&
+		test_region rev-list prepare_revision_walk auto-tags.trace \
+			>/dev/null &&
+		test_region rev-list traverse_commit_list auto-tags.trace \
+			>/dev/null &&
+		test_region revision all_refs auto-tags.trace >/dev/null &&
+		test_region revision alternate_refs auto-tags.trace >/dev/null &&
+		test_trace2_data revision all_refs/pending "[1-9][0-9]*" \
+			<auto-tags.trace >/dev/null &&
+		test_trace2_data revision alternate_refs/pending 0 \
+			<auto-tags.trace >/dev/null &&
 		test_grep "^Fetching origin$" fetch.out &&
 		test_grep "^Fetching secondary$" fetch.out &&
 		test_grep "origin/stale" fetch.err &&
