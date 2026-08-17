@@ -3353,6 +3353,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-auto-create &&
 	test_trace2_data grep worktree_blob/write_outcome 8 \
 		<grep-worktree-trace-auto-create &&
+	test_trace2_data grep worktree_blob/write_errno 0 \
+		<grep-worktree-trace-auto-create &&
 	test_trace2_data grep worktree_blob/compact_loaded 0 \
 		<grep-worktree-trace-auto-create &&
 	test_trace2_data grep worktree_blob/recovery_entries 0 \
@@ -3389,6 +3391,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		git grep "absent worktree blob" -- grep-worktree-equal &&
 	test_path_is_missing .git/index.grep-worktree &&
 	test_trace2_data grep worktree_blob/write_outcome 3 \
+		<grep-worktree-trace-lock-contention &&
+	test_trace2_data grep worktree_blob/write_errno "[1-9][0-9]*" \
 		<grep-worktree-trace-lock-contention &&
 	rm .git/index.grep-worktree.lock &&
 
@@ -3440,6 +3444,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-no-optional-locks &&
 	test_trace2_data grep worktree_blob/write_outcome 1 \
 		<grep-worktree-trace-no-optional-locks &&
+	test_trace2_data grep worktree_blob/write_errno 0 \
+		<grep-worktree-trace-no-optional-locks &&
 	test_trace2_data grep worktree_blob/compact_loaded 1 \
 		<grep-worktree-trace-no-optional-locks &&
 	test_cmp .git/index.grep-worktree.no-optional-locks-save \
@@ -3484,6 +3490,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_trace2_data grep worktree_blob/hits 1 \
 		<grep-worktree-trace-generation-reused &&
 	test_trace2_data grep worktree_blob/write_outcome 2 \
+		<grep-worktree-trace-generation-reused &&
+	test_trace2_data grep worktree_blob/write_errno 0 \
 		<grep-worktree-trace-generation-reused &&
 	test_trace2_data grep worktree_blob/compact_loaded 1 \
 		<grep-worktree-trace-generation-reused &&
@@ -4599,6 +4607,8 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		test_trace2_data grep worktree_blob/direct_write 1 \
 			<checksum-negative.trace &&
 		test_trace2_data grep worktree_blob/write_outcome 8 \
+			<checksum-negative.trace &&
+		test_trace2_data grep worktree_blob/write_errno 0 \
 			<checksum-negative.trace &&
 		echo "target:changed before delayed negative" >expected &&
 		GIT_TRACE2_EVENT="$PWD/checksum-result.trace" \

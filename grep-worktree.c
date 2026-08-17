@@ -155,6 +155,7 @@ struct grep_worktree_cache {
 	uint64_t direct_write;
 	uint64_t negative_noop;
 	enum grep_worktree_write_outcome write_outcome;
+	int write_errno;
 	int split_index;
 	int recovery_checksum_checked;
 	int recovery_checksum_valid;
@@ -1082,6 +1083,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	if (!cache)
 		return;
 	cache->write_outcome = GREP_WORKTREE_WRITE_ABORTED;
+	cache->write_errno = 0;
 	if (!use_optional_locks()) {
 		cache->write_outcome =
 			GREP_WORKTREE_WRITE_OPTIONAL_LOCKS_DISABLED;
@@ -1179,7 +1181,8 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 			0,
 		0444);
 	if (fd < 0) {
-		cache->write_outcome = errno == EEXIST ?
+		cache->write_errno = errno;
+		cache->write_outcome = cache->write_errno == EEXIST ?
 			GREP_WORKTREE_WRITE_LOCK_CONTENDED :
 			GREP_WORKTREE_WRITE_LOCK_FAILED;
 		goto done;
@@ -1666,6 +1669,9 @@ void grep_worktree_cache_free(struct grep_worktree_cache *cache)
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/write_outcome",
 			   cache->write_outcome);
+	trace2_data_intmax("grep", cache->repo,
+			   "worktree_blob/write_errno",
+			   cache->write_errno);
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/compact_loaded",
 			   cache->compact_loaded);
