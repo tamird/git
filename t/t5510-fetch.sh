@@ -503,6 +503,53 @@ test_expect_success 'fetch --all --prune limits auto-follow scans to local tags'
 			<auto-tags.trace >/dev/null &&
 		test_trace2_data revision alternate_refs/pending 0 \
 			<auto-tags.trace >/dev/null &&
+		awk -F '\''"'\'' -v tree_bytes="$((15 + $(test_oid rawsz)))" '\''
+			function field(name, i) {
+				for (i = 2; i + 2 <= NF; i += 2)
+					if ($i == name && $(i + 1) == ":")
+						return $(i + 2)
+				return ""
+			}
+			BEGIN {
+				expected["edge-mark/roots"] = 1
+				expected["edge-mark/roots-already-uninteresting"] = 0
+				expected["edge-mark/trees-expanded"] = 1
+				expected["edge-mark/tree-bytes"] = tree_bytes
+			}
+			{
+				if (field("event") != "data" ||
+				    field("category") != "rev-list")
+					next
+				key = field("key")
+				if (index(key, "edge-mark/") != 1)
+					next
+				sid = field("sid")
+				value = field("value")
+				if (!(key in expected) || sid == "" ||
+				    value !~ /^[0-9]+$/) {
+					bad = 1
+					next
+				}
+				if (++seen[sid, key] != 1)
+					bad = 1
+				values[sid, key] = value + 0
+				sessions[sid] = 1
+			}
+			END {
+				for (sid in sessions) {
+					matched = 1
+					for (key in expected) {
+						if (seen[sid, key] != 1)
+							bad = 1
+						if (values[sid, key] != expected[key])
+							matched = 0
+					}
+					if (matched)
+						found = 1
+				}
+				exit (bad || !found)
+			}
+		'\'' auto-tags.trace &&
 		test_grep "^Fetching origin$" fetch.out &&
 		test_grep "^Fetching secondary$" fetch.out &&
 		test_grep "origin/stale" fetch.err &&

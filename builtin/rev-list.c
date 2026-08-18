@@ -941,11 +941,34 @@ int cmd_rev_list(int argc,
 	prepare_maximal_independent(&revs);
 
 	if (revs.tree_objects) {
+		struct tree_mark_stats stats = { 0 };
+		int trace_tree_marking =
+			trace2_is_enabled() && revs.diffopt.flags.quick &&
+			revs.read_from_stdin && revs.tag_objects &&
+			revs.tree_objects && revs.blob_objects &&
+			!revs.edge_hint && !show_disk_usage;
+
 		trace2_region_enter("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		mark_edges_uninteresting(&revs, show_edge, 0);
+		if (trace_tree_marking)
+			mark_edges_uninteresting_with_stats(&revs, show_edge,
+							   &stats);
+		else
+			mark_edges_uninteresting(&revs, show_edge, 0);
 		trace2_region_leave("rev-list", "mark_edges_uninteresting",
 				    the_repository);
+		if (trace_tree_marking) {
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/roots", stats.roots);
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/roots-already-uninteresting",
+					   stats.roots_already_uninteresting);
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/trees-expanded",
+					   stats.trees_expanded);
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/tree-bytes", stats.tree_bytes);
+		}
 	}
 
 	if (bisect_list) {

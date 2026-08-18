@@ -555,7 +555,19 @@ void put_revision_mark(const struct rev_info *revs,
 		       const struct commit *commit);
 
 void mark_parents_uninteresting(struct rev_info *revs, struct commit *commit);
+
+struct tree_mark_stats {
+	/* Non-null roots requested by the nonsparse edge walk. */
+	uint64_t roots;
+	uint64_t roots_already_uninteresting;
+	/* Successfully expanded trees and their logical tree-object bytes. */
+	uint64_t trees_expanded;
+	uint64_t tree_bytes;
+};
+
 void mark_tree_uninteresting(struct repository *r, struct tree *tree);
+void mark_tree_uninteresting_with_stats(struct repository *r, struct tree *tree,
+					struct tree_mark_stats *stats);
 void mark_trees_uninteresting_sparse(struct repository *r, struct oidset *trees);
 
 /**

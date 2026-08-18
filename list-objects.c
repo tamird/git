@@ -233,9 +233,22 @@ static void process_tag(struct traversal_context *ctx,
 		show_object(ctx, &tag->object, name);
 }
 
+static void mark_edge_tree_uninteresting(struct rev_info *revs,
+					 struct tree *tree,
+					 struct tree_mark_stats *stats)
+{
+	if (stats && tree) {
+		stats->roots++;
+		if (tree->object.flags & UNINTERESTING)
+			stats->roots_already_uninteresting++;
+	}
+	mark_tree_uninteresting_with_stats(revs->repo, tree, stats);
+}
+
 static void mark_edge_parents_uninteresting(struct commit *commit,
 					    struct rev_info *revs,
-					    show_edge_fn show_edge)
+					    show_edge_fn show_edge,
+					    struct tree_mark_stats *stats)
 {
 	struct commit_list *parents;
 
@@ -243,8 +256,8 @@ static void mark_edge_parents_uninteresting(struct commit *commit,
 		struct commit *parent = parents->item;
 		if (!(parent->object.flags & UNINTERESTING))
 			continue;
-		mark_tree_uninteresting(revs->repo,
-					repo_get_commit_tree(the_repository, parent));
+		mark_edge_tree_uninteresting(revs,
+				repo_get_commit_tree(the_repository, parent), stats);
 		if (revs->edge_hint && !(parent->object.flags & SHOWN)) {
 			parent->object.flags |= SHOWN;
 			show_edge(parent);
@@ -280,9 +293,9 @@ static void add_edge_parents(struct commit *commit,
 	}
 }
 
-void mark_edges_uninteresting(struct rev_info *revs,
-			      show_edge_fn show_edge,
-			      int sparse)
+static void mark_edges_uninteresting_1(struct rev_info *revs,
+				       show_edge_fn show_edge, int sparse,
+				       struct tree_mark_stats *stats)
 {
 	struct commit_list *list;
 
@@ -308,15 +321,17 @@ void mark_edges_uninteresting(struct rev_info *revs,
 		for (list = revs->commits; list; list = list->next) {
 			struct commit *commit = list->item;
 			if (commit->object.flags & UNINTERESTING) {
-				mark_tree_uninteresting(revs->repo,
-							repo_get_commit_tree(the_repository, commit));
+				mark_edge_tree_uninteresting(revs,
+					repo_get_commit_tree(the_repository, commit),
+					stats);
 				if (revs->edge_hint_aggressive && !(commit->object.flags & SHOWN)) {
 					commit->object.flags |= SHOWN;
 					show_edge(commit);
 				}
 				continue;
 			}
-			mark_edge_parents_uninteresting(commit, revs, show_edge);
+			mark_edge_parents_uninteresting(commit, revs, show_edge,
+							stats);
 		}
 	}
 
@@ -326,14 +341,27 @@ void mark_edges_uninteresting(struct rev_info *revs,
 			struct commit *commit = (struct commit *)obj;
 			if (obj->type != OBJ_COMMIT || !(obj->flags & UNINTERESTING))
 				continue;
-			mark_tree_uninteresting(revs->repo,
-						repo_get_commit_tree(the_repository, commit));
+			mark_edge_tree_uninteresting(revs,
+				repo_get_commit_tree(the_repository, commit), stats);
 			if (!(obj->flags & SHOWN)) {
 				obj->flags |= SHOWN;
 				show_edge(commit);
 			}
 		}
 	}
+}
+
+void mark_edges_uninteresting(struct rev_info *revs,
+			      show_edge_fn show_edge, int sparse)
+{
+	mark_edges_uninteresting_1(revs, show_edge, sparse, NULL);
+}
+
+void mark_edges_uninteresting_with_stats(struct rev_info *revs,
+					 show_edge_fn show_edge,
+					 struct tree_mark_stats *stats)
+{
+	mark_edges_uninteresting_1(revs, show_edge, 0, stats);
 }
 
 static void add_pending_tree(struct rev_info *revs, struct tree *tree)

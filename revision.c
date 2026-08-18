@@ -67,20 +67,29 @@ static void mark_blob_uninteresting(struct blob *blob)
 	blob->object.flags |= UNINTERESTING;
 }
 
+static void mark_tree_uninteresting_1(struct repository *r, struct tree *tree,
+				      struct tree_mark_stats *stats);
+
 static void mark_tree_contents_uninteresting(struct repository *r,
-					     struct tree *tree)
+					     struct tree *tree,
+					     struct tree_mark_stats *stats)
 {
 	struct tree_desc desc;
 	struct name_entry entry;
 
 	if (repo_parse_tree_gently(the_repository, tree, 1) < 0)
 		return;
+	if (stats) {
+		stats->trees_expanded++;
+		stats->tree_bytes += tree->size;
+	}
 
 	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
 	while (tree_entry(&desc, &entry)) {
 		switch (object_type(entry.mode)) {
 		case OBJ_TREE:
-			mark_tree_uninteresting(r, lookup_tree(r, &entry.oid));
+			mark_tree_uninteresting_1(r, lookup_tree(r, &entry.oid),
+						stats);
 			break;
 		case OBJ_BLOB:
 			mark_blob_uninteresting(lookup_blob(r, &entry.oid));
@@ -98,7 +107,8 @@ static void mark_tree_contents_uninteresting(struct repository *r,
 	free_tree_buffer(tree);
 }
 
-void mark_tree_uninteresting(struct repository *r, struct tree *tree)
+static void mark_tree_uninteresting_1(struct repository *r, struct tree *tree,
+				      struct tree_mark_stats *stats)
 {
 	struct object *obj;
 
@@ -109,7 +119,18 @@ void mark_tree_uninteresting(struct repository *r, struct tree *tree)
 	if (obj->flags & UNINTERESTING)
 		return;
 	obj->flags |= UNINTERESTING;
-	mark_tree_contents_uninteresting(r, tree);
+	mark_tree_contents_uninteresting(r, tree, stats);
+}
+
+void mark_tree_uninteresting(struct repository *r, struct tree *tree)
+{
+	mark_tree_uninteresting_1(r, tree, NULL);
+}
+
+void mark_tree_uninteresting_with_stats(struct repository *r, struct tree *tree,
+					struct tree_mark_stats *stats)
+{
+	mark_tree_uninteresting_1(r, tree, stats);
 }
 
 struct path_and_oids_entry {
@@ -459,7 +480,7 @@ static struct commit *handle_commit(struct rev_info *revs,
 		if (!revs->tree_objects)
 			return NULL;
 		if (flags & UNINTERESTING) {
-			mark_tree_contents_uninteresting(revs->repo, tree);
+			mark_tree_contents_uninteresting(revs->repo, tree, NULL);
 			return NULL;
 		}
 		add_pending_object_with_path(revs, object, name, mode, path);
