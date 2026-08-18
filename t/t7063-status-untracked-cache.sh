@@ -1470,4 +1470,129 @@ test_expect_success 'pending validation uses the original index cutoff' '
 	)
 '
 
+test_expect_success 'successful commits respect disabled optional cache publication' '
+	test_when_finished "git -C pending-cache config index.skipHash false" &&
+	(
+		cd pending-cache &&
+		git config index.skipHash true &&
+		cp .git/pending .git/commit-no-optional &&
+		echo optional-disabled >b/tracked &&
+		GIT_INDEX_FILE=.git/commit-no-optional \
+			git add b/tracked &&
+		GIT_INDEX_FILE=.git/commit-no-optional \
+			test-tool scrap-cache-tree &&
+		echo "$ZERO_OID" >.git/commit-zero-hash &&
+		test_trailing_hash .git/commit-no-optional \
+			>.git/commit-before-hash &&
+		test_cmp .git/commit-zero-hash .git/commit-before-hash &&
+		GIT_INDEX_FILE=.git/commit-no-optional \
+			test-tool dump-untracked-cache state \
+			>.git/commit-before-state &&
+		test_cmp .git/pending-state .git/commit-before-state &&
+		GIT_INDEX_FILE=.git/commit-no-optional \
+		GIT_TRACE2_EVENT="$PWD/.git/commit-no-optional.trace" \
+			git --no-optional-locks -c core.editor=true \
+			-c commit.status=true commit --edit \
+			-m "pending cache without optional publication" &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<.git/commit-no-optional.trace &&
+		sed -n "/\"category\":\"status\",\"key\":\"untracked\\/cache-resync\",\"value\":\"1\"/q;p" \
+			.git/commit-no-optional.trace \
+			>.git/commit-no-optional-before-status &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" \
+			.git/commit-no-optional.trace) &&
+		test -n "$root_sid" &&
+		grep -F "\"sid\":\"$root_sid\"" \
+			.git/commit-no-optional-before-status \
+			>.git/commit-no-optional-root-before-status &&
+		changed_mask=$(
+			test_trace2_data index write/changed_mask "[0-9][0-9]*" \
+				<.git/commit-no-optional-root-before-status |
+			sed -n "s/.*\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p"
+		) &&
+		case "$changed_mask" in
+		""|*[!0-9]*) return 1 ;;
+		esac &&
+		test "$((changed_mask & 32))" -ne 0 &&
+		echo optional-disabled >.git/commit-content-expect &&
+		git show HEAD:b/tracked >.git/commit-content-actual &&
+		test_cmp .git/commit-content-expect \
+			.git/commit-content-actual &&
+		test_trailing_hash .git/commit-no-optional \
+			>.git/commit-after-hash &&
+		test_cmp .git/commit-zero-hash .git/commit-after-hash &&
+		GIT_INDEX_FILE=.git/commit-no-optional \
+			test-tool dump-untracked-cache state \
+			>.git/commit-after-state &&
+		test_cmp .git/pending-state .git/commit-after-state
+	)
+'
+
+test_expect_success 'successful commits publish recovered hashless index caches' '
+	test_when_finished "git -C pending-cache config index.skipHash false" &&
+	(
+		cd pending-cache &&
+		git config index.skipHash true &&
+		cp .git/pending .git/commit-publish &&
+		echo optional-published >b/tracked &&
+		GIT_INDEX_FILE=.git/commit-publish \
+			git add b/tracked &&
+		GIT_INDEX_FILE=.git/commit-publish \
+			test-tool scrap-cache-tree &&
+		echo "$ZERO_OID" >.git/commit-zero-hash &&
+		test_trailing_hash .git/commit-publish \
+			>.git/commit-before-hash &&
+		test_cmp .git/commit-zero-hash .git/commit-before-hash &&
+		GIT_INDEX_FILE=.git/commit-publish \
+			test-tool dump-untracked-cache state \
+			>.git/commit-before-state &&
+		test_cmp .git/pending-state .git/commit-before-state &&
+		GIT_INDEX_FILE=.git/commit-publish \
+		GIT_TRACE2_EVENT="$PWD/.git/commit-publish.trace" \
+			git -c core.editor=true -c commit.status=true \
+			commit --edit -m "publish recovered pending cache" &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<.git/commit-publish.trace &&
+		sed -n "/\"category\":\"status\",\"key\":\"untracked\\/cache-resync\",\"value\":\"1\"/q;p" \
+			.git/commit-publish.trace \
+			>.git/commit-publish-before-status &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" \
+			.git/commit-publish.trace) &&
+		test -n "$root_sid" &&
+		grep -F "\"sid\":\"$root_sid\"" \
+			.git/commit-publish-before-status \
+			>.git/commit-publish-root-before-status &&
+		changed_mask=$(
+			test_trace2_data index write/changed_mask "[0-9][0-9]*" \
+				<.git/commit-publish-root-before-status |
+			sed -n "s/.*\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p"
+		) &&
+		case "$changed_mask" in
+		""|*[!0-9]*) return 1 ;;
+		esac &&
+		test "$((changed_mask & 32))" -ne 0 &&
+		echo optional-published >.git/commit-content-expect &&
+		git show HEAD:b/tracked >.git/commit-content-actual &&
+		test_cmp .git/commit-content-expect \
+			.git/commit-content-actual &&
+		test_trailing_hash .git/commit-publish \
+			>.git/commit-after-hash &&
+		test_cmp .git/commit-zero-hash .git/commit-after-hash &&
+		GIT_INDEX_FILE=.git/commit-publish \
+			test-tool dump-untracked-cache state \
+			>.git/commit-after-state &&
+		test_cmp .git/trusted-state .git/commit-after-state &&
+		GIT_INDEX_FILE=.git/commit-publish \
+			test-tool dump-untracked-cache >.git/commit-published-cache &&
+		test_grep "^/a/deep/ .* valid$" .git/commit-published-cache &&
+		GIT_INDEX_FILE=.git/commit-publish \
+		GIT_TRACE2_EVENT="$PWD/.git/commit-warm.trace" \
+			git status --porcelain >.git/commit-warm-out &&
+		test_trace2_data status untracked/cache-resync 0 \
+			<.git/commit-warm.trace &&
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<.git/commit-warm.trace
+	)
+'
+
 test_done

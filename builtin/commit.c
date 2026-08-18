@@ -569,6 +569,11 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 		      struct wt_status *s)
 {
 	struct object_id oid;
+	struct index_state *istate = the_repository->index;
+	int pending_resync = istate->untracked &&
+		istate->untracked->fsmonitor_resync;
+	unsigned int pending_dir_flags = pending_resync ?
+		istate->untracked->dir_flags : 0;
 
 	if (s->relative_paths)
 		s->prefix = prefix;
@@ -588,6 +593,17 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 	s->ignore_submodule_arg = ignore_submodule_arg;
 
 	wt_status_collect(s);
+	/* As-is preparation wrote the index before this cache recovery. */
+	if (commit_style == COMMIT_AS_IS && pending_resync &&
+	    istate->untracked && !istate->untracked->fsmonitor_resync &&
+	    istate->untracked->dir_flags == pending_dir_flags &&
+	    (istate->cache_changed & UNTRACKED_CHANGED) &&
+	    use_optional_locks()) {
+		struct lock_file lock = LOCK_INIT;
+
+		if (repo_hold_locked_index(the_repository, &lock, 0) >= 0)
+			repo_update_index_if_able(the_repository, &lock);
+	}
 	wt_status_print(s);
 	wt_status_collect_free_buffers(s);
 
