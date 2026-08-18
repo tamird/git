@@ -691,7 +691,7 @@ static void write_items_sequentially(struct checkout *state)
 int run_parallel_checkout(struct checkout *state, int num_workers, int threshold,
 			  struct progress *progress, unsigned int *progress_cnt)
 {
-	int ret;
+	int ret, trace_phases;
 
 	if (parallel_checkout.status != PC_ACCEPTING_ENTRIES)
 		BUG("cannot run parallel checkout: uninitialized or already running");
@@ -699,19 +699,57 @@ int run_parallel_checkout(struct checkout *state, int num_workers, int threshold
 	parallel_checkout.status = PC_RUNNING;
 	parallel_checkout.progress = progress;
 	parallel_checkout.progress_cnt = progress_cnt;
+	trace_phases = parallel_checkout.nr && trace2_is_enabled();
+	if (trace_phases)
+		trace2_data_intmax("pcheckout", the_repository, "queue/items",
+				   parallel_checkout.nr);
 
 	if (parallel_checkout.nr < num_workers)
 		num_workers = parallel_checkout.nr;
 
 	if (num_workers <= 1 || parallel_checkout.nr < threshold) {
+		if (trace_phases)
+			trace2_region_enter("pcheckout", "sequential-write",
+					    the_repository);
 		write_items_sequentially(state);
+		if (trace_phases)
+			trace2_region_leave("pcheckout", "sequential-write",
+					    the_repository);
 	} else {
-		struct pc_worker *workers = setup_workers(state, num_workers);
+		struct pc_worker *workers;
+
+		if (trace_phases)
+			trace2_region_enter("pcheckout", "setup",
+					    the_repository);
+		workers = setup_workers(state, num_workers);
+		if (trace_phases)
+			trace2_region_leave("pcheckout", "setup",
+					    the_repository);
+
+		if (trace_phases)
+			trace2_region_enter("pcheckout", "dispatch-and-collect",
+					    the_repository);
 		gather_results_from_workers(workers, num_workers);
+		if (trace_phases)
+			trace2_region_leave("pcheckout", "dispatch-and-collect",
+					    the_repository);
+
+		if (trace_phases)
+			trace2_region_enter("pcheckout", "finish",
+					    the_repository);
 		finish_workers(workers, num_workers);
+		if (trace_phases)
+			trace2_region_leave("pcheckout", "finish",
+					    the_repository);
 	}
 
+	if (trace_phases)
+		trace2_region_enter("pcheckout", "handle-results",
+				    the_repository);
 	ret = handle_results(state);
+	if (trace_phases)
+		trace2_region_leave("pcheckout", "handle-results",
+				    the_repository);
 
 	finish_parallel_checkout();
 	return ret;
