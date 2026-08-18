@@ -45,6 +45,8 @@ struct diff_pickaxe_index {
 	struct grep_index *index;
 	struct grep_index_query *query;
 	struct grep_index_prepared *prepared;
+	enum grep_index_load_outcome local_outcome;
+	enum grep_index_ipc_availability_outcome ipc_outcome;
 	struct oidmap results;
 	struct oidmap batch_results;
 	char *needle;
@@ -84,6 +86,20 @@ struct diff_pickaxe_index {
 	uint64_t commit_oids_maybe;
 	uint64_t commit_oids_unknown;
 };
+
+static struct grep_index *pickaxe_index_load(
+	struct diff_pickaxe_index *index, struct repository *repo)
+{
+	return grep_index_load_with_outcome(
+		repo, trace2_is_enabled() ? &index->local_outcome : NULL);
+}
+
+static int pickaxe_index_ipc_is_available(
+	struct diff_pickaxe_index *index, struct repository *repo)
+{
+	return grep_index_ipc_is_available_with_outcome(
+		repo, trace2_is_enabled() ? &index->ipc_outcome : NULL);
+}
 
 typedef int (*pickaxe_fn)(mmfile_t *one, mmfile_t *two,
 			  struct diff_options *o,
@@ -616,8 +632,8 @@ void diffcore_pickaxe(struct diff_options *o)
 					index->persistent_only = 1;
 				else if (index->query)
 					index->ipc =
-						grep_index_ipc_is_available(
-							o->repo);
+						pickaxe_index_ipc_is_available(
+							index, o->repo);
 			}
 		}
 	}
@@ -672,7 +688,7 @@ void diffcore_pickaxe(struct diff_options *o)
 			 */
 			if (!index->direct_tried) {
 				index->direct_tried = 1;
-				index->index = grep_index_load(o->repo);
+				index->index = pickaxe_index_load(index, o->repo);
 			}
 			if (index->index) {
 				int covered = 1;
@@ -765,7 +781,7 @@ void diffcore_pickaxe(struct diff_options *o)
 	if (index && index->query && !index->ipc &&
 	    !index->direct_tried) {
 		index->direct_tried = 1;
-		index->index = grep_index_load(o->repo);
+		index->index = pickaxe_index_load(index, o->repo);
 		if (index->index && !index->persistent_only)
 			index->prepared =
 				grep_index_prepare(index->index, index->query);
@@ -868,7 +884,7 @@ int diff_pickaxe_edge_maybe_contains(
 	}
 	if (!index->direct_tried) {
 		index->direct_tried = 1;
-		index->index = grep_index_load(o->repo);
+		index->index = pickaxe_index_load(index, o->repo);
 	}
 	if (!index->index || !grep_index_is_transposed(index->index)) {
 		index->commit_index_disabled = 1;
@@ -966,6 +982,14 @@ void diff_pickaxe_index_clear(struct diff_pickaxe_index **state)
 			   !!index->index);
 	trace2_data_intmax("pickaxe", index->repo, "content_index/ipc",
 			   index->ipc);
+	if (index->local_outcome != GREP_INDEX_LOAD_NOT_ATTEMPTED)
+		trace2_data_intmax("pickaxe", index->repo,
+				   "content_index/local_outcome",
+				   index->local_outcome);
+	if (index->ipc_outcome != GREP_INDEX_IPC_AVAILABILITY_NOT_ATTEMPTED)
+		trace2_data_intmax("pickaxe", index->repo,
+				   "content_index/ipc_outcome",
+				   index->ipc_outcome);
 	trace2_data_intmax("pickaxe", index->repo,
 			   "content_index/persistent_only",
 			   index->persistent_only);
