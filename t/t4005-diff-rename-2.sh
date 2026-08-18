@@ -71,8 +71,29 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 	cat <<-EOF >expected &&
 	:100644 100644 $origoid $oid1 C1234	COPYING	COPYING.1
 	EOF
-	git diff-index -C --find-copies-harder $tree >current &&
-	compare_diff_raw current expected
+	GIT_TRACE2_EVENT="$PWD/rename-inexact.trace" \
+		git diff-index -l4 -C --find-copies-harder $tree >current &&
+	compare_diff_raw current expected &&
+	compared_bytes=$(($(wc -c <COPYING) + $(wc -c <COPYING.1))) &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
+		rename-inexact.trace)" = 8 &&
+	test_trace2_data diff rename/inexact/sources 2 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/destinations 1 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/rename_limit 4 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/limit_result 0 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/similarity_calls 2 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/size_rejected 1 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/content_compared 1 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/compared_bytes "$compared_bytes" \
+		<rename-inexact.trace
 '
 
 test_done
