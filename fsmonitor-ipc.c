@@ -725,9 +725,16 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	strbuf_setlen(&command, start + snapshot.len * 2);
 	if (!fsmonitor_ipc__send_untracked_cache_command(
 		    command.buf, command.len, &answer) &&
-	    answer.len == 2 && !memcmp(answer.buf, "ok", 2))
+	    answer.len == 2 && !memcmp(answer.buf, "ok", 2)) {
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "untracked-cache/saved", snapshot.len);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/save-root-valid",
+				   istate->untracked->root->valid);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/save-root-can-skip",
+				   istate->untracked->root->can_skip_replay);
+	}
 
 done:
 	strbuf_release(&answer);

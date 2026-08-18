@@ -1983,6 +1983,14 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 0 \
+			<../untracked-restart-clean-first.trace &&
+		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-valid \
+			<../untracked-restart-clean-first.trace | wc -l)" -eq 1 &&
+		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 0 \
+			<../untracked-restart-clean-first.trace &&
+		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-can-skip \
+			<../untracked-restart-clean-first.trace | wc -l)" -eq 1 &&
 		GIT_TRACE2_EVENT_NESTING=4 \
 		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-second.trace" \
 			git --no-optional-locks status --porcelain -uall \
@@ -2001,6 +2009,14 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-second.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-second.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+			<../untracked-restart-clean-second.trace &&
+		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-valid \
+			<../untracked-restart-clean-second.trace | wc -l)" -eq 1 &&
+		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 1 \
+			<../untracked-restart-clean-second.trace &&
+		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-can-skip \
+			<../untracked-restart-clean-second.trace | wc -l)" -eq 1 &&
 		GIT_TRACE2_EVENT_NESTING=4 \
 		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-third.trace" \
 			git --no-optional-locks status --porcelain -uall \
