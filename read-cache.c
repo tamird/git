@@ -8,6 +8,7 @@
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "abspath.h"
 #include "config.h"
 #include "date.h"
 #include "diff.h"
@@ -2953,6 +2954,79 @@ enum write_extensions {
 };
 #define WRITE_ALL_EXTENSIONS ((enum write_extensions)-1)
 
+struct index_write_identity {
+	int fd;
+	struct stat stat;
+	struct object_id hash;
+	unsigned int hash_valid : 1;
+};
+
+static void release_index_write_identity(struct index_write_identity *identity)
+{
+	int saved_errno = errno;
+
+	if (identity->fd >= 0)
+		close(identity->fd);
+	identity->fd = -1;
+	errno = saved_errno;
+}
+
+/* Failure to identify an optional cache write must not fail the write. */
+static void capture_index_write_identity(struct index_state *istate, int fd,
+					 struct index_write_identity *identity)
+{
+	int saved_errno = errno;
+	const char *map;
+	size_t size;
+	struct git_hash_ctx ctx;
+
+	if (fstat(fd, &identity->stat) ||
+	    identity->stat.st_size < (off_t)(sizeof(struct cache_header) +
+		istate->repo->hash_algo->rawsz))
+		goto out;
+
+#ifndef GIT_WINDOWS_NATIVE
+	if (fstat_is_reliable() && identity->stat.st_dev &&
+	    identity->stat.st_ino) {
+		int pinned;
+
+#ifdef F_DUPFD_CLOEXEC
+		pinned = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+#else
+		pinned = dup(fd);
+		if (pinned >= 0 && fcntl(pinned, F_SETFD, FD_CLOEXEC) < 0) {
+			close(pinned);
+			pinned = -1;
+		}
+#endif
+		if (pinned < 0)
+			goto out;
+		if (fstat(pinned, &identity->stat) ||
+		    !identity->stat.st_dev || !identity->stat.st_ino) {
+			close(pinned);
+			goto out;
+		}
+		identity->fd = pinned;
+		goto out;
+	}
+#endif
+
+	/* Windows creation handles must be closed before renaming the file. */
+	if ((uintmax_t)identity->stat.st_size > SIZE_MAX)
+		goto out;
+	size = (size_t)identity->stat.st_size;
+	map = xmmap_gently(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (map == MAP_FAILED)
+		goto out;
+	git_hash_init(&ctx, istate->repo->hash_algo);
+	git_hash_update(&ctx, map, size);
+	git_hash_final_oid(&identity->hash, &ctx);
+	munmap((void *)map, size);
+	identity->hash_valid = 1;
+out:
+	errno = saved_errno;
+}
+
 /*
  * On success, `tempfile` is closed. If it is the temporary file
  * of a `struct lock_file`, we will therefore effectively perform
@@ -2962,7 +3036,7 @@ enum write_extensions {
  */
 static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 			  enum write_extensions write_extensions, unsigned flags,
-			  int force_hash)
+			  int force_hash, struct index_write_identity *identity)
 {
 	uint64_t start = getnanotime();
 	struct hashfile *f;
@@ -3244,6 +3318,9 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	finalize_hashfile(f, istate->oid.hash, FSYNC_COMPONENT_INDEX,
 			  CSUM_HASH_IN_STREAM | csum_fsync_flag);
 	f = NULL;
+	if (identity && is_null_oid(&istate->oid))
+		capture_index_write_identity(istate, get_tempfile_fd(tempfile),
+					     identity);
 
 	if (close_tempfile_gently(tempfile)) {
 		ret = error(_("could not close '%s'"), get_tempfile_path(tempfile));
@@ -3288,6 +3365,30 @@ static int commit_locked_index(struct lock_file *lk)
 		return commit_lock_file(lk);
 }
 
+static int should_record_index_write_identity(struct index_state *istate,
+					      struct lock_file *lock,
+					      unsigned flags)
+{
+	struct strbuf expected = STRBUF_INIT;
+	char *target;
+	int matches;
+
+	if (!istate->repo || istate != istate->repo->index ||
+	    !(flags & COMMIT_LOCK) || alternate_index_output)
+		return 0;
+	prepare_repo_settings(istate->repo);
+	if (!istate->repo->settings.index_skip_hash)
+		return 0;
+
+	/* A differently spelled symlink may conservatively miss this cache. */
+	target = get_locked_file_path(lock);
+	strbuf_add_absolute_path(&expected, repo_get_index_file(istate->repo));
+	matches = !fspathcmp(target, expected.buf);
+	free(target);
+	strbuf_release(&expected);
+	return matches;
+}
+
 static int do_write_locked_index(struct index_state *istate,
 				 struct lock_file *lock,
 				 unsigned flags,
@@ -3295,6 +3396,8 @@ static int do_write_locked_index(struct index_state *istate,
 {
 	int ret;
 	int was_full = istate->sparse_index == INDEX_EXPANDED;
+	struct index_write_identity identity = { .fd = -1 };
+	struct index_write_identity *record_identity = NULL;
 
 	ret = convert_to_sparse(istate, 0);
 
@@ -3303,22 +3406,40 @@ static int do_write_locked_index(struct index_state *istate,
 		return ret;
 	}
 
+	if (should_record_index_write_identity(istate, lock, flags))
+		record_identity = &identity;
 	trace2_region_enter_printf("index", "do_write_index", istate->repo,
 				   "%s", get_lock_file_path(lock));
-	ret = do_write_index(istate, lock->tempfile, write_extensions, flags, 0);
+	ret = do_write_index(istate, lock->tempfile, write_extensions, flags, 0,
+			     record_identity);
 	trace2_region_leave_printf("index", "do_write_index", istate->repo,
 				   "%s", get_lock_file_path(lock));
 
 	if (was_full)
 		ensure_full_index(istate);
 
-	if (ret)
+	if (ret) {
+		release_index_write_identity(&identity);
 		return ret;
+	}
 	if (flags & COMMIT_LOCK)
 		ret = commit_locked_index(lock);
 	else
 		ret = close_lock_file_gently(lock);
-	if (!ret && flags & COMMIT_LOCK && !alternate_index_output) {
+	if (!ret && is_null_oid(&istate->oid) &&
+	    (identity.fd >= 0 || identity.hash_valid)) {
+		/* The stat and pin must identify the same file, even after hooks. */
+		istate->index_file_stat = identity.stat;
+		istate->index_file_stat_valid = 1;
+		if (identity.fd >= 0) {
+			istate->index_file_fd = identity.fd;
+			istate->index_file_fd_valid = 1;
+			identity.fd = -1;
+		} else {
+			oidcpy(&istate->index_file_identity, &identity.hash);
+			istate->index_file_identity_valid = 1;
+		}
+	} else if (!ret && flags & COMMIT_LOCK && !alternate_index_output) {
 		if (!stat(repo_get_index_file(istate->repo),
 			  &istate->index_file_stat))
 			istate->index_file_stat_valid = 1;
@@ -3327,6 +3448,7 @@ static int do_write_locked_index(struct index_state *istate,
 	} else if (!ret) {
 		istate->index_file_stat_valid = 0;
 	}
+	release_index_write_identity(&identity);
 
 	run_hooks_l(the_repository, "post-index-change",
 		    istate->updated_workdir ? "1" : "0",
@@ -3430,7 +3552,7 @@ static int write_shared_index(struct index_state *istate,
 	trace2_region_enter_printf("index", "shared/do_write_index",
 				   the_repository, "%s", get_tempfile_path(*temp));
 	/* The trailing hash names the shared index and is stored in LINK. */
-	ret = do_write_index(si->base, *temp, WRITE_NO_EXTENSION, flags, 1);
+	ret = do_write_index(si->base, *temp, WRITE_NO_EXTENSION, flags, 1, NULL);
 	trace2_region_leave_printf("index", "shared/do_write_index",
 				   the_repository, "%s", get_tempfile_path(*temp));
 
@@ -3492,12 +3614,6 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 	int new_shared_index, ret, test_split_index_env;
 	struct split_index *si = istate->split_index;
 
-	if (istate->index_file_fd_valid) {
-		close(istate->index_file_fd);
-		istate->index_file_fd_valid = 0;
-	}
-	istate->index_file_identity_valid = 0;
-
 	if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0) &&
 	    cache_tree_verify(the_repository, istate) < 0)
 		return -1;
@@ -3507,6 +3623,12 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 			rollback_lock_file(lock);
 		return 0;
 	}
+
+	if (istate->index_file_fd_valid) {
+		close(istate->index_file_fd);
+		istate->index_file_fd_valid = 0;
+	}
+	istate->index_file_identity_valid = 0;
 
 	if (istate->fsmonitor_last_update)
 		fill_fsmonitor_bitmap(istate);
