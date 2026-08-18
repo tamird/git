@@ -2441,7 +2441,8 @@ static const char *get_refname(struct used_atom *atom, struct ref_array_item *re
 }
 
 static int get_object(struct ref_array_item *ref, int deref,
-		      struct expand_data *oi, struct strbuf *err)
+		      struct expand_data *oi, struct strbuf *err,
+		      int trace_population)
 {
 	/* parse_object_buffer() will set eaten to 1 if free() will be needed */
 	int eaten = 0;
@@ -2455,8 +2456,15 @@ static int get_object(struct ref_array_item *ref, int deref,
 		oi->info.typep = &oi->type;
 	}
 
-	if (odb_read_object_info_extended(the_repository->objects, &oi->oid, &oi->info,
-					  OBJECT_INFO_LOOKUP_REPLACE)) {
+	if (trace_population)
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_INFO);
+	ret = odb_read_object_info_extended(the_repository->objects, &oi->oid,
+					    &oi->info, OBJECT_INFO_LOOKUP_REPLACE);
+	if (trace_population)
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_INFO);
+	if (ret) {
 		ret = strbuf_addf_ret(err, -1, _("missing object %s for %s"),
 				      oid_to_hex(&oi->oid), ref->refname);
 		goto out;
@@ -2527,7 +2535,8 @@ static char *get_worktree_path(const struct ref_array_item *ref)
 /*
  * Parse the object referred by ref, and grab needed value.
  */
-static int populate_value(struct ref_array_item *ref, struct strbuf *err)
+static int populate_value(struct ref_array_item *ref, struct strbuf *err,
+			  int trace_population)
 {
 	struct ref_filter_object_metadata *metadata;
 	int i;
@@ -2742,11 +2751,28 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 	if (ref_filter_object_metadata_enabled && !metadata &&
 	    ref_filter_object_metadata_entries <
 		    REF_FILTER_OBJECT_METADATA_MAX_ENTRIES) {
-		struct commit *commit =
-			lookup_commit_in_graph(the_repository, &ref->objectname);
+		struct commit *commit;
+		int has_object = 0;
 
-		if (commit &&
-		    odb_has_object(the_repository->objects, &ref->objectname, 0)) {
+		/* Include any paranoia existence check performed by the lookup. */
+		if (trace_population)
+			trace2_timer_start(
+				TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_GRAPH_LOOKUP);
+		commit = lookup_commit_in_graph(the_repository, &ref->objectname);
+		if (trace_population)
+			trace2_timer_stop(
+				TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_GRAPH_LOOKUP);
+		if (commit) {
+			if (trace_population)
+				trace2_timer_start(
+					TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_EXISTS);
+			has_object = odb_has_object(the_repository->objects,
+						    &ref->objectname, 0);
+			if (trace_population)
+				trace2_timer_stop(
+					TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_EXISTS);
+		}
+		if (has_object) {
 			CALLOC_ARRAY(metadata, 1);
 			oidcpy(&metadata->ent.oid, &ref->objectname);
 			metadata->type = OBJ_COMMIT;
@@ -2804,7 +2830,7 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 
 
 	oi.oid = ref->objectname;
-	if (get_object(ref, 0, &oi, err))
+	if (get_object(ref, 0, &oi, err, trace_population))
 		return -1;
 	if (ref_filter_object_metadata_enabled && !metadata &&
 	    ref_filter_object_metadata_entries <
@@ -2845,7 +2871,7 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
 		}
 	}
 
-	return get_object(ref, 1, &oi_deref, err);
+	return get_object(ref, 1, &oi_deref, err, trace_population);
 }
 
 /*
@@ -2853,10 +2879,11 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err)
  * out of the object by calling populate value.
  */
 static int get_ref_atom_value(struct ref_array_item *ref, int atom,
-			      struct atom_value **v, struct strbuf *err)
+			      struct atom_value **v, struct strbuf *err,
+			      int trace_population)
 {
 	if (!ref->value) {
-		if (populate_value(ref, err))
+		if (populate_value(ref, err, trace_population))
 			return -1;
 		fill_missing_values(ref->value);
 	}
@@ -2874,7 +2901,7 @@ static int get_ref_atom_value_for_sort(struct ref_array_item *ref, int atom,
 	if (trace_population)
 		trace2_timer_start(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE);
-	ret = get_ref_atom_value(ref, atom, v, err);
+	ret = get_ref_atom_value(ref, atom, v, err, trace_population);
 	if (trace_population)
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE);
@@ -3895,7 +3922,7 @@ int format_ref_array_item(struct ref_array_item *info,
 		if (cp < sp)
 			append_literal(cp, sp, &state);
 		pos = parse_ref_filter_atom(format, sp + 2, ep, error_buf);
-		if (pos < 0 || get_ref_atom_value(info, pos, &atomv, error_buf) ||
+		if (pos < 0 || get_ref_atom_value(info, pos, &atomv, error_buf, 0) ||
 		    atomv->handler(atomv, &state, error_buf)) {
 			pop_stack_element(&state.stack);
 			return -1;
