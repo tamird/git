@@ -928,6 +928,8 @@ static int merge_working_tree(const struct checkout_opts *opts,
 			rollback_lock_file(&lock_file);
 			return MERGE_WORKING_TREE_UNPACK_FAILED;
 		}
+		if (ret == -2)
+			*writeout_error = 1;
 	}
 
 	if (!cache_tree_fully_valid(cache_tree_get(the_repository->index)))
