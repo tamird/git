@@ -94,6 +94,37 @@ struct diff_score {
 	short name_score;
 };
 
+struct inexact_rename_stats {
+	int sources, destinations;
+	int rename_limit, limit_result;
+	uint64_t similarity_calls, size_rejected;
+	uint64_t content_compared, compared_bytes;
+};
+
+static void trace_inexact_rename(struct repository *repo,
+				const struct inexact_rename_stats *stats)
+{
+	if (!stats)
+		return;
+
+	trace2_data_intmax("diff", repo, "rename/inexact/sources",
+			  stats->sources);
+	trace2_data_intmax("diff", repo, "rename/inexact/destinations",
+			  stats->destinations);
+	trace2_data_intmax("diff", repo, "rename/inexact/rename_limit",
+			  stats->rename_limit);
+	trace2_data_intmax("diff", repo, "rename/inexact/limit_result",
+			  stats->limit_result);
+	trace2_data_intmax("diff", repo, "rename/inexact/similarity_calls",
+			  stats->similarity_calls);
+	trace2_data_intmax("diff", repo, "rename/inexact/size_rejected",
+			  stats->size_rejected);
+	trace2_data_intmax("diff", repo, "rename/inexact/content_compared",
+			  stats->content_compared);
+	trace2_data_intmax("diff", repo, "rename/inexact/compared_bytes",
+			  stats->compared_bytes);
+}
+
 struct inexact_prefetch_options {
 	struct repository *repo;
 	int skip_unmodified;
@@ -133,7 +164,8 @@ static int estimate_similarity(struct repository *r,
 			       struct diff_filespec *src,
 			       struct diff_filespec *dst,
 			       int minimum_score,
-			       struct diff_populate_filespec_options *dpf_opt)
+			       struct diff_populate_filespec_options *dpf_opt,
+			       struct inexact_rename_stats *stats)
 {
 	/* src points at a file that existed in the original tree (or
 	 * optionally a file in the destination tree) and dst points
@@ -150,6 +182,9 @@ static int estimate_similarity(struct repository *r,
 	 */
 	unsigned long max_size, delta_size, base_size, src_copied, literal_added;
 	int score;
+
+	if (stats)
+		stats->similarity_calls++;
 
 	/* We deal only with regular files.  Symlink renames are handled
 	 * only when they are exact matches --- in other words, no edits
@@ -188,8 +223,11 @@ static int estimate_similarity(struct repository *r,
 	 * and the final score computation below would not have a
 	 * divide-by-zero issue.
 	 */
-	if (max_size * (MAX_SCORE-minimum_score) < delta_size * MAX_SCORE)
+	if (max_size * (MAX_SCORE-minimum_score) < delta_size * MAX_SCORE) {
+		if (stats)
+			stats->size_rejected++;
 		return 0;
+	}
 
 	dpf_opt->check_size_only = 0;
 
@@ -197,6 +235,13 @@ static int estimate_similarity(struct repository *r,
 		return 0;
 	if (!dst->cnt_data && diff_populate_filespec(r, dst, dpf_opt))
 		return 0;
+
+	if (stats) {
+		stats->content_compared++;
+		/* Pair-weighted logical content, not I/O or newly hashed bytes. */
+		stats->compared_bytes += src->size;
+		stats->compared_bytes += dst->size;
+	}
 
 	if (diffcore_count_changes(r, src, dst,
 				   &src->cnt_data, &dst->cnt_data,
@@ -1035,7 +1080,8 @@ static int find_basename_matches(struct diff_options *options,
 			one = rename_src[src_index].p->one;
 			two = rename_dst[dst_index].p->two;
 			score = estimate_similarity(options->repo, one, two,
-						    minimum_score, &dpf_options);
+						    minimum_score, &dpf_options,
+						    NULL);
 
 			/* If sufficiently similar, record as rename pair */
 			if (score < minimum_score)
@@ -1391,7 +1437,9 @@ void diffcore_rename_extended(struct diff_options *options,
 	struct diff_score *mx;
 	int i, j, rename_count, skip_unmodified = 0;
 	int num_destinations, dst_cnt;
-	int num_sources, want_copies;
+	int num_sources, want_copies, limit_result;
+	struct inexact_rename_stats inexact_stats;
+	struct inexact_rename_stats *stats = NULL;
 	struct progress *progress = NULL;
 	struct mem_pool local_pool;
 	struct dir_rename_info info;
@@ -1553,9 +1601,20 @@ void diffcore_rename_extended(struct diff_options *options,
 	if (!num_destinations || !num_sources)
 		goto cleanup;
 
-	switch (too_many_rename_candidates(num_destinations, num_sources,
-					   options)) {
+	limit_result = too_many_rename_candidates(num_destinations, num_sources,
+						 options);
+	if (trace2_is_enabled()) {
+		inexact_stats = (struct inexact_rename_stats) {
+			.sources = num_sources,
+			.destinations = num_destinations,
+			.rename_limit = options->rename_limit,
+			.limit_result = limit_result,
+		};
+		stats = &inexact_stats;
+	}
+	switch (limit_result) {
 	case 1:
+		trace_inexact_rename(options->repo, stats);
 		goto cleanup;
 	case 2:
 		options->degraded_cc_to_c = 1;
@@ -1605,7 +1664,7 @@ void diffcore_rename_extended(struct diff_options *options,
 			this_src.score = estimate_similarity(options->repo,
 							     one, two,
 							     minimum_score,
-							     &dpf_options);
+							     &dpf_options, stats);
 			this_src.name_score = basename_same(one, two);
 			this_src.dst = i;
 			this_src.src = j;
@@ -1632,6 +1691,7 @@ void diffcore_rename_extended(struct diff_options *options,
 		rename_count += find_renames(mx, dst_cnt, minimum_score, 1,
 					     &info, dirs_removed);
 	free(mx);
+	trace_inexact_rename(options->repo, stats);
 	trace2_region_leave("diff", "inexact renames", options->repo);
 
  cleanup:
