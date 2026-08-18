@@ -108,6 +108,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "materialized/sort-populate",
 		.want_per_thread_events = 0,
 	},
+	/* These call timers are included in sort-populate. */
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_GRAPH_LOOKUP] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-populate/graph-lookup",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_EXISTS] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-populate/object-exists",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_INFO] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-populate/object-info",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_FORMAT_OUTPUT] = {
 		.category = "ref-filter",
 		.name = "materialized/format-output",

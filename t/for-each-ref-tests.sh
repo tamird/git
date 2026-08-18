@@ -592,6 +592,41 @@ test_expect_success 'cache object metadata shared by refs' '
 		<metadata-formatted.trace &&
 	test_trace2_data ref-filter object_metadata/hits 0 \
 		<metadata-formatted.trace &&
+	for population_expectation in \
+		metadata-cache:graph-lookup:2 \
+		metadata-cache:object-exists:0 \
+		metadata-cache:object-info:2 \
+		metadata-graph:graph-lookup:2 \
+		metadata-graph:object-exists:2 \
+		metadata-graph:object-info:0 \
+		metadata-formatted:graph-lookup:0 \
+		metadata-formatted:object-exists:0 \
+		metadata-formatted:object-info:3
+	do
+		population_trace=${population_expectation%%:*}.trace &&
+		population_timer=${population_expectation#*:} &&
+		population_name=materialized/sort-populate/${population_timer%:*} &&
+		population_intervals=${population_timer##*:} &&
+		if test "$population_intervals" = 0
+		then
+			test_grep ! \
+				"\"category\":\"ref-filter\",\"name\":\"$population_name\"" \
+				"$population_trace"
+		else
+			test "$(grep -c \
+				"\"event\":\"timer\".*\"category\":\"ref-filter\",\"name\":\"$population_name\"," \
+				"$population_trace")" = 1 &&
+			test_grep \
+				"\"event\":\"timer\".*\"category\":\"ref-filter\",\"name\":\"$population_name\",\"intervals\":$population_intervals," \
+				"$population_trace" &&
+			test_grep ! \
+				"\"event\":\"th_timer\".*\"category\":\"ref-filter\",\"name\":\"$population_name\"" \
+				"$population_trace"
+		fi &&
+		test_grep ! \
+			"\"event\":\"region_[^\"]*\".*\"category\":\"ref-filter\",\"label\":\"$population_name\"" \
+			"$population_trace" || return 1
+	done &&
 	GIT_TRACE2_EVENT="$PWD/metadata-subject.trace" \
 		${git_for_each_ref} --format="%(refname) %(subject)" \
 		--sort=committerdate refs/heads/duplicate-a \
@@ -620,7 +655,9 @@ test_expect_success 'exercise patterns with prefixes' '
 		${git_for_each_ref} --format="%(refname)" \
 		refs/tags/testtag refs/tags/testtag-2 >actual &&
 	test_cmp expected actual &&
-	for phase in prepare sort sort-populate format-output cleanup
+	for phase in prepare sort sort-populate \
+		sort-populate/graph-lookup sort-populate/object-exists \
+		sort-populate/object-info format-output cleanup
 	do
 		name=materialized/$phase &&
 		test_grep ! \
