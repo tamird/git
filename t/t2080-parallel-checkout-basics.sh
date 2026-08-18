@@ -175,8 +175,44 @@ do
 		git -C $repo submodule foreach "git update-index --refresh" &&
 
 		set_checkout_config $workers $threshold &&
+		trace_file="$(pwd)/$repo.trace" &&
+		rm -f "$trace_file" &&
 		test_checkout_workers $expected_workers \
+			env GIT_TRACE2_EVENT="$trace_file" \
 			git -C $repo checkout --recurse-submodules B2 &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" "$trace_file") &&
+		test -n "$root_sid" &&
+		root_trace="$trace_file.root" &&
+		grep -F "\"sid\":\"$root_sid\"" "$trace_file" >"$root_trace" &&
+		for pair in "remove_entries 7" "queue_entries 13"
+		do
+			set -- $pair &&
+			grep "\"category\":\"unpack_trees\",\"key\":\"$1/count\"" \
+				"$root_trace" >count &&
+			test_line_count = 1 count &&
+			test_grep "\"value\":\"$2\"" count || return 1
+		done &&
+		if test "$mode" = sequential-fallback
+		then
+			grep "\"category\":\"pcheckout\",\"key\":\"queue/items\"" \
+				"$root_trace" >count &&
+			test_line_count = 1 count &&
+			test_grep "\"value\":\"[1-9][0-9]*\"" count &&
+			for region in sequential-write handle-results
+			do
+				for event in region_enter region_leave
+				do
+					grep "\"event\":\"$event\".*\"category\":\"pcheckout\",\"label\":\"$region\"" \
+						"$root_trace" >region &&
+					test_line_count = 1 region || return 1
+				done || return 1
+			done &&
+			for region in setup dispatch-and-collect finish
+			do
+				test_grep ! "\"category\":\"pcheckout\",\"label\":\"$region\"" \
+					"$root_trace" || return 1
+			done
+		fi &&
 		verify_checkout $repo
 	'
 done
@@ -245,7 +281,22 @@ test_expect_success 'parallel checkout respects --[no]-force' '
 		echo changed >F.t &&
 
 		# We expect 0 workers because there is nothing to be done
-		test_checkout_workers 0 git checkout HEAD &&
+		trace_file="$(pwd)/trace-noop" &&
+		rm -f "$trace_file" &&
+		test_checkout_workers 0 env GIT_TRACE2_EVENT="$trace_file" \
+			git checkout HEAD &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" "$trace_file") &&
+		test -n "$root_sid" &&
+		root_trace="$trace_file.root" &&
+		grep -F "\"sid\":\"$root_sid\"" "$trace_file" >"$root_trace" &&
+		for region in remove_entries queue_entries
+		do
+			grep "\"category\":\"unpack_trees\",\"key\":\"$region/count\"" \
+				"$root_trace" >count &&
+			test_line_count = 1 count &&
+			test_grep "\"value\":\"0\"" count || return 1
+		done &&
+		test_grep ! "\"category\":\"pcheckout\"" "$root_trace" &&
 		test_path_is_file D &&
 		test_grep changed D &&
 		test_grep changed F.t &&
@@ -289,7 +340,27 @@ test_expect_success 'parallel checkout traces worker load' '
 		rm a b c d &&
 
 		trace_file="$(pwd)/trace-event" &&
+		rm -f "$trace_file" &&
 		GIT_TRACE2_EVENT="$trace_file" git checkout . &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" "$trace_file") &&
+		test -n "$root_sid" &&
+		root_trace="$trace_file.root" &&
+		grep -F "\"sid\":\"$root_sid\"" "$trace_file" >"$root_trace" &&
+		grep "\"category\":\"pcheckout\",\"key\":\"queue/items\"" \
+			"$root_trace" >count &&
+		test_line_count = 1 count &&
+		test_grep "\"value\":\"4\"" count &&
+		for region in setup dispatch-and-collect finish handle-results
+		do
+			for event in region_enter region_leave
+			do
+				grep "\"event\":\"$event\".*\"category\":\"pcheckout\",\"label\":\"$region\"" \
+					"$root_trace" >region &&
+				test_line_count = 1 region || return 1
+			done || return 1
+		done &&
+		test_grep ! "\"category\":\"pcheckout\",\"label\":\"sequential-write\"" \
+			"$root_trace" &&
 		for pair in \
 			"items 2" \
 			"written 2" \

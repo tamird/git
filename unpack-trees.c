@@ -425,7 +425,9 @@ static int check_updates(struct unpack_trees_options *o,
 			 struct index_state *index)
 {
 	unsigned cnt = 0;
+	uintmax_t remove_count = 0, checkout_count = 0;
 	int errs = 0;
+	int trace_counts = trace2_is_enabled();
 	struct progress *progress;
 	struct checkout state = CHECKOUT_INIT;
 	int i, pc_workers, pc_threshold;
@@ -463,6 +465,8 @@ static int check_updates(struct unpack_trees_options *o,
 
 		if (ce->ce_flags & CE_WT_REMOVE) {
 			display_progress(progress, ++cnt);
+			if (trace_counts)
+				remove_count++;
 			unlink_entry(ce, o->super_prefix);
 		}
 	}
@@ -470,6 +474,9 @@ static int check_updates(struct unpack_trees_options *o,
 	remove_marked_cache_entries(index, 0);
 	remove_scheduled_dirs();
 	trace2_region_leave("unpack_trees", "remove_entries", index->repo);
+	if (trace_counts)
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "remove_entries/count", remove_count);
 
 	if (should_update_submodules())
 		load_gitmodules_file(index, &state);
@@ -497,6 +504,8 @@ static int check_updates(struct unpack_trees_options *o,
 				BUG("both update and delete flags are set on %s",
 				    ce->name);
 			ce->ce_flags &= ~CE_UPDATE;
+			if (trace_counts)
+				checkout_count++;
 			errs |= checkout_entry(ce, &state, NULL, NULL);
 
 			if (last_pc_queue_size == pc_queue_size())
@@ -504,6 +513,9 @@ static int check_updates(struct unpack_trees_options *o,
 		}
 	}
 	trace2_region_leave("unpack_trees", "queue_entries", index->repo);
+	if (trace_counts)
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/count", checkout_count);
 	if (pc_workers > 1)
 		errs |= run_parallel_checkout(&state, pc_workers, pc_threshold,
 					      progress, &cnt);
