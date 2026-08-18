@@ -115,6 +115,14 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 						    int check_only, int stop_at_first_file, const struct pathspec *pathspec);
 static int resolve_dtype(int dtype, struct index_state *istate,
 			 const char *path, int len);
+static void invalidate_one_directory(struct untracked_cache *uc,
+				     struct untracked_cache_dir *ucd,
+				     int invalidate_descendants);
+
+static int untracked_cache_uses_fsmonitor(const struct untracked_cache *uc)
+{
+	return uc->use_fsmonitor && !uc->fsmonitor_resync;
+}
 
 static void update_can_skip_replay(struct untracked_cache_dir *dir)
 {
@@ -1061,10 +1069,12 @@ void add_pattern(const char *string, const char *base,
 static int read_skip_worktree_file_from_index(struct index_state *istate,
 					      const char *path,
 					      size_t *size_out, char **data_out,
-					      struct oid_stat *oid_stat)
+					      struct oid_stat *oid_stat,
+					      int *eligible)
 {
 	int pos, len;
 
+	*eligible = 0;
 	len = strlen(path);
 	pos = index_name_pos(istate, path, len);
 	if (pos < 0)
@@ -1072,6 +1082,7 @@ static int read_skip_worktree_file_from_index(struct index_state *istate,
 	if (!ce_skip_worktree(istate->cache[pos]))
 		return -1;
 
+	*eligible = 1;
 	return do_read_blob(&istate->cache[pos]->oid, oid_stat, size_out, data_out);
 }
 
@@ -1189,6 +1200,7 @@ static uintmax_t do_invalidate_gitignore(struct untracked_cache_dir *dir)
 
 	dir->valid = 0;
 	dir->can_skip_replay = 0;
+	dir->stat_result = UNTRACKED_STAT_UNCHECKED;
 	for (size_t i = 0; i < dir->untracked_nr; i++)
 		free(dir->untracked[i]);
 	dir->untracked_nr = 0;
@@ -1238,6 +1250,7 @@ static void invalidate_directory(struct untracked_cache *uc,
 
 	dir->can_skip_replay = 0;
 	dir->valid = 0;
+	dir->stat_result = UNTRACKED_STAT_UNCHECKED;
 	for (size_t i = 0; i < dir->untracked_nr; i++)
 		free(dir->untracked[i]);
 	dir->untracked_nr = 0;
@@ -1259,7 +1272,8 @@ static void invalidate_directory(struct untracked_cache *uc,
  */
 static int add_patterns(const char *fname, const char *base, int baselen,
 			struct pattern_list *pl, struct index_state *istate,
-			unsigned flags, struct oid_stat *oid_stat)
+			unsigned flags, struct oid_stat *oid_stat,
+			enum untracked_ignore_load_result *load_result)
 {
 	struct stat st;
 	int r;
@@ -1268,6 +1282,11 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 	char *buf;
 	struct object_id legacy_oid;
 	int has_legacy_oid = 0;
+	enum untracked_ignore_load_result ignored_result;
+
+	if (!load_result)
+		load_result = &ignored_result;
+	*load_result = UNTRACKED_IGNORE_INDETERMINATE;
 
 	if (oid_stat && !oid_stat->valid) {
 		if (!is_null_oid(&oid_stat->oid)) {
@@ -1283,17 +1302,31 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 		fd = open(fname, O_RDONLY);
 
 	if (fd < 0 || fstat(fd, &st) < 0) {
+		int saved_errno = errno;
+		int eligible = 0;
+		int absent = fd < 0 &&
+			(saved_errno == ENOENT ||
+			 (!(flags & PATTERN_NOFOLLOW) && saved_errno == ENOTDIR));
+
 		if (fd < 0)
 			warn_on_fopen_errors(fname);
 		else
 			close(fd);
-		if (!istate)
+		if (!istate) {
+			if (absent)
+				*load_result = UNTRACKED_IGNORE_NO_RULES;
 			return -1;
+		}
 		r = read_skip_worktree_file_from_index(istate, fname,
 						       &size, &buf,
-						       oid_stat);
-		if (r != 1)
+						       oid_stat, &eligible);
+		if (r != 1) {
+			if (eligible && !r)
+				*load_result = UNTRACKED_IGNORE_LOADED;
+			else if (!eligible && absent)
+				*load_result = UNTRACKED_IGNORE_NO_RULES;
 			return r;
+		}
 	} else {
 		size = xsize_t(st.st_size);
 		if (size == 0) {
@@ -1303,6 +1336,7 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 				oid_stat->valid = 1;
 			}
 			close(fd);
+			*load_result = UNTRACKED_IGNORE_LOADED;
 			return 0;
 		}
 		buf = xmallocz(size);
@@ -1344,6 +1378,7 @@ static int add_patterns(const char *fname, const char *base, int baselen,
 
 	add_patterns_from_buffer(buf, size, base, baselen, pl);
 	free(buf);
+	*load_result = UNTRACKED_IGNORE_LOADED;
 	return 0;
 }
 
@@ -1382,7 +1417,7 @@ int add_patterns_from_file_to_list(const char *fname, const char *base,
 				   struct index_state *istate,
 				   unsigned flags)
 {
-	return add_patterns(fname, base, baselen, pl, istate, flags, NULL);
+	return add_patterns(fname, base, baselen, pl, istate, flags, NULL, NULL);
 }
 
 int add_patterns_from_blob_to_list(
@@ -1428,7 +1463,8 @@ struct pattern_list *add_pattern_list(struct dir_struct *dir,
  * Used to set up core.excludesfile and .git/info/exclude lists.
  */
 static void add_patterns_from_file_1(struct dir_struct *dir, const char *fname,
-				     struct oid_stat *oid_stat)
+				     struct oid_stat *oid_stat,
+				     enum untracked_ignore_load_result *load_result)
 {
 	struct pattern_list *pl;
 	/*
@@ -1439,14 +1475,14 @@ static void add_patterns_from_file_1(struct dir_struct *dir, const char *fname,
 	if (!dir->untracked)
 		dir->internal.unmanaged_exclude_files++;
 	pl = add_pattern_list(dir, EXC_FILE, fname);
-	if (add_patterns(fname, "", 0, pl, NULL, 0, oid_stat) < 0)
+	if (add_patterns(fname, "", 0, pl, NULL, 0, oid_stat, load_result) < 0)
 		die(_("cannot use %s as an exclude file"), fname);
 }
 
 void add_patterns_from_file(struct dir_struct *dir, const char *fname)
 {
 	dir->internal.unmanaged_exclude_files++; /* see validate_untracked_cache() */
-	add_patterns_from_file_1(dir, fname, NULL);
+	add_patterns_from_file_1(dir, fname, NULL, NULL);
 }
 
 int match_basename(const char *basename, int basenamelen,
@@ -1770,7 +1806,7 @@ static struct path_pattern *last_matching_pattern_from_lists(
  * Loads the per-directory exclude list for the substring of base
  * which has a char length of baselen.
  */
-static void prep_exclude(struct dir_struct *dir,
+static enum untracked_ignore_load_result prep_exclude(struct dir_struct *dir,
 			 struct index_state *istate,
 			 const char *base, int baselen)
 {
@@ -1779,6 +1815,7 @@ static void prep_exclude(struct dir_struct *dir,
 	struct exclude_stack *stk = NULL;
 	struct untracked_cache_dir *untracked;
 	int current;
+	enum untracked_ignore_load_result result;
 
 	group = &dir->internal.exclude_list_group[EXC_DIRS];
 
@@ -1799,10 +1836,11 @@ static void prep_exclude(struct dir_struct *dir,
 		free(stk);
 		group->nr--;
 	}
+	result = stk ? stk->load_result : UNTRACKED_IGNORE_LOADED;
 
 	/* Skip traversing into sub directories if the parent is excluded */
 	if (dir->internal.pattern)
-		return;
+		return result;
 
 	/*
 	 * Lazy initialization. All call sites currently just
@@ -1823,6 +1861,7 @@ static void prep_exclude(struct dir_struct *dir,
 	while (current < baselen) {
 		const char *cp;
 		struct oid_stat oid_stat;
+		enum untracked_ignore_load_result loaded = UNTRACKED_IGNORE_NO_RULES;
 
 		CALLOC_ARRAY(stk, 1);
 		if (current < 0) {
@@ -1843,6 +1882,7 @@ static void prep_exclude(struct dir_struct *dir,
 		stk->baselen = cp - base;
 		stk->exclude_ix = group->nr;
 		stk->ucd = untracked;
+		stk->load_result = result;
 		pl = add_pattern_list(dir, EXC_DIRS, NULL);
 		strbuf_add(&dir->internal.basebuf, base + current, stk->baselen - current);
 		assert(stk->baselen == dir->internal.basebuf.len);
@@ -1861,7 +1901,7 @@ static void prep_exclude(struct dir_struct *dir,
 				dir->internal.pattern = NULL;
 			if (dir->internal.pattern) {
 				dir->internal.exclude_stack = stk;
-				return;
+				return result;
 			}
 		}
 
@@ -1898,8 +1938,11 @@ static void prep_exclude(struct dir_struct *dir,
 				oidcpy(&oid_stat.oid, &untracked->exclude_oid);
 			add_patterns(pl->src, pl->src, stk->baselen, pl, istate,
 				     PATTERN_NOFOLLOW,
-				     untracked ? &oid_stat : NULL);
+				     untracked ? &oid_stat : NULL, &loaded);
 		}
+		if (loaded == UNTRACKED_IGNORE_INDETERMINATE)
+			result = loaded;
+		stk->load_result = result;
 		/*
 		 * NEEDSWORK: when untracked cache is enabled, prep_exclude()
 		 * will first be called in valid_cached_dir() then maybe many
@@ -1926,6 +1969,28 @@ static void prep_exclude(struct dir_struct *dir,
 		current = stk->baselen;
 	}
 	strbuf_setlen(&dir->internal.basebuf, baselen);
+	return result;
+}
+
+/* Drop only lazily loaded directory rules, preserving the caller's globals. */
+static void clear_directory_excludes(struct dir_struct *dir)
+{
+	struct exclude_list_group *group =
+		&dir->internal.exclude_list_group[EXC_DIRS];
+	struct exclude_stack *stk;
+
+	while ((stk = dir->internal.exclude_stack)) {
+		struct pattern_list *pl = &group->pl[stk->exclude_ix];
+
+		dir->internal.exclude_stack = stk->prev;
+		free((char *)pl->src);
+		clear_pattern_list(pl);
+		free(stk);
+		group->nr--;
+	}
+	dir->internal.pattern = NULL;
+	if (dir->internal.basebuf.buf)
+		strbuf_reset(&dir->internal.basebuf);
 }
 
 /*
@@ -2680,6 +2745,7 @@ static void add_untracked(struct untracked_cache_dir *dir, const char *name)
 	if (!dir)
 		return;
 	dir->can_skip_replay = 0;
+	dir->stat_result = UNTRACKED_STAT_UNCHECKED;
 	ALLOC_GROW(dir->untracked, dir->untracked_nr + 1,
 		   dir->untracked_alloc);
 	dir->untracked[dir->untracked_nr++] = xstrdup(name);
@@ -2700,8 +2766,9 @@ static int valid_cached_dir(struct dir_struct *dir,
 	 * With fsmonitor, we can trust the untracked cache's valid field.
 	 */
 	refresh_fsmonitor(istate);
-	if (!(dir->untracked->use_fsmonitor && untracked->valid) &&
-	    (!untracked->valid || !untracked->stat_matches)) {
+	if (!(untracked_cache_uses_fsmonitor(dir->untracked) && untracked->valid) &&
+	    (!untracked->valid || !dir->internal.stat_prevalidated ||
+	     untracked->stat_result != UNTRACKED_STAT_MATCH)) {
 		if (lstat(path->len ? path->buf : ".", &st)) {
 			memset(&untracked->stat_data, 0, sizeof(untracked->stat_data));
 			return 0;
@@ -2742,7 +2809,8 @@ struct untracked_stat_task {
 
 struct untracked_stat_data {
 	pthread_mutex_t mutex;
-	struct index_state *istate;
+	struct cache_time cutoff;
+	int pending;
 	struct untracked_stat_task *tasks;
 	size_t next_task;
 	size_t nr_tasks;
@@ -2764,29 +2832,35 @@ struct untracked_stat_thread {
  * changed entries and validates per-directory exclude files.
  */
 static void validate_untracked_stat(struct untracked_cache_dir *untracked,
-				    struct index_state *istate,
+				    struct untracked_stat_data *shared,
 				    struct strbuf *path, int *nr_lstat,
 				    int recurse)
 {
 	struct stat st;
 	size_t i, len = path->len;
 
-	untracked->stat_matches = 0;
-	if (untracked->valid) {
+	untracked->stat_result = UNTRACKED_STAT_UNCHECKED;
+	if (shared->pending || untracked->valid) {
 		(*nr_lstat)++;
-		if (!lstat(path->len ? path->buf : ".", &st) &&
-		    !match_untracked_dir_stat_racy(&istate->timestamp,
-					      &untracked->stat_data, &st))
-			untracked->stat_matches = 1;
+		if (lstat(path->len ? path->buf : ".", &st) ||
+		    !S_ISDIR(st.st_mode))
+			untracked->stat_result = UNTRACKED_STAT_UNSAFE;
+		else if (untracked->valid &&
+			 !match_untracked_dir_stat_racy(&shared->cutoff,
+						       &untracked->stat_data, &st))
+			untracked->stat_result = UNTRACKED_STAT_MATCH;
+		else
+			untracked->stat_result = UNTRACKED_STAT_CHANGED_DIRECTORY;
 	}
-	if (!recurse)
+	if (!recurse || (shared->pending &&
+			 untracked->stat_result == UNTRACKED_STAT_UNSAFE))
 		return;
 
 	for (i = 0; i < untracked->dirs_nr; i++) {
 		if (path->len)
 			strbuf_addch(path, '/');
 		strbuf_addstr(path, untracked->dirs[i]->name);
-		validate_untracked_stat(untracked->dirs[i], istate, path,
+		validate_untracked_stat(untracked->dirs[i], shared, path,
 					nr_lstat, 1);
 		strbuf_setlen(path, len);
 	}
@@ -2816,7 +2890,9 @@ static void prepare_untracked_stat_tasks(struct untracked_stat_data *shared,
 		return;
 	}
 
-	validate_untracked_stat(untracked, shared->istate, path, nr_lstat, 0);
+	validate_untracked_stat(untracked, shared, path, nr_lstat, 0);
+	if (shared->pending && untracked->stat_result == UNTRACKED_STAT_UNSAFE)
+		return;
 	for (i = 0; i < untracked->dirs_nr; i++) {
 		if (path->len)
 			strbuf_addch(path, '/');
@@ -2845,7 +2921,7 @@ static void *validate_untracked_stat_thread(void *data)
 
 		task = &shared->tasks[task_nr];
 		strbuf_addstr(&path, task->path);
-		validate_untracked_stat(task->untracked, shared->istate, &path,
+		validate_untracked_stat(task->untracked, shared, &path,
 					&thread->nr_lstat, 1);
 		strbuf_reset(&path);
 	}
@@ -2854,11 +2930,13 @@ static void *validate_untracked_stat_thread(void *data)
 	return NULL;
 }
 
-static void validate_untracked_stats(struct untracked_cache_dir *root,
-				     struct index_state *istate)
+static int validate_untracked_stats(struct untracked_cache_dir *root,
+				     struct index_state *istate,
+				     const struct cache_time *cutoff)
 {
 	struct untracked_stat_data shared = {
-		.istate = istate,
+		.cutoff = cutoff ? *cutoff : istate->timestamp,
+		.pending = !!cutoff,
 	};
 	struct untracked_stat_thread *data;
 	struct strbuf path = STRBUF_INIT;
@@ -2867,7 +2945,7 @@ static void validate_untracked_stats(struct untracked_cache_dir *root,
 	int test_threads = git_env_bool("GIT_TEST_UNTRACKED_CACHE_THREADS", 0);
 
 	if (!HAVE_THREADS)
-		return;
+		goto serial;
 	threads = online_cpus();
 	if (threads > MAX_UNTRACKED_STAT_THREADS)
 		threads = MAX_UNTRACKED_STAT_THREADS;
@@ -2875,7 +2953,7 @@ static void validate_untracked_stats(struct untracked_cache_dir *root,
 		threads = 2;
 	nr_dirs = count_untracked_dirs(root);
 	if (threads < 2 || (nr_dirs < 1000 && !test_threads))
-		return;
+		goto serial;
 	if (test_threads)
 		task_size = 1;
 	else
@@ -2918,6 +2996,13 @@ static void validate_untracked_stats(struct untracked_cache_dir *root,
 	free(data);
 	trace2_data_intmax("read_directory", istate->repo,
 			   "parallel-lstat", nr_lstat);
+	return 1;
+
+serial:
+	if (shared.pending)
+		validate_untracked_stat(root, &shared, &path, &nr_lstat, 1);
+	strbuf_release(&path);
+	return shared.pending;
 }
 
 static int open_cached_dir(struct cached_dir *cdir,
@@ -3374,14 +3459,167 @@ void remove_untracked_cache(struct index_state *istate)
 	}
 }
 
+/* Validate the topology before using cached names to open ignore files. */
+static int valid_untracked_topology(const struct untracked_cache_dir *node,
+				    size_t path_len, unsigned depth)
+{
+	size_t i;
+
+	if (depth > 1024 || path_len >= INT_MAX)
+		return 0;
+	for (i = 0; i < node->dirs_nr; i++) {
+		const struct untracked_cache_dir *child = node->dirs[i];
+		const char *p = child->name;
+		size_t len;
+
+		if (!*p || !verify_path(p, S_IFDIR) ||
+		    (i && strcmp(node->dirs[i - 1]->name, p) >= 0))
+			return 0;
+		for (; *p; p++)
+			if (is_dir_sep(*p))
+				return 0;
+		len = p - child->name;
+		if (len >= INT_MAX || path_len >= INT_MAX - len - 1 ||
+		    !valid_untracked_topology(child,
+			path_len + !!path_len + len, depth + 1))
+			return 0;
+	}
+	return 1;
+}
+
+static void validate_untracked_global_excludes(struct dir_struct *dir)
+{
+	struct untracked_cache *uc = dir->untracked;
+
+	if (!oideq(&dir->internal.ss_info_exclude.oid, &uc->ss_info_exclude.oid)) {
+		invalidate_gitignore(uc, uc->root, GITIGNORE_INVALIDATION_GLOBAL,
+				     &uc->ss_info_exclude.oid,
+				     &dir->internal.ss_info_exclude.oid);
+		uc->ss_info_exclude = dir->internal.ss_info_exclude;
+	}
+	if (!oideq(&dir->internal.ss_excludes_file.oid, &uc->ss_excludes_file.oid)) {
+		invalidate_gitignore(uc, uc->root, GITIGNORE_INVALIDATION_GLOBAL,
+				     &uc->ss_excludes_file.oid,
+				     &dir->internal.ss_excludes_file.oid);
+		uc->ss_excludes_file = dir->internal.ss_excludes_file;
+	}
+}
+
+static int revalidate_untracked_ignores(struct dir_struct *dir,
+				       struct index_state *istate,
+				       struct untracked_cache_dir *node,
+				       struct strbuf *path)
+{
+	size_t i, len = path->len;
+
+	switch (node->stat_result) {
+	case UNTRACKED_STAT_MATCH:
+		break;
+	case UNTRACKED_STAT_CHANGED_DIRECTORY:
+		invalidate_one_directory(dir->untracked, node, 0);
+		break;
+	case UNTRACKED_STAT_UNCHECKED:
+	case UNTRACKED_STAT_UNSAFE:
+		do_invalidate_gitignore(node);
+		return 0;
+	}
+	if (len)
+		strbuf_addch(path, '/');
+	if (prep_exclude(dir, istate, path->buf, path->len) ==
+	    UNTRACKED_IGNORE_INDETERMINATE) {
+		strbuf_setlen(path, len);
+		return -1;
+	}
+	strbuf_setlen(path, len);
+	if (dir->internal.pattern) {
+		do_invalidate_gitignore(node);
+		return 0;
+	}
+	for (i = 0; i < node->dirs_nr; i++) {
+		if (len)
+			strbuf_addch(path, '/');
+		strbuf_addstr(path, node->dirs[i]->name);
+		if (revalidate_untracked_ignores(dir, istate, node->dirs[i], path)) {
+			strbuf_setlen(path, len);
+			return -1;
+		}
+		strbuf_setlen(path, len);
+	}
+	update_can_skip_replay(node);
+	return 0;
+}
+
+static int revalidate_pending_untracked_cache(struct dir_struct *dir,
+					     struct index_state *istate)
+{
+	struct untracked_cache *uc = dir->untracked;
+	struct strbuf path = STRBUF_INIT;
+	int ret = -1;
+
+	clear_directory_excludes(dir);
+	if (istate->repo != the_repository || uc != istate->untracked)
+		return -1;
+	if (!uc->root || *uc->root->name ||
+	    !valid_untracked_topology(uc->root, 0, 0)) {
+		free_untracked_cache(uc);
+		istate->untracked = dir->untracked = NULL;
+		istate->cache_changed |= UNTRACKED_CHANGED;
+		return -1;
+	}
+	if (dir->internal.info_exclude_result == UNTRACKED_IGNORE_INDETERMINATE ||
+	    dir->internal.excludes_file_result == UNTRACKED_IGNORE_INDETERMINATE)
+		return -1;
+	validate_untracked_global_excludes(dir);
+	validate_untracked_stats(uc->root, istate, &uc->fsmonitor_resync_cutoff);
+	if (revalidate_untracked_ignores(dir, istate, uc->root, &path))
+		goto done;
+	uc->fsmonitor_resync = 0;
+	memset(&uc->fsmonitor_resync_cutoff, 0, sizeof(uc->fsmonitor_resync_cutoff));
+	istate->cache_changed |= UNTRACKED_CHANGED;
+	ret = 0;
+done:
+	if (ret)
+		clear_directory_excludes(dir);
+	strbuf_release(&path);
+	return ret;
+}
+
+enum untracked_cache_mode {
+	UNTRACKED_CACHE_MODE_UNCACHED,
+	UNTRACKED_CACHE_MODE_SAME,
+	UNTRACKED_CACHE_MODE_NEGATIVE,
+	UNTRACKED_CACHE_MODE_RESET,
+};
+
+static enum untracked_cache_mode untracked_cache_mode(
+	const struct dir_struct *dir, struct index_state *istate, int negative_only)
+{
+	const unsigned normal = DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
+	unsigned requested = dir->flags, stored = dir->untracked->dir_flags;
+
+	if (negative_only) {
+		requested &= ~DIR_COLLECT_IGNORED;
+		return (requested == 0 || requested == normal) &&
+			(stored == 0 || stored == normal) ?
+			UNTRACKED_CACHE_MODE_NEGATIVE : UNTRACKED_CACHE_MODE_UNCACHED;
+	}
+	if (requested == stored)
+		return UNTRACKED_CACHE_MODE_SAME;
+	if (stored != new_untracked_cache_flags(istate))
+		return UNTRACKED_CACHE_MODE_RESET;
+	if ((requested == 0 || requested == normal) &&
+	    (stored == 0 || stored == normal))
+		return UNTRACKED_CACHE_MODE_NEGATIVE;
+	return UNTRACKED_CACHE_MODE_UNCACHED;
+}
+
 static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *dir,
 							    int base_len,
 							    struct index_state *istate,
 							    const struct pathspec *pathspec,
-							    int *negative_only)
+							    int *negative_only,
+							    int *revalidated)
 {
-	const unsigned int normal_flags =
-		DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	struct untracked_cache_dir *root;
 	int i;
 	static int untracked_cache_disabled = -1;
@@ -3447,15 +3685,16 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		warning(_("untracked cache is disabled on this system or location"));
 		return NULL;
 	}
-
-	if (*negative_only) {
-		unsigned int flags = dir->flags & ~DIR_COLLECT_IGNORED;
-
-		if ((flags != 0 && flags != normal_flags) ||
-		    (dir->untracked->dir_flags != 0 &&
-		     dir->untracked->dir_flags != normal_flags))
-			return NULL;
-	} else if (dir->flags != dir->untracked->dir_flags) {
+	switch (untracked_cache_mode(dir, istate, *negative_only)) {
+	case UNTRACKED_CACHE_MODE_UNCACHED:
+		return NULL;
+	case UNTRACKED_CACHE_MODE_SAME:
+		break;
+	case UNTRACKED_CACHE_MODE_NEGATIVE:
+		/* Positive entries depend on the output mode; negative ones do not. */
+		*negative_only = 1;
+		break;
+	case UNTRACKED_CACHE_MODE_RESET:
 		/*
 		 * If the untracked structure we received does not have the same flags
 		 * as configured, then we need to reset / create a new "untracked"
@@ -3472,22 +3711,12 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		 * caused surprisingly bad performance (with fscache and fsmonitor
 		 * enabled) on Windows.
 		 */
-		if (dir->untracked->dir_flags != new_untracked_cache_flags(istate)) {
-			free_untracked_cache(istate->untracked);
-			new_untracked_cache(istate, dir->flags);
-			dir->untracked = istate->untracked;
-		} else if ((dir->flags == 0 || dir->flags == normal_flags) &&
-			   (dir->untracked->dir_flags == 0 ||
-			    dir->untracked->dir_flags == normal_flags)) {
-			/*
-			 * Positive entries depend on the output mode, but negative
-			 * summaries do not.
-			 */
-			*negative_only = 1;
-		} else {
-			return NULL;
-		}
+		free_untracked_cache(istate->untracked);
+		new_untracked_cache(istate, dir->flags);
+		dir->untracked = istate->untracked;
+		break;
 	}
+	refresh_fsmonitor(istate);
 
 	if (!dir->untracked->root) {
 		if (*negative_only)
@@ -3499,28 +3728,18 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 
 	/* Validate $GIT_COMMON_DIR/info/exclude and core.excludesfile. */
 	root = dir->untracked->root;
+	if (dir->untracked->fsmonitor_resync) {
+		if (revalidate_pending_untracked_cache(dir, istate))
+			return NULL;
+		*revalidated = 1;
+	}
 	if (*negative_only &&
 	    (!oideq(&dir->internal.ss_info_exclude.oid,
 		    &dir->untracked->ss_info_exclude.oid) ||
 	     !oideq(&dir->internal.ss_excludes_file.oid,
 		    &dir->untracked->ss_excludes_file.oid)))
 		return NULL;
-	if (!oideq(&dir->internal.ss_info_exclude.oid,
-		   &dir->untracked->ss_info_exclude.oid)) {
-		invalidate_gitignore(dir->untracked, root,
-				     GITIGNORE_INVALIDATION_GLOBAL,
-				     &dir->untracked->ss_info_exclude.oid,
-				     &dir->internal.ss_info_exclude.oid);
-		dir->untracked->ss_info_exclude = dir->internal.ss_info_exclude;
-	}
-	if (!oideq(&dir->internal.ss_excludes_file.oid,
-		   &dir->untracked->ss_excludes_file.oid)) {
-		invalidate_gitignore(dir->untracked, root,
-				     GITIGNORE_INVALIDATION_GLOBAL,
-				     &dir->untracked->ss_excludes_file.oid,
-				     &dir->internal.ss_excludes_file.oid);
-		dir->untracked->ss_excludes_file = dir->internal.ss_excludes_file;
-	}
+	validate_untracked_global_excludes(dir);
 
 	/* Make sure this directory is not dropped out at saving phase. */
 	if (!*negative_only)
@@ -3576,6 +3795,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	int has_pathspec = pathspec && pathspec->nr;
 	int negative_only = has_pathspec || dir->untracked_cache_negative_only;
 	int cache_present = !!dir->untracked;
+	int revalidated = 0;
 	unsigned int stored_flags = cache_present ? dir->untracked->dir_flags : 0;
 
 	trace2_region_enter("dir", "read_directory", istate->repo);
@@ -3584,6 +3804,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.pruned_subtrees = 0;
 	dir->internal.repaired_subtrees = 0;
 	dir->internal.can_prune_replay = 0;
+	dir->internal.stat_prevalidated = 0;
 	dir->internal.icase_scan_budget_used = 0;
 
 	if (has_symlink_leading_path(path, len)) {
@@ -3592,7 +3813,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	}
 
 	untracked = validate_untracked_cache(dir, len, istate, pathspec,
-					     &negative_only);
+					     &negative_only, &revalidated);
+	dir->internal.stat_prevalidated = revalidated;
 	trace2_data_intmax("untracked_cache", istate->repo, "requested-flags",
 			   dir->flags);
 	trace2_data_intmax("untracked_cache", istate->repo, "stored-flags",
@@ -3626,9 +3848,10 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 				has_skippable_subtree(untracked_cache->root);
 
 			refresh_fsmonitor(istate);
-			if (!untracked_cache->use_fsmonitor) {
-				if (untracked)
-					validate_untracked_stats(untracked, istate);
+			if (!untracked_cache_uses_fsmonitor(untracked_cache)) {
+				if (untracked && !revalidated)
+					dir->internal.stat_prevalidated =
+						validate_untracked_stats(untracked, istate, NULL);
 			} else if (had_skippable_subtree ||
 				   untracked_cache->dir_invalidated) {
 				/*
@@ -3727,6 +3950,7 @@ done:
 		}
 	}
 
+	dir->internal.stat_prevalidated = 0;
 	return dir->nr;
 }
 
@@ -4033,6 +4257,8 @@ void setup_standard_excludes(struct dir_struct *dir)
 	const char *excludes_file = repo_excludes_file(the_repository);
 
 	dir->exclude_per_dir = ".gitignore";
+	dir->internal.excludes_file_result = UNTRACKED_IGNORE_NO_RULES;
+	dir->internal.info_exclude_result = UNTRACKED_IGNORE_NO_RULES;
 
 	/* core.excludesfile defaulting to $XDG_CONFIG_HOME/git/ignore */
 	if (excludes_file && !access_or_warn(excludes_file, R_OK, 0)) {
@@ -4042,7 +4268,10 @@ void setup_standard_excludes(struct dir_struct *dir)
 			dir->internal.ss_excludes_file.valid = 0;
 		}
 		add_patterns_from_file_1(dir, excludes_file,
-					 dir->untracked ? &dir->internal.ss_excludes_file : NULL);
+					 dir->untracked ? &dir->internal.ss_excludes_file : NULL,
+					 &dir->internal.excludes_file_result);
+	} else if (excludes_file && errno != ENOENT && errno != ENOTDIR) {
+		dir->internal.excludes_file_result = UNTRACKED_IGNORE_INDETERMINATE;
 	}
 
 	/* per repository user preference */
@@ -4055,7 +4284,10 @@ void setup_standard_excludes(struct dir_struct *dir)
 				dir->internal.ss_info_exclude.valid = 0;
 			}
 			add_patterns_from_file_1(dir, path,
-						 dir->untracked ? &dir->internal.ss_info_exclude : NULL);
+						 dir->untracked ? &dir->internal.ss_info_exclude : NULL,
+						 &dir->internal.info_exclude_result);
+		} else if (errno != ENOENT && errno != ENOTDIR) {
+			dir->internal.info_exclude_result = UNTRACKED_IGNORE_INDETERMINATE;
 		}
 	}
 }
@@ -4227,26 +4459,14 @@ static void write_one_dir(struct untracked_cache_dir *untracked,
 			write_one_dir(untracked->dirs[i], wd);
 }
 
-void write_untracked_extension(struct strbuf *out, struct untracked_cache *untracked)
+static void write_untracked_body(struct strbuf *out,
+				 struct untracked_cache *untracked)
 {
 	struct ondisk_untracked_cache *ouc;
 	struct write_data wd;
 	unsigned char varbuf[16];
 	uint8_t varint_len;
 	const unsigned hashsz = the_hash_algo->rawsz;
-
-	/* Never persist retained summaries before a full resync is validated. */
-	if (untracked->fsmonitor_resync) {
-		if (untracked->root && !untracked->root->valid) {
-			uintmax_t invalidated =
-				do_invalidate_gitignore(untracked->root);
-
-			trace2_data_intmax("untracked_cache", the_repository,
-					   "serialize/resync-invalidated-nodes",
-					   invalidated);
-		}
-		untracked->fsmonitor_resync = 0;
-	}
 
 	CALLOC_ARRAY(ouc, 1);
 	stat_data_to_disk(&ouc->info_exclude_stat, &untracked->ss_info_exclude.stat);
@@ -4294,6 +4514,45 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 	strbuf_release(&wd.out);
 	strbuf_release(&wd.sb_stat);
 	strbuf_release(&wd.sb_sha1);
+}
+
+#define UNTRACKED_PENDING_MAGIC "\0UNRV"
+#define UNTRACKED_PENDING_MAGIC_LEN 5
+#define UNTRACKED_PENDING_HEADER_LEN 21
+#define UNTRACKED_PENDING_OVERHEAD 22
+#define UNTRACKED_PENDING_SENTINEL 0xa5
+
+enum untracked_cache_encoding write_untracked_extension(
+	struct strbuf *out, struct untracked_cache *untracked)
+{
+	size_t start = out->len, body_start, body_len;
+
+	if (untracked->fsmonitor_resync &&
+	    (!untracked->fsmonitor_resync_cutoff.sec ||
+	     untracked->fsmonitor_resync_cutoff.nsec >= 1000000000))
+		return UNTRACKED_CACHE_ENCODING_NONE;
+	if (untracked->fsmonitor_resync)
+		strbuf_addchars(out, '\0', UNTRACKED_PENDING_HEADER_LEN);
+	body_start = out->len;
+	write_untracked_body(out, untracked);
+	body_len = out->len - body_start;
+	if (untracked->fsmonitor_resync) {
+		if (body_len > UINT32_MAX - UNTRACKED_PENDING_OVERHEAD)
+			goto omit;
+		memcpy(out->buf + start, UNTRACKED_PENDING_MAGIC,
+		       UNTRACKED_PENDING_MAGIC_LEN);
+		put_be32(out->buf + start + 5, 1);
+		put_be32(out->buf + start + 9, untracked->fsmonitor_resync_cutoff.sec);
+		put_be32(out->buf + start + 13, untracked->fsmonitor_resync_cutoff.nsec);
+		put_be32(out->buf + start + 17, body_len);
+		strbuf_addch(out, UNTRACKED_PENDING_SENTINEL);
+		return UNTRACKED_CACHE_ENCODING_PENDING;
+	}
+	if (body_len <= UINT32_MAX)
+		return UNTRACKED_CACHE_ENCODING_LEGACY;
+omit:
+	strbuf_setlen(out, start);
+	return UNTRACKED_CACHE_ENCODING_NONE;
 }
 
 static void free_untracked(struct untracked_cache_dir *ucd)
@@ -4667,6 +4926,52 @@ struct untracked_cache *read_untracked_extension_bounded(const void *data,
 					 1024 * 1024, 1024);
 }
 
+static struct untracked_cache *read_pending_untracked_extension_1(
+	const void *data, size_t sz, int bounded)
+{
+	const unsigned char *p = data;
+	struct untracked_cache *uc;
+	uint32_t body_len, sec, nsec;
+
+	if (sz < UNTRACKED_PENDING_OVERHEAD || sz > UINT32_MAX ||
+	    memcmp(p, UNTRACKED_PENDING_MAGIC, UNTRACKED_PENDING_MAGIC_LEN) ||
+	    get_be32(p + 5) != 1 ||
+	    p[sz - 1] != UNTRACKED_PENDING_SENTINEL)
+		return NULL;
+	sec = get_be32(p + 9);
+	nsec = get_be32(p + 13);
+	body_len = get_be32(p + 17);
+	if (!sec || nsec >= 1000000000 ||
+	    body_len != sz - UNTRACKED_PENDING_OVERHEAD)
+		return NULL;
+	uc = bounded ?
+		read_untracked_extension_bounded(p + UNTRACKED_PENDING_HEADER_LEN,
+						body_len) :
+		read_untracked_extension(p + UNTRACKED_PENDING_HEADER_LEN, body_len);
+	if (uc) {
+		uc->fsmonitor_resync = 1;
+		uc->fsmonitor_resync_cutoff.sec = sec;
+		uc->fsmonitor_resync_cutoff.nsec = nsec;
+	}
+	return uc;
+}
+
+struct untracked_cache *read_pending_untracked_extension(const void *data,
+							 size_t sz)
+{
+	return read_pending_untracked_extension_1(data, sz, 0);
+}
+
+struct untracked_cache *read_untracked_snapshot(const void *data, size_t sz)
+{
+	if (sz >= UNTRACKED_PENDING_MAGIC_LEN &&
+	    !memcmp(data, UNTRACKED_PENDING_MAGIC, UNTRACKED_PENDING_MAGIC_LEN))
+		return read_pending_untracked_extension_1(data, sz, 1);
+	if (sz > UINT32_MAX)
+		return NULL;
+	return read_untracked_extension_bounded(data, sz);
+}
+
 static void invalidate_one_directory(struct untracked_cache *uc,
 				     struct untracked_cache_dir *ucd,
 				     int invalidate_descendants)
@@ -4676,6 +4981,7 @@ static void invalidate_one_directory(struct untracked_cache *uc,
 	uc->dir_invalidated++;
 	ucd->can_skip_replay = 0;
 	ucd->valid = 0;
+	ucd->stat_result = UNTRACKED_STAT_UNCHECKED;
 	for (i = 0; i < ucd->untracked_nr; i++)
 		free(ucd->untracked[i]);
 	ucd->untracked_nr = 0;
@@ -4691,7 +4997,18 @@ void untracked_cache_invalidate_all(struct index_state *istate)
 	if (!uc || !uc->root)
 		return;
 
-	/* An invalid root persists the resync without discarding its children. */
+	if (!uc->fsmonitor_resync) {
+		if (!istate->timestamp.sec || istate->timestamp.nsec >= 1000000000) {
+			uintmax_t invalidated = do_invalidate_gitignore(uc->root);
+
+			trace2_data_intmax("untracked_cache", istate->repo,
+				"resync/unknown-cutoff-invalidated-nodes", invalidated);
+			istate->cache_changed |= UNTRACKED_CHANGED;
+			return;
+		}
+		uc->fsmonitor_resync_cutoff = istate->timestamp;
+	}
+	/* UNRV preserves these candidates without trusting their old token. */
 	invalidate_one_directory(uc, uc->root, 0);
 	uc->fsmonitor_resync = 1;
 	istate->cache_changed |= UNTRACKED_CHANGED;

@@ -624,8 +624,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		goto done;
 	}
 
-	candidate = read_untracked_extension_bounded(snapshot_data,
-						     snapshot_len);
+	candidate = read_untracked_snapshot(snapshot_data, snapshot_len);
 	if (!candidate) {
 		reason = "invalid-snapshot";
 		goto done;
@@ -691,8 +690,8 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	if (!index_oid)
 		return;
 
-	write_untracked_extension(&snapshot, istate->untracked);
-	if (!snapshot.len)
+	if (write_untracked_extension(&snapshot, istate->untracked) ==
+	    UNTRACKED_CACHE_ENCODING_NONE)
 		goto done;
 	if (add_tracked_snapshot(istate, &snapshot)) {
 		trace2_data_string("fsmonitor", istate->repo,
