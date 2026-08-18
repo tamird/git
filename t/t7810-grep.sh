@@ -3416,6 +3416,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 	test_cmp .git/index.grep-worktree.save \
 		.git/index.grep-worktree &&
 	test_grep ! "worktree_blob/" grep-worktree-trace-textconv &&
+	test_grep ! "\"event\":\".*timer\".*\"name\":\"worktree-cache/" \
+		grep-worktree-trace-textconv &&
 	rm .git/index.grep-worktree.save &&
 	test_trace2_data grep worktree_blob/hits 0 \
 		<grep-worktree-trace-1b &&
@@ -3448,6 +3450,12 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-no-optional-locks &&
 	test_trace2_data grep worktree_blob/compact_loaded 1 \
 		<grep-worktree-trace-no-optional-locks &&
+	test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/write\",\"intervals\":1," \
+		grep-worktree-trace-no-optional-locks &&
+	test_grep ! "\"name\":\"worktree-cache/recovery-prepare\"" \
+		grep-worktree-trace-no-optional-locks &&
+	test_grep ! "worktree_blob/recovery_write_outcome" \
+		grep-worktree-trace-no-optional-locks &&
 	test_cmp .git/index.grep-worktree.no-optional-locks-save \
 		.git/index.grep-worktree &&
 	rm .git/index.grep-worktree.no-optional-locks-save &&
@@ -3834,6 +3842,24 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 			<grep-worktree-trace-refresh &&
 		test_trace2_data grep worktree_blob/recorded_different 1 \
 			<grep-worktree-trace-refresh &&
+		test_trace2_data grep worktree_blob/recovery_write_outcome 5 \
+			<grep-worktree-trace-refresh &&
+		test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/write\"" \
+			grep-worktree-trace-refresh >actual &&
+		test_line_count = 1 actual &&
+		test_grep "\"intervals\":1," actual &&
+		test_grep ! "\"event\":\"th_timer\".*\"name\":\"worktree-cache/write\"" \
+			grep-worktree-trace-refresh &&
+		test_grep ! "\"event\":\"region_.*\".*\"label\":\"worktree-cache/write\"" \
+			grep-worktree-trace-refresh &&
+		test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/recovery-prepare\"" \
+			grep-worktree-trace-refresh >actual &&
+		test_line_count = 1 actual &&
+		test_grep "\"intervals\":1," actual &&
+		test_grep ! "\"event\":\"th_timer\".*\"name\":\"worktree-cache/recovery-prepare\"" \
+			grep-worktree-trace-refresh &&
+		test_grep ! "\"event\":\"region_.*\".*\"label\":\"worktree-cache/recovery-prepare\"" \
+			grep-worktree-trace-refresh &&
 		test_path_is_file .git/index.grep-worktree-recovery-next &&
 		echo "recovery entry d" >grep-worktree-refresh-d &&
 		git add grep-worktree-refresh-d &&

@@ -113,6 +113,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "materialized/cleanup",
 		.want_per_thread_events = 0,
 	},
+	/* Recovery preparation is included in the worktree-cache write timer. */
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC] = {
+		.category = "grep",
+		.name = "worktree-cache/finalize-ipc",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_WRITE] = {
+		.category = "grep",
+		.name = "worktree-cache/write",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_PREPARE] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-prepare",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

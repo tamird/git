@@ -2138,6 +2138,14 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-worktree.trace &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
 		<overlay-worktree.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/finalize-ipc\"" \
+		overlay-worktree.trace >actual &&
+	test_line_count = 1 actual &&
+	test_grep "\"intervals\":1," actual &&
+	test_grep ! "\"event\":\"th_timer\".*\"name\":\"worktree-cache/finalize-ipc\"" \
+		overlay-worktree.trace &&
+	test_grep ! "\"event\":\"region_.*\"label\":\"worktree-cache/finalize-ipc\"" \
+		overlay-worktree.trace &&
 	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
 		git grep --no-content-index \
 		"overlay present warmup absent 7818" -- overlay-present &&

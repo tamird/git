@@ -51,6 +51,20 @@ enum grep_worktree_write_outcome {
 };
 
 /*
+ * Trace2 values for an attempted recovery write. Committing the inactive
+ * slot does not authorize it: the compact sidecar must commit its checksum.
+ * The final value describes this write, not later generation validity.
+ */
+enum grep_worktree_recovery_write_outcome {
+	GREP_WORKTREE_RECOVERY_WRITE_NOT_REQUESTED = 0,
+	GREP_WORKTREE_RECOVERY_WRITE_PREPARE_FAILED = 1,
+	GREP_WORKTREE_RECOVERY_WRITE_PREPARED_NOT_PUBLISHED = 2,
+	GREP_WORKTREE_RECOVERY_WRITE_SLOT_COMMIT_FAILED = 3,
+	GREP_WORKTREE_RECOVERY_WRITE_SLOT_COMMITTED_UNREFERENCED = 4,
+	GREP_WORKTREE_RECOVERY_WRITE_COMPACT_COMMITTED_REFERENCE = 5,
+};
+
+/*
  * The sidecar contains:
  *
  *   0                    signature
@@ -155,6 +169,7 @@ struct grep_worktree_cache {
 	uint64_t direct_write;
 	uint64_t negative_noop;
 	enum grep_worktree_write_outcome write_outcome;
+	enum grep_worktree_recovery_write_outcome recovery_write_outcome;
 	int write_errno;
 	int split_index;
 	int recovery_checksum_checked;
@@ -1083,6 +1098,8 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	if (!cache)
 		return;
 	cache->write_outcome = GREP_WORKTREE_WRITE_ABORTED;
+	cache->recovery_write_outcome =
+		GREP_WORKTREE_RECOVERY_WRITE_NOT_REQUESTED;
 	cache->write_errno = 0;
 	if (!use_optional_locks()) {
 		cache->write_outcome =
@@ -1155,12 +1172,25 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		return;
 	}
 	wait_for_test_write_phase("prelock");
-	if (update_recovery &&
-	    prepare_recovery(cache, &recovery_lock,
-			     prepared_recovery_slot,
-			     &prepared_recovery_checksum,
-			     &prepared_recovery_equal))
-		update_recovery = 0;
+	if (update_recovery) {
+		int prepare_result;
+
+		cache->recovery_write_outcome =
+			GREP_WORKTREE_RECOVERY_WRITE_PREPARE_FAILED;
+		trace2_timer_start(
+			TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_PREPARE);
+		prepare_result = prepare_recovery(cache, &recovery_lock,
+					  prepared_recovery_slot,
+					  &prepared_recovery_checksum,
+					  &prepared_recovery_equal);
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_PREPARE);
+		if (prepare_result)
+			update_recovery = 0;
+		else
+			cache->recovery_write_outcome =
+				GREP_WORKTREE_RECOVERY_WRITE_PREPARED_NOT_PUBLISHED;
+	}
 	if (!cache->exact_changed && !persist_recovered &&
 	    !cache->split_base_changed && !update_recovery &&
 	    !cache->recovery_invalid && !cache->recorded_different)
@@ -1584,12 +1614,18 @@ merge_current:
 				break;
 			}
 		}
-		if (recovery_still_valid &&
-		    !commit_lock_file(&recovery_lock)) {
-			oidcpy(&current.recovery_checksum,
-			       &prepared_recovery_checksum);
-			current.recovery_slot = prepared_recovery_slot;
-			output_changed = 1;
+		if (recovery_still_valid) {
+			if (commit_lock_file(&recovery_lock)) {
+				cache->recovery_write_outcome =
+					GREP_WORKTREE_RECOVERY_WRITE_SLOT_COMMIT_FAILED;
+			} else {
+				cache->recovery_write_outcome =
+					GREP_WORKTREE_RECOVERY_WRITE_SLOT_COMMITTED_UNREFERENCED;
+				oidcpy(&current.recovery_checksum,
+				       &prepared_recovery_checksum);
+				current.recovery_slot = prepared_recovery_slot;
+				output_changed = 1;
+			}
 		}
 	}
 	if (!output_changed)
@@ -1624,6 +1660,10 @@ merge_current:
 		goto done;
 	}
 	cache->write_outcome = GREP_WORKTREE_WRITE_COMMITTED;
+	if (cache->recovery_write_outcome ==
+	    GREP_WORKTREE_RECOVERY_WRITE_SLOT_COMMITTED_UNREFERENCED)
+		cache->recovery_write_outcome =
+			GREP_WORKTREE_RECOVERY_WRITE_COMPACT_COMMITTED_REFERENCE;
 
 done:
 	if (!negative_safe &&
@@ -1669,6 +1709,11 @@ void grep_worktree_cache_free(struct grep_worktree_cache *cache)
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/write_outcome",
 			   cache->write_outcome);
+	if (cache->recovery_write_outcome !=
+	    GREP_WORKTREE_RECOVERY_WRITE_NOT_REQUESTED)
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/recovery_write_outcome",
+				   cache->recovery_write_outcome);
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/write_errno",
 			   cache->write_errno);
