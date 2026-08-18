@@ -4,6 +4,7 @@
 struct commit;
 struct object;
 struct rev_info;
+struct tree_mark_stats;
 
 typedef void (*show_commit_fn)(struct commit *, void *);
 typedef void (*show_object_fn)(struct object *, const char *, void *);
@@ -12,6 +13,10 @@ typedef void (*show_edge_fn)(struct commit *);
 void mark_edges_uninteresting(struct rev_info *revs,
 			      show_edge_fn show_edge,
 			      int sparse);
+/* Collect statistics for the nonsparse edge walk. */
+void mark_edges_uninteresting_with_stats(struct rev_info *revs,
+					 show_edge_fn show_edge,
+					 struct tree_mark_stats *stats);
 
 struct oidset;
 struct list_objects_filter_options;
