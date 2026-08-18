@@ -445,4 +445,61 @@ test_expect_success '"git checkout ." report should not include failed entries' 
 	)
 '
 
+test_expect_success 'branch switch reports parallel checkout failures' '
+	test_when_finished "rm -rf failed_switch" &&
+	set_checkout_config 2 0 &&
+	git init -b source failed_switch &&
+	(
+		cd failed_switch &&
+		test_commit base &&
+		git checkout -b target &&
+		echo good >good &&
+		echo bad >bad &&
+		git add good bad &&
+		git commit -m target &&
+
+		git rev-parse HEAD >expect-head &&
+		git symbolic-ref HEAD >expect-branch &&
+		git ls-files --stage >expect-index &&
+		cp good expect-good &&
+		bad_blob=$(git rev-parse :bad) &&
+		test "$bad_blob" != "$(git rev-parse :good)" &&
+		test "$bad_blob" != "$(git rev-parse :base.t)" &&
+		git checkout source &&
+		rm .git/objects/$(test_oid_to_path "$bad_blob") &&
+		test_must_fail git cat-file -e "$bad_blob" &&
+
+		capture_switch_exit () {
+			if GIT_TRACE2_EVENT="$PWD/switch-event.log" \
+				git switch target 2>switch.err
+			then
+				switch_status=0
+			else
+				switch_status=$?
+			fi &&
+			printf "%s\n" "$switch_status" >switch.exit
+		} &&
+		test_checkout_workers 2 capture_switch_exit &&
+		grep "\"category\":\"pcheckout\",\"key\":\"worker/failed\"" \
+			switch-event.log >worker-failed &&
+		test_line_count = 2 worker-failed &&
+		grep "\"value\":\"1\"" worker-failed >failed-one &&
+		test_line_count = 1 failed-one &&
+		grep "\"value\":\"0\"" worker-failed >failed-zero &&
+		test_line_count = 1 failed-zero &&
+		test_grep "cannot read object $bad_blob" switch.err &&
+		git rev-parse HEAD >actual-head &&
+		test_cmp expect-head actual-head &&
+		git symbolic-ref HEAD >actual-branch &&
+		test_cmp expect-branch actual-branch &&
+		git ls-files --stage >actual-index &&
+		test_cmp expect-index actual-index &&
+		test_cmp expect-good good &&
+		test_path_is_missing bad &&
+
+		echo 1 >expect-exit &&
+		test_cmp expect-exit switch.exit
+	)
+'
+
 test_done
