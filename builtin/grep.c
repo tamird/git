@@ -3267,6 +3267,7 @@ int cmd_grep(int argc,
 	uint64_t t_compile_begin = 0, t_compile_end = 0;
 	uint64_t t_dispatch_end = 0;
 	int phases_ready = 0;
+	int trace_worktree_finalize = 0;
 	int requested_threads = 0, selected_threads = 0;
 	int matcher_type = 0;
 	size_t revision_count = 0, pathspec_count = 0;
@@ -3654,15 +3655,22 @@ int cmd_grep(int argc,
 	if (threads_started)
 		hit |= wait_all();
 	t_dispatch_end = getnanotime();
+	trace_worktree_finalize = !!worktree_cache;
 	selected_threads = num_threads;
 	if (content_index_negative_entries) {
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_negative_cache_entries",
 				   content_index_negative_entries);
+		if (trace_worktree_finalize)
+			trace2_timer_start(
+				TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC);
 		grep_index_ipc_report_negatives(
 			the_repository, content_index_query,
 			&content_index_negative_identity,
 			content_index_negative_result, content_index_negative_nr);
+		if (trace_worktree_finalize)
+			trace2_timer_stop(
+				TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC);
 	}
 	if (hit && show_in_pager)
 		run_pager(&opt, prefix);
@@ -3671,11 +3679,21 @@ int cmd_grep(int argc,
 
 out:
 	if (worker_lease_id) {
+		if (trace_worktree_finalize)
+			trace2_timer_start(
+				TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC);
 		grep_index_ipc_release_workers(
 			the_repository, worker_lease_id);
+		if (trace_worktree_finalize)
+			trace2_timer_stop(
+				TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC);
 		worker_lease_id = 0;
 	}
+	if (trace_worktree_finalize)
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_WRITE);
 	grep_worktree_cache_write(worktree_cache);
+	if (trace_worktree_finalize)
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_WRITE);
 	grep_worktree_cache_free(worktree_cache);
 	worktree_cache = NULL;
 	clear_pathspec(&pathspec);
