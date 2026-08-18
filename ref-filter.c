@@ -2864,6 +2864,23 @@ static int get_ref_atom_value(struct ref_array_item *ref, int atom,
 	return 0;
 }
 
+static int get_ref_atom_value_for_sort(struct ref_array_item *ref, int atom,
+				      struct atom_value **v, struct strbuf *err,
+				      int trace_value_population)
+{
+	int trace_population = trace_value_population && !ref->value;
+	int ret;
+
+	if (trace_population)
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE);
+	ret = get_ref_atom_value(ref, atom, v, err);
+	if (trace_population)
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE);
+	return ret;
+}
+
 /*
  * Return 1 if the refname matches one of the patterns, otherwise 0.
  * A pattern can be a literal prefix (e.g. a refname "refs/heads/master"
@@ -3651,6 +3668,10 @@ static inline int can_do_iterative_format(struct ref_filter *filter,
 	return !(filter->reachable_from || filter->unreachable_from);
 }
 
+static void ref_array_sort_internal(struct ref_sorting *sorting,
+				    struct ref_array *array,
+				    int trace_value_population);
+
 void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 			    struct ref_sorting *sorting,
 			    struct ref_format *format)
@@ -3680,7 +3701,7 @@ void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE);
 		trace2_timer_start(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
-		ref_array_sort(sorting, &array);
+		ref_array_sort_internal(sorting, &array, trace2_is_enabled());
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
 		trace2_timer_start(
@@ -3721,7 +3742,13 @@ static int memcasecmp(const void *vs1, const void *vs2, size_t n)
 	return 0;
 }
 
-static int cmp_ref_sorting(struct ref_sorting *s, struct ref_array_item *a, struct ref_array_item *b)
+struct ref_sorting_context {
+	struct ref_sorting *sorting;
+	int trace_value_population;
+};
+
+static int cmp_ref_sorting(struct ref_sorting *s, struct ref_array_item *a,
+			   struct ref_array_item *b, int trace_value_population)
 {
 	struct atom_value *va, *vb;
 	int cmp;
@@ -3729,9 +3756,11 @@ static int cmp_ref_sorting(struct ref_sorting *s, struct ref_array_item *a, stru
 	cmp_type cmp_type = used_atom[s->atom].type;
 	struct strbuf err = STRBUF_INIT;
 
-	if (get_ref_atom_value(a, s->atom, &va, &err))
+	if (get_ref_atom_value_for_sort(a, s->atom, &va, &err,
+					trace_value_population))
 		die("%s", err.buf);
-	if (get_ref_atom_value(b, s->atom, &vb, &err))
+	if (get_ref_atom_value_for_sort(b, s->atom, &vb, &err,
+					trace_value_population))
 		die("%s", err.buf);
 	strbuf_release(&err);
 	if (s->sort_flags & REF_SORTING_DETACHED_HEAD_FIRST &&
@@ -3777,18 +3806,20 @@ static int cmp_ref_sorting(struct ref_sorting *s, struct ref_array_item *a, stru
 		? -cmp : cmp;
 }
 
-static int compare_refs(const void *a_, const void *b_, void *ref_sorting)
+static int compare_refs(const void *a_, const void *b_, void *data)
 {
 	struct ref_array_item *a = *((struct ref_array_item **)a_);
 	struct ref_array_item *b = *((struct ref_array_item **)b_);
+	const struct ref_sorting_context *ctx = data;
 	struct ref_sorting *s;
 
-	for (s = ref_sorting; s; s = s->next) {
-		int cmp = cmp_ref_sorting(s, a, b);
+	for (s = ctx->sorting; s; s = s->next) {
+		int cmp = cmp_ref_sorting(s, a, b,
+					  ctx->trace_value_population);
 		if (cmp)
 			return cmp;
 	}
-	s = ref_sorting;
+	s = ctx->sorting;
 	return s && s->sort_flags & REF_SORTING_ICASE ?
 		strcasecmp(a->refname, b->refname) :
 		strcmp(a->refname, b->refname);
@@ -3805,10 +3836,22 @@ void ref_sorting_set_sort_flags_all(struct ref_sorting *sorting,
 	}
 }
 
+static void ref_array_sort_internal(struct ref_sorting *sorting,
+				    struct ref_array *array,
+				    int trace_value_population)
+{
+	struct ref_sorting_context ctx = {
+		.sorting = sorting,
+		.trace_value_population = trace_value_population,
+	};
+
+	if (sorting)
+		QSORT_S(array->items, array->nr, compare_refs, &ctx);
+}
+
 void ref_array_sort(struct ref_sorting *sorting, struct ref_array *array)
 {
-	if (sorting)
-		QSORT_S(array->items, array->nr, compare_refs, sorting);
+	ref_array_sort_internal(sorting, array, 0);
 }
 
 static void append_literal(const char *cp, const char *ep, struct ref_formatting_state *state)
