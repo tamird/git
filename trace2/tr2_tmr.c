@@ -92,7 +92,7 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "filter",
 		.want_per_thread_events = 0,
 	},
-	/* Sorting includes lazy atom loading; format-output includes stdio. */
+	/* Sorting includes sort-populate; format-output includes stdio. */
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE] = {
 		.category = "ref-filter",
 		.name = "materialized/prepare",
@@ -101,6 +101,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT] = {
 		.category = "ref-filter",
 		.name = "materialized/sort",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-populate",
 		.want_per_thread_events = 0,
 	},
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_FORMAT_OUTPUT] = {
