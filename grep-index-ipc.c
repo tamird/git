@@ -22,9 +22,18 @@
 
 #ifndef SUPPORTS_SIMPLE_IPC
 
-int grep_index_ipc_is_available(struct repository *repo UNUSED)
+int grep_index_ipc_is_available_with_outcome(
+	struct repository *repo UNUSED,
+	enum grep_index_ipc_availability_outcome *outcome)
 {
+	if (outcome)
+		*outcome = GREP_INDEX_IPC_AVAILABILITY_UNSUPPORTED;
 	return 0;
+}
+
+int grep_index_ipc_is_available(struct repository *repo)
+{
+	return grep_index_ipc_is_available_with_outcome(repo, NULL);
 }
 
 int grep_index_ipc_workers_are_available(struct repository *repo UNUSED)
@@ -353,52 +362,93 @@ static enum ipc_active_state grep_index_ipc_path_state(const char *path)
 }
 
 static int grep_index_ipc_ensure_path(
-	struct repository *repo, const char *path)
+	struct repository *repo, const char *path,
+	enum grep_index_ipc_availability_outcome *outcome)
 {
 	struct ipc_client_connect_options options =
 		IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	struct ipc_client_connection *connection = NULL;
 	struct strbuf response = STRBUF_INIT;
 	enum ipc_active_state state = grep_index_ipc_path_state(path);
+	enum ipc_active_state fsmonitor_state = IPC_STATE__OTHER_ERROR;
+	int request_result = IPC_CLIENT_COMMAND_SUCCESS;
 
 	switch (state) {
 	case IPC_STATE__LISTENING:
+		if (outcome)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_AVAILABLE;
 		return 1;
 	case IPC_STATE__NOT_LISTENING:
 	case IPC_STATE__PATH_NOT_FOUND:
 		options.wait_if_busy = 1;
 		options.uds_disallow_chdir = 1;
-		if (ipc_client_try_connect(
-			    fsmonitor_ipc__get_path(repo), &options,
-			    &connection) == IPC_STATE__LISTENING)
-			ipc_client_send_command_to_connection_gently(
-				connection, "start-grep-index", 16,
-				&response);
+		fsmonitor_state = ipc_client_try_connect(
+			fsmonitor_ipc__get_path(repo), &options, &connection);
+		if (fsmonitor_state == IPC_STATE__LISTENING)
+			request_result =
+				ipc_client_send_command_to_connection_gently(
+					connection, "start-grep-index", 16,
+					&response);
 		ipc_client_close_connection(connection);
 		state = grep_index_ipc_path_state(path);
 		break;
 	case IPC_STATE__INVALID_PATH:
+		if (outcome)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_INVALID_PATH;
+		return 0;
 	case IPC_STATE__OTHER_ERROR:
 	default:
+		if (outcome)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_ENDPOINT_ERROR;
 		return 0;
+	}
+	if (outcome) {
+		if (state == IPC_STATE__LISTENING)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_AVAILABLE;
+		else if (state == IPC_STATE__INVALID_PATH)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_INVALID_PATH;
+		else if (state != IPC_STATE__NOT_LISTENING &&
+			 state != IPC_STATE__PATH_NOT_FOUND)
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_ENDPOINT_ERROR;
+		else if (fsmonitor_state != IPC_STATE__LISTENING)
+			*outcome =
+				GREP_INDEX_IPC_AVAILABILITY_FSMONITOR_UNAVAILABLE;
+		else if (request_result == IPC_CLIENT_COMMAND_ERROR_SEND)
+			*outcome =
+				GREP_INDEX_IPC_AVAILABILITY_START_SEND_FAILED;
+		else if (request_result == IPC_CLIENT_COMMAND_ERROR_READ)
+			*outcome =
+				GREP_INDEX_IPC_AVAILABILITY_START_READ_FAILED;
+		else if (request_result == IPC_CLIENT_COMMAND_SUCCESS)
+			*outcome =
+				GREP_INDEX_IPC_AVAILABILITY_NO_LISTENER_AFTER_REQUEST;
+		else
+			*outcome = GREP_INDEX_IPC_AVAILABILITY_ENDPOINT_ERROR;
 	}
 	strbuf_release(&response);
 	return state == IPC_STATE__LISTENING;
 }
 
-int grep_index_ipc_is_available(struct repository *repo)
+int grep_index_ipc_is_available_with_outcome(
+	struct repository *repo,
+	enum grep_index_ipc_availability_outcome *outcome)
 {
 	char *path = grep_index_ipc_path(repo);
-	int available = grep_index_ipc_ensure_path(repo, path);
+	int available = grep_index_ipc_ensure_path(repo, path, outcome);
 
 	free(path);
 	return available;
 }
 
+int grep_index_ipc_is_available(struct repository *repo)
+{
+	return grep_index_ipc_is_available_with_outcome(repo, NULL);
+}
+
 int grep_index_ipc_workers_are_available(struct repository *repo)
 {
 	char *path = grep_index_ipc_worker_path(repo);
-	int available = grep_index_ipc_ensure_path(repo, path);
+	int available = grep_index_ipc_ensure_path(repo, path, NULL);
 
 	free(path);
 	return available;

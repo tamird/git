@@ -20,7 +20,22 @@ struct grep_index_location {
 	uint8_t valid;
 };
 
+/* Values are exposed by pickaxe Trace2 data. */
+enum grep_index_load_outcome {
+	GREP_INDEX_LOAD_NOT_ATTEMPTED = 0,
+	GREP_INDEX_LOAD_LOADED = 1,
+	GREP_INDEX_LOAD_REPLACEMENTS = 2,
+	GREP_INDEX_LOAD_NO_GITDIR = 3,
+	GREP_INDEX_LOAD_MANIFEST_MISSING = 4,
+	GREP_INDEX_LOAD_MANIFEST_READ_ERROR = 5,
+	GREP_INDEX_LOAD_MANIFEST_EMPTY = 6,
+	GREP_INDEX_LOAD_MANIFEST_INVALID = 7,
+	GREP_INDEX_LOAD_SEGMENT_UNUSABLE = 8,
+};
+
 struct grep_index *grep_index_load(struct repository *repo);
+struct grep_index *grep_index_load_with_outcome(
+	struct repository *repo, enum grep_index_load_outcome *outcome);
 void grep_index_free(struct grep_index *index);
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt);
 void grep_index_query_free(struct grep_index_query *query);

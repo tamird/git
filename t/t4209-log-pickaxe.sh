@@ -386,6 +386,12 @@ test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
 		<pickaxe-default-patch.trace &&
 	test_trace2_data pickaxe content_index/ipc 0 \
 		<pickaxe-default-patch.trace &&
+	test_grep ! \
+		"\"category\":\"pickaxe\",\"key\":\"content_index/local_outcome\"," \
+		pickaxe-default-patch.trace &&
+	test_grep ! \
+		"\"category\":\"pickaxe\",\"key\":\"content_index/ipc_outcome\"," \
+		pickaxe-default-patch.trace &&
 	pickaxe_count_hits=$(sed -n \
 		"s#.*\"category\":\"pickaxe\",\"key\":\"content_index/count_cache_hits\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
 		pickaxe-default-patch.trace) &&
@@ -415,7 +421,8 @@ test_expect_success 'fixed pickaxe reuses counts below the index threshold' '
 test_expect_success 'fixed pickaxe caches counts without a content index' '
 	GIT_TEST_PICKAXE_CONTENT_INDEX_MIN_PAIRS=0 \
 	GIT_TRACE2_EVENT="$PWD/pickaxe-no-index.trace" \
-		git -C GS-plain log --no-renames -S"[b]" -- data.txt >actual &&
+		git -C GS-plain -c fsmonitor.socketDir=/tmp \
+		log --no-renames -S"[b]" -- data.txt >actual &&
 	test_cmp D-then-E-log actual &&
 	test_trace2_data pickaxe content_index/pairs_seen 0 \
 		<pickaxe-no-index.trace &&
@@ -428,6 +435,16 @@ test_expect_success 'fixed pickaxe caches counts without a content index' '
 	test_trace2_data pickaxe content_index/index 0 \
 		<pickaxe-no-index.trace &&
 	test_trace2_data pickaxe content_index/ipc 0 \
+		<pickaxe-no-index.trace &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"pickaxe\",\"key\":\"content_index/local_outcome\"," \
+		pickaxe-no-index.trace)" = 1 &&
+	test_trace2_data pickaxe content_index/local_outcome 4 \
+		<pickaxe-no-index.trace &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"pickaxe\",\"key\":\"content_index/ipc_outcome\"," \
+		pickaxe-no-index.trace)" = 1 &&
+	test_trace2_data pickaxe content_index/ipc_outcome "[25]" \
 		<pickaxe-no-index.trace &&
 	test_trace2_data pickaxe content_index/count_cache_hits \
 		"[1-9][0-9]*" <pickaxe-no-index.trace &&

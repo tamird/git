@@ -588,29 +588,40 @@ static struct grep_index *grep_index_load_legacy(struct repository *repo)
 }
 
 static int read_grep_index_chain(struct repository *repo, const char *name,
-				 struct strbuf *chain)
+				 struct strbuf *chain, int *read_error)
 {
 	struct strbuf path = STRBUF_INIT;
 	int result;
 
 	grep_index_path(repo, &path, name);
 	result = strbuf_read_file(chain, path.buf, 0);
+	if (read_error)
+		*read_error = result < 0 ? errno : 0;
 	strbuf_release(&path);
 	return result < 0 ? -1 : 0;
 }
 
-static struct grep_index *grep_index_load_transposed(struct repository *repo)
+static struct grep_index *grep_index_load_transposed(
+	struct repository *repo, enum grep_index_load_outcome *outcome)
 {
 	struct grep_index *index = NULL;
 	struct strbuf manifest = STRBUF_INIT;
 	struct strbuf line = STRBUF_INIT;
 	struct object_id oid;
+	enum grep_index_load_outcome result = GREP_INDEX_LOAD_NO_GITDIR;
 	size_t pos = 0;
 	size_t hexsz = repo->hash_algo->hexsz;
+	int read_error;
 
-	if (!repo->gitdir ||
-	    read_grep_index_chain(repo, "chain-transposed", &manifest))
+	if (!repo->gitdir)
 		goto cleanup;
+	if (read_grep_index_chain(repo, "chain-transposed", &manifest,
+				  &read_error)) {
+		result = read_error == ENOENT ?
+			 GREP_INDEX_LOAD_MANIFEST_MISSING :
+			 GREP_INDEX_LOAD_MANIFEST_READ_ERROR;
+		goto cleanup;
+	}
 	CALLOC_ARRAY(index, 1);
 	index->repo = repo;
 	while (pos < manifest.len) {
@@ -625,14 +636,22 @@ static struct grep_index *grep_index_load_transposed(struct repository *repo)
 		    line.buf[hexsz] != ' ' ||
 		    get_oid_hex_algop(line.buf, &oid, repo->hash_algo) ||
 		    get_oid_hex_algop(line.buf + hexsz + 1, &oid,
-				      repo->hash_algo) ||
-		    !add_transposed_grep_index_segment(
-			    index, line.buf + hexsz + 1))
+				      repo->hash_algo)) {
+			result = GREP_INDEX_LOAD_MANIFEST_INVALID;
 			goto invalid;
+		}
+		if (!add_transposed_grep_index_segment(
+			    index, line.buf + hexsz + 1)) {
+			result = GREP_INDEX_LOAD_SEGMENT_UNUSABLE;
+			goto invalid;
+		}
 		pos += len + !!end;
 	}
-	if (!index->segments_nr)
+	if (!index->segments_nr) {
+		result = GREP_INDEX_LOAD_MANIFEST_EMPTY;
 		goto invalid;
+	}
+	result = GREP_INDEX_LOAD_LOADED;
 	goto cleanup;
 
 invalid:
@@ -642,15 +661,21 @@ invalid:
 cleanup:
 	strbuf_release(&line);
 	strbuf_release(&manifest);
+	if (outcome)
+		*outcome = result;
 	return index;
 }
 
-struct grep_index *grep_index_load(struct repository *repo)
+struct grep_index *grep_index_load_with_outcome(
+	struct repository *repo, enum grep_index_load_outcome *outcome)
 {
 	if (replace_refs_enabled(repo)) {
 		prepare_replace_object(repo);
-		if (oidmap_get_size(&repo->objects->replace_map))
+		if (oidmap_get_size(&repo->objects->replace_map)) {
+			if (outcome)
+				*outcome = GREP_INDEX_LOAD_REPLACEMENTS;
 			return NULL;
+		}
 	}
 
 	/*
@@ -658,7 +683,12 @@ struct grep_index *grep_index_load(struct repository *repo)
 	 * file. Keep that cost on the explicit transposition path; callers can
 	 * fall back to ordinary object reads when the transposed index is absent.
 	 */
-	return grep_index_load_transposed(repo);
+	return grep_index_load_transposed(repo, outcome);
+}
+
+struct grep_index *grep_index_load(struct repository *repo)
+{
+	return grep_index_load_with_outcome(repo, NULL);
 }
 
 void grep_index_free(struct grep_index *index)
@@ -3567,7 +3597,7 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 			       error("unable to load new grep index segment") :
 			       0;
 	if (!read_grep_index_chain(
-		    repo, "chain-transposed", &existing_manifest)) {
+		    repo, "chain-transposed", &existing_manifest, NULL)) {
 		while (manifest_pos < existing_manifest.len) {
 			const char *line =
 				existing_manifest.buf + manifest_pos;
@@ -3971,7 +4001,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 {
 	struct grep_index *existing = transpose_existing ?
 					      grep_index_load_legacy(repo) :
-					      grep_index_load_transposed(repo);
+					      grep_index_load_transposed(repo, NULL);
 	struct progress *progress = NULL;
 	struct tempfile *temp = NULL;
 	struct tempfile *filter_temp = NULL;

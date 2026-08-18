@@ -22,7 +22,23 @@ enum grep_index_ipc_worker_update_result {
 	GREP_INDEX_IPC_WORKER_UPDATE_NOT_SENT,
 };
 
+/* Values are exposed by pickaxe Trace2 data. */
+enum grep_index_ipc_availability_outcome {
+	GREP_INDEX_IPC_AVAILABILITY_NOT_ATTEMPTED = 0,
+	GREP_INDEX_IPC_AVAILABILITY_AVAILABLE = 1,
+	GREP_INDEX_IPC_AVAILABILITY_UNSUPPORTED = 2,
+	GREP_INDEX_IPC_AVAILABILITY_INVALID_PATH = 3,
+	GREP_INDEX_IPC_AVAILABILITY_ENDPOINT_ERROR = 4,
+	GREP_INDEX_IPC_AVAILABILITY_FSMONITOR_UNAVAILABLE = 5,
+	GREP_INDEX_IPC_AVAILABILITY_START_SEND_FAILED = 6,
+	GREP_INDEX_IPC_AVAILABILITY_START_READ_FAILED = 7,
+	GREP_INDEX_IPC_AVAILABILITY_NO_LISTENER_AFTER_REQUEST = 8,
+};
+
 int grep_index_ipc_is_available(struct repository *repo);
+int grep_index_ipc_is_available_with_outcome(
+	struct repository *repo,
+	enum grep_index_ipc_availability_outcome *outcome);
 int grep_index_ipc_workers_are_available(struct repository *repo);
 int grep_index_ipc_query(struct repository *repo,
 			 const struct grep_index_query *query,
