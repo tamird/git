@@ -38,6 +38,7 @@
 #include "replace-object.h"
 #include "dir.h"
 #include "midx.h"
+#include "trace.h"
 #include "trace2.h"
 #include "shallow.h"
 #include "promisor-remote.h"
@@ -4115,7 +4116,10 @@ static void read_stdin_packs(struct repository *repo,
 			     enum stdin_packs_mode mode, int rev_list_unpacked)
 {
 	int prev_fetch_if_missing = repo->fetch_if_missing;
+	int trace_phases = mode == STDIN_PACKS_MODE_STANDARD &&
+		trace2_is_enabled();
 	struct rev_info revs;
+	uint64_t start_ns = 0;
 
 	/*
 	 * The revision walk may hit objects that are promised, only. As the
@@ -4152,16 +4156,28 @@ static void read_stdin_packs(struct repository *repo,
 		 */
 		ignore_packed_keep_in_core_open = 1;
 	}
+	if (trace_phases)
+		start_ns = getnanotime();
 	stdin_packs_read_input(&revs, mode);
+	if (trace_phases)
+		trace2_data_intmax("pack-objects", repo,
+				   "stdin-packs/input-us",
+				   (getnanotime() - start_ns) / 1000);
 	if (rev_list_unpacked)
 		add_unreachable_loose_objects(&revs);
 
+	if (trace_phases)
+		start_ns = getnanotime();
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
 	traverse_commit_list(&revs,
 			     show_commit_pack_hint,
 			     show_object_pack_hint,
 			     &mode);
+	if (trace_phases)
+		trace2_data_intmax("pack-objects", repo,
+				   "stdin-packs/revision-walk-us",
+				   (getnanotime() - start_ns) / 1000);
 
 	release_revisions(&revs);
 

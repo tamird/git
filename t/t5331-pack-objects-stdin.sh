@@ -289,7 +289,14 @@ test_expect_success '--stdin-packs=follow walks into unknown packs' '
 		# included packs reach objects from the unknown pack, so
 		# objects from pack "A" is included in the output pack
 		# in addition to the above.
-		P=$(git pack-objects --stdin-packs=follow $packdir/pack <in) &&
+		rm -f follow-event.log &&
+		P=$(GIT_TRACE2_EVENT="$(pwd)/follow-event.log" \
+			git pack-objects --stdin-packs=follow $packdir/pack <in) &&
+		for key in input-us revision-walk-us
+		do
+			test_grep ! "\"category\":\"pack-objects\",\"key\":\"stdin-packs/$key\"" \
+				follow-event.log || return 1
+		done &&
 		objects_in_packs $A $B $D >expect &&
 		objects_in_packs $P >actual &&
 		test_cmp expect actual &&
@@ -375,7 +382,15 @@ test_expect_success '--stdin-packs does not perform backfill fetch' '
 		ls .git/objects/pack/*.promisor | sed "s|.*/||; s/\.promisor$/.pack/" >packs &&
 		test_line_count -gt 1 packs &&
 		GIT_TRACE2_EVENT="$(pwd)/event.log" git pack-objects --stdin-packs pack <packs &&
-		test_grep ! "\"event\":\"child_start\"" event.log
+		test_grep ! "\"event\":\"child_start\"" event.log &&
+		for key in input-us revision-walk-us
+		do
+			grep "\"category\":\"pack-objects\",\"key\":\"stdin-packs/$key\"" \
+				event.log >timing &&
+			test_line_count = 1 timing &&
+			test_grep "\"event\":\"data\"" timing &&
+			test_grep "\"value\":\"[0-9][0-9]*\"" timing || return 1
+		done
 	)
 '
 
