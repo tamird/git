@@ -1978,8 +1978,9 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-first.trace &&
 		test_trace2_data status untracked/cache-root-valid 0 \
 			<../untracked-restart-clean-first.trace &&
-		test_trace2_data untracked_cache serialize/resync-invalidated-nodes \
-			"[0-9][0-9]*" <../untracked-restart-clean-first.trace &&
+		! have_t2_data_event untracked_cache \
+			serialize/resync-invalidated-nodes \
+			<../untracked-restart-clean-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-first.trace &&
 		GIT_TRACE2_EVENT_NESTING=4 \
@@ -2115,14 +2116,31 @@ test_expect_success PTHREADS \
 
 test_expect_success 'daemon restart revalidates hidden skipped subtrees' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_skipped" &&
+	test_when_finished "test ! -f test_untracked_skipped/stable/.gitignore ||
+		chmod 600 test_untracked_skipped/stable/.gitignore" &&
+	test_when_finished "test ! -f untracked-skipped-outside/.gitignore ||
+		chmod 600 untracked-skipped-outside/.gitignore" &&
 	git init test_untracked_skipped &&
 	(
 		cd test_untracked_skipped &&
 		echo tracked >tracked &&
-		git add tracked &&
+		mkdir stable &&
+		echo one >stable/one &&
+		echo two >stable/two &&
+		echo three >stable/three &&
+		echo ignored >stable/.gitignore &&
+		git add tracked stable &&
 		git commit -m initial &&
 		git config core.fsmonitor true &&
 		git config core.untrackedCache true &&
+		git config index.version 2 &&
+		git config index.skipHash false &&
+		git config core.splitIndex false &&
+		git config index.recordEndOfIndexEntries false &&
+		git config index.recordOffsetTable false &&
+		git config index.threads 1 &&
+		git -c core.fsmonitor=false update-index --index-version 2 &&
+		echo ignored >stable/ignored &&
 		mkdir -p u/a-visible &&
 		mkdir -p u/z-hidden &&
 		printf ".gitignore\\nitem\\n" >u/z-hidden/.gitignore &&
@@ -2143,12 +2161,111 @@ test_expect_success 'daemon restart revalidates hidden skipped subtrees' '
 			../untracked-skipped.prime &&
 		test_grep ! "u/z-hidden/item" \
 			../untracked-skipped.prime &&
+		test-tool dump-untracked-cache \
+			>../untracked-skipped.before-uno &&
+		test_grep "^/stable/ .* valid$" \
+			../untracked-skipped.before-uno &&
 		git fsmonitor--daemon stop &&
 		printf ".gitignore\\n" >u/z-hidden/.gitignore
 	) &&
 	start_daemon -C test_untracked_skipped &&
 	(
 		cd test_untracked_skipped &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-skipped.uno.trace" \
+			git status --porcelain -uno \
+			>../untracked-skipped.uno &&
+		test_must_be_empty ../untracked-skipped.uno &&
+		test_trace2_data status index/optional-lock acquired \
+			<../untracked-skipped.uno.trace &&
+		test_trace2_data fsm_client query/trivial-reason \
+			token-generation-changed <../untracked-skipped.uno.trace &&
+		test-tool dump-untracked-cache \
+			>../untracked-skipped.after-uno &&
+		test_grep "^/stable/ .* valid$" \
+			../untracked-skipped.after-uno &&
+		test-tool dump-untracked-cache state \
+			>../untracked-skipped.pending-state &&
+		test_grep "^pending " ../untracked-skipped.pending-state &&
+		test-tool dump-untracked-cache inspect-index .git/index \
+			>../untracked-skipped.inventory &&
+		test_grep "^UNRV " ../untracked-skipped.inventory &&
+		test_grep ! "^UNTR " ../untracked-skipped.inventory &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-skipped.second-uno.trace" \
+			git status --porcelain -uno \
+			>../untracked-skipped.second-uno &&
+		test_must_be_empty ../untracked-skipped.second-uno &&
+		test_trace2_data status index/optional-lock acquired \
+			<../untracked-skipped.second-uno.trace &&
+		have_t2_data_event fsmonitor apply_count \
+			<../untracked-skipped.second-uno.trace &&
+		! have_t2_data_event fsm_client query/trivial-response \
+			<../untracked-skipped.second-uno.trace &&
+		test_trace2_data index refresh/sum_lstat 0 \
+			<../untracked-skipped.second-uno.trace &&
+		test-tool dump-untracked-cache state \
+			>../untracked-skipped.second-state &&
+		test_cmp ../untracked-skipped.pending-state \
+			../untracked-skipped.second-state &&
+		test-tool dump-untracked-cache \
+			>../untracked-skipped.second-dump &&
+		test_grep "^/stable/ .* valid$" \
+			../untracked-skipped.second-dump &&
+		if test_have_prereq SANITY
+		then
+			ignore_oid=$(git hash-object stable/.gitignore) &&
+			test_grep "^/stable/ $ignore_oid .* valid$" \
+				../untracked-skipped.second-dump &&
+			chmod 000 stable/.gitignore &&
+			git --no-optional-locks -c core.fsmonitor=false \
+				-c core.untrackedCache=false status --porcelain \
+				>../untracked-skipped.pending-expect &&
+			GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE=1 \
+			GIT_TRACE2_EVENT_NESTING=4 \
+			GIT_TRACE2_EVENT="$PWD/../untracked-skipped.pending-first.trace" \
+				git --no-optional-locks status --porcelain \
+				>../untracked-skipped.pending-first &&
+			GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE=1 \
+			GIT_TRACE2_EVENT_NESTING=4 \
+			GIT_TRACE2_EVENT="$PWD/../untracked-skipped.pending-second.trace" \
+				git --no-optional-locks status --porcelain \
+				>../untracked-skipped.pending-second &&
+			test_cmp ../untracked-skipped.pending-expect \
+				../untracked-skipped.pending-first &&
+			test_cmp ../untracked-skipped.pending-expect \
+				../untracked-skipped.pending-second &&
+			test_trace2_data status untracked-cache/restore miss \
+				<../untracked-skipped.pending-first.trace &&
+			have_t2_data_event fsmonitor apply_count \
+				<../untracked-skipped.pending-first.trace &&
+			! have_t2_data_event fsm_client query/trivial-response \
+				<../untracked-skipped.pending-first.trace &&
+			test_trace2_data status untracked/cache-resync 1 \
+				<../untracked-skipped.pending-first.trace &&
+			test_trace2_data fsmonitor untracked-cache/compressed 1 \
+				<../untracked-skipped.pending-first.trace &&
+			have_t2_data_event fsmonitor untracked-cache/saved \
+				<../untracked-skipped.pending-first.trace &&
+			test_trace2_data status untracked-cache/restore hit \
+				<../untracked-skipped.pending-second.trace &&
+			test_trace2_data fsmonitor untracked-cache/decompressed 1 \
+				<../untracked-skipped.pending-second.trace &&
+			have_t2_data_event fsmonitor apply_count \
+				<../untracked-skipped.pending-second.trace &&
+			! have_t2_data_event fsm_client query/trivial-response \
+				<../untracked-skipped.pending-second.trace &&
+			test_trace2_data status untracked/cache-resync 1 \
+				<../untracked-skipped.pending-second.trace &&
+			test_trace2_data fsmonitor tracked-cache/restored \
+				"[1-9][0-9]*" <../untracked-skipped.pending-second.trace &&
+			test-tool dump-untracked-cache state \
+				>../untracked-skipped.snapshot-state &&
+			test_cmp ../untracked-skipped.pending-state \
+				../untracked-skipped.snapshot-state &&
+			chmod 600 stable/.gitignore
+		fi &&
+		test-tool dump-untracked-cache rewrite-index \
+			.git/index .git/legacy-topology \
+			--node-name=1:../untracked-skipped-outside --legacy=only &&
 		git status --porcelain >../untracked-skipped.first &&
 		test_grep "^?? u/$" ../untracked-skipped.first &&
 		git update-index --force-write-index &&
@@ -2168,7 +2285,39 @@ test_expect_success 'daemon restart revalidates hidden skipped subtrees' '
 			status --porcelain >../untracked-skipped.expect &&
 		test_cmp ../untracked-skipped.expect \
 			../untracked-skipped.actual &&
-		test_grep "^?? u/$" ../untracked-skipped.actual
+		test_grep "^?? u/$" ../untracked-skipped.actual &&
+		mkdir ../untracked-skipped-outside &&
+		echo "*" >../untracked-skipped-outside/.gitignore &&
+		if test_have_prereq SANITY
+		then
+			chmod 000 ../untracked-skipped-outside/.gitignore
+		fi &&
+		GIT_INDEX_FILE=.git/legacy-topology \
+			test-tool dump-untracked-cache state \
+			>../untracked-skipped.legacy-state &&
+		echo trusted >../untracked-skipped.trusted-state &&
+		test_cmp ../untracked-skipped.trusted-state \
+			../untracked-skipped.legacy-state &&
+		git fsmonitor--daemon stop &&
+		start_daemon -C . &&
+		GIT_INDEX_FILE=.git/legacy-topology GIT_OPTIONAL_LOCKS=0 \
+			git -c core.fsmonitor=false -c core.untrackedCache=false \
+			status --porcelain >../untracked-skipped.legacy-expect &&
+		GIT_INDEX_FILE=.git/legacy-topology \
+		GIT_TRACE2_EVENT="$PWD/../untracked-skipped.legacy.trace" \
+			git status --porcelain >../untracked-skipped.legacy-actual \
+			2>../untracked-skipped.legacy-err &&
+		test_cmp ../untracked-skipped.legacy-expect \
+			../untracked-skipped.legacy-actual &&
+		test_grep ! "unable to access" ../untracked-skipped.legacy-err &&
+		test_trace2_data fsm_client query/trivial-reason \
+			token-generation-changed <../untracked-skipped.legacy.trace &&
+		GIT_INDEX_FILE=.git/legacy-topology \
+			test-tool dump-untracked-cache state \
+			>../untracked-skipped.legacy-state &&
+		echo absent >../untracked-skipped.absent-state &&
+		test_cmp ../untracked-skipped.absent-state \
+			../untracked-skipped.legacy-state
 	)
 '
 

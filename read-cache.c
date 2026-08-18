@@ -70,6 +70,7 @@
 #define CACHE_EXT_RESOLVE_UNDO 0x52455543 /* "REUC" */
 #define CACHE_EXT_LINK 0x6c696e6b	  /* "link" */
 #define CACHE_EXT_UNTRACKED 0x554E5452	  /* "UNTR" */
+#define CACHE_EXT_UNTRACKED_PENDING 0x554E5256 /* "UNRV" */
 #define CACHE_EXT_FSMONITOR 0x46534D4E	  /* "FSMN" */
 #define CACHE_EXT_ENDOFINDEXENTRIES 0x454F4945	/* "EOIE" */
 #define CACHE_EXT_INDEXENTRYOFFSETTABLE 0x49454F54 /* "IEOT" */
@@ -1761,8 +1762,15 @@ static int verify_hdr(const struct cache_header *hdr, unsigned long size)
 	return 0;
 }
 
+enum untracked_extension_state {
+	UNTRACKED_EXTENSION_UNSEEN,
+	UNTRACKED_EXTENSION_SEEN,
+	UNTRACKED_EXTENSION_POISONED,
+};
+
 static int read_index_extension(struct index_state *istate,
-				const char *ext, const char *data, unsigned long sz)
+				const char *ext, const char *data, unsigned long sz,
+				enum untracked_extension_state *untracked_state)
 {
 	switch (CACHE_EXT(ext)) {
 	case CACHE_EXT_TREE:
@@ -1781,7 +1789,18 @@ static int read_index_extension(struct index_state *istate,
 			return -1;
 		break;
 	case CACHE_EXT_UNTRACKED:
-		istate->untracked = read_untracked_extension(data, sz);
+	case CACHE_EXT_UNTRACKED_PENDING:
+		if (*untracked_state != UNTRACKED_EXTENSION_UNSEEN) {
+			free_untracked_cache(istate->untracked);
+			istate->untracked = NULL;
+			*untracked_state = UNTRACKED_EXTENSION_POISONED;
+			break;
+		}
+		istate->untracked = CACHE_EXT(ext) == CACHE_EXT_UNTRACKED ?
+			read_untracked_extension(data, sz) :
+			read_pending_untracked_extension(data, sz);
+		*untracked_state = istate->untracked ?
+			UNTRACKED_EXTENSION_SEEN : UNTRACKED_EXTENSION_POISONED;
 		break;
 	case CACHE_EXT_FSMONITOR:
 		read_fsmonitor_extension(istate, data, sz);
@@ -2041,6 +2060,7 @@ static void *load_index_extensions(void *_data)
 	size_t src_offset = p->src_offset;
 	size_t end;
 	int extension_error = 0;
+	enum untracked_extension_state untracked_state = UNTRACKED_EXTENSION_UNSEEN;
 
 	if (p->mmap_size < the_hash_algo->rawsz) {
 		extension_error = 1;
@@ -2073,7 +2093,7 @@ static void *load_index_extensions(void *_data)
 		if (read_index_extension(p->istate,
 					 p->mmap + src_offset,
 					 p->mmap + src_offset + 8,
-					 extsize) < 0) {
+					 extsize, &untracked_state) < 0) {
 			extension_error = 1;
 			break;
 		}
@@ -3164,15 +3184,20 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	}
 	if (write_extensions & WRITE_UNTRACKED_CACHE_EXTENSION &&
 	    istate->untracked) {
+		enum untracked_cache_encoding encoding;
 		strbuf_reset(&sb);
 
-		write_untracked_extension(&sb, istate->untracked);
-		err = write_index_ext_header(f, eoie_c, CACHE_EXT_UNTRACKED,
-					     sb.len) < 0;
-		hashwrite(f, sb.buf, sb.len);
-		if (err) {
-			ret = -1;
-			goto out;
+		encoding = write_untracked_extension(&sb, istate->untracked);
+		if (encoding != UNTRACKED_CACHE_ENCODING_NONE) {
+			err = write_index_ext_header(f, eoie_c,
+				encoding == UNTRACKED_CACHE_ENCODING_PENDING ?
+				CACHE_EXT_UNTRACKED_PENDING : CACHE_EXT_UNTRACKED,
+				sb.len) < 0;
+			hashwrite(f, sb.buf, sb.len);
+			if (err) {
+				ret = -1;
+				goto out;
+			}
 		}
 	}
 	if (write_extensions & WRITE_FSMONITOR_EXTENSION &&

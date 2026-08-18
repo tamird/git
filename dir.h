@@ -126,11 +126,18 @@ struct pattern_list {
  * order to avoid opening and parsing each one every time that
  * directory is traversed.
  */
+enum untracked_ignore_load_result {
+	UNTRACKED_IGNORE_INDETERMINATE,
+	UNTRACKED_IGNORE_LOADED,
+	UNTRACKED_IGNORE_NO_RULES,
+};
+
 struct exclude_stack {
 	struct exclude_stack *prev; /* the struct exclude_stack for the parent directory */
 	int baselen;
 	int exclude_ix; /* index of exclude_list within EXC_DIRS exclude_list_group */
 	struct untracked_cache_dir *ucd;
+	enum untracked_ignore_load_result load_result;
 };
 
 struct exclude_list_group {
@@ -172,6 +179,13 @@ struct oid_stat {
  *  their contents (exclude_sha1[], info_exclude_sha1[] and
  *  excludes_file_sha1[])
  */
+enum untracked_stat_result {
+	UNTRACKED_STAT_UNCHECKED,
+	UNTRACKED_STAT_MATCH,
+	UNTRACKED_STAT_CHANGED_DIRECTORY,
+	UNTRACKED_STAT_UNSAFE,
+};
+
 struct untracked_cache_dir {
 	struct untracked_cache_dir **dirs;
 	char **untracked;
@@ -187,7 +201,7 @@ struct untracked_cache_dir {
 	/* The active subtree is valid and replays no untracked result. */
 	unsigned int can_skip_replay:1;
 	/* Transient parallel-validation result; not serialized. */
-	unsigned int stat_matches : 1;
+	unsigned int stat_result : 2;
 	/* null object ID means this directory does not have .gitignore */
 	struct object_id exclude_oid;
 	char name[FLEX_ARRAY];
@@ -220,8 +234,9 @@ struct untracked_cache {
 	int dir_opened;
 	/* fsmonitor invalidation data */
 	unsigned int use_fsmonitor : 1;
-	/* Transient: cached descendants await validation after a resync. */
+	/* Durable in UNRV: retained descendants await a complete validation. */
 	unsigned int fsmonitor_resync : 1;
+	struct cache_time fsmonitor_resync_cutoff;
 };
 
 /**
@@ -370,8 +385,12 @@ struct dir_struct {
 		/* Additional metadata related to 'untracked' */
 		struct oid_stat ss_info_exclude;
 		struct oid_stat ss_excludes_file;
+		enum untracked_ignore_load_result info_exclude_result;
+		enum untracked_ignore_load_result excludes_file_result;
 		unsigned unmanaged_exclude_files;
 		unsigned can_prune_replay:1;
+		/* Cached stat results belong to this read_directory() call only. */
+		unsigned stat_prevalidated:1;
 		size_t icase_scan_budget_used;
 
 		/* Stats about the traversal */
@@ -639,7 +658,16 @@ void free_untracked_cache(struct untracked_cache *);
 struct untracked_cache *read_untracked_extension(const void *data, unsigned long sz);
 struct untracked_cache *read_untracked_extension_bounded(const void *data,
 							unsigned long sz);
-void write_untracked_extension(struct strbuf *out, struct untracked_cache *untracked);
+enum untracked_cache_encoding {
+	UNTRACKED_CACHE_ENCODING_NONE,
+	UNTRACKED_CACHE_ENCODING_LEGACY,
+	UNTRACKED_CACHE_ENCODING_PENDING,
+};
+enum untracked_cache_encoding write_untracked_extension(
+	struct strbuf *out, struct untracked_cache *untracked);
+struct untracked_cache *read_pending_untracked_extension(const void *data,
+							 size_t sz);
+struct untracked_cache *read_untracked_snapshot(const void *data, size_t sz);
 void add_untracked_cache(struct index_state *istate);
 void remove_untracked_cache(struct index_state *istate);
 

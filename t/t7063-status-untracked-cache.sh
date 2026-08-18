@@ -1066,4 +1066,408 @@ test_expect_success PTHREADS 'parallel directory snapshots ignore weak file-stat
 	)
 '
 
+test_expect_success 'prepare production pending-cache index' '
+	test_create_repo pending-cache &&
+	(
+		cd pending-cache &&
+		git config index.version 2 &&
+		git config index.skipHash false &&
+		git config core.splitIndex false &&
+		git config index.recordEndOfIndexEntries false &&
+		git config index.recordOffsetTable false &&
+		git config index.threads 1 &&
+		git config core.fsmonitor false &&
+		git config core.untrackedCache true &&
+		mkdir -p a/deep a/loose b &&
+		echo tracked >a/tracked &&
+		echo tracked >a/deep/tracked &&
+		echo tracked >b/tracked &&
+		: >a/.gitignore &&
+		git add a/tracked a/deep/tracked a/.gitignore b/tracked &&
+		git commit -m base &&
+		echo untracked >a/loose/one &&
+		avoid_racy &&
+		git status --porcelain >.git/expect &&
+		git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		cp .git/index .git/trusted &&
+		test-tool dump-untracked-cache rewrite-index \
+			.git/trusted .git/pending --mark-pending &&
+		GIT_INDEX_FILE=.git/pending \
+			test-tool dump-untracked-cache state >.git/pending-state &&
+		test_grep "^pending [1-9][0-9]*\\.[0-9][0-9]*$" \
+			.git/pending-state &&
+		test-tool dump-untracked-cache inspect-index .git/pending \
+			>.git/inventory &&
+		test_grep "^UNRV [1-9]" .git/inventory &&
+		test_grep ! "^UNTR " .git/inventory &&
+		test_grep ! -E "^(EOIE|IEOT|link) " .git/inventory &&
+		GIT_INDEX_FILE=.git/pending \
+			test-tool dump-untracked-cache >.git/pending-dump &&
+		test_grep "^loose/$" .git/pending-dump &&
+		test_grep "^/a/deep/ .* valid$" .git/pending-dump &&
+		git ls-files --stage >.git/tracked-expect
+	)
+'
+
+test_expect_success 'pending stat results do not outlive one directory read' '
+	test_when_finished "rm -f pending-cache/b/new" &&
+	(
+		cd pending-cache &&
+		test_path_is_missing b/new &&
+		cp .git/pending .git/twice &&
+		GIT_INDEX_FILE=.git/twice \
+			test-tool dump-untracked-cache state >.git/twice-state &&
+		test_cmp .git/pending-state .git/twice-state &&
+		GIT_INDEX_FILE=.git/twice &&
+		GIT_EDITOR=: &&
+		GIT_TEST_UNTRACKED_CACHE_THREADS=0 &&
+		GIT_TRACE2_EVENT="$PWD/.git/twice-event" &&
+		GIT_TRACE2_PERF="$PWD/.git/twice-perf" &&
+		export GIT_INDEX_FILE GIT_EDITOR GIT_TEST_UNTRACKED_CACHE_THREADS \
+			GIT_TRACE2_EVENT GIT_TRACE2_PERF &&
+		test_must_fail git -c core.fsmonitor=false \
+			-c commit.status=true \
+			-c trailer.probe.cmd="echo created >b/new && test-tool chmtime +1 b && echo probe" \
+			commit --edit --trailer probe=value \
+			>.git/twice-out 2>.git/twice-err &&
+		test_path_is_file b/new &&
+		test_grep ! "b/new" .git/COMMIT_EDITMSG &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<.git/twice-event &&
+		test_trace2_data status untracked/cache-resync 0 \
+			<.git/twice-event &&
+		test_trace2_data status untracked/cache-use-fsmonitor 0 \
+			<.git/twice-event &&
+		test_grep ! "parallel-lstat:[1-9]" .git/twice-perf &&
+		test_grep "b/new" .git/twice-out
+	)
+'
+
+test_expect_success 'pending cache survives mandatory writes and validates' '
+	(
+		cd pending-cache &&
+		cp .git/pending .git/roundtrip &&
+		GIT_INDEX_FILE=.git/roundtrip \
+			git update-index --force-write-index &&
+		GIT_INDEX_FILE=.git/roundtrip \
+			test-tool dump-untracked-cache state >.git/roundtrip-state &&
+		test_cmp .git/pending-state .git/roundtrip-state &&
+		GIT_INDEX_FILE=.git/roundtrip \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		GIT_INDEX_FILE=.git/roundtrip \
+			test-tool dump-untracked-cache state >.git/roundtrip-state &&
+		echo trusted >.git/trusted-state &&
+		test_cmp .git/trusted-state .git/roundtrip-state
+	)
+'
+
+test_expect_success 'split index keeps pending cache in the main index' '
+	test_when_finished "git -C pending-cache config core.splitIndex false" &&
+	(
+		cd pending-cache &&
+		git config core.splitIndex true &&
+		cp .git/pending .git/split-pending &&
+		GIT_INDEX_FILE=.git/split-pending \
+			git update-index --split-index &&
+		GIT_INDEX_FILE=.git/split-pending \
+			test-tool dump-untracked-cache state >.git/split-state &&
+		test_cmp .git/pending-state .git/split-state &&
+		shared=$(GIT_INDEX_FILE=.git/split-pending \
+			git rev-parse --shared-index-path) &&
+		test -n "$shared" &&
+		test-tool dump-untracked-cache inspect-index "$shared" \
+			>.git/shared-inventory &&
+		test_grep ! -E "^(UNTR|UNRV) " .git/shared-inventory &&
+		GIT_INDEX_FILE=.git/split-pending \
+			git update-index --force-write-index &&
+		GIT_INDEX_FILE=.git/split-pending \
+			test-tool dump-untracked-cache state >.git/split-state &&
+		test_cmp .git/pending-state .git/split-state
+	)
+'
+
+test_expect_success 'unknown optional pending signature preserves tracked index' '
+	(
+		cd pending-cache &&
+		test-tool dump-untracked-cache rewrite-index \
+			.git/pending .git/mutated --rename-pending=UXRV &&
+		GIT_INDEX_FILE=.git/mutated \
+			git ls-files --stage >.git/tracked-actual &&
+		test_cmp .git/tracked-expect .git/tracked-actual &&
+		GIT_INDEX_FILE=.git/mutated \
+			test-tool dump-untracked-cache state >.git/state &&
+		echo absent >.git/absent &&
+		test_cmp .git/absent .git/state
+	)
+'
+
+test_expect_success 'malformed or conflicting pending extensions fail closed' '
+	(
+		cd pending-cache &&
+		for mutation in \
+			--set-pending=magic:1 \
+			--set-pending=version:2 \
+			--set-pending=sec:0 \
+			--set-pending=nsec:1000000000 \
+			--set-pending=body-length:0 \
+			--set-pending=body-length:4294967295 \
+			--set-pending=sentinel:0 \
+			--truncate-pending=0 \
+			--truncate-pending=21 \
+			--empty-body \
+			--duplicate-pending \
+			--legacy=before \
+			--legacy=after
+		do
+			test-tool dump-untracked-cache rewrite-index \
+				.git/pending .git/mutated "$mutation" &&
+			GIT_INDEX_FILE=.git/mutated \
+				git ls-files --stage >.git/tracked-actual &&
+			test_cmp .git/tracked-expect .git/tracked-actual &&
+			GIT_INDEX_FILE=.git/mutated \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/absent .git/state || return 1
+		done &&
+		for order in before after
+		do
+			test-tool dump-untracked-cache rewrite-index \
+				.git/pending .git/mutated \
+				--set-pending=version:2 --legacy=$order &&
+			GIT_INDEX_FILE=.git/mutated \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/absent .git/state || return 1
+		done
+	)
+'
+
+test_expect_success 'pending directory topology is validated before use' '
+	(
+		cd pending-cache &&
+		for mutation in \
+			--node-name=0:nonempty \
+			--node-name=1: \
+			--node-name=1:. \
+			--node-name=1:.. \
+			--node-name=1:../outside \
+			--node-name=1:.git \
+			--node-name=1:a/b \
+			--siblings=0:duplicate \
+			--siblings=0:reverse
+		do
+			test-tool dump-untracked-cache rewrite-index \
+				.git/pending .git/mutated "$mutation" &&
+			GIT_INDEX_FILE=.git/mutated \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/pending-state .git/state &&
+			GIT_INDEX_FILE=.git/mutated \
+				git status --porcelain >.git/actual &&
+			test_cmp .git/expect .git/actual &&
+			GIT_INDEX_FILE=.git/mutated \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/absent .git/state || return 1
+		done
+	)
+'
+
+test_expect_success MINGW 'pending topology rejects Windows path aliases' '
+	(
+		cd pending-cache &&
+		for mutation in \
+			"--node-name=1:C:escape" \
+			"--node-name=1:a\\b" \
+			"--node-name=1:git~1"
+		do
+			test-tool dump-untracked-cache rewrite-index \
+				.git/pending .git/mutated "$mutation" &&
+			GIT_INDEX_FILE=.git/mutated \
+				git -c core.protectNTFS=true status --porcelain \
+				>.git/actual &&
+			test_cmp .git/expect .git/actual &&
+			GIT_INDEX_FILE=.git/mutated \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/absent .git/state || return 1
+		done
+	)
+'
+
+test_expect_success 'pending validation accepts an empty indexed ignore blob' '
+	test_when_finished "git -C pending-cache checkout-index -f a/.gitignore" &&
+	(
+		cd pending-cache &&
+		cp .git/pending .git/empty-ignore &&
+		GIT_INDEX_FILE=.git/empty-ignore \
+			git update-index --skip-worktree a/.gitignore &&
+		rm a/.gitignore &&
+		GIT_INDEX_FILE=.git/empty-ignore \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		GIT_INDEX_FILE=.git/empty-ignore \
+			test-tool dump-untracked-cache state >.git/state &&
+		test_cmp .git/trusted-state .git/state &&
+		git checkout-index -f a/.gitignore
+	)
+'
+
+test_expect_success 'indeterminate indexed ignores retain pending state' '
+	test_when_finished "git -C pending-cache checkout-index -f a/.gitignore" &&
+	(
+		cd pending-cache &&
+		missing=$(echo missing-ignore | git hash-object --stdin) &&
+		wrong_type=$(git write-tree) &&
+		for oid in "$missing" "$wrong_type"
+		do
+			cp .git/pending .git/unknown-ignore &&
+			GIT_INDEX_FILE=.git/unknown-ignore \
+				git update-index --info-only \
+				--cacheinfo 100644,$oid,a/.gitignore &&
+			GIT_INDEX_FILE=.git/unknown-ignore \
+				git update-index --skip-worktree a/.gitignore &&
+			rm -f a/.gitignore &&
+			GIT_INDEX_FILE=.git/unknown-ignore GIT_OPTIONAL_LOCKS=0 \
+				git -c core.untrackedCache=false status --porcelain \
+				>.git/unknown-expect &&
+			GIT_INDEX_FILE=.git/unknown-ignore \
+				git status --porcelain >.git/actual &&
+			test_cmp .git/unknown-expect .git/actual &&
+			GIT_INDEX_FILE=.git/unknown-ignore \
+				test-tool dump-untracked-cache state >.git/state &&
+			test_cmp .git/pending-state .git/state || return 1
+		done &&
+		git checkout-index -f a/.gitignore
+	)
+'
+
+test_expect_success SANITY 'unreadable ignore retains pending state' '
+	test_when_finished "chmod 600 pending-cache/a/.gitignore" &&
+	(
+		cd pending-cache &&
+		cp .git/pending .git/unreadable-ignore &&
+		chmod 000 a/.gitignore &&
+		GIT_INDEX_FILE=.git/unreadable-ignore GIT_OPTIONAL_LOCKS=0 \
+			git -c core.untrackedCache=false status --porcelain \
+			>.git/unknown-expect &&
+		GIT_INDEX_FILE=.git/unreadable-ignore \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/unknown-expect .git/actual &&
+		GIT_INDEX_FILE=.git/unreadable-ignore \
+			test-tool dump-untracked-cache state >.git/state &&
+		test_cmp .git/pending-state .git/state
+	)
+'
+
+test_expect_success 'pending validation stops at unsafe ancestors' '
+	test_when_finished "test ! -f pending-cache/.git/outside/deep/.gitignore ||
+		chmod 600 pending-cache/.git/outside/deep/.gitignore" &&
+	test_when_finished "if test -d pending-cache/.git/saved-a; then
+		rm -f pending-cache/a &&
+		mv pending-cache/.git/saved-a pending-cache/a
+	fi" &&
+	(
+		cd pending-cache &&
+		mkdir -p .git/outside/deep &&
+		echo "*" >.git/outside/deep/.gitignore &&
+		echo outside >.git/outside/deep/never-visit &&
+		if test_have_prereq SANITY
+		then
+			chmod 000 .git/outside/deep/.gitignore &&
+			GIT_OPTIONAL_LOCKS=0 git -c core.untrackedCache=false \
+				-c core.excludesFile="$PWD/.git/outside/deep/.gitignore" \
+				status --porcelain >.git/access-control-out \
+				2>.git/access-control-err &&
+			test_grep "unable to access" .git/access-control-err
+		fi &&
+		mv a .git/saved-a &&
+		for kind in file symlink
+		do
+			if test "$kind" = symlink && ! test_have_prereq SYMLINKS
+			then
+				continue
+			fi &&
+			if test "$kind" = symlink
+			then
+				ln -s "$PWD/.git/outside" a
+			else
+				echo replacement >a
+			fi &&
+			GIT_INDEX_FILE=.git/pending GIT_OPTIONAL_LOCKS=0 \
+				git -c core.untrackedCache=false status --porcelain \
+				>.git/unsafe-expect &&
+			cp .git/pending .git/unsafe-serial &&
+			GIT_INDEX_FILE=.git/unsafe-serial \
+				git status --porcelain >.git/actual \
+				2>.git/unsafe-err &&
+			test_cmp .git/unsafe-expect .git/actual &&
+			test_grep ! "unable to access" .git/unsafe-err &&
+			if test_have_prereq PTHREADS
+			then
+				cp .git/pending .git/unsafe-parallel &&
+				GIT_INDEX_FILE=.git/unsafe-parallel \
+				GIT_TEST_UNTRACKED_CACHE_THREADS=1 \
+				GIT_TRACE2_PERF="$PWD/.git/unsafe-perf" \
+					git status --porcelain >.git/actual \
+					2>.git/unsafe-err &&
+				test_cmp .git/unsafe-expect .git/actual &&
+				test_grep ! "unable to access" .git/unsafe-err &&
+				test_grep "parallel-lstat:[1-9]" .git/unsafe-perf
+			fi &&
+			rm a || return 1
+		done &&
+		mv .git/saved-a a
+	)
+'
+
+test_expect_success 'pending validation uses the original index cutoff' '
+	(
+		cd pending-cache &&
+		git config core.trustCtime false &&
+		git config core.checkStat minimal &&
+		git config core.excludesFile "$PWD/.git/cutoff-excludes" &&
+		echo one >.git/cutoff-excludes &&
+		echo one >one &&
+		echo two >two &&
+		now=$(test-tool chmtime --get .git/index) &&
+		cutoff=$((now - 20)) &&
+		racy=$((cutoff + 1)) &&
+		test-tool chmtime =$racy a .git/cutoff-excludes &&
+		git status --porcelain >.git/cutoff-before &&
+		git status --porcelain >.git/cutoff-before &&
+		cp .git/index .git/cutoff-trusted &&
+		test-tool chmtime =$cutoff .git/cutoff-trusted &&
+		test-tool dump-untracked-cache rewrite-index \
+			.git/cutoff-trusted .git/cutoff-pending --mark-pending &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			test-tool dump-untracked-cache >.git/cutoff-dump &&
+		test_grep "^/a/ .* valid$" .git/cutoff-dump &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			test-tool dump-untracked-cache state >.git/cutoff-state &&
+		echo "pending $cutoff.000000000" >.git/cutoff-expect &&
+		test_cmp .git/cutoff-expect .git/cutoff-state &&
+		cp .git/cutoff-pending .git/cutoff-global &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			git update-index --force-write-index &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			test-tool dump-untracked-cache state >.git/cutoff-state &&
+		test_cmp .git/cutoff-expect .git/cutoff-state &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			git status --porcelain -- b >.git/actual &&
+		test_must_be_empty .git/actual &&
+		GIT_INDEX_FILE=.git/cutoff-pending \
+			test-tool dump-untracked-cache >.git/cutoff-dump &&
+		test_grep "^/a/ " .git/cutoff-dump &&
+		test_grep ! "^/a/ .* valid$" .git/cutoff-dump &&
+		echo two >.git/cutoff-excludes &&
+		test-tool chmtime =$racy .git/cutoff-excludes &&
+		GIT_INDEX_FILE=.git/cutoff-global GIT_OPTIONAL_LOCKS=0 \
+			git -c core.untrackedCache=false status --porcelain \
+			>.git/cutoff-expect &&
+		GIT_INDEX_FILE=.git/cutoff-global \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/cutoff-expect .git/actual &&
+		test_grep "^?? one$" .git/actual &&
+		test_grep ! "^?? two$" .git/actual
+	)
+'
+
 test_done
