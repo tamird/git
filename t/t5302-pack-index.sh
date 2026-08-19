@@ -142,7 +142,19 @@ test_expect_success PTHREADS 'index-pack shares one wide delta root among worker
 		read_bytes=$(sed -n "s#^input/read-bytes ##p" parallel-data) &&
 		test "$read_bytes" -eq \
 			"$(test_file_size "parallel-pack-$parallel_pack.pack")" &&
-		test_grep "^input/read-wait-ns [0-9][0-9]*$" parallel-data
+		test_grep "^input/read-wait-ns [0-9][0-9]*$" parallel-data &&
+		sed -n \
+			-e "s#.*\"event\":\"\\(region_[a-z]*\\)\".*\"category\":\"index-pack\",\"label\":\"conclude-pack\".*#\\1 conclude-pack#p" \
+			-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/unresolved-deltas\",\"value\":\\([^,}]*\\).*#\\1 conclude/unresolved-deltas \\2#p" \
+			-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/appended-bases\",\"value\":\\([^,}]*\\).*#\\1 conclude/appended-bases \\2#p" \
+			parallel-stdin.trace >parallel-conclude.actual &&
+		cat >parallel-conclude.expect <<-\EOF &&
+		data conclude/unresolved-deltas "0"
+		region_enter conclude-pack
+		region_leave conclude-pack
+		data conclude/appended-bases "0"
+		EOF
+		test_cmp parallel-conclude.expect parallel-conclude.actual
 	)
 '
 

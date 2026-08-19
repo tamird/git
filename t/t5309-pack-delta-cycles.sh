@@ -43,7 +43,18 @@ test_expect_success 'index-pack detects missing base objects' '
 		pack_obj $A $B
 	} >missing.pack &&
 	pack_trailer missing.pack &&
-	test_must_fail git index-pack --fix-thin --stdin <missing.pack
+	GIT_TRACE2_EVENT="$PWD/missing-base.trace" \
+		test_must_fail git index-pack --fix-thin --stdin <missing.pack &&
+	sed -n \
+		-e "s#.*\"event\":\"\\(region_[a-z]*\\)\".*\"category\":\"index-pack\",\"label\":\"conclude-pack\".*#\\1 conclude-pack#p" \
+		-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/unresolved-deltas\",\"value\":\\([^,}]*\\).*#\\1 conclude/unresolved-deltas \\2#p" \
+		-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/appended-bases\",\"value\":\\([^,}]*\\).*#\\1 conclude/appended-bases \\2#p" \
+		missing-base.trace >missing-base-conclude.actual &&
+	cat >missing-base-conclude.expect <<-\EOF &&
+	data conclude/unresolved-deltas "1"
+	region_enter conclude-pack
+	EOF
+	test_cmp missing-base-conclude.expect missing-base-conclude.actual
 '
 
 test_expect_success 'index-pack detects REF_DELTA cycles' '
@@ -63,7 +74,20 @@ test_expect_success 'failover to an object in another pack' '
 
 	# This cycle does not fail since the existence of A & B in
 	# the repo allows us to resolve the cycle.
-	git index-pack --stdin --fix-thin <cycle.pack
+	GIT_TRACE2_EVENT="$PWD/cycle-repair.trace" \
+		git index-pack --stdin --fix-thin <cycle.pack &&
+	sed -n \
+		-e "s#.*\"event\":\"\\(region_[a-z]*\\)\".*\"category\":\"index-pack\",\"label\":\"conclude-pack\".*#\\1 conclude-pack#p" \
+		-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/unresolved-deltas\",\"value\":\\([^,}]*\\).*#\\1 conclude/unresolved-deltas \\2#p" \
+		-e "s#.*\"event\":\"\\([^\"]*\\)\".*\"category\":\"index-pack\",\"key\":\"conclude/appended-bases\",\"value\":\\([^,}]*\\).*#\\1 conclude/appended-bases \\2#p" \
+		cycle-repair.trace >cycle-repair-conclude.actual &&
+	cat >cycle-repair-conclude.expect <<-\EOF &&
+	data conclude/unresolved-deltas "2"
+	region_enter conclude-pack
+	region_leave conclude-pack
+	data conclude/appended-bases "1"
+	EOF
+	test_cmp cycle-repair-conclude.expect cycle-repair-conclude.actual
 '
 
 test_expect_success 'failover to a duplicate object in the same pack' '

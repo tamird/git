@@ -1998,6 +1998,7 @@ int cmd_index_pack(int argc,
 	int report_end_of_input = 0;
 	int hash_algo = 0;
 	int quiet_parse, quiet_delta;
+	int nr_objects_before_conclude = 0;
 
 	/*
 	 * index-pack never needs to fetch missing objects except when
@@ -2214,16 +2215,27 @@ int cmd_index_pack(int argc,
 		trace2_region_enter("index-pack", "resolve-deltas",
 				    the_repository);
 	resolve_deltas(&opts);
-	if (quiet_delta) {
+	if (quiet_delta)
 		trace2_region_leave("index-pack", "resolve-deltas",
 				    the_repository);
+	if (input_read_trace.enabled) {
+		nr_objects_before_conclude = nr_objects;
+		trace2_data_intmax("index-pack", the_repository,
+				   "conclude/unresolved-deltas",
+				   nr_ref_deltas + nr_ofs_deltas -
+				   nr_resolved_deltas);
+	}
+	if (quiet_delta)
 		trace2_region_enter("index-pack", "conclude-pack",
 				    the_repository);
-	}
 	conclude_pack(fix_thin_pack, curr_pack, pack_hash);
 	if (quiet_delta)
 		trace2_region_leave("index-pack", "conclude-pack",
 				    the_repository);
+	if (input_read_trace.enabled)
+		trace2_data_intmax("index-pack", the_repository,
+				   "conclude/appended-bases",
+				   nr_objects - nr_objects_before_conclude);
 	free(ofs_deltas);
 	free(ref_deltas);
 	if (strict)
