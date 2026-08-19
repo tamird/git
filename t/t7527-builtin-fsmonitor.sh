@@ -1797,7 +1797,18 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 				test_cmp "$prefix-index.before" \
 					"$prefix-index.after" || return 1
 			done || return 1
-		done
+		done &&
+		for event in region_enter region_leave
+		do
+			test "$(grep -c \
+				"\"event\":\"$event\".*\"category\":\"fsmonitor\".*\"label\":\"untracked-cache/save\"" \
+				../untracked-snapshot-first.trace)" -eq 1 || return 1
+		done &&
+		test "$(have_t2_data_event fsmonitor \
+			untracked-cache/save-outcome \
+			<../untracked-snapshot-first.trace | wc -l)" -eq 1 &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome \
+			7 <../untracked-snapshot-first.trace
 	)
 '
 

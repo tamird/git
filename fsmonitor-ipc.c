@@ -670,6 +670,17 @@ done:
 	return result;
 }
 
+/* Keep these private Trace2 outcome values stable. */
+enum fsmonitor_untracked_cache_save_outcome {
+	FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE = 1,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_INDEX_IDENTITY_UNAVAILABLE = 2,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_ENCODING_NONE = 3,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE = 4,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR = 5,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK = 6,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED = 7,
+};
+
 void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 {
 	static const char hex[] = "0123456789abcdef";
@@ -678,22 +689,30 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	struct strbuf answer = STRBUF_INIT;
 	struct object_id generated_index_oid;
 	const struct object_id *index_oid;
+	enum fsmonitor_untracked_cache_save_outcome outcome =
+		FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE;
 	size_t start;
 
+	trace2_region_enter("fsmonitor", "untracked-cache/save", istate->repo);
 	if (!istate->untracked || !istate->untracked->root ||
 	    !istate->fsmonitor_last_update ||
 	    !starts_with(istate->fsmonitor_last_update, "builtin:") ||
 	    !strcmp(istate->fsmonitor_last_update, "builtin:fake") ||
 	    fsm_settings__get_mode(istate->repo) != FSMONITOR_MODE_IPC)
-		return;
+		goto done;
 	index_oid = untracked_cache_index_oid(istate, &generated_index_oid);
-	if (!index_oid)
-		return;
+	if (!index_oid) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_INDEX_IDENTITY_UNAVAILABLE;
+		goto done;
+	}
 
 	if (write_untracked_extension(&snapshot, istate->untracked) ==
-	    UNTRACKED_CACHE_ENCODING_NONE)
+	    UNTRACKED_CACHE_ENCODING_NONE) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_ENCODING_NONE;
 		goto done;
+	}
 	if (add_tracked_snapshot(istate, &snapshot)) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
 		trace2_data_string("fsmonitor", istate->repo,
 				   "untracked-cache/save-reason",
 				   "oversize-snapshot");
@@ -702,6 +721,7 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	if (snapshot.len > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
 	    git_env_bool("GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE", 0)) {
 		if (compress_untracked_cache(&snapshot)) {
+			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
 			trace2_data_string("fsmonitor", istate->repo,
 					   "untracked-cache/save-reason",
 					   "oversize-snapshot");
@@ -723,23 +743,32 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 		command.buf[start + i * 2 + 1] = hex[value & 0xf];
 	}
 	strbuf_setlen(&command, start + snapshot.len * 2);
-	if (!fsmonitor_ipc__send_untracked_cache_command(
-		    command.buf, command.len, &answer) &&
-	    answer.len == 2 && !memcmp(answer.buf, "ok", 2)) {
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "untracked-cache/saved", snapshot.len);
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "untracked-cache/save-root-valid",
-				   istate->untracked->root->valid);
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "untracked-cache/save-root-can-skip",
-				   istate->untracked->root->can_skip_replay);
+	if (fsmonitor_ipc__send_untracked_cache_command(
+		    command.buf, command.len, &answer)) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR;
+		goto done;
 	}
+	if (answer.len != 2 || memcmp(answer.buf, "ok", 2)) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK;
+		goto done;
+	}
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/saved", snapshot.len);
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/save-root-valid",
+			   istate->untracked->root->valid);
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/save-root-can-skip",
+			   istate->untracked->root->can_skip_replay);
+	outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED;
 
 done:
 	strbuf_release(&answer);
 	strbuf_release(&snapshot);
 	strbuf_release(&command);
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/save-outcome", outcome);
+	trace2_region_leave("fsmonitor", "untracked-cache/save", istate->repo);
 }
 
 int fsmonitor_ipc__send_command(const char *command,
