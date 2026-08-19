@@ -1319,8 +1319,9 @@ static void *threaded_second_pass(void *data)
 			}
 			FREE_AND_NULL(child);
 		}
-		if (threads_active && child_obj) {
-			delta_workers_active--;
+		if (threads_active) {
+			if (child_obj)
+				delta_workers_active--;
 			if (work_available ||
 			    (!delta_workers_active && list_empty(&work_head) &&
 			     nr_dispatched >= nr_objects))
