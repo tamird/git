@@ -190,7 +190,18 @@ test_expect_success !MINGW,FSMONITOR_DAEMON 'connection errors report their orig
 		test_must_fail test-tool -C invalid-socket-repo \
 			fsmonitor-client query --token 0 &&
 	test_trace2_data ipc-client try-connect/errno 20 \
-		<invalid-socket.trace
+		<invalid-socket.trace &&
+	test_grep "\"category\":\"fsm_client\",\"key\":\"query/connect-errno\"" \
+		invalid-socket.trace >actual &&
+	test_line_count = 1 actual &&
+	test_trace2_data fsm_client query/connect-errno 20 <actual &&
+	test_grep "\"event\":\"data\".*\"nesting\":1," actual &&
+	printf "%s\n" region_leave data >expect &&
+	grep -e "\"event\":\"region_leave\".*\"category\":\"fsm_client\",\"label\":\"query\"" \
+		-e "\"category\":\"fsm_client\",\"key\":\"query/connect-errno\"" \
+		invalid-socket.trace |
+	sed -n "s/.*\"event\":\"\\([^\"]*\\)\".*/\\1/p" >actual &&
+	test_cmp expect actual
 '
 
 test_done
