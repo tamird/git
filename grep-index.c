@@ -120,6 +120,8 @@ struct grep_index_memory {
 	uint64_t max_filter_bytes;
 	struct oidset misses[2];
 	int rotate_requested;
+	grep_index_memory_build_observer_fn build_observer;
+	void *build_observer_data;
 };
 
 static int grep_index_memory_entry_cmp(
@@ -3206,6 +3208,14 @@ struct grep_index_memory *grep_index_memory_new(
 	return index;
 }
 
+void grep_index_memory_set_build_observer_for_test(
+	struct grep_index_memory *index,
+	grep_index_memory_build_observer_fn observer, void *data)
+{
+	index->build_observer = observer;
+	index->build_observer_data = observer ? data : NULL;
+}
+
 static void grep_index_memory_clear(struct grep_index_memory *index)
 {
 	struct hashmap_iter iter;
@@ -3274,9 +3284,11 @@ void grep_index_memory_release_object_store(struct grep_index_memory *index)
 	obj_read_unlock();
 }
 
-int grep_index_memory_maybe_contains(struct grep_index_memory *index,
-				     const struct object_id *oid,
-				     const struct grep_index_query *query)
+int grep_index_memory_maybe_contains_with_outcome(
+	struct grep_index_memory *index,
+	const struct object_id *oid,
+	const struct grep_index_query *query,
+	struct grep_index_memory_query_outcome *outcome)
 {
 	struct grep_index_memory_entry key = { 0 };
 	struct grep_index_memory_entry *entry;
@@ -3291,12 +3303,19 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	int cache_saturated = 0;
 	int result;
 
+	if (outcome) {
+		outcome->origin = GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD;
+		outcome->waited = 0;
+	}
 	if (!index || !query)
 		return -1;
 
-	if (grep_index_contains_oid(index->persistent, oid))
+	if (grep_index_contains_oid(index->persistent, oid)) {
+		if (outcome)
+			outcome->origin = GREP_INDEX_MEMORY_QUERY_PERSISTENT;
 		return grep_index_maybe_contains(
 			index->persistent, index->repo, oid, query);
+	}
 
 	mode = query->ignore_case;
 	hashmap_entry_init(&key.ent, oidhash(oid));
@@ -3304,9 +3323,20 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	pthread_mutex_lock(&index->mutex);
 	entry = hashmap_get_entry(&index->entries, &key, ent, NULL);
 	if (entry) {
+		if (entry->state[mode] == GREP_INDEX_MEMORY_BUILDING) {
+			if (outcome)
+				outcome->waited = 1;
+			if (index->build_observer)
+				index->build_observer(
+					GREP_INDEX_MEMORY_WAIT_OBSERVED, oid,
+					mode, index->build_observer_data);
+		}
 		while (entry->state[mode] == GREP_INDEX_MEMORY_BUILDING)
 			pthread_cond_wait(&entry->cond, &index->mutex);
 		if (entry->state[mode] == GREP_INDEX_MEMORY_READY) {
+			if (outcome)
+				outcome->origin =
+					GREP_INDEX_MEMORY_QUERY_READY_REUSED;
 			filter = entry->filter[mode];
 			filter_size = entry->filter_size[mode];
 			pthread_mutex_unlock(&index->mutex);
@@ -3338,7 +3368,12 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 		index->entries_nr++;
 	}
 	entry->state[mode] = GREP_INDEX_MEMORY_BUILDING;
+	if (outcome)
+		outcome->origin = GREP_INDEX_MEMORY_QUERY_COLD_ATTEMPT;
 	pthread_mutex_unlock(&index->mutex);
+	if (index->build_observer)
+		index->build_observer(GREP_INDEX_MEMORY_BUILD_CLAIMED,
+				      oid, mode, index->build_observer_data);
 
 	oi.typep = &type;
 	oi.sizep = &size;
@@ -3390,6 +3425,14 @@ int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 	return filter ? grep_index_filter_maybe_contains(
 				filter, filter_size, query, 0) :
 			-1;
+}
+
+int grep_index_memory_maybe_contains(struct grep_index_memory *index,
+				     const struct object_id *oid,
+				     const struct grep_index_query *query)
+{
+	return grep_index_memory_maybe_contains_with_outcome(
+		index, oid, query, NULL);
 }
 
 static void collect_worktree_oids(struct repository *repo,

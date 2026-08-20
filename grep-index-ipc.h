@@ -1,6 +1,8 @@
 #ifndef GREP_INDEX_IPC_H
 #define GREP_INDEX_IPC_H
 
+#include "grep-index.h"
+
 struct grep_index_ipc_server;
 struct grep_index_query;
 struct object_id;
@@ -78,6 +80,10 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server,
 			       const char *gitdir, const char *path,
 			       const char *worker_path,
 			       int nr_threads);
+/* Install only before start or after all server users have joined. */
+void grep_index_ipc_server_set_build_observer_for_test(
+	struct grep_index_ipc_server *server,
+	grep_index_memory_build_observer_fn observer, void *data);
 void grep_index_ipc_server_start(struct grep_index_ipc_server *server);
 void grep_index_ipc_server_stop(struct grep_index_ipc_server *server);
 void grep_index_ipc_server_await(struct grep_index_ipc_server *server);
