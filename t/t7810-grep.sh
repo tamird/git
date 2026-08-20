@@ -3452,9 +3452,11 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-no-optional-locks &&
 	test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/write\",\"intervals\":1," \
 		grep-worktree-trace-no-optional-locks &&
-	test_grep ! "\"name\":\"worktree-cache/recovery-prepare\"" \
+	test_grep ! "\"name\":\"worktree-cache/recovery-" \
 		grep-worktree-trace-no-optional-locks &&
 	test_grep ! "worktree_blob/recovery_write_outcome" \
+		grep-worktree-trace-no-optional-locks &&
+	test_grep ! "worktree_blob/recovery_prepare/" \
 		grep-worktree-trace-no-optional-locks &&
 	test_cmp .git/index.grep-worktree.no-optional-locks-save \
 		.git/index.grep-worktree &&
@@ -3860,6 +3862,34 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 			grep-worktree-trace-refresh &&
 		test_grep ! "\"event\":\"region_.*\".*\"label\":\"worktree-cache/recovery-prepare\"" \
 			grep-worktree-trace-refresh &&
+		for phase in collect sort serialize
+		do
+			test_grep "\"event\":\"timer\".*\"category\":\"grep\",\"name\":\"worktree-cache/recovery-$phase\"" \
+				grep-worktree-trace-refresh >actual &&
+			test_line_count = 1 actual &&
+			test_grep "\"intervals\":1," actual &&
+			test_grep ! "\"event\":\"th_timer\".*\"name\":\"worktree-cache/recovery-$phase\"" \
+				grep-worktree-trace-refresh &&
+			test_grep ! "\"event\":\"region_.*\".*\"label\":\"worktree-cache/recovery-$phase\"" \
+				grep-worktree-trace-refresh || return 1
+		done &&
+		test_trace2_data grep \
+			worktree_blob/recovery_prepare/identity_hashes \
+			"[0-9][0-9]*" <grep-worktree-trace-refresh >actual &&
+		test_line_count = 1 actual &&
+		recovery_hashes=$(sed -e "s/.*\"value\":\"//" \
+			-e "s/\".*//" actual) &&
+		test_trace2_data grep \
+			worktree_blob/recovery_prepare/recovery_lookups \
+			"[0-9][0-9]*" <grep-worktree-trace-refresh >actual &&
+		test_line_count = 1 actual &&
+		recovery_lookups=$(sed -e "s/.*\"value\":\"//" \
+			-e "s/\".*//" actual) &&
+		test "$recovery_hashes" -ge 2 &&
+		test "$recovery_lookups" -ge 1 &&
+		test "$recovery_lookups" -le "$recovery_hashes" &&
+		test_trace2_data grep worktree_blob/recovery_prepare/entries 2 \
+			<grep-worktree-trace-refresh &&
 		test_path_is_file .git/index.grep-worktree-recovery-next &&
 		echo "recovery entry d" >grep-worktree-refresh-d &&
 		git add grep-worktree-refresh-d &&
