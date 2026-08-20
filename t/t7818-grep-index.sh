@@ -403,8 +403,9 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git read-tree HEAD &&
-			    rm -f worktree-fanout.trace cached-fanout.trace \
-				worktree-point.trace fanout-events" &&
+			    rm -f repeated-fanout.trace worktree-fanout.trace \
+				cached-fanout.trace worktree-point.trace \
+				fanout-events fanout-marks" &&
 	test_config grep.worktreeBlobCache true &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
@@ -414,7 +415,40 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 		test_seq -f "100644 $oid\tgrep-fanout/broad/%05g" 1 32768 &&
 		test_seq -f "100644 $oid\tgrep-fanout/point/%03g" 1 92
 	} | git -c core.ignorestat=true update-index --add --index-info &&
-	worker_events="\"event\":\"region_enter\".*\"thread\":\"th[0-9].*\"label\":\"send-command\"" &&
+	worker_events="\"event\":\"region_enter\".*\"thread\":\"th[0-9][0-9]*:unknown\".*\"category\":\"ipc-client\".*\"label\":\"send-command\"" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/repeated-fanout.trace" \
+		git grep -F "absent daemon fanout" -- grep-fanout/broad \
+		>actual &&
+	test_must_be_empty actual &&
+	test_grep ! "$worker_events" repeated-fanout.trace &&
+	test_seq 1 32768 |
+	awk "{
+		data = \"fanout \" \$1 \"\\n\"
+		printf \"blob\\nmark :%d\\ndata %d\\n%s\", \
+			\$1, length(data), data
+	}
+	END { print \"done\" }" |
+	git fast-import --quiet --done --export-marks=fanout-marks &&
+	test_line_count = 32768 fanout-marks &&
+	awk "{
+		if (\$2 in seen)
+			exit 1
+		seen[\$2] = 1
+		oids[substr(\$1, 2)] = \$2
+	}
+	END {
+		for (i = 1; i <= 32768; i++)
+			if (!(i in oids))
+				exit 1
+	}" fanout-marks &&
+	awk "{ oids[substr(\$1, 2)] = \$2 }
+	END {
+		for (i = 1; i <= 32768; i++)
+			printf \"100644 %s\\tgrep-fanout/broad/%05d\\n\", oids[i], i
+		for (i = 1; i <= 92; i++)
+			printf \"100644 %s\\tgrep-fanout/point/%03d\\n\", oids[i], i
+	}" fanout-marks |
+	git -c core.ignorestat=true update-index --add --index-info &&
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/worktree-fanout.trace" \
 		git grep -F "absent daemon fanout" -- grep-fanout/broad \
 		>actual &&
@@ -537,14 +571,15 @@ test_expect_success FSMONITOR_DAEMON 'daemon rotates saturated content cache' '
 		git fsmonitor--daemon start &&
 	echo "first saturated cache object" >saturated-first &&
 	echo "second saturated cache object" >saturated-second &&
-	git add saturated-first saturated-second &&
+	cp saturated-second saturated-second-alias &&
+	git add saturated-first saturated-second saturated-second-alias &&
 	test_when_finished "git reset --hard HEAD" &&
 	first_oid=$(git rev-parse :saturated-first) &&
 	second_oid=$(git rev-parse :saturated-second) &&
 	test_must_fail git grep --cached "absent saturated pattern" \
 		-- saturated-first &&
 	test_must_fail git grep --cached "absent saturated pattern" \
-		-- saturated-second &&
+		-- saturated-second saturated-second-alias &&
 	first_object=.git/objects/$(test_oid_to_path "$first_oid") &&
 	mv "$first_object" "$first_object.save" &&
 	test_when_finished "test ! -e \"$first_object.save\" ||
