@@ -8,6 +8,7 @@
 #include "fsmonitor-ipc.h"
 #include "hash.h"
 #include "hex.h"
+#include "json-writer.h"
 #include "oidmap.h"
 #include "parse.h"
 #include "path.h"
@@ -1920,6 +1921,38 @@ cleanup:
 	return NULL;
 }
 
+static void grep_index_ipc_trace_query(
+	struct repository *repo, size_t nr, size_t unique_nr,
+	const struct grep_index_ipc_query_task *tasks, size_t threads_nr,
+	size_t started, int result)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+	size_t counts[GREP_INDEX_IPC_MAYBE + 1] = { 0 };
+	size_t validated = 0;
+
+	/* Unstarted or partially validated tasks contribute no results. */
+	for (size_t i = 0; i < started; i++) {
+		if (tasks[i].result)
+			continue;
+		validated++;
+		for (size_t j = 0; j < tasks[i].nr; j++)
+			counts[tasks[i].maybe[j]]++;
+	}
+
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "input_objects", nr);
+	jw_object_intmax(&jw, "unique_objects", unique_nr);
+	jw_object_intmax(&jw, "requests_planned", threads_nr);
+	jw_object_intmax(&jw, "requests_validated", validated);
+	jw_object_intmax(&jw, "unknown", counts[GREP_INDEX_IPC_UNKNOWN]);
+	jw_object_intmax(&jw, "impossible", counts[GREP_INDEX_IPC_IMPOSSIBLE]);
+	jw_object_intmax(&jw, "maybe", counts[GREP_INDEX_IPC_MAYBE]);
+	jw_object_intmax(&jw, "outcome", !!result);
+	jw_end(&jw);
+	trace2_data_json("grep", repo, "content_index_ipc_query", &jw);
+	jw_release(&jw);
+}
+
 int grep_index_ipc_query_with_max_parallel_requests(
 	struct repository *repo, const struct grep_index_query *query,
 	const struct object_id *oids, size_t nr, unsigned char *maybe,
@@ -1996,6 +2029,7 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		pos += task_nr;
 	}
 	if (threads_nr == 1) {
+		started = 1;
 		grep_index_ipc_query_thread(&tasks[0]);
 		if (tasks[0].result)
 			goto cleanup;
@@ -2030,6 +2064,9 @@ scatter:
 	result = 0;
 
 cleanup:
+	if (tasks && trace2_is_enabled())
+		grep_index_ipc_trace_query(repo, nr, unique_nr, tasks,
+					   threads_nr, started, result);
 	oidmap_clear(&seen, 0);
 	free(unique_maybe);
 	free(unique_oids);
