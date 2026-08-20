@@ -160,6 +160,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "format-output/abbrev",
 		.want_per_thread_events = 0,
 	},
+	/* Disjoint checkout-entry phases within unpack-trees queue_entries. */
+	[TRACE2_TIMER_ID_UNPACK_TREES_PREPARE_ENTRY] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/prepare-entry",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_ATTRS_AND_ENQUEUE] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/attrs-and-enqueue",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_WRITE_ENTRY] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/write-entry",
+		.want_per_thread_events = 0,
+	},
 	/* Recovery preparation is included in the worktree-cache write timer. */
 	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC] = {
 		.category = "grep",

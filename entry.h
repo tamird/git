@@ -18,6 +18,8 @@ struct checkout {
 		 not_new:1,
 		 clone:1,
 		 refresh_cache:1;
+	/* Only the queue_entries loop in check_updates() sets this. */
+	unsigned trace_queue_entries:1;
 };
 #define CHECKOUT_INIT { .base_dir = "" }
 

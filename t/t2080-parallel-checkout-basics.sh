@@ -11,6 +11,37 @@ TEST_NO_CREATE_REPO=1
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-parallel-checkout.sh"
 
+# Set queue_entry_intervals to the single summary timer's interval count.
+test_queue_entry_timer () {
+	test_grep ! \
+		"\"event\":\"th_timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"" \
+		"$1" &&
+	test_grep ! \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"unpack_trees\",\"label\":\"queue-entries/$2\"" \
+		"$1" &&
+	if test "$3" = absent
+	then
+		queue_entry_intervals=0 &&
+		test_grep ! \
+			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"," \
+			"$1"
+	else
+		grep \
+			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"," \
+			"$1" >count &&
+		test_line_count = 1 count &&
+		queue_entry_intervals=$(sed -n \
+			"s#.*\"intervals\":\\([0-9][0-9]*\\),.*#\\1#p" count) &&
+		case "$queue_entry_intervals" in
+		""|*[!0-9]*|0*) return 1 ;;
+		esac &&
+		{
+			test "$3" = any ||
+			test "$queue_entry_intervals" = "$3"
+		}
+	fi
+}
+
 # Test parallel-checkout with a branch switch containing a variety of file
 # creations, deletions, and modifications, involving different entry types.
 # The branches B1 and B2 have the following paths:
@@ -213,7 +244,29 @@ do
 					"$root_trace" || return 1
 			done
 		fi &&
-		verify_checkout $repo
+		verify_checkout $repo &&
+		test_queue_entry_timer "$root_trace" prepare-entry 13 &&
+		test_queue_entry_timer "$root_trace" attrs-and-enqueue any &&
+		attrs_and_enqueue=$queue_entry_intervals &&
+		test_queue_entry_timer "$root_trace" write-entry any &&
+		write_entries=$queue_entry_intervals &&
+		if test "$mode" = sequential
+		then
+			test_grep ! \
+				"\"category\":\"pcheckout\",\"key\":\"queue/items\"" \
+				"$root_trace" &&
+			queued_entries=0
+		else
+			grep "\"event\":\"data\".*\"category\":\"pcheckout\",\"key\":\"queue/items\"," \
+				"$root_trace" >count &&
+			test_line_count = 1 count &&
+			queued_entries=$(sed -n \
+				"s#.*\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" count) &&
+			case "$queued_entries" in
+			""|*[!0-9]*|0*) return 1 ;;
+			esac
+		fi &&
+		test "$attrs_and_enqueue" -eq "$((queued_entries + write_entries))"
 	'
 done
 
@@ -304,7 +357,12 @@ test_expect_success 'parallel checkout respects --[no]-force' '
 		test_checkout_workers 2 git checkout --force HEAD &&
 		test_path_is_dir D &&
 		test_grep D/F D/F.t &&
-		test_grep F F.t
+		test_grep F F.t &&
+		for phase in prepare-entry attrs-and-enqueue write-entry
+		do
+			test_queue_entry_timer "$root_trace" "$phase" absent ||
+				return 1
+		done
 	)
 '
 
@@ -498,7 +556,14 @@ test_expect_success 'branch switch reports parallel checkout failures' '
 		test_path_is_missing bad &&
 
 		echo 1 >expect-exit &&
-		test_cmp expect-exit switch.exit
+		test_cmp expect-exit switch.exit &&
+		root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" switch-event.log) &&
+		test -n "$root_sid" &&
+		root_trace="$PWD/switch-event.log.root" &&
+		grep -F "\"sid\":\"$root_sid\"" switch-event.log >"$root_trace" &&
+		test_queue_entry_timer "$root_trace" prepare-entry 2 &&
+		test_queue_entry_timer "$root_trace" attrs-and-enqueue 2 &&
+		test_queue_entry_timer "$root_trace" write-entry absent
 	)
 '
 
