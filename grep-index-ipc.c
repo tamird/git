@@ -8,6 +8,7 @@
 #include "fsmonitor-ipc.h"
 #include "hash.h"
 #include "hex.h"
+#include "oidmap.h"
 #include "parse.h"
 #include "path.h"
 #include "read-cache-ll.h"
@@ -256,6 +257,11 @@ struct grep_index_ipc_query_task {
 	size_t nr;
 	unsigned char *maybe;
 	int result;
+};
+
+struct grep_index_ipc_query_oid {
+	struct oidmap_entry entry;
+	size_t pos;
 };
 
 static void grep_index_ipc_put_u32(struct strbuf *buf, uint32_t value)
@@ -1920,9 +1926,14 @@ int grep_index_ipc_query_with_max_parallel_requests(
 	size_t max_parallel_requests)
 {
 	struct strbuf serialized = STRBUF_INIT;
+	struct oidmap seen = OIDMAP_INIT;
+	struct grep_index_ipc_query_oid *entries = NULL;
+	struct object_id *unique_oids = NULL;
+	unsigned char *unique_maybe = NULL;
 	char *path = NULL;
 	struct grep_index_ipc_query_task *tasks = NULL;
 	pthread_t *threads = NULL;
+	size_t unique_nr = 0;
 	size_t threads_nr = 1;
 	size_t started = 0;
 	int cpus;
@@ -1941,9 +1952,26 @@ int grep_index_ipc_query_with_max_parallel_requests(
 			goto cleanup;
 	}
 
-	if (nr >= 2 * GREP_INDEX_IPC_MIN_OIDS_PER_THREAD) {
+	/* Repeated positions must not count as cache reuse in the daemon. */
+	CALLOC_ARRAY(entries, nr);
+	ALLOC_ARRAY(unique_oids, nr);
+	oidmap_init(&seen, nr);
+	for (size_t i = 0; i < nr; i++) {
+		struct grep_index_ipc_query_oid *entry;
+
+		if (oidmap_get(&seen, &oids[i]))
+			continue;
+		entry = &entries[unique_nr];
+		oidcpy(&entry->entry.oid, &oids[i]);
+		entry->pos = unique_nr;
+		oidcpy(&unique_oids[unique_nr++], &oids[i]);
+		oidmap_put(&seen, entry);
+	}
+	ALLOC_ARRAY(unique_maybe, unique_nr);
+
+	if (unique_nr >= 2 * GREP_INDEX_IPC_MIN_OIDS_PER_THREAD) {
 		threads_nr = DIV_ROUND_UP(
-			nr, GREP_INDEX_IPC_MIN_OIDS_PER_THREAD);
+			unique_nr, GREP_INDEX_IPC_MIN_OIDS_PER_THREAD);
 		if (threads_nr > GREP_INDEX_IPC_MAX_CLIENT_THREADS)
 			threads_nr = GREP_INDEX_IPC_MAX_CLIENT_THREADS;
 		cpus = online_cpus();
@@ -1955,23 +1983,23 @@ int grep_index_ipc_query_with_max_parallel_requests(
 	}
 	CALLOC_ARRAY(tasks, threads_nr);
 	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
-		size_t remaining = nr - pos;
+		size_t remaining = unique_nr - pos;
 		size_t task_nr = DIV_ROUND_UP(remaining, threads_nr - i);
 
 		tasks[i].path = path;
 		tasks[i].query = serialized.buf;
 		tasks[i].query_len = serialized.len;
 		tasks[i].hash_algo = repo->hash_algo;
-		tasks[i].oids = oids + pos;
+		tasks[i].oids = unique_oids + pos;
 		tasks[i].nr = task_nr;
-		tasks[i].maybe = maybe + pos;
+		tasks[i].maybe = unique_maybe + pos;
 		pos += task_nr;
 	}
 	if (threads_nr == 1) {
 		grep_index_ipc_query_thread(&tasks[0]);
-		if (!tasks[0].result)
-			result = 0;
-		goto cleanup;
+		if (tasks[0].result)
+			goto cleanup;
+		goto scatter;
 	}
 	ALLOC_ARRAY(threads, threads_nr);
 	for (size_t i = 0; i < threads_nr; i++) {
@@ -1989,9 +2017,23 @@ join:
 	for (size_t i = 0; i < threads_nr; i++)
 		if (tasks[i].result)
 			goto cleanup;
+
+scatter:
+	for (size_t i = 0; i < nr; i++) {
+		struct grep_index_ipc_query_oid *entry =
+			oidmap_get(&seen, &oids[i]);
+
+		if (!entry)
+			BUG("grep index query lost an object ID");
+		maybe[i] = unique_maybe[entry->pos];
+	}
 	result = 0;
 
 cleanup:
+	oidmap_clear(&seen, 0);
+	free(unique_maybe);
+	free(unique_oids);
+	free(entries);
 	free(threads);
 	free(tasks);
 	free(path);
