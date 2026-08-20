@@ -1478,19 +1478,39 @@ static void conclude_pack(int fix_thin_pack, const char *curr_pack, unsigned cha
 		struct strbuf msg = STRBUF_INIT;
 		int nr_unresolved = nr_ofs_deltas + nr_ref_deltas - nr_resolved_deltas;
 		int nr_objects_initial = nr_objects;
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		uint64_t fix_started = 0, finalize_started = 0, finished;
+		int fix_valid, finalize_valid;
+#endif
+
 		if (nr_unresolved <= 0)
 			die(_("confusion beyond insanity"));
 		REALLOC_ARRAY(objects, nr_objects + nr_unresolved + 1);
 		memset(objects + nr_objects + 1, 0,
 		       nr_unresolved * sizeof(*objects));
 		f = hashfd(the_repository->hash_algo, output_fd, curr_pack);
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		fix_valid = input_read_trace.enabled &&
+			!monotonic_input_read_time(&fix_started);
+#endif
 		fix_unresolved_deltas(f);
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		if (fix_valid && !monotonic_input_read_time(&finished) &&
+		    finished >= fix_started)
+			trace2_data_intmax("index-pack", the_repository,
+					   "conclude/fix-thin-us",
+					   (finished - fix_started) / 1000);
+#endif
 		strbuf_addf(&msg, Q_("completed with %d local object",
 				     "completed with %d local objects",
 				     nr_objects - nr_objects_initial),
 			    nr_objects - nr_objects_initial);
 		stop_progress_msg(&progress, msg.buf);
 		strbuf_release(&msg);
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		finalize_valid = input_read_trace.enabled &&
+			!monotonic_input_read_time(&finalize_started);
+#endif
 		finalize_hashfile(f, tail_hash, FSYNC_COMPONENT_PACK, 0);
 		hashcpy(read_hash, pack_hash, the_repository->hash_algo);
 		fixup_pack_header_footer(the_hash_algo, output_fd, pack_hash,
@@ -1499,6 +1519,13 @@ static void conclude_pack(int fix_thin_pack, const char *curr_pack, unsigned cha
 		if (!hasheq(read_hash, tail_hash, the_repository->hash_algo))
 			die(_("Unexpected tail checksum for %s "
 			      "(disk corruption?)"), curr_pack);
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+		if (finalize_valid && !monotonic_input_read_time(&finished) &&
+		    finished >= finalize_started)
+			trace2_data_intmax("index-pack", the_repository,
+					   "conclude/finalize-thin-us",
+					   (finished - finalize_started) / 1000);
+#endif
 	}
 	if (nr_ofs_deltas + nr_ref_deltas != nr_resolved_deltas)
 		die(Q_("pack has %d unresolved delta",
