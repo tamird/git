@@ -73,13 +73,63 @@ int grep_index_prepared_location_maybe_contains(
 	const struct grep_index_location *location);
 void grep_index_prepared_free(struct grep_index_prepared *prepared);
 
+enum grep_index_memory_build_event {
+	GREP_INDEX_MEMORY_BUILD_CLAIMED,
+	GREP_INDEX_MEMORY_WAIT_OBSERVED,
+};
+
+typedef void (*grep_index_memory_build_observer_fn)(
+	enum grep_index_memory_build_event event,
+	const struct object_id *oid, int ignore_case, void *data);
+
 struct grep_index_memory *grep_index_memory_new(
 	struct repository *repo, struct grep_index *persistent);
 void grep_index_memory_free(struct grep_index_memory *index);
+/*
+ * Install or clear a private test observer only while index has no users.
+ * Keep observer and data alive and unchanged until all users have joined.
+ * A replacement generation starts without an observer.  Passing NULL also
+ * clears data; the caller retains ownership of data.
+ *
+ * BUILD_CLAIMED runs after the index mutex is released and may wait on a
+ * test-owned barrier.  WAIT_OBSERVED runs once before the condition wait,
+ * with the index mutex held, and must return without waiting.  Neither
+ * callback may reenter the memory index.  The oid is borrowed for the call.
+ */
+void grep_index_memory_set_build_observer_for_test(
+	struct grep_index_memory *index,
+	grep_index_memory_build_observer_fn observer, void *data);
 /* Return a replacement generation while no other thread can use index. */
 struct grep_index_memory *grep_index_memory_rotate_if_requested(
 	struct grep_index_memory *index);
 void grep_index_memory_release_object_store(struct grep_index_memory *index);
+
+enum grep_index_memory_query_origin {
+	GREP_INDEX_MEMORY_QUERY_PERSISTENT,
+	GREP_INDEX_MEMORY_QUERY_READY_REUSED,
+	GREP_INDEX_MEMORY_QUERY_COLD_ATTEMPT,
+	GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD,
+};
+
+struct grep_index_memory_query_outcome {
+	enum grep_index_memory_query_origin origin;
+	unsigned int waited : 1;
+};
+
+/*
+ * Report the route taken independently of the returned classification.
+ * PERSISTENT delegates to the persistent index; READY_REUSED uses an
+ * existing ready memory filter, possibly after waiting for its builder.
+ * COLD_ATTEMPT means this call claimed a build, even if that build fails.
+ * UNAVAILABLE_PREBUILD means none of those routes was taken.
+ * waited records one observation of an existing BUILDING entry, including
+ * a wait that ends in FAILED or SATURATED.  outcome may be NULL.
+ */
+int grep_index_memory_maybe_contains_with_outcome(
+	struct grep_index_memory *index,
+	const struct object_id *oid,
+	const struct grep_index_query *query,
+	struct grep_index_memory_query_outcome *outcome);
 int grep_index_memory_maybe_contains(struct grep_index_memory *index,
 				     const struct object_id *oid,
 				     const struct grep_index_query *query);

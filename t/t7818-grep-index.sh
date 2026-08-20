@@ -145,6 +145,85 @@ test_content_index_ipc_query () {
 	}' "$1"
 }
 
+test_content_index_ipc_backend () {
+	awk -v expected_failures="$2" '
+	BEGIN {
+		marker = "\"category\":\"test-grep-index-ipc\",\"key\":\"query-protocol/"
+		key = "\"category\":\"grep\",\"key\":\"content_index_ipc_backend\""
+		prefix = key ",\"value\":{"
+		head = "\"unique_objects\":1,\"requests_planned\":1,\"requests_validated\":"
+		success = head "1,\"persistent\":0,\"ready_reused\":1,\"cold_attempt\":0,\"unavailable_prebuild\":0,\"waited\":0,\"outcome\":0}}"
+		failure = head "0,\"persistent\":0,\"ready_reused\":0,\"cold_attempt\":0,\"unavailable_prebuild\":0,\"waited\":0,\"outcome\":1}}"
+	}
+	index($0, marker "expected\"") {
+		if (active)
+			bad = 1
+		active = 1
+		records = 0
+		if (index($0, "\"value\":\"0\"}"))
+			expected = 0
+		else if (index($0, "\"value\":\"1\"}"))
+			expected = 1
+		else if (index($0, "\"value\":\"2\"}"))
+			expected = 2
+		else
+			bad = 1
+	}
+	index($0, key) {
+		records++
+		if (!active || !expected ||
+		    !index($0, "\"event\":\"data_json\"") ||
+		    !index($0, prefix) ||
+		    substr($0, index($0, prefix) + length(prefix)) != (expected == 1 ? success : failure))
+			bad = 1
+	}
+	index($0, marker "end\"") {
+		if (!active || records != (expected != 0))
+			bad = 1
+		counts[expected]++
+		active = 0
+	}
+	END {
+		if (active || bad || counts[0] != 5 || counts[1] != 1 ||
+		    counts[2] != expected_failures) {
+			print "unexpected content-index IPC backend records"
+			exit 1
+		}
+	}' "$1"
+}
+
+test_content_index_ipc_wait_backend () {
+	test_grep '"category":"grep","key":"content_index_ipc_backend"' "$1" &&
+	awk '
+	BEGIN {
+		key = "\"category\":\"grep\",\"key\":\"content_index_ipc_backend\""
+		prefix = key ",\"value\":{"
+		head = "\"unique_objects\":1,\"requests_planned\":1,\"requests_validated\":1,\"persistent\":0,\"ready_reused\":"
+		cold = head "0,\"cold_attempt\":1,\"unavailable_prebuild\":0,\"waited\":0,\"outcome\":0}}"
+		ready = head "1,\"cold_attempt\":0,\"unavailable_prebuild\":0,\"waited\":1,\"outcome\":0}}"
+	}
+	index($0, key) {
+		records++
+		if (!index($0, "\"event\":\"data_json\"") || !index($0, prefix)) {
+			bad = 1
+			next
+		}
+		payload = substr($0, index($0, prefix) + length(prefix))
+		if (payload == cold)
+			cold_count++
+		else if (payload == ready)
+			ready_count++
+		else
+			bad = 1
+	}
+	END {
+		if (bad || records != 2 || cold_count != 1 || ready_count != 1) {
+			print "expected one cold build and one READY waiter"
+			exit 1
+		}
+	}' "$1"
+}
+
 test_expect_success 'setup' '
 	if ! test_have_prereq WINDOWS
 	then
@@ -255,7 +334,26 @@ test_expect_success 'setup' '
 '
 
 test_expect_success 'content index query wire versions' '
-	test-tool grep-index-ipc query-wire
+	test-tool grep-index-ipc query-wire &&
+	if test_have_prereq FSMONITOR_DAEMON
+	then
+		test_when_finished "rm -f query-protocol.trace" &&
+		test_path_is_missing query-protocol.trace &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+			test-tool grep-index-ipc query-protocol untraced &&
+		test_path_is_missing query-protocol.trace &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT="$PWD/query-protocol.trace" \
+			GIT_TRACE2_PERF=0 \
+			test-tool grep-index-ipc query-protocol traced &&
+		if test_have_prereq WINDOWS
+		then
+			backend_failures=11
+		else
+			backend_failures=12
+		fi &&
+		test_content_index_ipc_backend query-protocol.trace \
+			"$backend_failures"
+	fi
 '
 
 test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long gitdir without socketDir' '
@@ -4189,6 +4287,33 @@ test_expect_success 'writer includes reachable historical blobs' '
 			git log --format=%s -Sabsent HEAD^..HEAD -- other \
 			2>err &&
 		test_grep "$other_oid" err
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON 'generic content-index query waits for a shared build' '
+	test_create_repo query-wait &&
+	test_when_finished "rm -rf query-wait" &&
+	(
+		cd query-wait &&
+		if ! test_have_prereq WINDOWS
+		then
+			git config fsmonitor.socketDir "$grep_index_socket_dir"
+		fi &&
+		wait_oid=$(printf "shared content-index wait fixture 7818\n" |
+			git hash-object -w --stdin) &&
+		echo blob >expect-type &&
+		git cat-file -t "$wait_oid" >actual-type &&
+		test_cmp expect-type actual-type &&
+		test_path_is_missing .git/objects/info/grep-index/chain &&
+		test_path_is_missing .git/objects/info/grep-index/chain-transposed &&
+		printf "%s\n" "build claimed: 1" "wait observed: 1" \
+			"workers joined: 2" >expect &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT="$PWD/wait.trace" GIT_TRACE2_PERF=0 \
+			test-tool grep-index-ipc query-wait "$wait_oid" >actual &&
+		test_cmp expect actual &&
+		test_path_is_missing .git/objects/info/grep-index/chain &&
+		test_path_is_missing .git/objects/info/grep-index/chain-transposed &&
+		test_content_index_ipc_wait_backend wait.trace
 	)
 '
 
