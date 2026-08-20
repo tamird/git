@@ -134,6 +134,27 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "materialized/cleanup",
 		.want_per_thread_events = 0,
 	},
+	/* Long/generic formatting includes object info, abbreviation, and stdio. */
+	[TRACE2_TIMER_ID_LS_TREE_READ_TREE] = {
+		.category = "ls-tree",
+		.name = "read-tree",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_LS_TREE_FORMAT_OUTPUT] = {
+		.category = "ls-tree",
+		.name = "format-output",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_LS_TREE_OBJECT_INFO] = {
+		.category = "ls-tree",
+		.name = "format-output/object-info",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_LS_TREE_ABBREV] = {
+		.category = "ls-tree",
+		.name = "format-output/abbrev",
+		.want_per_thread_events = 0,
+	},
 	/* Recovery preparation is included in the worktree-cache write timer. */
 	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC] = {
 		.category = "grep",

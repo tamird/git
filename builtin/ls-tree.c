@@ -17,6 +17,7 @@
 #include "quote.h"
 #include "parse-options.h"
 #include "pathspec.h"
+#include "trace2.h"
 
 static const char * const ls_tree_usage[] = {
 	N_("git ls-tree [<options>] <tree-ish> [<path>...]"),
@@ -33,7 +34,12 @@ static void expand_objectsize(struct strbuf *line, const struct object_id *oid,
 
 	if (type == OBJ_BLOB) {
 		size_t size;
-		if (odb_read_object_info(the_repository->objects, oid, &size) < 0)
+		int ret;
+
+		trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_OBJECT_INFO);
+		ret = odb_read_object_info(the_repository->objects, oid, &size);
+		trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_OBJECT_INFO);
+		if (ret < 0)
 			die(_("could not get object info about '%s'"),
 			    oid_to_hex(oid));
 		strbuf_add_uint(line, size);
@@ -105,6 +111,7 @@ static int show_tree_fmt(const struct object_id *oid, struct strbuf *base,
 	if (type == OBJ_BLOB && (options->ls_options & LS_TREE_ONLY))
 		return 0;
 
+	trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_FORMAT_OUTPUT);
 	while (strbuf_expand_step(&sb, &format)) {
 		size_t len;
 
@@ -120,9 +127,11 @@ static int show_tree_fmt(const struct object_id *oid, struct strbuf *base,
 			expand_objectsize(&sb, oid, type, 1);
 		else if (skip_prefix(format, "(objectsize)", &format))
 			expand_objectsize(&sb, oid, type, 0);
-		else if (skip_prefix(format, "(objectname)", &format))
+		else if (skip_prefix(format, "(objectname)", &format)) {
+			trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_ABBREV);
 			strbuf_add_unique_abbrev(&sb, oid, options->abbrev);
-		else if (skip_prefix(format, "(path)", &format)) {
+			trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_ABBREV);
+		} else if (skip_prefix(format, "(path)", &format)) {
 			const char *name;
 			const char *prefix = options->prefix;
 			struct strbuf sbuf = STRBUF_INIT;
@@ -139,6 +148,7 @@ static int show_tree_fmt(const struct object_id *oid, struct strbuf *base,
 	strbuf_addch(&sb, options->null_termination ? '\0' : '\n');
 	fwrite(sb.buf, sb.len, 1, stdout);
 	strbuf_release(&sb);
+	trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_FORMAT_OUTPUT);
 	return recurse;
 }
 
@@ -214,14 +224,21 @@ static int show_tree_long(const struct object_id *oid, struct strbuf *base,
 	int recurse;
 	char size_text[24];
 	enum object_type type = object_type(mode);
+	const char *abbrev;
 
 	early = show_tree_common(options, &recurse, base, pathname, type);
 	if (early >= 0)
 		return early;
 
+	trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_FORMAT_OUTPUT);
 	if (type == OBJ_BLOB) {
 		size_t size;
-		if (odb_read_object_info(the_repository->objects, oid, &size) == OBJ_BAD)
+		int ret;
+
+		trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_OBJECT_INFO);
+		ret = odb_read_object_info(the_repository->objects, oid, &size);
+		trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_OBJECT_INFO);
+		if (ret == OBJ_BAD)
 			xsnprintf(size_text, sizeof(size_text), "BAD");
 		else
 			xsnprintf(size_text, sizeof(size_text),
@@ -230,10 +247,12 @@ static int show_tree_long(const struct object_id *oid, struct strbuf *base,
 		xsnprintf(size_text, sizeof(size_text), "-");
 	}
 
-	printf("%06o %s %s %7s\t", mode, type_name(type),
-	       repo_find_unique_abbrev(the_repository, oid, options->abbrev),
-	       size_text);
+	trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_ABBREV);
+	abbrev = repo_find_unique_abbrev(the_repository, oid, options->abbrev);
+	trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_ABBREV);
+	printf("%06o %s %s %7s\t", mode, type_name(type), abbrev, size_text);
 	show_tree_common_default_long(options, base, pathname, base->len);
+	trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_FORMAT_OUTPUT);
 	return recurse;
 }
 
@@ -446,7 +465,9 @@ int cmd_ls_tree(int argc,
 		break;
 	}
 
+	trace2_timer_start(TRACE2_TIMER_ID_LS_TREE_READ_TREE);
 	ret = !!read_tree(the_repository, tree, &options.pathspec, fn, &options);
+	trace2_timer_stop(TRACE2_TIMER_ID_LS_TREE_READ_TREE);
 	clear_pathspec(&options.pathspec);
 	return ret;
 }
