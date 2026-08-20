@@ -11,8 +11,13 @@ test_description='Same rename detection as t4003 but testing diff-raw.'
 
 test_expect_success 'setup reference tree' '
 	COPYING_test_data >COPYING &&
+	for name in bound-a bound-b bound-c
+	do
+		cp COPYING "$name" || return 1
+	done &&
+	cat COPYING COPYING >zz-bound &&
 	echo frotz >rezrov &&
-	git update-index --add COPYING rezrov &&
+	git update-index --add COPYING bound-a bound-b bound-c rezrov zz-bound &&
 	tree=$(git write-tree) &&
 	echo $tree &&
 	sed -e "s/HOWEVER/However/" <COPYING >COPYING.1 &&
@@ -63,6 +68,9 @@ test_expect_success 'validate output from rename/copy detection (#2)' '
 # copy-edited COPYING.1, and unchanged rezrov.  We should not say
 # anything about rezrov or COPYING, since the revised again diff-raw
 # nows how to say Copy.
+# The unchanged bound-* sources fill the four best candidates together
+# with COPYING.  The later zz-bound source passes the 50% size check, but
+# its maximum possible score cannot beat those four candidates.
 
 test_expect_success 'validate output from rename/copy detection (#3)' '
 	COPYING_test_data >COPYING &&
@@ -74,11 +82,10 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 	GIT_TRACE2_EVENT="$PWD/rename-inexact.trace" \
 		git diff-index -l4 -C --find-copies-harder $tree >current &&
 	compare_diff_raw current expected &&
-	compared_bytes=$(($(wc -c <COPYING) + $(wc -c <COPYING.1))) &&
-	test "$(grep -c \
-		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
-		rename-inexact.trace)" = 8 &&
-	test_trace2_data diff rename/inexact/sources 2 \
+	pair_bytes=$(($(wc -c <COPYING) + $(wc -c <COPYING.1))) &&
+	score_bound_bytes=$(($(wc -c <zz-bound) + $(wc -c <COPYING.1))) &&
+	compared_bytes=$((4 * pair_bytes + score_bound_bytes)) &&
+	test_trace2_data diff rename/inexact/sources 6 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/destinations 1 \
 		<rename-inexact.trace &&
@@ -86,14 +93,23 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/limit_result 0 \
 		<rename-inexact.trace &&
-	test_trace2_data diff rename/inexact/similarity_calls 2 \
+	test_trace2_data diff rename/inexact/similarity_calls 6 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/size_rejected 1 \
 		<rename-inexact.trace &&
-	test_trace2_data diff rename/inexact/content_compared 1 \
+	test_trace2_data diff rename/inexact/content_compared 5 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/compared_bytes "$compared_bytes" \
-		<rename-inexact.trace
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/score_bound_floor_ready 1 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/score_bound_rejectable 1 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/score_bound_rejectable_bytes \
+		"$score_bound_bytes" <rename-inexact.trace &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
+		rename-inexact.trace)" = 11
 '
 
 test_done
