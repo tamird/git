@@ -1848,16 +1848,23 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_grep "\"key\":\"content_index_tree_${phase}_us\",\"value\":\"[0-9][0-9]*\"" \
 			tree-attributes.trace || return 1
 	done &&
+	printf "%s:nested/text:present needle\n" "$attributes_commit" \
+		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
 		absent ":(glob)nested/**/text" ":(glob)other/**/text" \
-		":(glob)nested/**/te*" >expect-tree-positive &&
+		":(glob)nested/**/te*" ":(glob,exclude)**/binary" \
+		>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
 	>tree-positive.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 		git grep "present needle" "$attributes_commit" -- \
 			absent ":(glob)nested/**/text" ":(glob)other/**/text" \
-			":(glob)nested/**/te*" >actual-tree-positive &&
+			":(glob)nested/**/te*" ":(glob,exclude)**/binary" \
+			>actual-tree-positive &&
 	test_cmp expect-tree-positive actual-tree-positive &&
 	test_trace2_data grep content_index_tree_entries 3 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_pathspec_checks "[0-9][0-9]*" \
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_pathspec_checks 2 \
 		<tree-positive.trace &&
@@ -1865,19 +1872,28 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-positive.trace &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
 		":(glob)**/nested/**/te*" ":(glob)**/absent" \
-		":(glob)**/te*" >expect-tree-positive &&
+		":(glob)**/te*" ":(exclude)**/binary" \
+		>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
 	>tree-positive.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 		git grep "present needle" "$attributes_commit" -- \
 			":(glob)**/nested/**/te*" ":(glob)**/absent" \
-			":(glob)**/te*" >actual-tree-positive &&
+			":(glob)**/te*" ":(exclude)**/binary" \
+			>actual-tree-positive &&
 	test_cmp expect-tree-positive actual-tree-positive &&
 	test_trace2_data grep content_index_tree_entries 3 \
 		<tree-positive.trace &&
-	test_trace2_data grep content_index_tree_pathspec_checks 1 \
+	test_trace2_data grep content_index_tree_pathspec_checks 2 \
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
 		<tree-positive.trace &&
+	>tree-positive.trace &&
+	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+		git grep "present needle" "$attributes_commit" -- \
+			":(glob)**/te*" ":(exclude)**/text" \
+			>actual-tree-positive &&
+	test_must_be_empty actual-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
 		nested/ ":(glob)**/te*" >expect-tree-positive &&
 	git grep "present needle" "$attributes_commit" -- \

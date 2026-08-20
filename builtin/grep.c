@@ -2575,6 +2575,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			for (size_t i = 0; i < pathspec->nr; i++) {
 				const struct pathspec_item *item = &pathspec->items[i];
 
+				if (item->magic & PATHSPEC_EXCLUDE)
+					continue;
 				if (item->nowildcard_len == item->len) {
 					if (grep_tree_literal_path_matches(
 						    item, base->buf + tn_len,
@@ -2607,6 +2609,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				const struct pathspec_item *item = &pathspec->items[i];
 				const char *basename;
 
+				if (item->magic & PATHSPEC_EXCLUDE)
+					continue;
 				if (item->nowildcard_len == item->len) {
 					if (grep_tree_literal_path_matches(
 						    item, base->buf + tn_len,
@@ -2975,10 +2979,10 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		.ipc_available = -1,
 		.recursive_basename_pathspec =
 			!recurse_submodules && pathspec->nr &&
-			!(pathspec->magic & ~PATHSPEC_GLOB),
+			!(pathspec->magic & ~(PATHSPEC_GLOB | PATHSPEC_EXCLUDE)),
 		.rooted_recursive_basename_pathspec =
 			!recurse_submodules && pathspec->nr &&
-			!(pathspec->magic & ~PATHSPEC_GLOB),
+			!(pathspec->magic & ~(PATHSPEC_GLOB | PATHSPEC_EXCLUDE)),
 		.trace_enabled = trace2_is_enabled(),
 		.batch_size = git_env_ulong("GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE",
 					    GREP_TREE_INDEX_BATCH_SIZE),
@@ -2993,10 +2997,13 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
+	/* Exclusions cannot admit a regular entry; match survivors normally. */
 	for (i = 0; query.recursive_basename_pathspec && i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
+		if (item->magic & PATHSPEC_EXCLUDE)
+			continue;
 		if (grep_tree_recursive_basename(item, &basename)) {
 			has_recursive_basename = 1;
 			if (item->magic == PATHSPEC_GLOB &&
@@ -3012,12 +3019,15 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		query.recursive_basename_pathspec = 0;
 	query.recursive_basename_all_directories =
 		query.recursive_basename_pathspec &&
+		!(pathspec->magic & PATHSPEC_EXCLUDE) &&
 		has_exact_recursive_glob_basename;
 	for (i = 0; query.rooted_recursive_basename_pathspec &&
 			    i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
 		const char *basename;
 
+		if (item->magic & PATHSPEC_EXCLUDE)
+			continue;
 		if (grep_tree_rooted_recursive_basename(item, &basename)) {
 			has_rooted_recursive_basename = 1;
 			continue;
