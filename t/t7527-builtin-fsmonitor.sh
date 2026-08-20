@@ -2039,6 +2039,8 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			../untracked-restart-index.after &&
 		rm nested/original nested/added &&
 		git checkout -- tracked steady/deep/tracked &&
+		# Keep this subtree older than the resync cutoff.
+		test-tool chmtime =-300 steady steady/deep &&
 		git status --porcelain >../untracked-restart-clean.out &&
 		test_must_be_empty ../untracked-restart-clean.out &&
 		test_path_is_file ignored &&
@@ -2061,16 +2063,20 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-first.trace &&
 		test_trace2_data status untracked/cache-root-valid 0 \
 			<../untracked-restart-clean-first.trace &&
+		test_trace2_data status untracked/subtrees-pruned \
+			"[1-9][0-9]*" <../untracked-restart-clean-first.trace &&
+		test_trace2_data status untracked/subtrees-repaired \
+			"[1-9][0-9]*" <../untracked-restart-clean-first.trace &&
 		! have_t2_data_event untracked_cache \
 			serialize/resync-invalidated-nodes \
 			<../untracked-restart-clean-first.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-first.trace &&
-		test_trace2_data fsmonitor untracked-cache/save-root-valid 0 \
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
 			<../untracked-restart-clean-first.trace &&
 		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-valid \
 			<../untracked-restart-clean-first.trace | wc -l)" -eq 1 &&
-		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 0 \
+		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 1 \
 			<../untracked-restart-clean-first.trace &&
 		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-can-skip \
 			<../untracked-restart-clean-first.trace | wc -l)" -eq 1 &&
@@ -2082,24 +2088,20 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			../untracked-restart-clean-second.out &&
 		test_trace2_data status untracked-cache/restore hit \
 			<../untracked-restart-clean-second.trace &&
-		test_trace2_data status untracked/cache-root-valid 0 \
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<../untracked-restart-clean-second.trace &&
+		test_trace2_data status untracked/cache-root-can-skip 1 \
 			<../untracked-restart-clean-second.trace &&
 		test_trace2_data untracked_cache negative-only 1 \
 			<../untracked-restart-clean-second.trace &&
-		have_t2_data_event status untracked/subtrees-repaired \
+		test_trace2_data status untracked/subtrees-pruned 1 \
 			<../untracked-restart-clean-second.trace &&
-		! test_trace2_data status untracked/subtrees-repaired 0 \
+		test_trace2_data status untracked/directories-visited 0 \
 			<../untracked-restart-clean-second.trace &&
-		have_t2_data_event fsmonitor untracked-cache/saved \
+		test_trace2_data status untracked/subtrees-repaired 0 \
 			<../untracked-restart-clean-second.trace &&
-		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+		! have_t2_data_event fsmonitor untracked-cache/saved \
 			<../untracked-restart-clean-second.trace &&
-		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-valid \
-			<../untracked-restart-clean-second.trace | wc -l)" -eq 1 &&
-		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 1 \
-			<../untracked-restart-clean-second.trace &&
-		test "$(have_t2_data_event fsmonitor untracked-cache/save-root-can-skip \
-			<../untracked-restart-clean-second.trace | wc -l)" -eq 1 &&
 		GIT_TRACE2_EVENT_NESTING=4 \
 		GIT_TRACE2_EVENT="$PWD/../untracked-restart-clean-third.trace" \
 			git --no-optional-locks status --porcelain -uall \

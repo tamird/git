@@ -3835,8 +3835,8 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 
 		/*
 		 * Negative-only scans must not replay or populate cached
-		 * entries. They may prune after fsmonitor invalidates stale
-		 * summaries.
+		 * entries. They may prune summaries validated by fsmonitor
+		 * or by this read's full resync validation.
 		 */
 		if (negative_only) {
 			untracked = NULL;
@@ -3848,8 +3848,9 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 				has_skippable_subtree(untracked_cache->root);
 
 			refresh_fsmonitor(istate);
-			if (!untracked_cache_uses_fsmonitor(untracked_cache)) {
-				if (untracked && !revalidated)
+			if (!untracked_cache_uses_fsmonitor(untracked_cache) &&
+			    !revalidated) {
+				if (untracked)
 					dir->internal.stat_prevalidated =
 						validate_untracked_stats(untracked, istate, NULL);
 			} else if (had_skippable_subtree ||
