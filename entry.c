@@ -15,6 +15,7 @@
 #include "fsmonitor.h"
 #include "entry.h"
 #include "parallel-checkout.h"
+#include "trace2.h"
 
 static void create_directories(const char *path, int path_len,
 			       const struct checkout *state)
@@ -479,9 +480,26 @@ static void mark_colliding_entries(const struct checkout *state,
 	}
 }
 
-int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
-		      const struct checkout *state, char *topath,
-		      int *nr_checkouts)
+static void checkout_entry_trace_phase(enum trace2_timer_id *active_phase,
+				       enum trace2_timer_id next_phase)
+{
+	int saved_errno;
+
+	if (!active_phase)
+		return;
+
+	saved_errno = errno;
+	trace2_timer_stop(*active_phase);
+	*active_phase = next_phase;
+	trace2_timer_start(*active_phase);
+	errno = saved_errno;
+}
+
+static int checkout_entry_ca_internal(struct cache_entry *ce,
+				      struct conv_attrs *ca,
+				      const struct checkout *state,
+				      char *topath, int *nr_checkouts,
+				      enum trace2_timer_id *active_phase)
 {
 	static struct strbuf path = STRBUF_INIT;
 	struct stat st;
@@ -581,6 +599,8 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 
 	create_directories(path.buf, path.len, state);
 
+	checkout_entry_trace_phase(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_ATTRS_AND_ENQUEUE);
 	if (S_ISREG(ce->ce_mode) && !ca) {
 		convert_attrs(state->istate, &ca_buf, ce->name);
 		ca = &ca_buf;
@@ -589,7 +609,34 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 	if (!enqueue_checkout(ce, ca, nr_checkouts))
 		return 0;
 
+	checkout_entry_trace_phase(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_WRITE_ENTRY);
 	return write_entry(ce, path.buf, ca, state, 0, nr_checkouts);
+}
+
+int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
+		      const struct checkout *state, char *topath,
+		      int *nr_checkouts)
+{
+	enum trace2_timer_id phase = TRACE2_TIMER_ID_UNPACK_TREES_PREPARE_ENTRY;
+	enum trace2_timer_id *active_phase = state->trace_queue_entries ?
+		&phase : NULL;
+	int saved_errno = errno;
+	int ret;
+
+	if (active_phase) {
+		trace2_timer_start(*active_phase);
+		errno = saved_errno;
+	}
+
+	ret = checkout_entry_ca_internal(ce, ca, state, topath, nr_checkouts,
+					 active_phase);
+	if (active_phase) {
+		saved_errno = errno;
+		trace2_timer_stop(*active_phase);
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 void unlink_entry(const struct cache_entry *ce, const char *super_prefix)

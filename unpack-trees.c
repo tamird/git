@@ -494,6 +494,7 @@ static int check_updates(struct unpack_trees_options *o,
 	if (pc_workers > 1)
 		init_parallel_checkout();
 	trace2_region_enter("unpack_trees", "queue_entries", index->repo);
+	state.trace_queue_entries = trace_counts;
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
@@ -512,6 +513,7 @@ static int check_updates(struct unpack_trees_options *o,
 				display_progress(progress, ++cnt);
 		}
 	}
+	state.trace_queue_entries = 0;
 	trace2_region_leave("unpack_trees", "queue_entries", index->repo);
 	if (trace_counts)
 		trace2_data_intmax("unpack_trees", index->repo,
