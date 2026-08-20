@@ -166,6 +166,28 @@ static struct spanhash_top *hash_chars(struct repository *r,
 	return hash;
 }
 
+static struct spanhash_top *get_spanhash(struct repository *r,
+					struct diff_filespec *one,
+					void **count_p)
+{
+	struct spanhash_top *count = count_p ? *count_p : NULL;
+
+	if (!count) {
+		count = hash_chars(r, one);
+		if (count_p)
+			*count_p = count;
+	}
+	return count;
+}
+
+void diffcore_prepare_count_changes(struct repository *r,
+				    struct diff_filespec *src,
+				    struct diff_filespec *dst)
+{
+	get_spanhash(r, src, &src->cnt_data);
+	get_spanhash(r, dst, &dst->cnt_data);
+}
+
 int diffcore_count_changes(struct repository *r,
 			   struct diff_filespec *src,
 			   struct diff_filespec *dst,
@@ -178,21 +200,8 @@ int diffcore_count_changes(struct repository *r,
 	struct spanhash_top *src_count, *dst_count;
 	unsigned long sc, la;
 
-	src_count = dst_count = NULL;
-	if (src_count_p)
-		src_count = *src_count_p;
-	if (!src_count) {
-		src_count = hash_chars(r, src);
-		if (src_count_p)
-			*src_count_p = src_count;
-	}
-	if (dst_count_p)
-		dst_count = *dst_count_p;
-	if (!dst_count) {
-		dst_count = hash_chars(r, dst);
-		if (dst_count_p)
-			*dst_count_p = dst_count;
-	}
+	src_count = get_spanhash(r, src, src_count_p);
+	dst_count = get_spanhash(r, dst, dst_count_p);
 	sc = la = 0;
 
 	s = src_count->data;

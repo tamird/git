@@ -234,6 +234,13 @@ void diff_debug_queue(const char *, struct diff_queue_struct *);
 #define diff_debug_queue(a,b) do { /* nothing */ } while (0)
 #endif
 
+/*
+ * Prepare persistent span-hash caches from populated filespecs, in the same
+ * source-then-destination order as diffcore_count_changes().
+ */
+void diffcore_prepare_count_changes(struct repository *r,
+				    struct diff_filespec *src,
+				    struct diff_filespec *dst);
 int diffcore_count_changes(struct repository *r,
 			   struct diff_filespec *src,
 			   struct diff_filespec *dst,
