@@ -100,6 +100,52 @@ wait_for_file_sum () {
 	return 1
 }
 
+test_grep_timer () {
+	awk -v name="$2" -v intervals="$3" '
+	BEGIN {
+		key = "\"category\":\"grep\",\"name\":\"" name "\""
+		count = "\"intervals\":" intervals ","
+	}
+	index($0, key) {
+		if (!index($0, "\"event\":\"timer\"") || !index($0, count))
+			bad = 1
+		records++
+	}
+	END {
+		if (bad || records != (intervals != 0)) {
+			print "unexpected grep timer: " name
+			exit 1
+		}
+	}' "$1"
+}
+
+test_grep_workers () {
+	awk -v expected="$2" '
+	/"event":"thread_(start|exit)"/ && /"thread":"th[0-9]+:grep"/ {
+		thread = $0
+		sub(/^.*"thread":"/, "", thread)
+		sub(/".*$/, "", thread)
+		if (index($0, "\"event\":\"thread_start\""))
+			starts[thread]++
+		else
+			exits[thread]++
+	}
+	END {
+		for (thread in starts) {
+			if (starts[thread] != 1 || exits[thread] != 1)
+				bad = 1
+			workers++
+		}
+		for (thread in exits)
+			if (!(thread in starts))
+				bad = 1
+		if (bad || workers != expected) {
+			print "unbalanced grep workers"
+			exit 1
+		}
+	}' "$1"
+}
+
 test_content_index_ipc_query () {
 	test_grep '"category":"grep","key":"content_index_ipc_query"' "$1" &&
 	awk -v input_objects="$2" -v unique_objects="$3" -v requests="$4" \
@@ -637,8 +683,19 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 		auto-thread.trace &&
 	GIT_TRACE2_EVENT="$PWD/explicit-thread.trace" \
 		git grep --cached --no-content-index --threads=3 \
-			"present needle" >/dev/null &&
+			-F -e "ordinary contents" -e "present needle" \
+			-- ordinary present >actual &&
+	printf "%s\n" "ordinary:ordinary contents" \
+		"present:present needle" >expect &&
+	test_cmp expect actual &&
 	! test_grep "worker_lease/" explicit-thread.trace &&
+	test_grep_workers explicit-thread.trace 3 &&
+	test_grep_timer explicit-thread.trace source/process 2 &&
+	test_grep_timer explicit-thread.trace source/object-read 2 &&
+	test_grep_timer explicit-thread.trace source/file-read 0 &&
+	test_grep_timer explicit-thread.trace source/file-hash 0 &&
+	test_grep_timer explicit-thread.trace dispatch/producer-wait 0 &&
+	test_grep_timer explicit-thread.trace dispatch/worker-drain 1 &&
 	GIT_TRACE2_EVENT="$PWD/configured-thread.trace" \
 		git -c grep.threads=3 grep --cached --no-content-index \
 			"present needle" >/dev/null &&
@@ -2407,6 +2464,10 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-worktree-missing.trace &&
 	test_trace2_data grep content_index_overlay_rejected 0 \
 		<overlay-worktree-missing.trace &&
+	test_grep_timer overlay-worktree-missing.trace source/process 1 &&
+	test_grep_timer overlay-worktree-missing.trace source/object-read 1 &&
+	test_grep_timer overlay-worktree-missing.trace source/file-read 1 &&
+	test_grep_timer overlay-worktree-missing.trace source/file-hash 0 &&
 	mv "$worktree_missing_object.save" "$worktree_missing_object"
 '
 
@@ -2590,19 +2651,33 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expected actual &&
 	test_trace2_data grep content_index_worktree_candidates 1 \
 		<candidate-unknown.trace &&
+	test_trace2_data grep content_index_worktree_unverified_negative 0 \
+		<candidate-unknown.trace &&
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
-	echo "ordinary:ordinary contents" >expected &&
-	GIT_TRACE2_EVENT="$PWD/candidate-clean.trace" \
-		git grep "ordinary contents" -- "ord*" >actual &&
-	test_cmp expected actual &&
+	rm -f .git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery &&
+	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/candidate-clean.trace" \
+		git grep --threads=1 "absent candidate-only needle" \
+		-- "ord*" >actual 2>err &&
+	test_must_be_empty actual &&
+	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 1 \
 		<candidate-clean.trace &&
+	test_trace2_data grep content_index_worktree_unverified_negative 1 \
+		<candidate-clean.trace &&
+	test_grep_timer candidate-clean.trace source/process 1 &&
+	test_grep_timer candidate-clean.trace source/file-read 1 &&
+	test_grep_timer candidate-clean.trace source/file-hash 1 &&
+	test_grep_timer candidate-clean.trace source/object-read 0 &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-negative.trace" git grep \
 		"absent candidate-only needle" -- "ord*" 2>err &&
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 0 \
+		<candidate-negative.trace &&
+	test_trace2_data grep content_index_worktree_unverified_negative 0 \
 		<candidate-negative.trace &&
 	git update-index --no-fsmonitor-valid ordinary &&
 	test_expect_code 1 env \
@@ -2661,6 +2736,8 @@ test_expect_success FSMONITOR_DAEMON \
 		-- "ord*" ":(exclude)ordinary" 2>err &&
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 0 \
+		<candidate-excluded.trace &&
+	test_trace2_data grep content_index_worktree_unverified_negative 0 \
 		<candidate-excluded.trace &&
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&

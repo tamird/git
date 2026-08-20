@@ -2343,8 +2343,11 @@ static int chk_hit_marker(struct grep_expr *x)
 int grep_source(struct grep_opt *opt, struct grep_source *gs)
 {
 	struct grep_pat *p;
+	int trace_source = gs->type != GREP_SOURCE_BUF;
 	int result;
 
+	if (trace_source)
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_SOURCE_PROCESS);
 	gs->match_error = 0;
 	for (p = opt->pattern_list; p; p = p->next)
 		p->match_error = 0;
@@ -2384,6 +2387,8 @@ int grep_source(struct grep_opt *opt, struct grep_source *gs)
 				gs->match_error = 1;
 				break;
 			}
+	if (trace_source)
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_PROCESS);
 	return result;
 }
 
@@ -2486,8 +2491,10 @@ static int grep_source_load_oid(struct grep_source *gs)
 	enum object_type type;
 	size_t size_st = 0;
 
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_SOURCE_OBJECT_READ);
 	gs->buf = odb_read_object(gs->repo->objects, gs->identifier,
 				  &type, &size_st);
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_OBJECT_READ);
 	gs->size = cast_size_t_to_ulong(size_st);
 	if (!gs->buf)
 		return error(_("'%s': unable to read %s"),
@@ -2505,14 +2512,15 @@ static int grep_source_load_file(struct grep_source *gs)
 	size_t size;
 	int i;
 
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_SOURCE_FILE_READ);
 	if (lstat(filename, &st) < 0) {
 	err_ret:
 		if (errno != ENOENT)
 			error_errno(_("failed to stat '%s'"), filename);
-		return -1;
+		goto failed;
 	}
 	if (!S_ISREG(st.st_mode))
-		return -1;
+		goto failed;
 	size = xsize_t(st.st_size);
 	i = open(filename, O_RDONLY);
 	if (i < 0)
@@ -2522,18 +2530,25 @@ static int grep_source_load_file(struct grep_source *gs)
 		error_errno(_("'%s': short read"), filename);
 		close(i);
 		free(data);
-		return -1;
+		goto failed;
 	}
 	close(i);
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_FILE_READ);
 
 	gs->buf = data;
 	gs->size = size;
 	if (gs->worktree_blob_candidate) {
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_SOURCE_FILE_HASH);
 		hash_object_file(gs->repo->hash_algo, data, size, OBJ_BLOB, &oid);
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_FILE_HASH);
 		gs->worktree_blob_observed = 1;
 		gs->worktree_blob_match = oideq(&oid, &gs->worktree_blob_oid);
 	}
 	return 0;
+
+failed:
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_FILE_READ);
+	return -1;
 }
 
 static int grep_source_load(struct grep_source *gs)
@@ -2550,15 +2565,17 @@ static int grep_source_load(struct grep_source *gs)
 		enum object_type type;
 		struct object_info oi = OBJECT_INFO_INIT;
 		void *data = NULL;
+		int result;
 
 		oi.typep = &type;
 		oi.sizep = &gs->size;
 		oi.contentp = &data;
-		if (!odb_read_object_info_extended(
-			    gs->repo->objects, gs->identifier, &oi,
-			    OBJECT_INFO_QUICK |
-				    OBJECT_INFO_SKIP_FETCH_OBJECT) &&
-		    type == OBJ_BLOB) {
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_SOURCE_OBJECT_READ);
+		result = odb_read_object_info_extended(
+			gs->repo->objects, gs->identifier, &oi,
+			OBJECT_INFO_QUICK | OBJECT_INFO_SKIP_FETCH_OBJECT);
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_OBJECT_READ);
+		if (!result && type == OBJ_BLOB) {
 			gs->buf = data;
 			gs->worktree_blob_used = 1;
 			return 0;

@@ -150,6 +150,37 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "worktree-cache/recovery-prepare",
 		.want_per_thread_events = 0,
 	},
+	/* Process includes reads and hashing; worker sums can exceed wall time. */
+	[TRACE2_TIMER_ID_GREP_SOURCE_PROCESS] = {
+		.category = "grep",
+		.name = "source/process",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_SOURCE_FILE_READ] = {
+		.category = "grep",
+		.name = "source/file-read",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_SOURCE_FILE_HASH] = {
+		.category = "grep",
+		.name = "source/file-hash",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_SOURCE_OBJECT_READ] = {
+		.category = "grep",
+		.name = "source/object-read",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_PRODUCER_WAIT] = {
+		.category = "grep",
+		.name = "dispatch/producer-wait",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKER_DRAIN] = {
+		.category = "grep",
+		.name = "dispatch/worker-drain",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

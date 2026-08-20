@@ -311,9 +311,15 @@ static int add_work(struct grep_opt *opt, struct grep_source *gs,
 
 	grep_lock();
 
-	while (!status_only_hit &&
-	       (todo_end + 1) % ARRAY_SIZE(todo) == todo_done)
-		pthread_cond_wait(&cond_write, &grep_mutex);
+	if (!status_only_hit &&
+	    (todo_end + 1) % ARRAY_SIZE(todo) == todo_done) {
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_PRODUCER_WAIT);
+		do {
+			pthread_cond_wait(&cond_write, &grep_mutex);
+		} while (!status_only_hit &&
+			 (todo_end + 1) % ARRAY_SIZE(todo) == todo_done);
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_PRODUCER_WAIT);
+	}
 	if (status_only_hit) {
 		grep_unlock();
 		grep_source_clear(gs);
@@ -423,6 +429,7 @@ static void *run(void *arg)
 	struct grep_opt *opt = thread->opt;
 	int worker_id = thread->id;
 
+	trace2_thread_start("grep");
 	while (1) {
 		struct work_item *w = get_work(worker_id);
 		int source_hit = 0;
@@ -474,6 +481,7 @@ static void *run(void *arg)
 	free(opt);
 	free(thread);
 
+	trace2_thread_exit();
 	return (void*) (intptr_t) hit;
 }
 
@@ -669,6 +677,7 @@ static int wait_all(void)
 	if (!HAVE_THREADS)
 		BUG("Never call this function unless you have started threads");
 
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_WORKER_DRAIN);
 	grep_lock();
 	all_work_added = 1;
 
@@ -714,6 +723,7 @@ static int wait_all(void)
 	worker_thread_count = 0;
 	worker_template = NULL;
 
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKER_DRAIN);
 	return hit;
 }
 
@@ -2022,6 +2032,7 @@ static int grep_cache(struct grep_opt *opt,
 						selected_nr :
 						repo->index->cache_nr;
 				uint64_t rejected = 0;
+				uint64_t unverified_negative = 0;
 
 				if (literal_selected) {
 					/*
@@ -2045,18 +2056,21 @@ static int grep_cache(struct grep_opt *opt,
 						!ce_stage(ce) &&
 						!ce_intent_to_add(ce) &&
 						(ce->ce_flags & CE_VALID);
+					int unverified = 0;
 
 					if (!literal_selected &&
 					    (ce_skip_worktree(ce) ||
 					     !S_ISREG(ce->ce_mode)))
 						continue;
 					if (!known_equal &&
-					    grep_worktree_cache_entry_eligible(ce))
+					    grep_worktree_cache_entry_eligible(ce)) {
 						known_equal =
 							grep_worktree_cache_lookup(
 								worktree_cache,
 								i) ==
 							GREP_WORKTREE_CACHE_EQUAL;
+						unverified = !known_equal;
+					}
 					/*
 					 * A negative blob result excludes a
 					 * worktree path only when its bytes
@@ -2074,6 +2088,9 @@ static int grep_cache(struct grep_opt *opt,
 						    ce_namelen(ce), 0,
 						    NULL, 0))
 						continue;
+					/* The file read must still prove raw-byte equality. */
+					if (unverified && !(maybe[i / 8] & bit))
+						unverified_negative++;
 					ALLOC_GROW(
 						selected,
 						selected_nr + 1,
@@ -2081,6 +2098,10 @@ static int grep_cache(struct grep_opt *opt,
 					selected[selected_nr++] = i;
 				}
 				use_selected = 1;
+				trace2_data_intmax(
+					"grep", repo,
+					"content_index_worktree_unverified_negative",
+					unverified_negative);
 				if (literal_selected) {
 					trace2_data_intmax(
 						"grep", repo,
