@@ -448,9 +448,18 @@ static int cmd_log_walk_no_free(struct rev_info *rev,
 	 * and HAS_CHANGES being accumulated in rev->diffopt, so be careful to
 	 * retain that state information if replacing rev->diffopt in this loop
 	 */
-	while ((commit = get_revision(rev)) != NULL) {
+	while (1) {
 		uint64_t output_begin = 0;
 		int shown;
+
+		/* Include the terminating NULL call, but no output-loop work. */
+		if (trace)
+			trace2_timer_start(TRACE2_TIMER_ID_LOG_GET_REVISION);
+		commit = get_revision(rev);
+		if (trace)
+			trace2_timer_stop(TRACE2_TIMER_ID_LOG_GET_REVISION);
+		if (!commit)
+			break;
 
 		if (trace)
 			output_begin = getnanotime();

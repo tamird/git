@@ -176,6 +176,27 @@ test_expect_success 'git log --follow' '
 		git log --follow --pretty="format:%s" ichi >actual &&
 	printf "third\nsecond\ninitial" >expect &&
 	test_cmp expect actual &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"log\",\"key\":\"count/returned\"," \
+		log-follow.trace)" = 1 &&
+	returned=$(sed -n \
+		"s#.*\"event\":\"data\".*\"category\":\"log\",\"key\":\"count/returned\",\"value\":\"\\([0-9][0-9]*\\)\".*#\\1#p" \
+		log-follow.trace) &&
+	case "$returned" in
+	""|*[!0-9]*|0[0-9]*) return 1 ;;
+	esac &&
+	test "$(grep -c \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision\"," \
+		log-follow.trace)" = 1 &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision\",\"intervals\":$((returned + 1))," \
+		log-follow.trace &&
+	test_grep ! \
+		"\"event\":\"th_timer\".*\"category\":\"log\",\"name\":\"get-revision\"" \
+		log-follow.trace &&
+	test_grep ! \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"log\",\"label\":\"get-revision\"" \
+		log-follow.trace &&
 	for phase in setup "write back to queue"
 	do
 		test "$(grep -c \
