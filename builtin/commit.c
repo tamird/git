@@ -1654,13 +1654,20 @@ struct repository *repo UNUSED)
 	    status_format != STATUS_FORMAT_PORCELAIN_V2)
 		progress_flag = REFRESH_PROGRESS;
 	repo_read_index(the_repository);
-	if (!optional_locks && !s.pathspec.nr &&
+	/* Restore a missing tree early so refresh can reuse its tracked bitmap. */
+	if ((!optional_locks ||
+	     (the_repository->index->untracked &&
+	      !the_repository->index->untracked->root)) &&
+	    !s.pathspec.nr &&
 	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
 	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
 	    s.show_ignored_mode == SHOW_NO_IGNORED) {
 		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
 			the_repository->index, &cache_untracked_reason);
+		if (optional_locks &&
+		    cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT)
+			the_repository->index->cache_changed |= UNTRACKED_CHANGED;
 	}
 	refresh_index(the_repository->index,
 		      REFRESH_QUIET|REFRESH_UNMERGED|progress_flag,
@@ -1671,7 +1678,8 @@ struct repository *repo UNUSED)
 	else
 		fd = -1;
 
-	if (optional_locks && fd < 0 && !s.pathspec.nr &&
+	if (optional_locks && fd < 0 && !cache_untracked_attempted &&
+	    !s.pathspec.nr &&
 	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
 	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
 	    s.show_ignored_mode == SHOW_NO_IGNORED) {
@@ -1717,12 +1725,13 @@ struct repository *repo UNUSED)
 					   "untracked-cache/restore-reason",
 					   cache_untracked_reason);
 	}
-	if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ||
-	    (cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT &&
-	     the_repository->index->untracked &&
-	     (the_repository->index->untracked->dir_opened ||
-	      the_repository->index->untracked->gitignore_invalidated ||
-	      the_repository->index->untracked->dir_invalidated)))
+	if (fd < 0 &&
+	    (cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ||
+	     (cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT &&
+	      the_repository->index->untracked &&
+	      (the_repository->index->untracked->dir_opened ||
+	       the_repository->index->untracked->gitignore_invalidated ||
+	       the_repository->index->untracked->dir_invalidated))))
 		fsmonitor_ipc__save_untracked_cache(the_repository->index);
 
 	if (0 <= fd)
