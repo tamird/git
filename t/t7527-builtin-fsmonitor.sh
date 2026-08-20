@@ -1558,30 +1558,79 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 	(
 		cd test_untracked_snapshot &&
 		test_commit base tracked &&
+		mkdir -p steady/deep &&
+		test_commit steady steady/deep/tracked &&
 		git config core.fsmonitor true &&
 		git config core.untrackedCache true &&
 		: >../untracked-snapshot.excludes &&
 		git config core.excludesFile \
-			"$PWD/../untracked-snapshot.excludes" &&
-		mkdir -p nested/one nested/two &&
-		echo exclude >exclude-target &&
-		echo one >nested/one/untracked &&
-		echo two >nested/two/untracked
+			"$PWD/../untracked-snapshot.excludes"
 	) &&
 	start_daemon -C test_untracked_snapshot \
 		--t2 "$PWD/untracked-snapshot-daemon.trace" &&
 	(
 		cd test_untracked_snapshot &&
+		git update-index --untracked-cache &&
+		git hash-object .git/index >../untracked-snapshot-cold-index.before &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-cold.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-snapshot-cold.out &&
+		test_must_be_empty ../untracked-snapshot-cold.out &&
+		test_trace2_data status index/optional-lock \
+			disabled <../untracked-snapshot-cold.trace &&
+		test_trace2_data status untracked-cache/restore \
+			miss <../untracked-snapshot-cold.trace &&
+		test_trace2_data status untracked/cache-root-present \
+			0 <../untracked-snapshot-cold.trace &&
+		have_t2_data_event fsmonitor untracked-cache/saved \
+			<../untracked-snapshot-cold.trace &&
+		git hash-object .git/index >../untracked-snapshot-cold-index.after &&
+		test_cmp ../untracked-snapshot-cold-index.before \
+			../untracked-snapshot-cold-index.after &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-locked.trace" \
-			git status --porcelain >/dev/null &&
+			git status --porcelain >../untracked-snapshot-locked.out &&
+		test_cmp ../untracked-snapshot-cold.out \
+			../untracked-snapshot-locked.out &&
 		test_trace2_data status index/optional-lock \
 			acquired <../untracked-snapshot-locked.trace &&
 		test_trace2_data status untracked-cache/restore-attempted \
+			1 <../untracked-snapshot-locked.trace &&
+		test_trace2_data status untracked-cache/restore \
+			hit <../untracked-snapshot-locked.trace &&
+		test_trace2_data status untracked/cache-root-present \
+			1 <../untracked-snapshot-locked.trace &&
+		test_trace2_data status untracked/directories-visited \
 			0 <../untracked-snapshot-locked.trace &&
-		! have_t2_data_event status untracked-cache/restore \
-			<../untracked-snapshot-locked.trace &&
+		test_trace2_data status untracked/cache-opendir \
+			0 <../untracked-snapshot-locked.trace &&
 		! have_t2_data_event status untracked-cache/restore-reason \
 			<../untracked-snapshot-locked.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../untracked-snapshot-locked.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-warm-locked.trace" \
+			git status --porcelain >../untracked-snapshot-warm-locked.out &&
+		test_cmp ../untracked-snapshot-cold.out \
+			../untracked-snapshot-warm-locked.out &&
+		test_trace2_data status index/optional-lock \
+			acquired <../untracked-snapshot-warm-locked.trace &&
+		test_trace2_data status untracked-cache/restore-attempted \
+			0 <../untracked-snapshot-warm-locked.trace &&
+		! have_t2_data_event status untracked-cache/restore \
+			<../untracked-snapshot-warm-locked.trace &&
+		! have_t2_data_event status untracked-cache/restore-reason \
+			<../untracked-snapshot-warm-locked.trace &&
+		test_trace2_data status untracked/cache-root-present \
+			1 <../untracked-snapshot-warm-locked.trace &&
+		test_trace2_data status untracked/directories-visited \
+			0 <../untracked-snapshot-warm-locked.trace &&
+		test_trace2_data status untracked/cache-opendir \
+			0 <../untracked-snapshot-warm-locked.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../untracked-snapshot-warm-locked.trace &&
+		mkdir -p nested/one nested/two &&
+		echo exclude >exclude-target &&
+		echo one >nested/one/untracked &&
+		echo two >nested/two/untracked &&
 		git hash-object .git/index >../untracked-snapshot-index.before &&
 		GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE=1 \
 		GIT_TRACE2_EVENT_NESTING=2 \
