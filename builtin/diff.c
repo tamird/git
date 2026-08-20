@@ -246,6 +246,15 @@ static void builtin_diff_combined(struct rev_info *revs,
 	oid_array_clear(&parents);
 }
 
+static void update_index_if_able(struct lock_file *lock_file)
+{
+	uint64_t start = getnanotime();
+
+	repo_update_index_if_able(the_repository, lock_file);
+	trace2_data_intmax("diff", the_repository, "finalize/index-update-us",
+			   (getnanotime() - start) / 1000);
+}
+
 static void refresh_index_quietly(const struct pathspec *pathspec,
 				 int allow_index_reuse)
 {
@@ -279,7 +288,7 @@ static void refresh_index_quietly(const struct pathspec *pathspec,
 	}
 	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED,
 		      pathspec, NULL, NULL);
-	repo_update_index_if_able(the_repository, &lock_file);
+	update_index_if_able(&lock_file);
 }
 
 static void builtin_diff_files(struct rev_info *revs, int argc,
@@ -710,7 +719,7 @@ int cmd_diff(int argc,
 		struct lock_file lock_file = LOCK_INIT;
 
 		if (repo_hold_locked_index(the_repository, &lock_file, 0) >= 0)
-			repo_update_index_if_able(the_repository, &lock_file);
+			update_index_if_able(&lock_file);
 	}
 	release_revisions(&rev);
 	object_array_clear(&ent);

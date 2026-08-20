@@ -374,6 +374,7 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 			test_must_be_empty .git/diff-refresh-before &&
 			test-tool chmtime +10 tracked &&
 			GIT_TRACE2_EVENT="$PWD/.git/diff-refresh.trace" \
+			GIT_TRACE2_EVENT_NESTING=2 \
 				git diff --name-only >.git/diff-refresh-actual &&
 			test_must_be_empty .git/diff-refresh-actual &&
 			case "$split" in
@@ -384,7 +385,29 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 				<.git/diff-refresh.trace &&
 			git diff-files --name-only -- tracked \
 				>.git/diff-refresh-after &&
-			test_must_be_empty .git/diff-refresh-after
+			test_must_be_empty .git/diff-refresh-after &&
+			test_grep "\"category\":\"diff\",\"key\":\"finalize/index-update-us\"" \
+				.git/diff-refresh.trace >.git/diff-refresh-actual &&
+			test_line_count = 1 .git/diff-refresh-actual &&
+			test_trace2_data diff finalize/index-update-us \
+				"[0-9][0-9]*" <.git/diff-refresh-actual &&
+			test_grep "\"event\":\"data\".*\"nesting\":1," \
+				.git/diff-refresh-actual &&
+			for key in version cache_nr changed_mask
+			do
+				test_trace2_data index "write/$key" "[0-9][0-9]*" \
+					<.git/diff-refresh.trace >.git/diff-refresh-actual &&
+				test_grep "\"event\":\"data\".*\"nesting\":2," \
+					.git/diff-refresh-actual || return 1
+			done &&
+			printf "%s\n" region_leave data >.git/diff-refresh-before &&
+			grep -e "\"event\":\"region_leave\".*\"category\":\"index\",\"label\":\"do_write_index\"" \
+				-e "\"event\":\"region_leave\".*\"category\":\"index\",\"label\":\"shared/do_write_index\"" \
+				-e "\"category\":\"diff\",\"key\":\"finalize/index-update-us\"" \
+				.git/diff-refresh.trace |
+			sed -n "s/.*\"event\":\"\\([^\"]*\\)\".*/\\1/p" |
+			uniq >.git/diff-refresh-after &&
+			test_cmp .git/diff-refresh-before .git/diff-refresh-after
 		) || return 1
 	done
 '
