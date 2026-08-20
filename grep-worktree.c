@@ -968,7 +968,11 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	struct hashfile *f = NULL;
 	struct strbuf compact_path = STRBUF_INIT;
 	struct strbuf path = STRBUF_INIT;
+	enum trace2_timer_id active_timer = TRACE2_NUMBER_OF_TIMERS;
 	size_t compact_size = 0;
+	uint64_t identity_hashes = 0;
+	uint64_t recovery_lookups = 0;
+	int trace_enabled = trace2_is_enabled();
 	int fd;
 	int result = -1;
 
@@ -997,25 +1001,36 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	    !cache->recovery_invalid &&
 	    (!load_recovery(cache) || !recovery_checksum_valid(cache)))
 		goto done;
+	active_timer = TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_COLLECT;
+	trace2_timer_start(active_timer);
 	for (size_t i = 0; i < cache->istate->cache_nr; i++) {
 		unsigned char mask = 1u << (i & 7);
 		const struct cache_entry *ce = cache->istate->cache[i];
 
 		if (!grep_worktree_cache_entry_eligible(ce))
 			continue;
+		if (trace_enabled)
+			identity_hashes++;
 		if (grep_worktree_entry_identity_hash(
 			    &cache->entry_identity, ce, &entry_oid))
 			goto done;
 		if (cache->different[i >> 3] & mask)
 			continue;
-		if (!(cache->equal[i >> 3] & mask) &&
-		    !recovery_contains_oid(cache, &entry_oid))
-			continue;
+		if (!(cache->equal[i >> 3] & mask)) {
+			if (trace_enabled)
+				recovery_lookups++;
+			if (!recovery_contains_oid(cache, &entry_oid))
+				continue;
+		}
 		oid_array_append(&entries, &entry_oid);
 		included[i >> 3] |= mask;
 	}
+	trace2_timer_stop(active_timer);
+	active_timer = TRACE2_NUMBER_OF_TIMERS;
 	if (entries.nr > UINT32_MAX)
 		goto done;
+	active_timer = TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_SORT;
+	trace2_timer_start(active_timer);
 	oid_array_sort(&entries);
 	for (size_t i = 0; i < entries.nr; i++) {
 		if (i && oideq(&entries.oid[i - 1], &entries.oid[i]))
@@ -1025,7 +1040,10 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	for (size_t i = 1;
 	     i < GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES; i++)
 		fanout[i] += fanout[i - 1];
+	trace2_timer_stop(active_timer);
 
+	active_timer = TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_SERIALIZE;
+	trace2_timer_start(active_timer);
 	f = hashfd(cache->repo->hash_algo, fd, get_lock_file_path(lock));
 	hashwrite_be32(f, GREP_WORKTREE_RECOVERY_SIGNATURE);
 	hashwrite_be32(f, GREP_WORKTREE_RECOVERY_VERSION);
@@ -1041,12 +1059,28 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 			  GREP_WORKTREE_ENTRY_IDENTITY_RAWSZ);
 	finalize_hashfile(f, recovery_checksum->hash, FSYNC_COMPONENT_NONE,
 			  CSUM_HASH_IN_STREAM);
+	trace2_timer_stop(active_timer);
+	active_timer = TRACE2_NUMBER_OF_TIMERS;
 	f = NULL;
 	*prepared_equal = included;
 	included = NULL;
 	result = 0;
 
 done:
+	if (active_timer != TRACE2_NUMBER_OF_TIMERS)
+		trace2_timer_stop(active_timer);
+	if (trace_enabled) {
+		/* Attempted work, including partial preparation, not publication. */
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/recovery_prepare/identity_hashes",
+				   identity_hashes);
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/recovery_prepare/recovery_lookups",
+				   recovery_lookups);
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/recovery_prepare/entries",
+				   entries.nr);
+	}
 	if (compact_map)
 		munmap((void *)compact_map, compact_size);
 	if (f)

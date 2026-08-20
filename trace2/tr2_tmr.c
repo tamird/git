@@ -150,6 +150,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "worktree-cache/recovery-prepare",
 		.want_per_thread_events = 0,
 	},
+	/* These disjoint phases leave preparation preflight and cleanup unclassified. */
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_COLLECT] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-collect",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_SORT] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-sort",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_SERIALIZE] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-serialize",
+		.want_per_thread_events = 0,
+	},
 	/* Process includes reads and hashing; worker sums can exceed wall time. */
 	[TRACE2_TIMER_ID_GREP_SOURCE_PROCESS] = {
 		.category = "grep",
