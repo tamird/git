@@ -99,6 +99,13 @@ struct inexact_rename_stats {
 	int rename_limit, limit_result;
 	uint64_t similarity_calls, size_rejected;
 	uint64_t content_compared, compared_bytes;
+	uint64_t score_bound_floor_ready, score_bound_rejectable;
+	uint64_t score_bound_rejectable_bytes;
+};
+
+struct similarity_score_bound {
+	unsigned long src_size, dst_size;
+	int score, valid;
 };
 
 static void trace_inexact_rename(struct repository *repo,
@@ -123,6 +130,13 @@ static void trace_inexact_rename(struct repository *repo,
 			  stats->content_compared);
 	trace2_data_intmax("diff", repo, "rename/inexact/compared_bytes",
 			  stats->compared_bytes);
+	trace2_data_intmax("diff", repo, "rename/inexact/score_bound_floor_ready",
+			  stats->score_bound_floor_ready);
+	trace2_data_intmax("diff", repo, "rename/inexact/score_bound_rejectable",
+			  stats->score_bound_rejectable);
+	trace2_data_intmax("diff", repo,
+			  "rename/inexact/score_bound_rejectable_bytes",
+			  stats->score_bound_rejectable_bytes);
 }
 
 struct inexact_prefetch_options {
@@ -165,7 +179,8 @@ static int estimate_similarity(struct repository *r,
 			       struct diff_filespec *dst,
 			       int minimum_score,
 			       struct diff_populate_filespec_options *dpf_opt,
-			       struct inexact_rename_stats *stats)
+			       struct inexact_rename_stats *stats,
+			       struct similarity_score_bound *bound)
 {
 	/* src points at a file that existed in the original tree (or
 	 * optionally a file in the destination tree) and dst points
@@ -185,6 +200,8 @@ static int estimate_similarity(struct repository *r,
 
 	if (stats)
 		stats->similarity_calls++;
+	if (bound)
+		*bound = (struct similarity_score_bound) { 0 };
 
 	/* We deal only with regular files.  Symlink renames are handled
 	 * only when they are exact matches --- in other words, no edits
@@ -229,6 +246,10 @@ static int estimate_similarity(struct repository *r,
 		return 0;
 	}
 
+	if (bound) {
+		bound->src_size = src->size;
+		bound->dst_size = dst->size;
+	}
 	dpf_opt->check_size_only = 0;
 
 	if (!src->cnt_data && diff_populate_filespec(r, src, dpf_opt))
@@ -243,6 +264,17 @@ static int estimate_similarity(struct repository *r,
 		stats->compared_bytes += dst->size;
 	}
 
+	if (bound && bound->src_size == src->size &&
+	    bound->dst_size == dst->size) {
+		/*
+		 * Full population can change the sizes.  For stable sizes,
+		 * copied bytes cannot exceed the smaller input.  Use the
+		 * final score's expression and cast, not the size inequality.
+		 */
+		bound->score = max_size ?
+			(int)(base_size * MAX_SCORE / max_size) : 0;
+		bound->valid = 1;
+	}
 	if (diffcore_count_changes(r, src, dst,
 				   &src->cnt_data, &dst->cnt_data,
 				   &src_copied, &literal_added))
@@ -1081,7 +1113,7 @@ static int find_basename_matches(struct diff_options *options,
 			two = rename_dst[dst_index].p->two;
 			score = estimate_similarity(options->repo, one, two,
 						    minimum_score, &dpf_options,
-						    NULL);
+						    NULL, NULL);
 
 			/* If sufficiently similar, record as rename pair */
 			if (score < minimum_score)
@@ -1108,7 +1140,9 @@ static int find_basename_matches(struct diff_options *options,
 }
 
 #define NUM_CANDIDATE_PER_DST 4
-static void record_if_better(struct diff_score m[], struct diff_score *o)
+static void record_if_better(struct diff_score m[], struct diff_score *o,
+			     struct inexact_rename_stats *stats,
+			     const struct similarity_score_bound *bound)
 {
 	int i, worst;
 
@@ -1117,6 +1151,19 @@ static void record_if_better(struct diff_score m[], struct diff_score *o)
 	for (i = 1; i < NUM_CANDIDATE_PER_DST; i++)
 		if (score_compare(&m[i], &m[worst]) > 0)
 			worst = i;
+
+	/* A valid worst slot means that all four candidates are present. */
+	if (stats && bound && bound->valid &&
+	    m[worst].dst >= 0 && m[worst].score > 0) {
+		stats->score_bound_floor_ready++;
+		/* Equal scores still need the existing basename tie-break. */
+		if (bound->score < m[worst].score) {
+			stats->score_bound_rejectable++;
+			/* Pair-weighted logical content, not I/O. */
+			stats->score_bound_rejectable_bytes += bound->src_size;
+			stats->score_bound_rejectable_bytes += bound->dst_size;
+		}
+	}
 
 	/* is it better than the worst one? */
 	if (score_compare(&m[worst], o) > 0)
@@ -1654,6 +1701,7 @@ void diffcore_rename_extended(struct diff_options *options,
 		for (j = 0; j < rename_src_nr; j++) {
 			struct diff_filespec *one = rename_src[j].p->one;
 			struct diff_score this_src;
+			struct similarity_score_bound score_bound;
 
 			assert(!one->rename_used || want_copies || break_idx);
 
@@ -1664,11 +1712,13 @@ void diffcore_rename_extended(struct diff_options *options,
 			this_src.score = estimate_similarity(options->repo,
 							     one, two,
 							     minimum_score,
-							     &dpf_options, stats);
+							     &dpf_options, stats,
+							     stats ? &score_bound : NULL);
 			this_src.name_score = basename_same(one, two);
 			this_src.dst = i;
 			this_src.src = j;
-			record_if_better(m, &this_src);
+			record_if_better(m, &this_src, stats,
+					 stats ? &score_bound : NULL);
 			/*
 			 * Once we run estimate_similarity,
 			 * We do not need the text anymore.
