@@ -100,6 +100,51 @@ wait_for_file_sum () {
 	return 1
 }
 
+test_content_index_ipc_query () {
+	test_grep '"category":"grep","key":"content_index_ipc_query"' "$1" &&
+	awk -v input_objects="$2" -v unique_objects="$3" -v requests="$4" \
+		-v expected_unknown="$5" -v expected_impossible="$6" \
+		-v expected_maybe="$7" '
+	BEGIN {
+		key = "\"category\":\"grep\",\"key\":\"content_index_ipc_query\""
+		prefix = key ",\"value\":{"
+		split("input_objects unique_objects requests_planned requests_validated unknown impossible maybe outcome", names, " ")
+	}
+	index($0, key) {
+		records++
+		if (!index($0, "\"event\":\"data_json\"") || !index($0, prefix)) {
+			bad = 1
+			next
+		}
+		payload = substr($0, index($0, prefix) + length(prefix))
+		if (substr(payload, length(payload) - 1) != "}}" ||
+		    split(substr(payload, 1, length(payload) - 2), fields, ",") != 8) {
+			bad = 1
+			next
+		}
+		for (i = 1; i <= 8; i++) {
+			field_prefix = "\"" names[i] "\":"
+			value = substr(fields[i], length(field_prefix) + 1)
+			if (index(fields[i], field_prefix) != 1 || value !~ /^[0-9]+$/)
+				bad = 1
+			values[i] = value + 0
+		}
+		if (values[1] != input_objects || values[2] != unique_objects ||
+		    values[3] != requests || values[4] != requests || values[8] != 0 ||
+		    values[5] + values[6] + values[7] != unique_objects ||
+		    (expected_unknown >= 0 && values[5] != expected_unknown) ||
+		    (expected_impossible >= 0 && values[6] != expected_impossible) ||
+		    (expected_maybe >= 0 && values[7] != expected_maybe))
+			bad = 1
+	}
+	END {
+		if (records != 1 || bad) {
+			print "expected one valid content-index IPC query record"
+			exit 1
+		}
+	}' "$1"
+}
+
 test_expect_success 'setup' '
 	if ! test_have_prereq WINDOWS
 	then
@@ -421,6 +466,7 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 		>actual &&
 	test_must_be_empty actual &&
 	test_grep ! "$worker_events" repeated-fanout.trace &&
+	test_content_index_ipc_query repeated-fanout.trace 32768 1 1 -1 -1 -1 &&
 	test_seq 1 32768 |
 	awk "{
 		data = \"fanout \" \$1 \"\\n\"
@@ -455,11 +501,13 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 	test_must_be_empty actual &&
 	test_grep "$worker_events" worktree-fanout.trace >fanout-events &&
 	test_line_count = 2 fanout-events &&
+	test_content_index_ipc_query worktree-fanout.trace 32768 32768 2 -1 -1 -1 &&
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/worktree-point.trace" \
 		git grep -F "absent daemon fanout" -- grep-fanout/point \
 		>actual &&
 	test_must_be_empty actual &&
 	test_grep ! "$worker_events" worktree-point.trace &&
+	test_content_index_ipc_query worktree-point.trace 92 92 1 -1 -1 -1 &&
 	fanout_workers=$(test-tool online-cpus) &&
 	if test "$fanout_workers" -gt 8
 	then
@@ -470,7 +518,9 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 		>actual &&
 	test_must_be_empty actual &&
 	test_grep "$worker_events" cached-fanout.trace >fanout-events &&
-	test_line_count = "$fanout_workers" fanout-events
+	test_line_count = "$fanout_workers" fanout-events &&
+	test_content_index_ipc_query cached-fanout.trace 32768 32768 \
+		"$fanout_workers" -1 -1 -1
 '
 
 test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in memory' '
@@ -2100,6 +2150,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-absent.trace &&
 	test_trace2_data grep content_index_negative_cache_entries 1 \
 		<overlay-absent.trace &&
+	test_content_index_ipc_query overlay-absent.trace 1 1 1 0 1 0 &&
 	absent_oid=$(git rev-parse :overlay-absent) &&
 	absent_object=.git/objects/$(test_oid_to_path "$absent_oid") &&
 	mv "$absent_object" "$absent_object.save" &&
@@ -2124,6 +2175,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-present.trace &&
 	test_trace2_data grep content_index_overlay_rejected 0 \
 		<overlay-present.trace &&
+	test_content_index_ipc_query overlay-present.trace 1 1 1 0 0 1 &&
 	echo "overlay-present:overlay present needle 7818" >expect &&
 	env GIT_TEST_GREP_INDEX_OVERLAY_SAMPLE_SIZE=1 \
 		GIT_TRACE2_EVENT="$PWD/overlay-sample-productive.trace" \
@@ -2159,6 +2211,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		git grep --cached "overlay absent missing needle 7818" \
 		-- overlay-missing 2>err-missing &&
 	test_grep "unable to read" err-missing &&
+	test_content_index_ipc_query overlay-missing.trace 1 1 1 1 0 0 &&
 	mv "$missing_object.save" "$missing_object" &&
 	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
 		git grep --no-content-index \
