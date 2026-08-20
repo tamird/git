@@ -83,8 +83,7 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 		git diff-index -l4 -C --find-copies-harder $tree >current &&
 	compare_diff_raw current expected &&
 	pair_bytes=$(($(wc -c <COPYING) + $(wc -c <COPYING.1))) &&
-	score_bound_bytes=$(($(wc -c <zz-bound) + $(wc -c <COPYING.1))) &&
-	compared_bytes=$((4 * pair_bytes + score_bound_bytes)) &&
+	compared_bytes=$((4 * pair_bytes)) &&
 	test_trace2_data diff rename/inexact/sources 6 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/destinations 1 \
@@ -97,16 +96,16 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/size_rejected 1 \
 		<rename-inexact.trace &&
-	test_trace2_data diff rename/inexact/content_compared 5 \
+	test_trace2_data diff rename/inexact/content_compared 4 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/compared_bytes "$compared_bytes" \
 		<rename-inexact.trace &&
-	test_trace2_data diff rename/inexact/score_bound_floor_ready 1 \
+	test_trace2_data diff rename/inexact/score_bound_floor_ready 0 \
 		<rename-inexact.trace &&
-	test_trace2_data diff rename/inexact/score_bound_rejectable 1 \
+	test_trace2_data diff rename/inexact/score_bound_rejectable 0 \
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/score_bound_rejectable_bytes \
-		"$score_bound_bytes" <rename-inexact.trace &&
+		0 <rename-inexact.trace &&
 	test "$(grep -c \
 		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
 		rename-inexact.trace)" = 11

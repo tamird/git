@@ -178,6 +178,7 @@ static int estimate_similarity(struct repository *r,
 			       struct diff_filespec *src,
 			       struct diff_filespec *dst,
 			       int minimum_score,
+			       int candidate_score_floor,
 			       struct diff_populate_filespec_options *dpf_opt,
 			       struct inexact_rename_stats *stats,
 			       struct similarity_score_bound *bound)
@@ -196,6 +197,8 @@ static int estimate_similarity(struct repository *r,
 	 * call into this function in that case.
 	 */
 	unsigned long max_size, delta_size, base_size, src_copied, literal_added;
+	unsigned long compared_src_size, compared_dst_size;
+	struct similarity_score_bound score_bound = { 0 };
 	int score;
 
 	if (stats)
@@ -246,10 +249,8 @@ static int estimate_similarity(struct repository *r,
 		return 0;
 	}
 
-	if (bound) {
-		bound->src_size = src->size;
-		bound->dst_size = dst->size;
-	}
+	score_bound.src_size = src->size;
+	score_bound.dst_size = dst->size;
 	dpf_opt->check_size_only = 0;
 
 	if (!src->cnt_data && diff_populate_filespec(r, src, dpf_opt))
@@ -257,24 +258,42 @@ static int estimate_similarity(struct repository *r,
 	if (!dst->cnt_data && diff_populate_filespec(r, dst, dpf_opt))
 		return 0;
 
-	if (stats) {
-		stats->content_compared++;
-		/* Pair-weighted logical content, not I/O or newly hashed bytes. */
-		stats->compared_bytes += src->size;
-		stats->compared_bytes += dst->size;
-	}
-
-	if (bound && bound->src_size == src->size &&
-	    bound->dst_size == dst->size) {
+	compared_src_size = src->size;
+	compared_dst_size = dst->size;
+	if (score_bound.src_size == src->size &&
+	    score_bound.dst_size == dst->size) {
 		/*
 		 * Full population can change the sizes.  For stable sizes,
 		 * copied bytes cannot exceed the smaller input.  Use the
 		 * final score's expression and cast, not the size inequality.
 		 */
-		bound->score = max_size ?
+		score_bound.score = max_size ?
 			(int)(base_size * MAX_SCORE / max_size) : 0;
-		bound->valid = 1;
+		score_bound.valid = 1;
 	}
+
+	if (candidate_score_floor > 0 && score_bound.valid &&
+	    score_bound.score < candidate_score_floor) {
+		/*
+		 * Counting changes also creates persistent span-hash caches.
+		 * Preserve that work before skipping only the comparison.
+		 */
+		diffcore_prepare_count_changes(r, src, dst);
+		if (score_bound.src_size == src->size &&
+		    score_bound.dst_size == dst->size)
+			return 0;
+		score_bound.valid = 0;
+	}
+
+	/* The counters and shadow bound describe actual comparisons only. */
+	if (stats) {
+		stats->content_compared++;
+		/* Pair-weighted logical content, not I/O or newly hashed bytes. */
+		stats->compared_bytes += compared_src_size;
+		stats->compared_bytes += compared_dst_size;
+	}
+	if (bound)
+		*bound = score_bound;
 	if (diffcore_count_changes(r, src, dst,
 				   &src->cnt_data, &dst->cnt_data,
 				   &src_copied, &literal_added))
@@ -1112,7 +1131,7 @@ static int find_basename_matches(struct diff_options *options,
 			one = rename_src[src_index].p->one;
 			two = rename_dst[dst_index].p->two;
 			score = estimate_similarity(options->repo, one, two,
-						    minimum_score, &dpf_options,
+						    minimum_score, 0, &dpf_options,
 						    NULL, NULL);
 
 			/* If sufficiently similar, record as rename pair */
@@ -1140,17 +1159,21 @@ static int find_basename_matches(struct diff_options *options,
 }
 
 #define NUM_CANDIDATE_PER_DST 4
+static int find_worst_candidate(struct diff_score m[])
+{
+	int i, worst = 0;
+
+	for (i = 1; i < NUM_CANDIDATE_PER_DST; i++)
+		if (score_compare(&m[i], &m[worst]) > 0)
+			worst = i;
+	return worst;
+}
+
 static void record_if_better(struct diff_score m[], struct diff_score *o,
 			     struct inexact_rename_stats *stats,
 			     const struct similarity_score_bound *bound)
 {
-	int i, worst;
-
-	/* find the worst one */
-	worst = 0;
-	for (i = 1; i < NUM_CANDIDATE_PER_DST; i++)
-		if (score_compare(&m[i], &m[worst]) > 0)
-			worst = i;
+	int worst = find_worst_candidate(m);
 
 	/* A valid worst slot means that all four candidates are present. */
 	if (stats && bound && bound->valid &&
@@ -1702,6 +1725,7 @@ void diffcore_rename_extended(struct diff_options *options,
 			struct diff_filespec *one = rename_src[j].p->one;
 			struct diff_score this_src;
 			struct similarity_score_bound score_bound;
+			int worst, candidate_score_floor;
 
 			assert(!one->rename_used || want_copies || break_idx);
 
@@ -1709,9 +1733,13 @@ void diffcore_rename_extended(struct diff_options *options,
 			    diff_unmodified_pair(rename_src[j].p))
 				continue;
 
+			worst = find_worst_candidate(m);
+			candidate_score_floor = m[worst].dst >= 0 ?
+				m[worst].score : 0;
 			this_src.score = estimate_similarity(options->repo,
 							     one, two,
 							     minimum_score,
+							     candidate_score_floor,
 							     &dpf_options, stats,
 							     stats ? &score_bound : NULL);
 			this_src.name_score = basename_same(one, two);
