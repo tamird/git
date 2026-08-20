@@ -292,7 +292,7 @@ test_expect_success '--stdin-packs=follow walks into unknown packs' '
 		rm -f follow-event.log &&
 		P=$(GIT_TRACE2_EVENT="$(pwd)/follow-event.log" \
 			git pack-objects --stdin-packs=follow $packdir/pack <in) &&
-		for key in input-us revision-walk-us
+		for key in input-us revision-walk-us revision-prepare-us
 		do
 			test_grep ! "\"category\":\"pack-objects\",\"key\":\"stdin-packs/$key\"" \
 				follow-event.log || return 1
@@ -383,7 +383,7 @@ test_expect_success '--stdin-packs does not perform backfill fetch' '
 		test_line_count -gt 1 packs &&
 		GIT_TRACE2_EVENT="$(pwd)/event.log" git pack-objects --stdin-packs pack <packs &&
 		test_grep ! "\"event\":\"child_start\"" event.log &&
-		for key in input-us revision-walk-us
+		for key in input-us revision-walk-us revision-prepare-us
 		do
 			grep "\"category\":\"pack-objects\",\"key\":\"stdin-packs/$key\"" \
 				event.log >timing &&
