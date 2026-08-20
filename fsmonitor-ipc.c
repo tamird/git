@@ -162,6 +162,10 @@ int fsmonitor_ipc__send_query(const char *since_token,
 	struct ipc_client_connect_options options
 		= IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	const char *tok = since_token ? since_token : "";
+#ifndef GIT_WINDOWS_NATIVE
+	int connect_errno = 0;
+	int have_connect_errno = 0;
+#endif
 #ifdef __APPLE__
 	struct strbuf request = STRBUF_INIT;
 #endif
@@ -189,6 +193,13 @@ int fsmonitor_ipc__send_query(const char *since_token,
 try_again:
 	state = ipc_client_try_connect(fsmonitor_ipc__get_path(the_repository),
 						&options, &connection);
+#ifndef GIT_WINDOWS_NATIVE
+	/* Only the Unix IPC backend preserves errno on OTHER_ERROR. */
+	if (state == IPC_STATE__OTHER_ERROR) {
+		connect_errno = errno;
+		have_connect_errno = 1;
+	}
+#endif
 
 	switch (state) {
 	case IPC_STATE__LISTENING:
@@ -255,6 +266,12 @@ try_again:
 
 done:
 	trace2_region_leave("fsm_client", "query", NULL);
+#ifndef GIT_WINDOWS_NATIVE
+	/* Keep the failure visible at the default event nesting depth. */
+	if (have_connect_errno)
+		trace2_data_intmax("fsm_client", NULL, "query/connect-errno",
+				   connect_errno);
+#endif
 #ifdef __APPLE__
 	strbuf_release(&request);
 #endif
