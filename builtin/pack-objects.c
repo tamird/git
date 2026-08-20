@@ -4120,6 +4120,7 @@ static void read_stdin_packs(struct repository *repo,
 		trace2_is_enabled();
 	struct rev_info revs;
 	uint64_t start_ns = 0;
+	uint64_t prepare_ns = 0;
 
 	/*
 	 * The revision walk may hit objects that are promised, only. As the
@@ -4170,14 +4171,22 @@ static void read_stdin_packs(struct repository *repo,
 		start_ns = getnanotime();
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
+	if (trace_phases)
+		prepare_ns = getnanotime() - start_ns;
 	traverse_commit_list(&revs,
 			     show_commit_pack_hint,
 			     show_object_pack_hint,
 			     &mode);
-	if (trace_phases)
+	if (trace_phases) {
+		uint64_t end_ns = getnanotime();
+
 		trace2_data_intmax("pack-objects", repo,
 				   "stdin-packs/revision-walk-us",
-				   (getnanotime() - start_ns) / 1000);
+				   (end_ns - start_ns) / 1000);
+		trace2_data_intmax("pack-objects", repo,
+				   "stdin-packs/revision-prepare-us",
+				   prepare_ns / 1000);
+	}
 
 	release_revisions(&revs);
 
