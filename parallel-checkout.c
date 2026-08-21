@@ -766,9 +766,12 @@ int run_parallel_checkout(struct checkout *state, int num_workers, int threshold
 	} else {
 		struct pc_worker *workers;
 
-		if (trace_phases)
+		if (trace_phases) {
+			trace2_counter_add(TRACE2_COUNTER_ID_PCHECKOUT_PARALLEL_ITEMS,
+					   parallel_checkout.nr);
 			trace2_region_enter("pcheckout", "setup",
 					    the_repository);
+		}
 		workers = setup_workers(state, num_workers);
 		if (trace_phases)
 			trace2_region_leave("pcheckout", "setup",

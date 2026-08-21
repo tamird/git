@@ -328,6 +328,7 @@ TEST_DATA_BY_TEST = {
         "//t:test-binary-1.png",
     ],
     "t3401-rebase-and-am-rename": [
+        "//t:lib-parallel-checkout",
         "//t:lib-rebase",
     ],
     "t3403-rebase-skip": [

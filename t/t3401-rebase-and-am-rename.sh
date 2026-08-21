@@ -74,13 +74,102 @@ test_expect_success 'rebase --merge: directory rename detected' '
 
 		git checkout B^0 &&
 
-		git -c merge.directoryRenames=true rebase --merge A &&
+		. "$TEST_DIRECTORY"/lib-parallel-checkout.sh &&
+		trace_file="$(pwd)/trace-rebase" &&
+		rm -f "$trace_file" &&
+		# Restore the default nesting limit, overridden by test-lib.sh.
+		GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$trace_file" \
+		GIT_TEST_CHECKOUT_WORKERS=2 \
+			git -c merge.directoryRenames=true rebase --merge A &&
 
 		git ls-files -s >out &&
 		test_line_count = 5 out &&
 
 		test_path_is_file y/d &&
-		test_path_is_missing x/d
+		test_path_is_missing x/d &&
+
+		sed -n "/\"event\":\"cmd_name\".*\"name\":\"rebase\"/s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" \
+			"$trace_file" >rebase-sid &&
+		test_line_count = 1 rebase-sid &&
+		read root_sid <rebase-sid &&
+		test -n "$root_sid" &&
+		case "$root_sid" in
+		*/*) return 1 ;;
+		esac &&
+		grep -F "\"sid\":\"$root_sid\"" "$trace_file" >root-trace &&
+		test_checkout_worker_sids "$trace_file" 4 &&
+
+		sed -n "/\"event\":\"child_start\".*\"argv\":\\[\"git\",\"checkout--worker\"/s/.*\"child_id\":\\([0-9][0-9]*\\),.*/\\1/p" \
+			root-trace >worker-child-ids &&
+		test_line_count = 4 worker-child-ids &&
+		sort -u worker-child-ids >worker-child-ids.sorted &&
+		test_line_count = 4 worker-child-ids.sorted &&
+		while read child_id
+		do
+			grep "\"event\":\"child_exit\".*\"child_id\":$child_id," \
+				root-trace >child-exit &&
+			test_line_count = 1 child-exit &&
+			test_grep "\"code\":0," child-exit ||
+			return 1
+		done <worker-child-ids &&
+
+		test_write_lines start "exit 0" "atexit 0" >expect-lifecycle &&
+		cat rebase-sid worker-sids >checkout-sids &&
+		total=0 &&
+		while read sid
+		do
+			grep -F "\"sid\":\"$sid\"" "$trace_file" >process-trace &&
+			sed -n \
+				-e "s/.*\"event\":\"start\".*/start/p" \
+				-e "s/.*\"event\":\"exit\".*\"code\":\\([0-9][0-9]*\\)}.*/exit \\1/p" \
+				-e "s/.*\"event\":\"atexit\".*\"code\":\\([0-9][0-9]*\\)}.*/atexit \\1/p" \
+				process-trace >actual-lifecycle &&
+			test_cmp expect-lifecycle actual-lifecycle ||
+			return 1
+
+			if test "$sid" = "$root_sid"
+			then
+				continue
+			fi &&
+
+			case "$sid" in
+			"$root_sid"/*/*) return 1 ;;
+			"$root_sid"/?*) ;;
+			*) return 1 ;;
+			esac &&
+			items=$(sed -n "/\"event\":\"data\".*\"category\":\"pcheckout\",\"key\":\"worker\/items\"/s/.*\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" process-trace) &&
+			case "$items" in
+			1|2) ;;
+			*) return 1 ;;
+			esac &&
+			for pair in "items $items" "written $items" "collided 0" "failed 0"
+			do
+				set -- $pair &&
+				grep "\"event\":\"data\".*\"category\":\"pcheckout\",\"key\":\"worker/$1\"," \
+					process-trace >worker-count &&
+				test_line_count = 1 worker-count &&
+				test_grep "\"value\":\"$2\"}" worker-count ||
+				return 1
+			done &&
+			total=$((total + items)) ||
+			return 1
+		done <checkout-sids &&
+		test "$total" = 6 &&
+
+		# Only checkout_onto is visible; the nested replay also writes two.
+		grep "\"event\":\"data\".*\"category\":\"pcheckout\",\"key\":\"queue/items\"," \
+			root-trace >queue-count &&
+		test_line_count = 1 queue-count &&
+		test_grep "\"nesting\":2," queue-count &&
+		test_grep "\"value\":\"4\"}" queue-count &&
+
+		test_grep ! "\"event\":\"th_counter\".*\"category\":\"pcheckout\",\"name\":\"parallel/items-total\"," \
+			root-trace &&
+		grep "\"event\":\"counter\".*\"category\":\"pcheckout\",\"name\":\"parallel/items-total\"," \
+			root-trace >parallel-count &&
+		test_line_count = 1 parallel-count &&
+		test_grep "\"count\":6}" parallel-count
 	)
 '
 

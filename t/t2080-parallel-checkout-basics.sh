@@ -42,6 +42,27 @@ test_queue_entry_timer () {
 	fi
 }
 
+# Check the summary-only number of items selected for parallel checkout.
+test_parallel_checkout_items () {
+	local trace_file="$1" expected="$2" &&
+
+	test_grep ! \
+		"\"event\":\"th_counter\".*\"category\":\"pcheckout\",\"name\":\"parallel/items-total\"," \
+		"$trace_file" &&
+	if test "$expected" = absent
+	then
+		test_grep ! \
+			"\"event\":\"counter\".*\"category\":\"pcheckout\",\"name\":\"parallel/items-total\"," \
+			"$trace_file"
+	else
+		grep \
+			"\"event\":\"counter\".*\"category\":\"pcheckout\",\"name\":\"parallel/items-total\"," \
+			"$trace_file" >parallel-count &&
+		test_line_count = 1 parallel-count &&
+		test_grep "\"count\":$expected}" parallel-count
+	fi
+}
+
 # Test parallel-checkout with a branch switch containing a variety of file
 # creations, deletions, and modifications, involving different entry types.
 # The branches B1 and B2 have the following paths:
@@ -266,7 +287,13 @@ do
 			""|*[!0-9]*|0*) return 1 ;;
 			esac
 		fi &&
-		test "$attrs_and_enqueue" -eq "$((queued_entries + write_entries))"
+		test "$attrs_and_enqueue" -eq "$((queued_entries + write_entries))" &&
+		if test "$mode" = parallel
+		then
+			test_parallel_checkout_items "$root_trace" "$queued_entries"
+		else
+			test_parallel_checkout_items "$root_trace" absent
+		fi
 	'
 done
 
@@ -451,7 +478,8 @@ test_expect_success 'parallel checkout traces worker load' '
 				"odb stream-to-fd/write 2" \
 				"odb stream-to-fd/close 2" ||
 			return 1
-		done <worker-sids
+		done <worker-sids &&
+		test_parallel_checkout_items "$root_trace" 4
 	)
 '
 
@@ -611,7 +639,8 @@ test_expect_success 'branch switch reports parallel checkout failures' '
 					"odb stream-to-fd/write 1" \
 					"odb stream-to-fd/close 1"
 			fi || return 1
-		done <worker-sids
+		done <worker-sids &&
+		test_parallel_checkout_items "$root_trace" 2
 	)
 '
 

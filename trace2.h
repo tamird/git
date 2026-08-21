@@ -609,6 +609,9 @@ enum trace2_counter_id {
 	TRACE2_COUNTER_ID_FSYNC_WRITEOUT_ONLY,
 	TRACE2_COUNTER_ID_FSYNC_HARDWARE_FLUSH,
 
+	/* Items selected for parallel checkout, not successful writes. */
+	TRACE2_COUNTER_ID_PCHECKOUT_PARALLEL_ITEMS,
+
 	/* Add additional counter definitions before here. */
 	TRACE2_NUMBER_OF_COUNTERS
 };
