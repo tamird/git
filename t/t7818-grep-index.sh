@@ -1992,6 +1992,40 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
 		<tree-positive.trace &&
+	git grep "present needle" "$attributes_commit" -- \
+		":(glob)**/binary" ":(glob)nested/**/text" \
+		>actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	git grep "present needle" "$attributes_commit" -- \
+		nested/ ":(glob)other/**/text" ":(glob)**/te*" \
+		>actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	test_expect_code 1 git grep "present needle" "$attributes_commit" -- \
+		":(glob)nested/**/text" ":(glob)**/text" \
+		":(exclude)**/text" >actual-tree-positive &&
+	test_must_be_empty actual-tree-positive &&
+	for mixed_root in nested other
+	do
+		if test "$mixed_root" = nested
+		then
+			mixed_basename=absent
+		else
+			mixed_basename=text
+		fi &&
+		git grep --no-content-index "present needle" \
+			"$attributes_commit" -- \
+			":(glob)$mixed_root/**/text" ":(glob)**/$mixed_basename" \
+			>actual-tree-positive &&
+		test_cmp expect-tree-positive actual-tree-positive &&
+		>tree-positive.trace &&
+		env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+			git grep "present needle" "$attributes_commit" -- \
+				":(glob)$mixed_root/**/text" \
+				":(glob)**/$mixed_basename" >actual-tree-positive &&
+		test_cmp expect-tree-positive actual-tree-positive &&
+		test_trace2_data grep content_index_tree_basename_rejected 1 \
+			<tree-positive.trace || return 1
+	done &&
 	>tree-positive.trace &&
 	test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 		git grep "present needle" "$attributes_commit" -- \

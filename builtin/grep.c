@@ -2642,11 +2642,15 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 					}
 					continue;
 				}
-				if (grep_tree_rooted_recursive_basename(item, &basename) &&
-				    !git_fnmatch(item, basename, entry.path, 0)) {
-					basename_matches = 1;
+				if (grep_tree_rooted_recursive_basename(item, &basename))
+					basename_matches =
+						!git_fnmatch(item, basename, entry.path, 0);
+				else
+					basename_matches =
+						grep_tree_recursive_basename_matches(
+							item, entry.path, te_len);
+				if (basename_matches)
 					break;
-				}
 			}
 			if (!basename_matches) {
 				if (query->trace_enabled)
@@ -3053,6 +3057,8 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			has_rooted_recursive_basename = 1;
 			continue;
 		}
+		if (grep_tree_recursive_basename(item, &basename))
+			continue;
 		if (item->prefix || item->magic || !item->len ||
 		    item->nowildcard_len != item->len)
 			query.rooted_recursive_basename_pathspec = 0;
