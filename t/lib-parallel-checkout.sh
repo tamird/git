@@ -36,6 +36,56 @@ test_checkout_workers () {
 	rm "$trace_file"
 } 8>&2 2>&4
 
+# Select the exact worker SIDs; callers isolate each SID before checking timers.
+test_checkout_worker_sids () {
+	sed -n "/\"event\":\"cmd_name\".*\"name\":\"checkout--worker\"/s/.*\"sid\":\"\([^\"]*\)\".*/\1/p" \
+		"$1" >worker-sids &&
+	test_line_count = "$2" worker-sids &&
+	sort -u worker-sids >worker-sids.sorted &&
+	test_line_count = "$2" worker-sids.sorted
+}
+
+# Check one summary-only timer in an exact-SID trace.
+test_checkout_content_timer () {
+	local trace_file="$1" category="$2" name="$3" expected="$4" &&
+	local intervals &&
+
+	test_grep ! \
+		"\"event\":\"th_timer\".*\"category\":\"$category\",\"name\":\"$name\"" \
+		"$trace_file" &&
+	test_grep ! \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"$category\",\"label\":\"$name\"" \
+		"$trace_file" &&
+	if test "$expected" = absent
+	then
+		test_grep ! \
+			"\"event\":\"timer\".*\"category\":\"$category\",\"name\":\"$name\"," \
+			"$trace_file"
+	else
+		grep \
+			"\"event\":\"timer\".*\"category\":\"$category\",\"name\":\"$name\"," \
+			"$trace_file" >phase-count &&
+		test_line_count = 1 phase-count &&
+		intervals=$(sed -n \
+			"s#.*\"intervals\":\([0-9][0-9]*\),.*#\1#p" phase-count) &&
+		case "$intervals" in
+		""|*[!0-9]*|0*) return 1 ;;
+		esac &&
+		test "$intervals" = "$expected"
+	fi
+}
+
+test_checkout_content_timers () {
+	local trace_file="$1" pair &&
+	shift &&
+	for pair
+	do
+		set -- $pair &&
+		test_checkout_content_timer "$trace_file" "$1" "$2" "$3" ||
+		return 1
+	done
+}
+
 # Verify that both the working tree and the index were created correctly
 verify_checkout () {
 	if test $# -ne 1
