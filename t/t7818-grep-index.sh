@@ -192,10 +192,12 @@ test_content_index_ipc_query () {
 }
 
 test_content_index_ipc_backend () {
-	awk -v expected_failures="$2" '
+	awk -v expected_failures="$2" -v expected_eof="$3" '
 	BEGIN {
 		marker = "\"category\":\"test-grep-index-ipc\",\"key\":\"query-protocol/"
 		key = "\"category\":\"grep\",\"key\":\"content_index_ipc_backend\""
+		capability_key = "\"category\":\"grep\",\"key\":\"content_index_ipc_capability\""
+		capability_prefix = capability_key ",\"value\":\""
 		prefix = key ",\"value\":{"
 		head = "\"unique_objects\":1,\"requests_planned\":1,\"requests_validated\":"
 		success = head "1,\"persistent\":0,\"ready_reused\":1,\"cold_attempt\":0,\"unavailable_prebuild\":0,\"waited\":0,\"outcome\":0}}"
@@ -206,6 +208,8 @@ test_content_index_ipc_backend () {
 			bad = 1
 		active = 1
 		records = 0
+		capability_records = 0
+		capability_expected = 0
 		if (index($0, "\"value\":\"0\"}"))
 			expected = 0
 		else if (index($0, "\"value\":\"1\"}"))
@@ -214,6 +218,26 @@ test_content_index_ipc_backend () {
 			expected = 2
 		else
 			bad = 1
+	}
+	index($0, marker "capability\"") {
+		if (!active || capability_expected)
+			capability_bad = 1
+		capability_expected = 0
+		for (i = 1; i <= 7; i++)
+			if (index($0, "\"value\":\"" i "\"}"))
+				capability_expected = i
+		if (!capability_expected ||
+		    (expected && capability_expected != 1) ||
+		    (!expected && capability_expected == 1))
+			capability_bad = 1
+	}
+	index($0, capability_key) {
+		capability_records++
+		if (!active || !capability_expected ||
+		    !index($0, "\"event\":\"data\"") ||
+		    !index($0, capability_prefix) ||
+		    substr($0, index($0, capability_prefix) + length(capability_prefix)) != capability_expected "\"}")
+			capability_bad = 1
 	}
 	index($0, key) {
 		records++
@@ -226,13 +250,34 @@ test_content_index_ipc_backend () {
 	index($0, marker "end\"") {
 		if (!active || records != (expected != 0))
 			bad = 1
+		if (!capability_expected || capability_records > 1)
+			capability_bad = 1
+		if (!capability_records)
+			missing_capability++
+		capability_counts[capability_expected]++
 		counts[expected]++
 		active = 0
 	}
 	END {
-		if (active || bad || counts[0] != 5 || counts[1] != 1 ||
-		    counts[2] != expected_failures) {
+		# Five reply failures and the missing endpoint have no backend record.
+		if (active || bad || counts[0] != 6 + expected_eof ||
+		    counts[1] != 1 || counts[2] != expected_failures) {
 			print "unexpected content-index IPC backend records"
+			exit 1
+		}
+		if (capability_bad ||
+		    capability_counts[1] != 1 + expected_failures ||
+		    capability_counts[2] != 1 ||
+		    capability_counts[3] != expected_eof ||
+		    capability_counts[4] != 1 ||
+		    capability_counts[5] != 2 ||
+		    capability_counts[6] != 1 ||
+		    capability_counts[7] != 1) {
+			print "unexpected content-index IPC capability records"
+			exit 1
+		}
+		if (missing_capability) {
+			print "missing content-index IPC capability records: " missing_capability
 			exit 1
 		}
 	}' "$1"
@@ -393,12 +438,14 @@ test_expect_success 'content index query wire versions' '
 			test-tool grep-index-ipc query-protocol traced &&
 		if test_have_prereq WINDOWS
 		then
-			backend_failures=11
+			backend_failures=11 &&
+			capability_eof=0
 		else
-			backend_failures=12
+			backend_failures=12 &&
+			capability_eof=1
 		fi &&
 		test_content_index_ipc_backend query-protocol.trace \
-			"$backend_failures"
+			"$backend_failures" "$capability_eof"
 	fi
 '
 

@@ -1952,14 +1952,27 @@ void grep_index_ipc_release_workers(struct repository *repo,
 			"grep", repo, "worker_lease/released", 1);
 }
 
-static int grep_index_ipc_query_diagnostic_is_available(const char *path)
+/* Values are exposed by grep content_index_ipc_capability Trace2 data. */
+enum grep_index_ipc_capability_outcome {
+	GREP_INDEX_IPC_CAPABILITY_AVAILABLE = 1,
+	GREP_INDEX_IPC_CAPABILITY_CONNECT_FAILED = 2,
+	GREP_INDEX_IPC_CAPABILITY_SEND_FAILED = 3,
+	GREP_INDEX_IPC_CAPABILITY_EMPTY_REPLY = 4,
+	GREP_INDEX_IPC_CAPABILITY_INVALID_LENGTH = 5,
+	GREP_INDEX_IPC_CAPABILITY_INVALID_SIGNATURE = 6,
+	GREP_INDEX_IPC_CAPABILITY_INVALID_VERSION = 7,
+};
+
+static enum grep_index_ipc_capability_outcome
+grep_index_ipc_query_capability(const char *path)
 {
 	struct ipc_client_connect_options options =
 		IPC_CLIENT_CONNECT_OPTIONS_INIT;
 	struct ipc_client_connection *connection = NULL;
 	struct strbuf request = STRBUF_INIT;
 	struct strbuf response = STRBUF_INIT;
-	int available = 0;
+	enum grep_index_ipc_capability_outcome outcome =
+		GREP_INDEX_IPC_CAPABILITY_CONNECT_FAILED;
 
 	grep_index_ipc_put_u32(
 		&request, GREP_INDEX_IPC_CAPABILITY_REQUEST_SIGNATURE);
@@ -1967,20 +1980,29 @@ static int grep_index_ipc_query_diagnostic_is_available(const char *path)
 	options.wait_if_busy = 1;
 	options.uds_disallow_chdir = 1;
 	if (ipc_client_try_connect(path, &options, &connection) !=
-	    IPC_STATE__LISTENING ||
-	    ipc_client_send_command_to_connection_gently(
+	    IPC_STATE__LISTENING)
+		goto cleanup;
+	outcome = GREP_INDEX_IPC_CAPABILITY_SEND_FAILED;
+	if (ipc_client_send_command_to_connection_gently(
 		    connection, request.buf, request.len, &response))
 		goto cleanup;
-	available = response.len == GREP_INDEX_IPC_CAPABILITY_SIZE &&
-		get_be32(response.buf) ==
-			GREP_INDEX_IPC_CAPABILITY_RESPONSE_SIGNATURE &&
-		get_be32(response.buf + 4) == GREP_INDEX_IPC_DIAGNOSTIC_VERSION;
+	if (!response.len)
+		outcome = GREP_INDEX_IPC_CAPABILITY_EMPTY_REPLY;
+	else if (response.len != GREP_INDEX_IPC_CAPABILITY_SIZE)
+		outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_LENGTH;
+	else if (get_be32(response.buf) !=
+		 GREP_INDEX_IPC_CAPABILITY_RESPONSE_SIGNATURE)
+		outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_SIGNATURE;
+	else if (get_be32(response.buf + 4) != GREP_INDEX_IPC_DIAGNOSTIC_VERSION)
+		outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_VERSION;
+	else
+		outcome = GREP_INDEX_IPC_CAPABILITY_AVAILABLE;
 
 cleanup:
 	ipc_client_close_connection(connection);
 	strbuf_release(&response);
 	strbuf_release(&request);
-	return available;
+	return outcome;
 }
 
 static void *grep_index_ipc_query_thread(void *data)
@@ -2198,8 +2220,14 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		    threads_nr > max_parallel_requests)
 			threads_nr = max_parallel_requests;
 	}
-	if (trace2_is_enabled())
-		diagnostic = grep_index_ipc_query_diagnostic_is_available(path);
+	if (trace2_is_enabled()) {
+		enum grep_index_ipc_capability_outcome outcome =
+			grep_index_ipc_query_capability(path);
+
+		trace2_data_intmax("grep", repo,
+				   "content_index_ipc_capability", outcome);
+		diagnostic = outcome == GREP_INDEX_IPC_CAPABILITY_AVAILABLE;
+	}
 	CALLOC_ARRAY(tasks, threads_nr);
 	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
 		size_t remaining = unique_nr - pos;
