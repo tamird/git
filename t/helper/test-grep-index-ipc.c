@@ -284,22 +284,42 @@ static int query_protocol_check(struct query_protocol_test *test,
 
 static int query_protocol_query(const struct grep_index_query *query,
 				const struct object_id *oid,
-				unsigned char *value, int expected_backend)
+				unsigned char *value, int expected_backend,
+				unsigned int expected_capability)
 {
 	int result;
 
-	/* Bound each call's prospective backend record without joining old data. */
+	/* Bound each call's records without joining results from old queries. */
 	trace2_data_intmax("test-grep-index-ipc", the_repository,
 			   "query-protocol/expected", expected_backend);
+	trace2_data_intmax("test-grep-index-ipc", the_repository,
+			   "query-protocol/capability", expected_capability);
 	result = grep_index_ipc_query(the_repository, query, oid, 1, value);
 	trace2_data_intmax("test-grep-index-ipc", the_repository,
 			   "query-protocol/end", 1);
 	return result;
 }
 
+static int query_protocol_no_listener(const char *path,
+				      const struct grep_index_query *query,
+				      const struct object_id *oid)
+{
+	unsigned char value = 0xa5;
+	int result;
+
+	if (query_protocol_check_path(path))
+		return -1;
+	result = query_protocol_query(query, oid, &value, 0, 2);
+	if (result != -1 || value != 0xa5)
+		return error("missing query endpoint changed result %d/%u",
+			     result, value);
+	return 0;
+}
+
 static int query_protocol_run(struct query_protocol_test *test,
 			      const struct grep_index_query *query,
-			      const struct object_id *oid, int traced)
+			      const struct object_id *oid, int traced,
+			      unsigned int expected_capability)
 {
 	struct ipc_server_opts opts = {
 		.nr_threads = 1,
@@ -318,7 +338,8 @@ static int query_protocol_run(struct query_protocol_test *test,
 		return error("could not create %s query endpoint", test->name);
 	ipc_server_start_async(server);
 	result = query_protocol_query(query, oid, &value,
-				      legacy ? 0 : success ? 1 : 2);
+				      legacy ? 0 : success ? 1 : 2,
+				      expected_capability);
 	ipc_server_stop_async(server);
 	ipc_server_await(server);
 	ipc_server_free(server);
@@ -381,6 +402,7 @@ cleanup:
 struct query_protocol_eof {
 	struct query_protocol_test test;
 	struct unix_ss_socket *socket;
+	enum query_protocol_signature drop_signature;
 	int abort_fd;
 	int io_error;
 };
@@ -443,7 +465,7 @@ static void *query_protocol_eof_thread(void *data)
 			query_protocol_response(&eof->test, request.buf,
 						request.len, &response);
 		if (!stop && request.len >= 4 &&
-		    get_be32(request.buf) == QUERY_DIAGNOSTIC_REQUEST) {
+		    get_be32(request.buf) == eof->drop_signature) {
 			/* The complete request arrived; omit the response flush. */
 			close(fd);
 			continue;
@@ -468,19 +490,22 @@ cleanup:
 static int query_protocol_eof(const char *path,
 			      const struct strbuf *request,
 			      const struct grep_index_query *query,
-			      const struct object_id *oid)
+			      const struct object_id *oid,
+			      enum query_protocol_signature drop_signature)
 {
+	int capability_eof = drop_signature == QUERY_CAPABILITY_REQUEST;
 	struct unix_stream_listen_opts opts = {
 		.listen_backlog_size = 5,
 		.disallow_chdir = 1,
 	};
 	struct query_protocol_eof eof = {
 		.test = {
-			.name = "diagnostic EOF",
+			.name = capability_eof ? "capability EOF" : "diagnostic EOF",
 			.path = path,
 			.request = request,
 			.scenario = QUERY_EOF,
 		},
+		.drop_signature = drop_signature,
 		.abort_fd = -1,
 	};
 	struct unix_ss_socket *socket = NULL;
@@ -508,7 +533,9 @@ static int query_protocol_eof(const char *path,
 		return error("could not start EOF query endpoint");
 	}
 	/* The worker now owns both the listener and its pathname. */
-	result = query_protocol_query(query, oid, &value, 2);
+	result = query_protocol_query(query, oid, &value,
+				      capability_eof ? 0 : 2,
+				      capability_eof ? 3 : 1);
 	/* A replay must finish before this synchronous call returns. */
 	strbuf_addstr(&stop, "STOP");
 	stop_result = query_protocol_send(path, &stop, &response);
@@ -523,33 +550,37 @@ static int query_protocol_eof(const char *path,
 		return error("EOF query endpoint did not stop cleanly");
 	}
 	strbuf_release(&response);
-	return query_protocol_check(&eof.test, result, value, 1, 0, 1, 0);
+	return query_protocol_check(&eof.test, result, value, 1,
+				    capability_eof, !capability_eof,
+				    capability_eof);
 }
 #endif
 
 static int test_query_protocol(int traced)
 {
+	/* Pin the numeric Trace2 contract independently of the private producer. */
 	static const struct {
 		enum query_protocol_scenario scenario;
 		const char *name;
+		unsigned int expected_capability;
 	} scenarios[] = {
-		{ QUERY_LEGACY, "legacy capability fallback" },
-		{ QUERY_CAP_MAGIC, "capability magic" },
-		{ QUERY_CAP_VERSION, "capability version" },
-		{ QUERY_CAP_SHORT, "short capability" },
-		{ QUERY_CAP_LONG, "long capability" },
-		{ QUERY_VALID, "valid diagnostic" },
-		{ QUERY_EMPTY, "empty diagnostic" },
-		{ QUERY_MAGIC, "diagnostic magic" },
-		{ QUERY_VERSION, "diagnostic version" },
-		{ QUERY_COUNT, "diagnostic count" },
-		{ QUERY_SHORT, "short diagnostic" },
-		{ QUERY_LONG, "long diagnostic" },
-		{ QUERY_CLASS, "diagnostic class" },
-		{ QUERY_ORIGIN_COUNT, "diagnostic origin count" },
-		{ QUERY_ORIGIN_SUM, "diagnostic origin sum" },
-		{ QUERY_ORIGIN_OVERFLOW, "diagnostic origin overflow" },
-		{ QUERY_WAIT, "diagnostic wait count" },
+		{ QUERY_LEGACY, "legacy capability fallback", 4 },
+		{ QUERY_CAP_MAGIC, "capability magic", 6 },
+		{ QUERY_CAP_VERSION, "capability version", 7 },
+		{ QUERY_CAP_SHORT, "short capability", 5 },
+		{ QUERY_CAP_LONG, "long capability", 5 },
+		{ QUERY_VALID, "valid diagnostic", 1 },
+		{ QUERY_EMPTY, "empty diagnostic", 1 },
+		{ QUERY_MAGIC, "diagnostic magic", 1 },
+		{ QUERY_VERSION, "diagnostic version", 1 },
+		{ QUERY_COUNT, "diagnostic count", 1 },
+		{ QUERY_SHORT, "short diagnostic", 1 },
+		{ QUERY_LONG, "long diagnostic", 1 },
+		{ QUERY_CLASS, "diagnostic class", 1 },
+		{ QUERY_ORIGIN_COUNT, "diagnostic origin count", 1 },
+		{ QUERY_ORIGIN_SUM, "diagnostic origin sum", 1 },
+		{ QUERY_ORIGIN_OVERFLOW, "diagnostic origin overflow", 1 },
+		{ QUERY_WAIT, "diagnostic wait count", 1 },
 	};
 	struct grep_index_query *query;
 	struct strbuf request = STRBUF_INIT;
@@ -581,10 +612,12 @@ static int test_query_protocol(int traced)
 			.scenario = QUERY_VALID,
 		};
 
-		if (query_protocol_run(&test, query, &oid, 0) ||
+		if (query_protocol_run(&test, query, &oid, 0, 0) ||
 		    query_protocol_legacy_server(path, &request))
 			goto cleanup;
 	} else {
+		if (query_protocol_no_listener(path, query, &oid))
+			goto cleanup;
 		for (size_t i = 0; i < ARRAY_SIZE(scenarios); i++) {
 			struct query_protocol_test test = {
 				.name = scenarios[i].name,
@@ -593,11 +626,15 @@ static int test_query_protocol(int traced)
 				.scenario = scenarios[i].scenario,
 			};
 
-			if (query_protocol_run(&test, query, &oid, 1))
+			if (query_protocol_run(&test, query, &oid, 1,
+					       scenarios[i].expected_capability))
 				goto cleanup;
 		}
 #ifndef GIT_WINDOWS_NATIVE
-		if (query_protocol_eof(path, &request, query, &oid))
+		if (query_protocol_eof(path, &request, query, &oid,
+				       QUERY_CAPABILITY_REQUEST) ||
+		    query_protocol_eof(path, &request, query, &oid,
+				       QUERY_DIAGNOSTIC_REQUEST))
 			goto cleanup;
 #endif
 	}
