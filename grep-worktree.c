@@ -64,6 +64,33 @@ enum grep_worktree_recovery_write_outcome {
 	GREP_WORKTREE_RECOVERY_WRITE_COMPACT_COMMITTED_REFERENCE = 5,
 };
 
+/* Preparation is separate from later recovery-slot publication. */
+enum grep_worktree_prepare_outcome {
+	GREP_WORKTREE_PREPARE_PREPARED = 0,
+	GREP_WORKTREE_PREPARE_SLOT_LOCK_FAILED,
+	GREP_WORKTREE_PREPARE_COMPACT_MAP_FAILED,
+	GREP_WORKTREE_PREPARE_COMPACT_TOO_SMALL,
+	GREP_WORKTREE_PREPARE_COMPACT_CHANGED,
+	GREP_WORKTREE_PREPARE_RECOVERY_LOAD_FAILED,
+	GREP_WORKTREE_PREPARE_RECOVERY_CHECKSUM_FAILED,
+	GREP_WORKTREE_PREPARE_ENTRY_IDENTITY_FAILED,
+	GREP_WORKTREE_PREPARE_ENTRY_LIMIT_EXCEEDED,
+	GREP_WORKTREE_PREPARE_DUPLICATE_IDENTITY,
+};
+
+/* Some aborted writes simply have no remaining update to publish. */
+enum grep_worktree_write_abort_reason {
+	GREP_WORKTREE_ABORT_UNSET = 0,
+	GREP_WORKTREE_ABORT_NO_PENDING_AFTER_PREPARE,
+	GREP_WORKTREE_ABORT_INVALIDATION_MARKER_ERROR,
+	GREP_WORKTREE_ABORT_DIRECT_IDENTITY,
+	GREP_WORKTREE_ABORT_BASE_IDENTITY,
+	GREP_WORKTREE_ABORT_REMAP_IDENTITY,
+	GREP_WORKTREE_ABORT_INDEX_READ_FAILED,
+	GREP_WORKTREE_ABORT_INDEX_IDENTITY_FAILED,
+	GREP_WORKTREE_ABORT_NO_OUTPUT_CHANGE,
+};
+
 /*
  * The sidecar contains:
  *
@@ -954,11 +981,9 @@ static void wait_for_test_write_phase(const char *phase)
 		sleep_millisec(10);
 }
 
-static int prepare_recovery(struct grep_worktree_cache *cache,
-			    struct lock_file *lock,
-			    int slot,
-			    struct object_id *recovery_checksum,
-			    unsigned char **prepared_equal)
+static enum grep_worktree_prepare_outcome prepare_recovery(
+	struct grep_worktree_cache *cache, struct lock_file *lock, int slot,
+	struct object_id *recovery_checksum, unsigned char **prepared_equal)
 {
 	unsigned char *included = NULL;
 	struct object_id entry_oid;
@@ -969,38 +994,58 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	struct strbuf compact_path = STRBUF_INIT;
 	struct strbuf path = STRBUF_INIT;
 	enum trace2_timer_id active_timer = TRACE2_NUMBER_OF_TIMERS;
+	enum grep_worktree_prepare_outcome result =
+		GREP_WORKTREE_PREPARE_SLOT_LOCK_FAILED;
 	size_t compact_size = 0;
 	uint64_t identity_hashes = 0;
 	uint64_t recovery_lookups = 0;
 	int trace_enabled = trace2_is_enabled();
+	int lock_errno = 0;
 	int fd;
-	int result = -1;
 
 	oidclr(recovery_checksum, cache->repo->hash_algo);
 	*prepared_equal = NULL;
 	grep_worktree_recovery_path(cache->repo, slot, &path);
 	fd = hold_lock_file_for_update_mode(lock, path.buf, 0, 0444);
-	if (fd < 0)
+	if (fd < 0) {
+		lock_errno = errno;
 		goto done;
+	}
 	if (!is_null_oid(&cache->recovery_checksum)) {
 		size_t rawsz = cache->repo->hash_algo->rawsz;
 
 		grep_worktree_cache_path(cache->repo, &compact_path);
 		compact_map = map_file(compact_path.buf, &compact_size);
-		if (!compact_map || compact_size < rawsz ||
-		    !hasheq(compact_map + compact_size - rawsz,
-			    cache->compact_checksum.hash,
-			    cache->repo->hash_algo))
+		if (!compact_map) {
+			result = GREP_WORKTREE_PREPARE_COMPACT_MAP_FAILED;
 			goto done;
+		}
+		if (compact_size < rawsz) {
+			result = GREP_WORKTREE_PREPARE_COMPACT_TOO_SMALL;
+			goto done;
+		}
+		if (!hasheq(compact_map + compact_size - rawsz,
+			    cache->compact_checksum.hash,
+			    cache->repo->hash_algo)) {
+			result = GREP_WORKTREE_PREPARE_COMPACT_CHANGED;
+			goto done;
+		}
 		munmap((void *)compact_map, compact_size);
 		compact_map = NULL;
 	}
 	CALLOC_ARRAY(included, cache->bitmap_size);
 	CALLOC_ARRAY(fanout, GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES);
 	if (!is_null_oid(&cache->recovery_checksum) &&
-	    !cache->recovery_invalid &&
-	    (!load_recovery(cache) || !recovery_checksum_valid(cache)))
-		goto done;
+	    !cache->recovery_invalid) {
+		if (!load_recovery(cache)) {
+			result = GREP_WORKTREE_PREPARE_RECOVERY_LOAD_FAILED;
+			goto done;
+		}
+		if (!recovery_checksum_valid(cache)) {
+			result = GREP_WORKTREE_PREPARE_RECOVERY_CHECKSUM_FAILED;
+			goto done;
+		}
+	}
 	active_timer = TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_COLLECT;
 	trace2_timer_start(active_timer);
 	for (size_t i = 0; i < cache->istate->cache_nr; i++) {
@@ -1012,8 +1057,10 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 		if (trace_enabled)
 			identity_hashes++;
 		if (grep_worktree_entry_identity_hash(
-			    &cache->entry_identity, ce, &entry_oid))
+			    &cache->entry_identity, ce, &entry_oid)) {
+			result = GREP_WORKTREE_PREPARE_ENTRY_IDENTITY_FAILED;
 			goto done;
+		}
 		if (cache->different[i >> 3] & mask)
 			continue;
 		if (!(cache->equal[i >> 3] & mask)) {
@@ -1027,14 +1074,18 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	}
 	trace2_timer_stop(active_timer);
 	active_timer = TRACE2_NUMBER_OF_TIMERS;
-	if (entries.nr > UINT32_MAX)
+	if (entries.nr > UINT32_MAX) {
+		result = GREP_WORKTREE_PREPARE_ENTRY_LIMIT_EXCEEDED;
 		goto done;
+	}
 	active_timer = TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_SORT;
 	trace2_timer_start(active_timer);
 	oid_array_sort(&entries);
 	for (size_t i = 0; i < entries.nr; i++) {
-		if (i && oideq(&entries.oid[i - 1], &entries.oid[i]))
+		if (i && oideq(&entries.oid[i - 1], &entries.oid[i])) {
+			result = GREP_WORKTREE_PREPARE_DUPLICATE_IDENTITY;
 			goto done;
+		}
 		fanout[get_be16(entries.oid[i].hash)]++;
 	}
 	for (size_t i = 1;
@@ -1064,12 +1115,20 @@ static int prepare_recovery(struct grep_worktree_cache *cache,
 	f = NULL;
 	*prepared_equal = included;
 	included = NULL;
-	result = 0;
+	result = GREP_WORKTREE_PREPARE_PREPARED;
 
 done:
 	if (active_timer != TRACE2_NUMBER_OF_TIMERS)
 		trace2_timer_stop(active_timer);
 	if (trace_enabled) {
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/recovery_prepare/outcome",
+				   result);
+		if (result == GREP_WORKTREE_PREPARE_SLOT_LOCK_FAILED)
+			trace2_data_intmax(
+				"grep", cache->repo,
+				"worktree_blob/recovery_prepare/lock_errno",
+				lock_errno);
 		/* Attempted work, including partial preparation, not publication. */
 		trace2_data_intmax("grep", cache->repo,
 				   "worktree_blob/recovery_prepare/identity_hashes",
@@ -1085,7 +1144,7 @@ done:
 		munmap((void *)compact_map, compact_size);
 	if (f)
 		free_hashfile(f);
-	if (result)
+	if (result != GREP_WORKTREE_PREPARE_PREPARED)
 		rollback_lock_file(lock);
 	free(fanout);
 	free(included);
@@ -1111,6 +1170,8 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	struct lock_file lock = LOCK_INIT;
 	struct lock_file recovery_lock = LOCK_INIT;
 	struct strbuf path = STRBUF_INIT;
+	enum grep_worktree_write_abort_reason abort_reason =
+		GREP_WORKTREE_ABORT_UNSET;
 	uint64_t recovery_refresh_min;
 	int prepared_recovery_slot = 0;
 	int update_recovery;
@@ -1207,7 +1268,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	}
 	wait_for_test_write_phase("prelock");
 	if (update_recovery) {
-		int prepare_result;
+		enum grep_worktree_prepare_outcome prepare_result;
 
 		cache->recovery_write_outcome =
 			GREP_WORKTREE_RECOVERY_WRITE_PREPARE_FAILED;
@@ -1219,7 +1280,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 					  &prepared_recovery_equal);
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_RECOVERY_PREPARE);
-		if (prepare_result)
+		if (prepare_result != GREP_WORKTREE_PREPARE_PREPARED)
 			update_recovery = 0;
 		else
 			cache->recovery_write_outcome =
@@ -1227,8 +1288,10 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	}
 	if (!cache->exact_changed && !persist_recovered &&
 	    !cache->split_base_changed && !update_recovery &&
-	    !cache->recovery_invalid && !cache->recorded_different)
+	    !cache->recovery_invalid && !cache->recorded_different) {
+		abort_reason = GREP_WORKTREE_ABORT_NO_PENDING_AFTER_PREPARE;
 		goto done;
+	}
 	repeated_negatives_only =
 		cache->recorded_different &&
 		!cache->exact_changed && !persist_recovered &&
@@ -1262,6 +1325,9 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 			negative_safe = 1;
 			cache->write_outcome =
 				GREP_WORKTREE_WRITE_GENERATION_REJECTED;
+		} else {
+			abort_reason =
+				GREP_WORKTREE_ABORT_INVALIDATION_MARKER_ERROR;
 		}
 		goto done;
 	}
@@ -1381,8 +1447,11 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 				continue;
 			if (grep_worktree_entry_identity_hash(
 				    &cache->entry_identity,
-				    ce, &entry_oid))
+				    ce, &entry_oid)) {
+				abort_reason =
+					GREP_WORKTREE_ABORT_DIRECT_IDENTITY;
 				goto done;
+			}
 			oid_array_append(&cache->negative_entries, &entry_oid);
 			if (current.split_base_nr && ce->index &&
 			    ce->index <= current.split_base_nr) {
@@ -1393,8 +1462,11 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 					    &cache->entry_identity,
 					    cache->istate->split_index->base
 						    ->cache[base_pos],
-					    &base_oid))
+					    &base_oid)) {
+					abort_reason =
+						GREP_WORKTREE_ABORT_BASE_IDENTITY;
 					goto done;
+				}
 				if (oideq(&entry_oid, &base_oid) &&
 				    split_base_equal[base_pos >> 3] &
 					    (1u << (base_pos & 7))) {
@@ -1420,8 +1492,11 @@ read_current_index:
 			continue;
 		if (grep_worktree_entry_identity_hash(
 			    &cache->entry_identity,
-			    cache->istate->cache[i], &entry_oid))
+			    cache->istate->cache[i], &entry_oid)) {
+			abort_reason =
+				GREP_WORKTREE_ABORT_REMAP_IDENTITY;
 			goto done;
+		}
 		oid_array_append(&cache->negative_entries, &entry_oid);
 	}
 	oid_array_sort(&cache->negative_entries);
@@ -1430,12 +1505,16 @@ read_current_index:
 	index_result = read_index_from(
 		&istate, repo_get_index_file(cache->repo),
 		repo_get_git_dir(cache->repo));
-	if (index_result < 0)
+	if (index_result < 0) {
+		abort_reason = GREP_WORKTREE_ABORT_INDEX_READ_FAILED;
 		goto done;
+	}
 	index_result =
 		grep_index_identity_get(cache->repo, &istate, &identity);
-	if (index_result)
+	if (index_result) {
+		abort_reason = GREP_WORKTREE_ABORT_INDEX_IDENTITY_FAILED;
 		goto done;
+	}
 
 	current.repo = cache->repo;
 	current.istate = &istate;
@@ -1662,8 +1741,10 @@ merge_current:
 			}
 		}
 	}
-	if (!output_changed)
+	if (!output_changed) {
+		abort_reason = GREP_WORKTREE_ABORT_NO_OUTPUT_CHANGE;
 		goto done;
+	}
 	if (direct_current)
 		cache->direct_write++;
 
@@ -1704,6 +1785,10 @@ done:
 	    invalidate_observation_generation(cache) &&
 	    write_invalidation_marker(cache))
 		die_errno(_("unable to invalidate grep worktree cache"));
+	if (cache->write_outcome == GREP_WORKTREE_WRITE_ABORTED)
+		trace2_data_intmax("grep", cache->repo,
+				   "worktree_blob/write_abort_reason",
+				   abort_reason);
 	if (f)
 		free_hashfile(f);
 	rollback_lock_file(&lock);

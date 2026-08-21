@@ -4414,6 +4414,8 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 				GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$publisher_hold" \
 				GIT_TEST_GREP_WORKTREE_WRITE_PHASE=locked \
 				GIT_TEST_GREP_WORKTREE_WRITE_READY="$publisher_ready" \
+				GIT_TRACE2_EVENT_NESTING=1 \
+				GIT_TRACE2_EVENT="$PWD/publisher.trace" \
 				git grep "absent recovery race" -- target \
 				>publisher.out 2>publisher.err &
 		} &&
@@ -4432,6 +4434,23 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		test_path_is_file .git/index.grep-worktree.lock &&
 		cp .git/index.grep-worktree-generation \
 			.git/index.grep-worktree-generation.before &&
+
+		test_expect_code 1 env \
+			GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 \
+			GIT_TRACE2_EVENT_NESTING=1 \
+			GIT_TRACE2_EVENT="$PWD/prepare-contended.trace" \
+			git grep "absent recovery race" -- target \
+			>actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/recovery_write_outcome 1 \
+			<prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/write_outcome 6 \
+			<prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/write_errno 0 \
+			<prepare-contended.trace &&
 
 		cp .git/index.old .git/index &&
 		negative_hold="$PWD/.git/grep-worktree-negative-hold" &&
@@ -4672,7 +4691,22 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 				target >actual &&
 		test_cmp expected actual &&
 		test_trace2_data grep worktree_blob/hits 0 \
-			<checksum-result.trace
+			<checksum-result.trace &&
+
+		test_trace2_data grep worktree_blob/write_outcome 6 \
+			<promotion.trace &&
+		test_trace2_data grep worktree_blob/write_errno 0 \
+			<promotion.trace &&
+		test_trace2_data grep worktree_blob/recovery_prepare/outcome 1 \
+			<prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/recovery_prepare/lock_errno \
+			"[1-9][0-9]*" <prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/write_abort_reason 1 \
+			<prepare-contended.trace &&
+		test_trace2_data grep worktree_blob/recovery_prepare/outcome 0 \
+			<publisher.trace &&
+		test_trace2_data grep worktree_blob/write_abort_reason 8 \
+			<promotion.trace
 	)
 '
 
