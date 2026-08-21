@@ -10,6 +10,7 @@
 #include "odb/source.h"
 #include "odb/streaming.h"
 #include "replace-object.h"
+#include "trace2.h"
 
 #define FILTER_BUFFER (1024*16)
 
@@ -242,6 +243,30 @@ void odb_write_stream_release(struct odb_write_stream *st)
 	free(st->data);
 }
 
+static void stream_to_fd_timer_start(enum trace2_timer_id timer)
+{
+	int saved_errno;
+
+	if (!trace2_is_enabled())
+		return;
+
+	saved_errno = errno;
+	trace2_timer_start(timer);
+	errno = saved_errno;
+}
+
+static void stream_to_fd_timer_stop(enum trace2_timer_id timer)
+{
+	int saved_errno;
+
+	if (!trace2_is_enabled())
+		return;
+
+	saved_errno = errno;
+	trace2_timer_stop(timer);
+	errno = saved_errno;
+}
+
 int odb_stream_blob_to_fd(struct object_database *odb,
 			  int fd,
 			  const struct object_id *oid,
@@ -252,7 +277,9 @@ int odb_stream_blob_to_fd(struct object_database *odb,
 	ssize_t kept = 0;
 	int result = -1;
 
+	stream_to_fd_timer_start(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_OPEN);
 	st = odb_read_stream_open(odb, oid, filter);
+	stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_OPEN);
 	if (!st) {
 		if (filter)
 			free_stream_filter(filter);
@@ -262,39 +289,55 @@ int odb_stream_blob_to_fd(struct object_database *odb,
 		goto close_and_exit;
 	for (;;) {
 		char buf[1024 * 16];
-		ssize_t wrote, holeto;
-		ssize_t readlen = odb_read_stream_read(st, buf, sizeof(buf));
+		ssize_t wrote, holeto, readlen;
 
+		stream_to_fd_timer_start(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_READ_FILTER);
+		readlen = odb_read_stream_read(st, buf, sizeof(buf));
+		stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_READ_FILTER);
 		if (readlen < 0)
 			goto close_and_exit;
 		if (!readlen)
 			break;
+		stream_to_fd_timer_start(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
 		if (can_seek && sizeof(buf) == readlen) {
 			for (holeto = 0; holeto < readlen; holeto++)
 				if (buf[holeto])
 					break;
 			if (readlen == holeto) {
 				kept += holeto;
+				stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
 				continue;
 			}
 		}
 
-		if (kept && lseek(fd, kept, SEEK_CUR) == (off_t) -1)
+		if (kept && lseek(fd, kept, SEEK_CUR) == (off_t) -1) {
+			stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
 			goto close_and_exit;
-		else
+		} else {
 			kept = 0;
+		}
 		wrote = write_in_full(fd, buf, readlen);
+		stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
 
 		if (wrote < 0)
 			goto close_and_exit;
 	}
-	if (kept && (lseek(fd, kept - 1, SEEK_CUR) == (off_t) -1 ||
-		     xwrite(fd, "", 1) != 1))
-		goto close_and_exit;
+	if (kept) {
+		int failed;
+
+		stream_to_fd_timer_start(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
+		failed = lseek(fd, kept - 1, SEEK_CUR) == (off_t) -1 ||
+			 xwrite(fd, "", 1) != 1;
+		stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE);
+		if (failed)
+			goto close_and_exit;
+	}
 	result = 0;
 
  close_and_exit:
+	stream_to_fd_timer_start(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_CLOSE);
 	odb_read_stream_close(st);
+	stream_to_fd_timer_stop(TRACE2_TIMER_ID_ODB_STREAM_TO_FD_CLOSE);
 	return result;
 }
 

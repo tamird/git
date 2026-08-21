@@ -285,8 +285,43 @@ static int reset_fd(int fd, const char *path)
 	return 0;
 }
 
+struct pc_item_trace {
+	enum trace2_timer_id phase;
+	unsigned enabled:1, active:1;
+};
+
+static void stop_pc_item_phase(struct pc_item_trace *trace)
+{
+	int saved_errno;
+
+	if (!trace->active)
+		return;
+
+	saved_errno = errno;
+	trace2_timer_stop(trace->phase);
+	trace->active = 0;
+	errno = saved_errno;
+}
+
+static void start_pc_item_phase(struct pc_item_trace *trace,
+				enum trace2_timer_id phase)
+{
+	int saved_errno;
+
+	if (!trace->enabled)
+		return;
+
+	saved_errno = errno;
+	if (trace->active)
+		trace2_timer_stop(trace->phase);
+	trace->phase = phase;
+	trace2_timer_start(trace->phase);
+	trace->active = 1;
+	errno = saved_errno;
+}
+
 static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
-			       const char *path)
+			       const char *path, struct pc_item_trace *trace)
 {
 	int ret;
 	struct stream_filter *filter;
@@ -300,9 +335,11 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 
 	filter = get_stream_filter_ca(&pc_item->ca, &pc_item->ce->oid);
 	if (filter) {
+		stop_pc_item_phase(trace);
 		if (odb_stream_blob_to_fd(the_repository->objects, fd,
 					  &pc_item->ce->oid, filter, 1)) {
 			/* On error, reset fd to try writing without streaming */
+			start_pc_item_phase(trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_PREPARE);
 			if (reset_fd(fd, path))
 				return -1;
 		} else {
@@ -310,6 +347,7 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 		}
 	}
 
+	start_pc_item_phase(trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_READ_BLOB);
 	blob = read_blob_entry(pc_item->ce, &size);
 	if (!blob)
 		return error("cannot read object %s '%s'",
@@ -321,6 +359,7 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 	 * checkout, so pass NULL. Note: if that changes, the metadata must also
 	 * be passed from the main process to the workers.
 	 */
+	start_pc_item_phase(trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_CONVERT);
 	ret = convert_to_working_tree_ca(&pc_item->ca, pc_item->ce->name,
 					 blob, size, &buf, NULL);
 
@@ -331,6 +370,7 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 		size = newsize;
 	}
 
+	start_pc_item_phase(trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_WRITE_BUFFER);
 	wrote = write_in_full(fd, blob, size);
 	free(blob);
 	if (wrote < 0)
@@ -358,7 +398,12 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 	int fd = -1, fstat_done = 0;
 	struct strbuf path = STRBUF_INIT;
 	const char *dir_sep;
+	struct pc_item_trace trace = {
+		.phase = TRACE2_TIMER_ID_PCHECKOUT_ITEM_PREPARE,
+		.enabled = trace2_is_enabled(),
+	};
 
+	start_pc_item_phase(&trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_PREPARE);
 	strbuf_add(&path, state->base_dir, state->base_dir_len);
 	strbuf_add(&path, pc_item->ce->name, pc_item->ce->ce_namelen);
 
@@ -398,7 +443,8 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 		goto out;
 	}
 
-	if (write_pc_item_to_fd(pc_item, fd, path.buf)) {
+	if (write_pc_item_to_fd(pc_item, fd, path.buf, &trace)) {
+		start_pc_item_phase(&trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_FINALIZE);
 		/* Error was already reported. */
 		pc_item->status = PC_ITEM_FAILED;
 		close_and_clear(&fd);
@@ -406,6 +452,7 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 		goto out;
 	}
 
+	start_pc_item_phase(&trace, TRACE2_TIMER_ID_PCHECKOUT_ITEM_FINALIZE);
 	fstat_done = fstat_checkout_output(fd, state, &pc_item->st);
 
 	if (close_and_clear(&fd)) {
@@ -424,6 +471,7 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 
 out:
 	strbuf_release(&path);
+	stop_pc_item_phase(&trace);
 }
 
 static void send_one_item(int fd, struct parallel_checkout_item *pc_item)

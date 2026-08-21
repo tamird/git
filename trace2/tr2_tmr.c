@@ -176,6 +176,52 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "queue-entries/write-entry",
 		.want_per_thread_events = 0,
 	},
+	/* Checkout item phases defer streaming content to the ODB timers. */
+	[TRACE2_TIMER_ID_PCHECKOUT_ITEM_PREPARE] = {
+		.category = "pcheckout",
+		.name = "item/prepare",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_PCHECKOUT_ITEM_READ_BLOB] = {
+		.category = "pcheckout",
+		.name = "item/read-blob",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_PCHECKOUT_ITEM_CONVERT] = {
+		.category = "pcheckout",
+		.name = "item/convert",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_PCHECKOUT_ITEM_WRITE_BUFFER] = {
+		.category = "pcheckout",
+		.name = "item/write-buffer",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_PCHECKOUT_ITEM_FINALIZE] = {
+		.category = "pcheckout",
+		.name = "item/finalize",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_ODB_STREAM_TO_FD_OPEN] = {
+		.category = "odb",
+		.name = "stream-to-fd/open",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_ODB_STREAM_TO_FD_READ_FILTER] = {
+		.category = "odb",
+		.name = "stream-to-fd/read-filter",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_ODB_STREAM_TO_FD_WRITE] = {
+		.category = "odb",
+		.name = "stream-to-fd/write",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_ODB_STREAM_TO_FD_CLOSE] = {
+		.category = "odb",
+		.name = "stream-to-fd/close",
+		.want_per_thread_events = 0,
+	},
 	/* Recovery preparation is included in the worktree-cache write timer. */
 	[TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_FINALIZE_IPC] = {
 		.category = "grep",

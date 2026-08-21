@@ -435,7 +435,23 @@ test_expect_success 'parallel checkout traces worker load' '
 		done &&
 		grep "\"category\":\"pcheckout\",\"key\":\"worker/slowest-item-us\"" \
 			"$trace_file" >slowest-item-us &&
-		test_line_count = 2 slowest-item-us
+		test_line_count = 2 slowest-item-us &&
+		test_checkout_worker_sids "$trace_file" 2 &&
+		while read worker_sid
+		do
+			grep -F "\"sid\":\"$worker_sid\"" "$trace_file" >worker-trace &&
+			test_checkout_content_timers worker-trace \
+				"pcheckout item/prepare 2" \
+				"pcheckout item/read-blob absent" \
+				"pcheckout item/convert absent" \
+				"pcheckout item/write-buffer absent" \
+				"pcheckout item/finalize 2" \
+				"odb stream-to-fd/open 2" \
+				"odb stream-to-fd/read-filter 4" \
+				"odb stream-to-fd/write 2" \
+				"odb stream-to-fd/close 2" ||
+			return 1
+		done <worker-sids
 	)
 '
 
@@ -563,7 +579,39 @@ test_expect_success 'branch switch reports parallel checkout failures' '
 		grep -F "\"sid\":\"$root_sid\"" switch-event.log >"$root_trace" &&
 		test_queue_entry_timer "$root_trace" prepare-entry 2 &&
 		test_queue_entry_timer "$root_trace" attrs-and-enqueue 2 &&
-		test_queue_entry_timer "$root_trace" write-entry absent
+		test_queue_entry_timer "$root_trace" write-entry absent &&
+		test_checkout_worker_sids switch-event.log 2 &&
+		while read worker_sid
+		do
+			grep -F "\"sid\":\"$worker_sid\"" switch-event.log >worker-trace &&
+			if grep "\"category\":\"pcheckout\",\"key\":\"worker/failed\",\"value\":\"1\"" \
+				worker-trace
+			then
+				test_checkout_content_timers worker-trace \
+					"pcheckout item/prepare 2" \
+					"pcheckout item/read-blob 1" \
+					"pcheckout item/convert absent" \
+					"pcheckout item/write-buffer absent" \
+					"pcheckout item/finalize 1" \
+					"odb stream-to-fd/open 1" \
+					"odb stream-to-fd/read-filter absent" \
+					"odb stream-to-fd/write absent" \
+					"odb stream-to-fd/close absent"
+			else
+				test_grep "\"category\":\"pcheckout\",\"key\":\"worker/failed\",\"value\":\"0\"" \
+					worker-trace &&
+				test_checkout_content_timers worker-trace \
+					"pcheckout item/prepare 1" \
+					"pcheckout item/read-blob absent" \
+					"pcheckout item/convert absent" \
+					"pcheckout item/write-buffer absent" \
+					"pcheckout item/finalize 1" \
+					"odb stream-to-fd/open 1" \
+					"odb stream-to-fd/read-filter 2" \
+					"odb stream-to-fd/write 1" \
+					"odb stream-to-fd/close 1"
+			fi || return 1
+		done <worker-sids
 	)
 '
 

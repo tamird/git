@@ -52,11 +52,50 @@ test_expect_success ICONV 'parallel-checkout with re-encoding' '
 		test_cmp_bin utf8-text A.internal &&
 
 		rm A B &&
-		test_checkout_workers 2 git checkout A B &&
+		trace_file="$(pwd)/encoding-event" &&
+		rm -f "$trace_file" &&
+		test_checkout_workers 2 env GIT_TRACE2_EVENT="$trace_file" \
+			git checkout A B &&
 
 		# Check that A (and only A) is re-encoded during checkout
 		test_cmp_bin utf16-text A &&
-		test_cmp_bin utf8-text B
+		test_cmp_bin utf8-text B &&
+
+		test_checkout_worker_sids "$trace_file" 2 &&
+		buffered_workers=0 &&
+		streamed_workers=0 &&
+		while read worker_sid
+		do
+			grep -F "\"sid\":\"$worker_sid\"" "$trace_file" >worker-trace &&
+			test_checkout_content_timers worker-trace \
+				"pcheckout item/prepare 1" \
+				"pcheckout item/finalize 1" &&
+			if grep "\"event\":\"timer\".*\"category\":\"pcheckout\",\"name\":\"item/read-blob\"," \
+				worker-trace
+			then
+				buffered_workers=$((buffered_workers + 1)) &&
+				test_checkout_content_timers worker-trace \
+					"pcheckout item/read-blob 1" \
+					"pcheckout item/convert 1" \
+					"pcheckout item/write-buffer 1" \
+					"odb stream-to-fd/open absent" \
+					"odb stream-to-fd/read-filter absent" \
+					"odb stream-to-fd/write absent" \
+					"odb stream-to-fd/close absent"
+			else
+				streamed_workers=$((streamed_workers + 1)) &&
+				test_checkout_content_timers worker-trace \
+					"pcheckout item/read-blob absent" \
+					"pcheckout item/convert absent" \
+					"pcheckout item/write-buffer absent" \
+					"odb stream-to-fd/open 1" \
+					"odb stream-to-fd/read-filter 2" \
+					"odb stream-to-fd/write 1" \
+					"odb stream-to-fd/close 1"
+			fi || return 1
+		done <worker-sids &&
+		test "$buffered_workers" = 1 &&
+		test "$streamed_workers" = 1
 	)
 '
 
