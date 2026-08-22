@@ -255,15 +255,23 @@ static enum fsmonitor_cookie_item_result with_lock__wait_for_cookie(
 		struct timeval now;
 		struct timespec ts;
 		int err = 0;
+		int test_shutdown =
+			git_env_bool("GIT_TEST_FSMONITOR_SHUTDOWN_ON_COOKIE", 0);
 
 		gettimeofday(&now, NULL);
 		ts.tv_sec = now.tv_sec + 1;
 		ts.tv_nsec = now.tv_usec * 1000;
 
-		while (cookie->result == FCIR_INIT && !err)
+		/* Test the real listener cleanup while this cookie is pending. */
+		if (test_shutdown)
+			fsm_listen__stop_async(state);
+		while (!err && (cookie->result == FCIR_INIT ||
+			       (test_shutdown && state->current_token_data)))
 			err = pthread_cond_timedwait(&state->cookies_cond,
 						     &state->main_lock,
 						     &ts);
+		if (test_shutdown && state->current_token_data)
+			die("fsmonitor test listener did not stop (error %d)", err);
 		if (err == ETIMEDOUT && cookie->result == FCIR_INIT) {
 			trace_printf_key(&trace_fsmonitor,
 					 "cookie_wait timed out");
@@ -973,13 +981,9 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	pthread_mutex_lock(&state->main_lock);
 
 	if (!state->current_token_data) {
-#ifdef __APPLE__
 		pthread_mutex_unlock(&state->main_lock);
 		result = reply(reply_data, "missing", 7);
 		goto cleanup;
-#else
-		BUG("fsmonitor state does not have a current token");
-#endif
 	}
 
 	/*
@@ -1004,6 +1008,13 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 			      cookie_result);
 			do_trivial = 1;
 		}
+	}
+
+	/* The listener can exit while the cookie wait releases main_lock. */
+	if (!state->current_token_data) {
+		pthread_mutex_unlock(&state->main_lock);
+		result = reply(reply_data, "missing", 7);
+		goto cleanup;
 	}
 
 	if (do_flush)
@@ -1509,6 +1520,7 @@ static void *fsm_listen__thread_proc(void *_state)
 	    state->current_token_data->client_ref_count == 0)
 		fsmonitor_free_token_data(state->current_token_data);
 	state->current_token_data = NULL;
+	with_lock__abort_all_cookies(state);
 	pthread_mutex_unlock(&state->main_lock);
 
 	trace2_thread_exit();

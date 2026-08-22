@@ -53,12 +53,6 @@ test_lazy_prereq FSMONITOR_WORKS '
 	return $ret
 '
 
-if ! test_have_prereq FSMONITOR_WORKS
-then
-	skip_all="filesystem does not deliver fsmonitor events (container/overlayfs?)"
-	test_done
-fi
-
 stop_daemon_delete_repo () {
 	r=$1 &&
 	{ maybe_timeout 30 git -C $r fsmonitor--daemon stop 2>/dev/null || :; } &&
@@ -131,15 +125,36 @@ have_t2_data_event () {
 	grep -e '"event":"data".*"category":"'"$c"'".*"key":"'"$k"'"'
 }
 
-test_expect_success 'explicit daemon start and stop' '
+# This test stops the listener directly and does not require filesystem events.
+test_expect_success 'explicit daemon start and stop with a waiting query' '
 	test_when_finished "stop_daemon_delete_repo test_explicit" &&
 
 	git init test_explicit &&
 	start_daemon -C test_explicit &&
 
 	git -C test_explicit fsmonitor--daemon stop &&
+	test_must_fail git -C test_explicit fsmonitor--daemon status &&
+
+	GIT_TEST_FSMONITOR_SHUTDOWN_ON_COOKIE=1 \
+		start_daemon -C test_explicit \
+			--tf "$PWD/trace_explicit_daemon" &&
+	test_expect_code 128 env \
+		GIT_TRACE2_EVENT="$PWD/trace_explicit_shutdown" \
+		test-tool -C test_explicit fsmonitor-client query --token 0 \
+		>actual_explicit_shutdown 2>err_explicit_shutdown &&
+	test_grep "cookie-abort:" trace_explicit_daemon &&
+	test_trace2_data fsm_client query/response-length 7 \
+		<trace_explicit_shutdown &&
+
+	git -C test_explicit fsmonitor--daemon stop &&
 	test_must_fail git -C test_explicit fsmonitor--daemon status
 '
+
+if ! test_have_prereq FSMONITOR_WORKS
+then
+	skip_all="filesystem does not deliver fsmonitor events (container/overlayfs?)"
+	test_done
+fi
 
 test_expect_success 'implicit daemon start' '
 	test_when_finished "stop_daemon_delete_repo test_implicit" &&
