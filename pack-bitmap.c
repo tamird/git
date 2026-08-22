@@ -1327,9 +1327,14 @@ struct bitmap_boundary_stats {
 	intmax_t roots_without_bitmap;
 	intmax_t roots_already_covered;
 	intmax_t roots_noncommit;
+	int fill_in_traced;
+	intmax_t boundary_tip_count;
+	intmax_t pending_before;
+	intmax_t pending_after;
 	uint64_t prepare_us;
 	uint64_t traverse_us;
 	uint64_t fill_in_us;
+	uint64_t fill_in_call_us;
 };
 
 enum bitmap_trace_source_kind {
@@ -1494,8 +1499,12 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 	 * Then add the boundary commit(s) as fill-in traversal tips.
 	 */
 	trace2_region_enter("pack-bitmap", "boundary-fill-in", repo);
-	if (trace_timings)
+	if (trace_timings) {
 		phase_started = getnanotime();
+		stats->fill_in_traced = 1;
+		stats->boundary_tip_count = cb.boundary.nr;
+		stats->pending_before = revs->pending.nr;
+	}
 	for (i = 0; i < cb.boundary.nr; i++) {
 		struct object *obj = cb.boundary.objects[i].item;
 		if (bitmap_walk_contains(bitmap_git, cb.base, &obj->oid))
@@ -1503,8 +1512,25 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 		else
 			add_pending_object(revs, obj, "");
 	}
-	if (revs->pending.nr)
+	if (trace_timings)
+		stats->pending_after = revs->pending.nr;
+	if (revs->pending.nr) {
+		uint64_t fill_in_started = 0;
+
+		if (trace_timings) {
+			int saved_errno = errno;
+
+			fill_in_started = getnanotime();
+			errno = saved_errno;
+		}
 		cb.base = fill_in_bitmap(bitmap_git, revs, cb.base, NULL);
+		if (trace_timings) {
+			int saved_errno = errno;
+
+			stats->fill_in_call_us = (getnanotime() - fill_in_started) / 1000;
+			errno = saved_errno;
+		}
+	}
 	if (trace_timings)
 		stats->fill_in_us = (getnanotime() - phase_started) / 1000;
 	trace2_region_leave("pack-bitmap", "boundary-fill-in", repo);
@@ -2288,6 +2314,23 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 			trace2_data_intmax("bitmap", repo,
 					   "haves/boundary-fill-in-us",
 					   boundary_stats.fill_in_us);
+			if (boundary_stats.fill_in_traced) {
+				int saved_errno = errno;
+
+				trace2_data_intmax("bitmap", repo,
+						   "haves/boundary-tip-count",
+						   boundary_stats.boundary_tip_count);
+				trace2_data_intmax("bitmap", repo,
+						   "haves/boundary-pending-before",
+						   boundary_stats.pending_before);
+				trace2_data_intmax("bitmap", repo,
+						   "haves/boundary-pending-after",
+						   boundary_stats.pending_after);
+				trace2_data_intmax("bitmap", repo,
+						   "haves/boundary-fill-in-call-us",
+						   boundary_stats.fill_in_call_us);
+				errno = saved_errno;
+			}
 		} else {
 			trace2_region_enter("pack-bitmap", "haves/classic", repo);
 			revs->ignore_missing_links = 1;

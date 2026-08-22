@@ -710,6 +710,7 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 
 		git rev-parse HEAD~63 >in &&
 		test-tool bitmap write "$(basename $pack)" <in &&
+		bitmap_have=$(cat in) &&
 		test_commit packed &&
 		git rev-list --objects --no-object-names HEAD ^HEAD^ \
 			>packed.objects &&
@@ -725,6 +726,59 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		git checkout -b unindexed-want "$base" &&
 		test_commit unindexed-want &&
 		want=$(git rev-parse HEAD) &&
+		# Include a stored bitmap root without covering the missing HAVE.
+		printf "%s\n%s\n%s\n" \
+			"$want" "^$have" "^$bitmap_have" >positive.in &&
+		git rev-list --objects --no-object-names \
+			"$want" "^$have" "^$bitmap_have" >positive.expect.raw &&
+		sort positive.expect.raw >positive.expect.objects &&
+		(
+			# Exercise the default limit, not the harness override.
+			sane_unset GIT_TRACE2_EVENT_NESTING &&
+			GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL=1 \
+			GIT_TRACE2_EVENT="$PWD/boundary-positive.trace" \
+				git -c core.multiPackIndex=true \
+					-c pack.useBitmapBoundaryTraversal=true \
+					pack-objects --use-bitmap-index --stdout --revs \
+					<positive.in >positive.pack
+		) &&
+		git index-pack positive.pack &&
+		list_packed_objects positive.idx >positive.actual.objects &&
+		test_cmp positive.expect.objects positive.actual.objects &&
+		test_line_count = 3 positive.actual.objects &&
+		test_grep "\"event\":\"region_enter\".*\"nesting\":2,.*\"label\":\"haves/boundary\"" \
+			boundary-positive.trace &&
+		bitmap_data="\"event\":\"data\".*\"nesting\":2,.*\"category\":\"bitmap\"" &&
+		test_grep "$bitmap_data.*\"key\":\"source/kind\",\"value\":\"2\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"roots/haves\",\"value\":\"2\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"roots/wants\",\"value\":\"1\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/root-with-bitmap\",\"value\":\"1\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/root-without-bitmap\",\"value\":\"1\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/boundary-tip-count\",\"value\":\"[1-9][0-9]*\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/boundary-pending-before\",\"value\":\"[0-9][0-9]*\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/boundary-pending-after\",\"value\":\"[1-9][0-9]*\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/boundary-fill-in-call-us\",\"value\":\"[0-9][0-9]*\"" \
+			boundary-positive.trace &&
+		sed -n "/$bitmap_data/s/.*\"key\":\"\([^\"]*\)\".*/\1/p" \
+			boundary-positive.trace >positive.bitmap.keys &&
+		grep -E "^haves/boundary-(tip-count|pending-before|pending-after|fill-in-call-us)$" \
+			positive.bitmap.keys >positive.actual.keys &&
+		cat >positive.expect.keys <<-\EOF &&
+		haves/boundary-tip-count
+		haves/boundary-pending-before
+		haves/boundary-pending-after
+		haves/boundary-fill-in-call-us
+		EOF
+		test_cmp positive.expect.keys positive.actual.keys &&
+
 		printf "%s\n%s\n" "$want" "^$have" >in &&
 		git rev-list --objects --no-object-names "$want" "^$have" |
 			sort >expect.objects &&
