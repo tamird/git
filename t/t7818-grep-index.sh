@@ -741,6 +741,7 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_grep_timer explicit-thread.trace source/object-read 2 &&
 	test_grep_timer explicit-thread.trace source/file-read 0 &&
 	test_grep_timer explicit-thread.trace source/file-hash 0 &&
+	test_grep_timer explicit-thread.trace dispatch/producer-lock 2 &&
 	test_grep_timer explicit-thread.trace dispatch/producer-wait 0 &&
 	test_grep_timer explicit-thread.trace dispatch/worker-drain 1 &&
 	GIT_TRACE2_EVENT="$PWD/configured-thread.trace" \
