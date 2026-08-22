@@ -679,6 +679,40 @@ test_expect_success 'rename directory' '
 	retry_grep "^event: dirrenamed/*$"  .git/trace
 '
 
+test_expect_success 'watch an empty directory moved into the worktree' '
+	test_when_finished "stop_daemon_delete_repo test_move_empty" &&
+	test_when_finished "rm -rf test_move_empty_outside" &&
+
+	git init test_move_empty &&
+	mkdir test_move_empty_outside &&
+	start_daemon -C test_move_empty --tk true &&
+
+	test-tool -C test_move_empty fsmonitor-client query --token 0 \
+		>actual_move_empty_0 &&
+	nul_to_q <actual_move_empty_0 >actual_move_empty_q0 &&
+	test_grep "^builtin:test_00000001:[0-9][0-9]*Q" actual_move_empty_q0 &&
+	move_empty_token=$(sed "s/Q.*//" actual_move_empty_q0) &&
+
+	mv test_move_empty_outside test_move_empty/incoming &&
+
+	# Consume the move before creating anything inside the empty directory.
+	test-tool -C test_move_empty fsmonitor-client query \
+		--token "$move_empty_token" >actual_move_empty_1 &&
+	nul_to_q <actual_move_empty_1 >actual_move_empty_q1 &&
+	test_grep "^builtin:test_00000001:[0-9][0-9]*Q" actual_move_empty_q1 &&
+	test_grep ! "Q/Q" actual_move_empty_q1 &&
+	test_grep -E "Qincoming/?Q" actual_move_empty_q1 &&
+	move_empty_token=$(sed "s/Q.*//" actual_move_empty_q1) &&
+
+	>test_move_empty/incoming/new-file &&
+	test-tool -C test_move_empty fsmonitor-client query \
+		--token "$move_empty_token" >actual_move_empty_2 &&
+	nul_to_q <actual_move_empty_2 >actual_move_empty_q2 &&
+	test_grep "^builtin:test_00000001:[0-9][0-9]*Q" actual_move_empty_q2 &&
+	test_grep ! "Q/Q" actual_move_empty_q2 &&
+	test_grep -E "Qincoming/(new-file)?Q" actual_move_empty_q2
+'
+
 test_expect_success 'file changes to directory' '
 	test_when_finished clean_up_repo_and_stop_daemon &&
 
