@@ -371,6 +371,14 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 				log_flags_set(path_k, event_flags[k]);
 
 			/*
+			 * Ordinary metadata changes to the worktree root do not
+			 * name a tracked path. Recursive and root-change events
+			 * were handled above; do not read past the root's NUL.
+			 */
+			if (!*worktree_rel)
+				break;
+
+			/*
 			 * Because of the implicit "binning" (the
 			 * kernel calls us at a given frequency) and
 			 * de-duping (the kernel is free to combine
@@ -382,20 +390,14 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 			 */
 
 			if (event_flags[k] & (kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemIsSymlink)) {
-				const char *rel = path_k +
-					state->path_worktree_watch.len + 1;
-
 				if (!batch)
 					batch = fsmonitor_batch__new();
-				my_add_path(batch, rel);
+				my_add_path(batch, worktree_rel);
 			}
 
 			if (event_flags[k] & kFSEventStreamEventFlagItemIsDir) {
-				const char *rel = path_k +
-					state->path_worktree_watch.len + 1;
-
 				strbuf_reset(&tmp);
-				strbuf_addstr(&tmp, rel);
+				strbuf_addstr(&tmp, worktree_rel);
 				strbuf_addch(&tmp, '/');
 
 				if (!batch)

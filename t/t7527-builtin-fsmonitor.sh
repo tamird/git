@@ -150,6 +150,48 @@ test_expect_success 'explicit daemon start and stop with a waiting query' '
 	test_must_fail git -C test_explicit fsmonitor--daemon status
 '
 
+# Retry a grep up to RETRY_TIMEOUT times until it succeeds.
+#
+RETRY_TIMEOUT=5
+
+retry_grep () {
+	nr_tries_left=$RETRY_TIMEOUT
+	until grep "$1" "$2" 2>/dev/null
+	do
+		if test $nr_tries_left -eq 0
+		then
+			grep "$1" "$2"
+			return
+		fi
+		nr_tries_left=$(($nr_tries_left - 1))
+		sleep 1
+	done
+}
+
+# Root and child callbacks do not depend on successful cookie synchronization.
+test_expect_success MACOS 'root metadata does not publish a worktree path' '
+	test_when_finished "stop_daemon_delete_repo test_root_metadata" &&
+	git init test_root_metadata &&
+	chmod 755 test_root_metadata &&
+	root_trace="$PWD/.git/trace_root_metadata" &&
+	root_event="^fsevent: .*[/]test_root_metadata., flags=" &&
+	start_daemon -C test_root_metadata --tf "$root_trace" &&
+	chmod 700 test_root_metadata &&
+	>test_root_metadata/child &&
+
+	retry_grep "$root_event" "$root_trace" &&
+	retry_grep "^event: child$" "$root_trace" &&
+	git -C test_root_metadata fsmonitor--daemon stop &&
+
+	grep "$root_event" "$root_trace" |
+	grep -Ev "MustScanSubDirs|UserDropped|KernelDropped|RootChanged" |
+	grep "ItemIsDir" &&
+	printf "%s\n" child >expect_root_metadata &&
+	sed -n "s/^event: //p" "$root_trace" |
+	sort -u >actual_root_metadata &&
+	test_cmp expect_root_metadata actual_root_metadata
+'
+
 if ! test_have_prereq FSMONITOR_WORKS
 then
 	skip_all="filesystem does not deliver fsmonitor events (container/overlayfs?)"
@@ -611,24 +653,6 @@ clean_up_repo_and_stop_daemon () {
 	git clean -fd &&
 	test_might_fail git fsmonitor--daemon stop &&
 	rm -f .git/trace
-}
-
-# Retry a grep up to RETRY_TIMEOUT times until it succeeds.
-#
-RETRY_TIMEOUT=5
-
-retry_grep () {
-	nr_tries_left=$RETRY_TIMEOUT
-	until grep "$1" "$2" 2>/dev/null
-	do
-		if test $nr_tries_left -eq 0
-		then
-			grep "$1" "$2"
-			return
-		fi
-		nr_tries_left=$(($nr_tries_left - 1))
-		sleep 1
-	done
 }
 
 test_expect_success 'edit some files' '
