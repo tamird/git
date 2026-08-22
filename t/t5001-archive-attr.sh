@@ -74,8 +74,12 @@ test_expect_exists	archive/excluded-by-pathspec.d
 test_expect_exists	archive/excluded-by-pathspec.d/file
 
 test_expect_success 'git archive with pathspec' '
-	git archive HEAD ":!excluded-by-pathspec.d" >archive-pathspec.tar &&
-	extract_tar_to_dir archive-pathspec
+	GIT_TRACE2_EVENT="$PWD/archive-pathspec.trace" \
+	GIT_TRACE2_EVENT_NESTING=10 \
+		git archive HEAD ":!excluded-by-pathspec.d" >archive-pathspec.tar &&
+	extract_tar_to_dir archive-pathspec &&
+	test_region unpack_trees unpack_trees archive-pathspec.trace &&
+	test_region ! cache_tree update archive-pathspec.trace
 '
 
 test_expect_missing	archive-pathspec/ignored
@@ -128,7 +132,13 @@ test_expect_missing	worktree2/ignored-by-worktree
 
 test_expect_success 'git archive vs. bare' '
 	(cd bare && git archive HEAD) >bare-archive.tar &&
-	test_cmp_bin archive.tar bare-archive.tar
+	test_cmp_bin archive.tar bare-archive.tar &&
+	GIT_TRACE2_EVENT="$PWD/archive-promisor.trace" \
+	GIT_TRACE2_EVENT_NESTING=10 \
+		git -C bare -c remote.origin.promisor=true archive HEAD \
+		>bare-promisor-archive.tar &&
+	test_cmp_bin archive.tar bare-promisor-archive.tar &&
+	test_region cache_tree update archive-promisor.trace
 '
 
 test_expect_success 'git archive with worktree attributes, bare' '
