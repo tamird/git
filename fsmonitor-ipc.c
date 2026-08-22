@@ -212,10 +212,8 @@ try_again:
 #endif
 			answer);
 		ipc_client_close_connection(connection);
-#ifdef __APPLE__
 		if (!ret && !memchr(answer->buf, '\0', answer->len))
 			ret = -1;
-#endif
 
 		trace2_data_intmax("fsm_client", NULL,
 				   "query/response-length", answer->len);
