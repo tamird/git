@@ -225,7 +225,8 @@ static void add_dir_rename(uint32_t cookie, const char *path,
  * Handle directory renames
  *
  * Once an IN_MOVED_TO event is received, lookup the rename tracking information
- * via the event cookie and use this information to update the watch.
+ * via the event cookie and remove the old watch.  The caller registers the
+ * new path after this bookkeeping is complete.
  */
 static void rename_dir(uint32_t cookie, const char *path,
 		       struct fsm_listen_data *data)
@@ -244,10 +245,6 @@ static void rename_dir(uint32_t cookie, const char *path,
 		if (w) {
 			w->cookie = 0; /* rename handled */
 			remove_watch(w, data);
-			if (add_watch(path, data))
-				trace_printf_key(&trace_fsmonitor,
-						 "failed to add watch for renamed dir '%s'",
-						 path);
 		} else {
 			/* Directory was moved out of watch tree */
 			trace_printf_key(&trace_fsmonitor,
@@ -564,16 +561,11 @@ static int process_event(const char *path,
 		if (em_rename_dir_from(event->mask))
 			add_dir_rename(event->cookie, path, state->listen_data);
 
-		/* received IN_MOVE_TO, update watch to reflect new path */
-		if (em_rename_dir_to(event->mask)) {
+		/* received IN_MOVE_TO, retire the old path's watch */
+		if (em_rename_dir_to(event->mask))
 			rename_dir(event->cookie, path, state->listen_data);
-			if (register_inotify(path, state, *batch)) {
-				state->listen_data->shutdown = SHUTDOWN_ERROR;
-				goto done;
-			}
-		}
 
-		if (em_dir_created(event->mask)) {
+		if (em_dir_created(event->mask) || em_rename_dir_to(event->mask)) {
 			if (add_watch(path, state->listen_data)) {
 				state->listen_data->shutdown = SHUTDOWN_ERROR;
 				goto done;
