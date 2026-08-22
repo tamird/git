@@ -12,6 +12,7 @@
 #include "object-name.h"
 #include "path.h"
 #include "pretty.h"
+#include "promisor-remote.h"
 #include "setup.h"
 #include "refs.h"
 #include "odb.h"
@@ -532,6 +533,8 @@ static void parse_treeish_arg(const char **argv,
 
 		memset(&opts, 0, sizeof(opts));
 		opts.index_only = 1;
+		/* Preserve cache-tree repair's bulk prefetch in partial clones. */
+		opts.skip_cache_tree_update = !repo_has_promisor_remote(ar_args->repo);
 		opts.head_idx = -1;
 		opts.src_index = ar_args->repo->index;
 		opts.dst_index = ar_args->repo->index;
