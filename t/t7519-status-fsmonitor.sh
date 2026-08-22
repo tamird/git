@@ -50,6 +50,39 @@ write_integration_script () {
 	EOF
 }
 
+# Check the existing preload boundary and counter before new worker assertions.
+test_preload_trace () {
+	test "$(grep -c '"region_enter".*"category":"index","label":"preload"' "$1")" = 1 &&
+	test "$(grep -c '"region_leave".*"category":"index","label":"preload"' "$1")" = 1 &&
+	test "$(grep -c '"category":"index","key":"preload/sum_lstat",' "$1")" = 1 &&
+	test_trace2_data index preload/sum_lstat "$2" <"$1"
+}
+
+# Keep the complete worker accounting while allowing zero or unavailable time.
+extract_preload_workers () {
+	awk '
+		/"region_enter".*"category":"index","label":"preload"/ {
+			preload_left = 0
+		}
+		/"region_leave".*"category":"index","label":"preload"/ {
+			preload_left = 1
+		}
+		/"category":"index","key":"preload\/workers","value":/ {
+			if (!preload_left)
+				exit 1
+		}
+	' "$1" &&
+	sed -n '
+		/"category":"index","key":"preload\/workers","value":/ {
+			s/^.*"category":"index","key":"preload\/workers","value"://
+			s/}$//
+			s/"elapsed_us":0}/"elapsed_us":null}/g
+			s/"elapsed_us":[1-9][0-9]*}/"elapsed_us":null}/g
+			p
+		}
+	' "$1"
+}
+
 test_lazy_prereq UNTRACKED_CACHE '
 	{ git update-index --test-untracked-cache; ret=$?; } &&
 	test $ret -ne 1
@@ -509,7 +542,9 @@ test_expect_success PTHREADS 'bare diff avoids preload for one fsmonitor-dirty p
 		git --no-optional-locks \
 			-c core.fsmonitor=false -c core.preloadIndex=false \
 			diff >.git/diff.expect &&
-		GIT_TEST_PRELOAD_INDEX=true git diff >.git/diff.actual &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/.git/diff-deleted.trace" \
+			git diff >.git/diff.actual &&
 		test_cmp .git/diff.expect .git/diff.actual &&
 		test_grep "^deleted file mode" .git/diff.actual &&
 		echo staged-change >staged &&
@@ -521,7 +556,22 @@ test_expect_success PTHREADS 'bare diff avoids preload for one fsmonitor-dirty p
 			-c core.fsmonitor=false -c core.preloadIndex=false \
 			diff >.git/diff.expect &&
 		GIT_TEST_PRELOAD_INDEX=true git diff >.git/diff.actual &&
-		test_cmp .git/diff.expect .git/diff.actual
+		test_cmp .git/diff.expect .git/diff.actual &&
+
+		test_preload_trace .git/diff-multiple.trace 2 &&
+		test_preload_trace .git/diff-deleted.trace 2 &&
+		extract_preload_workers .git/diff-multiple.trace \
+			>.git/preload-multiple.actual &&
+		extract_preload_workers .git/diff-deleted.trace \
+			>.git/preload-deleted.actual &&
+		cat >.git/preload-multiple.expect <<-\EOF &&
+		[{"entries":66,"lstat_attempts":0,"lstat_enoent":0,"lstat_other_error":0,"stat_match":0,"stat_mismatch":0,"elapsed_us":null},{"entries":65,"lstat_attempts":2,"lstat_enoent":0,"lstat_other_error":0,"stat_match":0,"stat_mismatch":2,"elapsed_us":null}]
+		EOF
+		cat >.git/preload-deleted.expect <<-\EOF &&
+		[{"entries":66,"lstat_attempts":0,"lstat_enoent":0,"lstat_other_error":0,"stat_match":0,"stat_mismatch":0,"elapsed_us":null},{"entries":65,"lstat_attempts":2,"lstat_enoent":1,"lstat_other_error":0,"stat_match":0,"stat_mismatch":1,"elapsed_us":null}]
+		EOF
+		test_cmp .git/preload-multiple.expect .git/preload-multiple.actual &&
+		test_cmp .git/preload-deleted.expect .git/preload-deleted.actual
 	)
 '
 
@@ -679,7 +729,27 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 		-c core.preloadIndex=false \
 		-C diff-index diff HEAD^ >expect &&
 	git -C diff-index diff HEAD^ >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+
+	if test_have_prereq PTHREADS
+	then
+		test_preload_trace diff-index/.git/fsmonitor-diff-first.trace 2 &&
+		test_preload_trace diff-index/.git/fsmonitor-diff-second.trace 0 &&
+		extract_preload_workers diff-index/.git/fsmonitor-diff-first.trace \
+			>diff-index/.git/preload-first.actual &&
+		extract_preload_workers diff-index/.git/fsmonitor-diff-second.trace \
+			>diff-index/.git/preload-second.actual &&
+		cat >diff-index/.git/preload-first.expect <<-\EOF &&
+		[{"entries":1,"lstat_attempts":1,"lstat_enoent":0,"lstat_other_error":0,"stat_match":1,"stat_mismatch":0,"elapsed_us":null},{"entries":1,"lstat_attempts":1,"lstat_enoent":0,"lstat_other_error":0,"stat_match":1,"stat_mismatch":0,"elapsed_us":null}]
+		EOF
+		cat >diff-index/.git/preload-second.expect <<-\EOF &&
+		[{"entries":1,"lstat_attempts":0,"lstat_enoent":0,"lstat_other_error":0,"stat_match":0,"stat_mismatch":0,"elapsed_us":null},{"entries":1,"lstat_attempts":0,"lstat_enoent":0,"lstat_other_error":0,"stat_match":0,"stat_mismatch":0,"elapsed_us":null}]
+		EOF
+		test_cmp diff-index/.git/preload-first.expect \
+			diff-index/.git/preload-first.actual &&
+		test_cmp diff-index/.git/preload-second.expect \
+			diff-index/.git/preload-second.actual
+	fi
 '
 
 test_expect_success 'diff-index reuses valid cache trees with excluded globs' '
