@@ -309,7 +309,9 @@ static int add_work(struct grep_opt *opt, struct grep_source *gs,
 	if (opt->binary != GREP_BINARY_TEXT)
 		grep_source_load_driver(gs, opt->repo->index);
 
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_PRODUCER_LOCK);
 	grep_lock();
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_PRODUCER_LOCK);
 
 	if (!status_only_hit &&
 	    (todo_end + 1) % ARRAY_SIZE(todo) == todo_done) {

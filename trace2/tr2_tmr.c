@@ -275,6 +275,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "source/object-read",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_GREP_PRODUCER_LOCK] = {
+		.category = "grep",
+		.name = "dispatch/producer-lock",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_GREP_PRODUCER_WAIT] = {
 		.category = "grep",
 		.name = "dispatch/producer-wait",
