@@ -207,6 +207,7 @@ struct grep_worktree_cache {
 	int recovery_invalid;
 	int recovery_revoked;
 	int compact_loaded;
+	int load_result;
 	int exact_changed;
 	int split_base_changed;
 };
@@ -840,6 +841,7 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 		cache->compact_loaded = 0;
 		loaded = 0;
 	}
+	cache->load_result = loaded;
 	*sidecar_loaded =
 		!!loaded ||
 		(!cache->split_index &&
@@ -1839,6 +1841,9 @@ void grep_worktree_cache_free(struct grep_worktree_cache *cache)
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/compact_loaded",
 			   cache->compact_loaded);
+	trace2_data_intmax("grep", cache->repo,
+			   "worktree_blob/load_result",
+			   cache->load_result);
 	trace2_data_intmax("grep", cache->repo,
 			   "worktree_blob/recovery_entries",
 			   cache->recovery_entries_nr);

@@ -2661,6 +2661,7 @@ test_expect_success 'content index prunes cached worktree blobs' '
 			    .git/index.grep-worktree-generation \
 			    .git/index.grep-worktree-recovery \
 			    .git/index.grep-worktree.save \
+			    exact-lookup.trace \
 			    recovery-lookup.trace &&
 			    git rm -f --ignore-unmatch ordinary-shift &&
 			    git update-index --no-fsmonitor &&
@@ -2678,7 +2679,8 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	git status --porcelain >/dev/null &&
 	test_must_fail git grep "absent cached worktree" -- ordinary &&
 	test_path_is_file .git/index.grep-worktree &&
-	test_must_fail git grep "absent cached worktree" -- ordinary &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/exact-lookup.trace" \
+		git grep "absent cached worktree" -- ordinary &&
 	echo "ordinary shift" >ordinary-shift &&
 	test-tool chmtime =-5 ordinary-shift &&
 	git add ordinary-shift &&
@@ -2703,7 +2705,15 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	echo "ordinary:worktree-only-needle" >expected &&
 	git grep "worktree-only-needle" -- ordinary >actual 2>err &&
 	test_cmp expected actual &&
-	test_must_be_empty err
+	test_must_be_empty err &&
+	test_trace2_data grep worktree_blob/compact_loaded 1 \
+		<exact-lookup.trace &&
+	test_trace2_data grep worktree_blob/compact_loaded 1 \
+		<recovery-lookup.trace &&
+	test_trace2_data grep worktree_blob/load_result 1 \
+		<exact-lookup.trace &&
+	test_trace2_data grep worktree_blob/load_result 0 \
+		<recovery-lookup.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \
