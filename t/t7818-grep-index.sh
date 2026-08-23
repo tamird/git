@@ -1924,6 +1924,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
 		nested ":(glob)other/**/text" ":(glob)another/**/text" \
 		>expect-tree-attributes &&
+	>tree-attributes.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-attributes.trace" \
 		GIT_TRACE2_EVENT_NESTING=2 \
 		git grep "present needle" "$attributes_commit" -- \
@@ -2206,7 +2207,9 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_pathspec_checks 2 \
 		<tree-union.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
-		<tree-union.trace
+		<tree-union.trace &&
+	test_trace2_data grep content_index_tree_object_read_us "[0-9][0-9]*" \
+		<tree-attributes.trace
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
