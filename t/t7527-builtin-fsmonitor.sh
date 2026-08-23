@@ -877,6 +877,69 @@ test_expect_success 'worktree with .git file' '
 	test_must_fail git -C wt-secondary fsmonitor--daemon status
 '
 
+test_lazy_prereq INOTIFY_FDINFO '
+	test "$uname_s" = Linux &&
+	test -r /proc/self/fdinfo/0 &&
+	readlink /proc/self/fd/0 >/dev/null
+'
+
+count_inotify_watches () {
+	# Ordinary tokens contain the daemon PID as their second dot field.
+	fsmonitor_pid=$(echo "$1" | cut -d. -f2) &&
+	case "$fsmonitor_pid" in
+	""|*[!0-9]*) return 1 ;;
+	esac &&
+	>inotify-watch-list &&
+	for fd in /proc/"$fsmonitor_pid"/fd/*
+	do
+		# An unrelated IPC descriptor may close while we inspect it.
+		test "$(readlink "$fd" 2>/dev/null)" = anon_inode:inotify || continue
+		grep "^inotify " "/proc/$fsmonitor_pid/fdinfo/${fd##*/}" \
+			>>inotify-watch-list || return 1
+	done &&
+	test -s inotify-watch-list &&
+	wc -l <inotify-watch-list
+}
+
+test_inotify_metadata_watches () {
+	git_dir=$(git -C "$1" rev-parse --absolute-git-dir) &&
+	test_when_finished "rm -rf \"$git_dir/unrelated-metadata\"" &&
+	test_when_finished "git -C \"$1\" fsmonitor--daemon stop" &&
+	(
+		sane_unset GIT_TEST_FSMONITOR_TOKEN &&
+		start_daemon -C "$1" &&
+		test-tool -C "$1" fsmonitor-client query --token 0 >watch-query &&
+		nul_to_q <watch-query >watch-query.q &&
+		watch_token=$(sed "s/Q.*//" watch-query.q) &&
+		count_inotify_watches "$watch_token" >expect-watch-count &&
+		git -C "$1" fsmonitor--daemon stop &&
+
+		mkdir -p "$git_dir/unrelated-metadata/one/two" &&
+		start_daemon -C "$1" &&
+		test-tool -C "$1" fsmonitor-client query --token 0 >watch-query &&
+		nul_to_q <watch-query >watch-query.q &&
+		watch_token=$(sed "s/Q.*//" watch-query.q) &&
+		count_inotify_watches "$watch_token" >actual-watch-count &&
+
+		# The cookie directory must still be watched after pruning metadata.
+		echo changed >"$1/file1" &&
+		test-tool -C "$1" fsmonitor-client query \
+			--token "$watch_token" >watch-query &&
+		nul_to_q <watch-query >watch-query.q &&
+		test_grep "Qfile1Q" watch-query.q &&
+		test_grep ! "Q/Q" watch-query.q &&
+		test_cmp expect-watch-count actual-watch-count
+	)
+}
+
+test_expect_success INOTIFY_FDINFO 'main worktree ignores unrelated metadata watches' '
+	test_inotify_metadata_watches wt-base
+'
+
+test_expect_success INOTIFY_FDINFO 'linked worktree ignores unrelated metadata watches' '
+	test_inotify_metadata_watches wt-secondary
+'
+
 test_expect_success MACOS 'worktrees share one daemon' '
 	test_when_finished "rm -rf shared-base shared-secondary" &&
 	test_when_finished \
