@@ -2369,6 +2369,7 @@ struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
 	int ipc_available;
+	const struct pathspec_item *onestar_suffix;
 	int recursive_basename_pathspec;
 	int recursive_basename_all_directories;
 	int rooted_recursive_basename_pathspec;
@@ -2565,6 +2566,18 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 	int old_baselen = base->len;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
+	const struct pathspec_item *suffix_item =
+		query ? query->onestar_suffix : NULL;
+	int suffix_len = suffix_item ? suffix_item->len - 1 : 0;
+
+	/*
+	 * A root directory named exactly like the pattern admits descendants
+	 * whose basenames do not end with the suffix.
+	 */
+	if (suffix_item && old_baselen - tn_len > suffix_item->len &&
+	    !memcmp(base->buf + tn_len, suffix_item->match, suffix_item->len) &&
+	    base->buf[tn_len + suffix_item->len] == '/')
+		suffix_item = NULL;
 	if (repo->submodule_prefix) {
 		strbuf_addstr(&name, repo->submodule_prefix);
 		name_base_len = name.len;
@@ -2590,6 +2603,14 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		if (query && query->trace_enabled)
 			query->tree_entries++;
 
+		if (suffix_item && S_ISREG(entry.mode) &&
+		    (te_len < suffix_len ||
+		     memcmp(entry.path + te_len - suffix_len,
+			    suffix_item->match + 1, suffix_len))) {
+			if (query->trace_enabled)
+				query->basename_rejected++;
+			continue;
+		}
 		if (query && query->recursive_basename_pathspec &&
 		    S_ISREG(entry.mode) &&
 		    !starts_with(base->buf + tn_len, "**/")) {
@@ -3023,6 +3044,16 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	int has_exact_recursive_glob_basename = 0;
 	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
+
+	if (!recurse_submodules && pathspec->nr == 1 && !pathspec->magic) {
+		const struct pathspec_item *item = &pathspec->items[0];
+
+		if (!item->prefix && !item->nowildcard_len &&
+		    (item->flags & PATHSPEC_ONESTAR) && item->len > 1 &&
+		    item->match[0] == '*' && !strchr(item->match, '/') &&
+		    !strchr(item->match, '\\'))
+			query.onestar_suffix = item;
+	}
 
 	/* Exclusions cannot admit a regular entry; match survivors normally. */
 	for (i = 0; query.recursive_basename_pathspec && i < pathspec->nr; i++) {
