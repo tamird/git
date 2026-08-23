@@ -171,6 +171,10 @@ test_expect_success 'git diff refreshes only matching index entries' '
 	printf "excluded\n" >refresh-scope/excluded &&
 	git add -- refresh-scope/included refresh-scope/excluded &&
 	test-tool chmtime +10 refresh-scope/included refresh-scope/excluded &&
+	cp .git/index index.before &&
+	git --no-optional-locks diff -- refresh-scope/included >actual &&
+	test_must_be_empty actual &&
+	test_cmp_bin index.before .git/index &&
 	git diff -- refresh-scope/included >actual &&
 	test_must_be_empty actual &&
 	printf "refresh-scope/excluded\n" >expected &&

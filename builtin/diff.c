@@ -708,7 +708,7 @@ int cmd_diff(int argc,
 				      first_non_parent);
 	result = diff_result_code(&rev);
 	t_dispatch_end = getnanotime();
-	if (1 < rev.diffopt.skip_stat_unmatch)
+	if (1 < rev.diffopt.skip_stat_unmatch && use_optional_locks())
 		refresh_index_quietly(&rev.prune_data,
 				      !ent.nr && !blobs &&
 				      !sparse_validation_scoped);
