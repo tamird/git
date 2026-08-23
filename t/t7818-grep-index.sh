@@ -1774,6 +1774,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_when_finished "git fsmonitor--daemon stop &&
 			    git config --unset core.fsmonitor &&
 			    rm -f tree.trace tree-positive.trace \
+				  tree-union.trace \
 				  tree-bypass.trace tree-fallback.trace \
 				  tree-byte-fallback.trace \
 				  tree-missing.trace \
@@ -2095,6 +2096,36 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	git grep "present needle" "$literal_suffix_tree" -- \
 		"*text" >actual-tree-positive &&
 	test_cmp expect-tree-positive actual-tree-positive &&
+	git grep --no-content-index -F "present needle" "$attributes_commit" -- \
+		"*binary" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	git grep -F "present needle" "$attributes_commit" -- \
+		"*binary" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	git grep --no-content-index -F "present needle" "$attributes_commit" -- \
+		"*absent" nested/ >actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	git grep -F "present needle" "$attributes_commit" -- \
+		"*absent" nested/ >actual-tree-positive &&
+	test_cmp expect-tree-attributes actual-tree-positive &&
+	printf "%s:*text/child:present needle\n" "$literal_suffix_tree" \
+		>expect-tree-positive &&
+	git grep --no-content-index -F "present needle" "$literal_suffix_tree" -- \
+		"*absent" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	git grep -F "present needle" "$literal_suffix_tree" -- \
+		"*absent" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	printf "%s:nested/text:present needle\n" "$attributes_commit" \
+		>expect-tree-positive &&
+	git grep --no-content-index -F "present needle" "$attributes_commit" -- \
+		"*absent" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	>tree-union.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-union.trace" \
+		git grep -F "present needle" "$attributes_commit" -- \
+			"*absent" "*text" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
 	positive_oid=$(git rev-parse :present) &&
 	positive_object=.git/objects/$(test_oid_to_path "$positive_oid") &&
 	mv "$positive_object" "$positive_object.save" &&
@@ -2165,7 +2196,17 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_pathspec_checks 2 \
 		<tree-positive.trace &&
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
-		<tree-positive.trace
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_entries 3 \
+		<tree-union.trace &&
+	test_trace2_data grep content_index_tree_directories 1 \
+		<tree-union.trace &&
+	test_trace2_data grep content_index_tree_objects 1 \
+		<tree-union.trace &&
+	test_trace2_data grep content_index_tree_pathspec_checks 2 \
+		<tree-union.trace &&
+	test_trace2_data grep content_index_tree_basename_rejected 1 \
+		<tree-union.trace
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
