@@ -2374,6 +2374,7 @@ struct grep_tree_query_context {
 	int recursive_basename_all_directories;
 	int rooted_recursive_basename_pathspec;
 	int trace_enabled;
+	int tree_object_read_invalid;
 	size_t batch_size;
 	size_t batch_max_bytes;
 	uint64_t objects;
@@ -2387,6 +2388,7 @@ struct grep_tree_query_context {
 	uint64_t pathspec_rejected;
 	uint64_t basename_rejected;
 	uint64_t tree_walk_ns;
+	uint64_t tree_object_read_ns;
 	uint64_t batch_prepare_ns;
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
@@ -2772,11 +2774,29 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			struct tree_desc sub;
 			void *data;
 			unsigned long size;
+			uint64_t object_read_begin = 0;
 
-			if (query && query->trace_enabled)
+			if (query && query->trace_enabled) {
+				int saved_errno = errno;
+
 				query->tree_directories++;
+				object_read_begin = getnanotime();
+				errno = saved_errno;
+			}
 			data = odb_read_object(the_repository->objects,
 					       &entry.oid, &type, &size);
+			if (query && query->trace_enabled) {
+				int saved_errno = errno;
+				uint64_t object_read_end = getnanotime();
+
+				errno = saved_errno;
+				if (!object_read_begin || !object_read_end ||
+				    object_read_end < object_read_begin)
+					query->tree_object_read_invalid = 1;
+				else if (!query->tree_object_read_invalid)
+					query->tree_object_read_ns +=
+						object_read_end - object_read_begin;
+			}
 			if (!data) {
 				if (batch)
 					flush_grep_tree_batch_before_die(batch);
@@ -3191,6 +3211,10 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_walk_us",
 					   query.tree_walk_ns / 1000);
+			if (!query.tree_object_read_invalid)
+				trace2_data_intmax("grep", the_repository,
+						   "content_index_tree_object_read_us",
+						   query.tree_object_read_ns / 1000);
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_batch_prepare_us",
 					   query.batch_prepare_ns / 1000);
