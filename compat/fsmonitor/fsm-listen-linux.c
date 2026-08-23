@@ -259,8 +259,25 @@ static void rename_dir(uint32_t cookie, const char *path,
 	}
 }
 
+static int should_watch_directory(const char *path,
+				  struct fsmonitor_daemon_state *state)
+{
+	enum fsmonitor_path_type type =
+		fsmonitor_classify_path_absolute(state, path);
+	size_t len;
+
+	if (type != IS_INSIDE_DOT_GIT && type != IS_INSIDE_GITDIR)
+		return 1;
+
+	/* Metadata events are ignored, but we must reach the cookie directory. */
+	len = strlen(path);
+	return len < state->path_cookie_prefix.len &&
+		!fspathncmp(path, state->path_cookie_prefix.buf, len) &&
+		state->path_cookie_prefix.buf[len] == '/';
+}
+
 /*
- * Recursively add watches to every directory under path
+ * Recursively add watches to relevant directories under path
  */
 static int register_inotify(const char *path,
 			    struct fsmonitor_daemon_state *state,
@@ -302,6 +319,8 @@ static int register_inotify(const char *path,
 
 		/* recurse into directory */
 		if (dtype == DT_DIR) {
+			if (!should_watch_directory(current.buf, state))
+				continue;
 			if (add_watch(current.buf, state->listen_data))
 				goto failed;
 			if (register_inotify(current.buf, state, batch))
