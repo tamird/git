@@ -2369,7 +2369,7 @@ struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
 	int ipc_available;
-	const struct pathspec_item *onestar_suffix;
+	int onestar_suffix_pathspec;
 	int recursive_basename_pathspec;
 	int recursive_basename_all_directories;
 	int rooted_recursive_basename_pathspec;
@@ -2566,18 +2566,20 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 	int old_baselen = base->len;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
-	const struct pathspec_item *suffix_item =
-		query ? query->onestar_suffix : NULL;
-	int suffix_len = suffix_item ? suffix_item->len - 1 : 0;
+	int onestar_suffix_pathspec = query && query->onestar_suffix_pathspec;
 
 	/*
-	 * A root directory named exactly like the pattern admits descendants
-	 * whose basenames do not end with the suffix.
+	 * A root directory named exactly like any pattern admits descendants
+	 * whose basenames need not match any suffix.
 	 */
-	if (suffix_item && old_baselen - tn_len > suffix_item->len &&
-	    !memcmp(base->buf + tn_len, suffix_item->match, suffix_item->len) &&
-	    base->buf[tn_len + suffix_item->len] == '/')
-		suffix_item = NULL;
+	for (size_t i = 0; onestar_suffix_pathspec && i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+
+		if (old_baselen - tn_len > item->len &&
+		    !memcmp(base->buf + tn_len, item->match, item->len) &&
+		    base->buf[tn_len + item->len] == '/')
+			onestar_suffix_pathspec = 0;
+	}
 	if (repo->submodule_prefix) {
 		strbuf_addstr(&name, repo->submodule_prefix);
 		name_base_len = name.len;
@@ -2603,13 +2605,25 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		if (query && query->trace_enabled)
 			query->tree_entries++;
 
-		if (suffix_item && S_ISREG(entry.mode) &&
-		    (te_len < suffix_len ||
-		     memcmp(entry.path + te_len - suffix_len,
-			    suffix_item->match + 1, suffix_len))) {
-			if (query->trace_enabled)
-				query->basename_rejected++;
-			continue;
+		if (onestar_suffix_pathspec && S_ISREG(entry.mode)) {
+			int basename_matches = 0;
+
+			for (size_t i = 0; i < pathspec->nr; i++) {
+				const struct pathspec_item *item = &pathspec->items[i];
+				int suffix_len = item->len - 1;
+
+				if (te_len >= suffix_len &&
+				    !memcmp(entry.path + te_len - suffix_len,
+					    item->match + 1, suffix_len)) {
+					basename_matches = 1;
+					break;
+				}
+			}
+			if (!basename_matches) {
+				if (query->trace_enabled)
+					query->basename_rejected++;
+				continue;
+			}
 		}
 		if (query && query->recursive_basename_pathspec &&
 		    S_ISREG(entry.mode) &&
@@ -3045,14 +3059,19 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	int has_rooted_recursive_basename = 0;
 	const unsigned int nr = list->nr;
 
-	if (!recurse_submodules && pathspec->nr == 1 && !pathspec->magic) {
-		const struct pathspec_item *item = &pathspec->items[0];
+	if (!recurse_submodules && pathspec->nr && !pathspec->magic) {
+		query.onestar_suffix_pathspec = 1;
+		for (i = 0; i < pathspec->nr; i++) {
+			const struct pathspec_item *item = &pathspec->items[i];
 
-		if (!item->prefix && !item->nowildcard_len &&
-		    (item->flags & PATHSPEC_ONESTAR) && item->len > 1 &&
-		    item->match[0] == '*' && !strchr(item->match, '/') &&
-		    !strchr(item->match, '\\'))
-			query.onestar_suffix = item;
+			if (item->prefix || item->nowildcard_len ||
+			    !(item->flags & PATHSPEC_ONESTAR) || item->len <= 1 ||
+			    item->match[0] != '*' || strchr(item->match, '/') ||
+			    strchr(item->match, '\\')) {
+				query.onestar_suffix_pathspec = 0;
+				break;
+			}
+		}
 	}
 
 	/* Exclusions cannot admit a regular entry; match survivors normally. */
