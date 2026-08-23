@@ -19,11 +19,15 @@ test_expect_success 'setup' '
 '
 
 test_expect_success 'git ls-files --error-unmatch should fail with unmatched path.' '
-	test_must_fail git ls-files --error-unmatch foo bar-does-not-match
+	test_must_fail git ls-files --error-unmatch -- "*" foo bar-does-not-match
 '
 
 test_expect_success 'git ls-files --error-unmatch should succeed with matched paths.' '
-	git ls-files --error-unmatch foo bar
+	test_write_lines bar foo >expect &&
+	git ls-files -- "b*" bar "f*" foo >actual &&
+	test_cmp expect actual &&
+	git ls-files --error-unmatch -- "b*" bar "f*" foo >actual &&
+	test_cmp expect actual
 '
 
 test_done

@@ -192,6 +192,15 @@ int match_pathspec(struct index_state *istate,
 		   const char *name, int namelen,
 		   int prefix, char *seen, int is_dir);
 
+/*
+ * Like match_pathspec(), but only reports whether a match exists and does not
+ * collect per-pathspec match information.
+ */
+int match_pathspec_bool(struct index_state *istate,
+			const struct pathspec *pathspec,
+			const char *name, int namelen,
+			int prefix, int is_dir);
+
 /* Set both DO_MATCH_DIRECTORY and DO_MATCH_LEADING_PATHSPEC if is_dir true */
 int match_leading_pathspec(struct index_state *istate,
 			   const struct pathspec *ps,
