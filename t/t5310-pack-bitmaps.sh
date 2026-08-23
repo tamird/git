@@ -767,9 +767,11 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 			boundary-positive.trace &&
 		test_grep "$bitmap_data.*\"key\":\"haves/boundary-fill-in-call-us\",\"value\":\"[0-9][0-9]*\"" \
 			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"haves/boundary-fill-in-limited\",\"value\":\"[01]\"" \
+			boundary-positive.trace &&
 		sed -n "/$bitmap_data/s/.*\"key\":\"\([^\"]*\)\".*/\1/p" \
 			boundary-positive.trace >positive.bitmap.keys &&
-		grep -E "^haves/boundary-(tip-count|pending-before|pending-after|fill-in-call-us)$" \
+		grep -E "^haves/boundary-(tip-count|pending-before|pending-after|fill-in-call-us|fill-in-prepare-us|fill-in-traverse-us|fill-in-limited)$" \
 			positive.bitmap.keys >positive.actual.keys &&
 		cat >positive.expect.keys <<-\EOF &&
 		haves/boundary-tip-count
@@ -777,6 +779,18 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		haves/boundary-pending-after
 		haves/boundary-fill-in-call-us
 		EOF
+		if grep -q "^haves/boundary-fill-in-prepare-us$" positive.actual.keys
+		then
+			test_grep "$bitmap_data.*\"key\":\"haves/boundary-fill-in-prepare-us\",\"value\":\"[0-9][0-9]*\"" \
+				boundary-positive.trace &&
+			test_grep "$bitmap_data.*\"key\":\"haves/boundary-fill-in-traverse-us\",\"value\":\"[0-9][0-9]*\"" \
+				boundary-positive.trace &&
+			cat >>positive.expect.keys <<-\EOF
+			haves/boundary-fill-in-prepare-us
+			haves/boundary-fill-in-traverse-us
+			EOF
+		fi &&
+		echo haves/boundary-fill-in-limited >>positive.expect.keys &&
 		test_cmp positive.expect.keys positive.actual.keys &&
 
 		printf "%s\n%s\n" "$want" "^$have" >in &&
@@ -791,6 +805,7 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		test_cmp expect.objects actual.objects &&
 		test_line_count = 3 actual.objects &&
 		test_grep ! "\"label\":\"haves/boundary\"" boundary.trace &&
+		test_grep ! "\"key\":\"haves/boundary-fill-in-" boundary.trace &&
 		test_grep ! "\"key\":\"bitmap/misses\"" boundary.trace
 	)
 '

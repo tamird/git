@@ -1281,13 +1281,53 @@ static int add_commit_to_bitmap(struct bitmap_index *bitmap_git,
 	return 1;
 }
 
+struct bitmap_fill_in_stats {
+	uint64_t prepare_us;
+	uint64_t traverse_us;
+	int limited;
+	int timings_valid;
+};
+
+static int bitmap_fill_in_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
 static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 				     struct rev_info *revs,
 				     struct bitmap *base,
-				     struct bitmap *seen)
+				     struct bitmap *seen,
+				     struct bitmap_fill_in_stats *stats)
 {
 	struct include_data incdata;
 	struct bitmap_show_data show_data;
+	uint64_t phase_started = 0, phase_finished;
+	int trace_timings = 0;
 
 	if (!base)
 		base = bitmap_new();
@@ -1300,13 +1340,33 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 	revs->include_check_obj = should_include_obj;
 	revs->include_check_data = &incdata;
 
+	if (stats) {
+		stats->timings_valid = 0;
+		trace_timings = !bitmap_fill_in_time(&phase_started);
+	}
 	if (prepare_revision_walk(revs))
 		die(_("revision walk setup failed"));
+	if (trace_timings) {
+		trace_timings = !bitmap_fill_in_time(&phase_finished) &&
+			phase_finished >= phase_started;
+		if (trace_timings)
+			stats->prepare_us = (phase_finished - phase_started) / 1000;
+	}
+	/* Preparation can enable limited mode while handling pending commits. */
+	if (stats)
+		stats->limited = revs->limited;
 
 	show_data.bitmap_git = bitmap_git;
 	show_data.base = base;
 
+	if (trace_timings)
+		trace_timings = !bitmap_fill_in_time(&phase_started);
 	traverse_commit_list(revs, show_commit, show_object, &show_data);
+	if (trace_timings && !bitmap_fill_in_time(&phase_finished) &&
+	    phase_finished >= phase_started) {
+		stats->traverse_us = (phase_finished - phase_started) / 1000;
+		stats->timings_valid = 1;
+	}
 
 	revs->include_check = NULL;
 	revs->include_check_obj = NULL;
@@ -1335,6 +1395,7 @@ struct bitmap_boundary_stats {
 	uint64_t traverse_us;
 	uint64_t fill_in_us;
 	uint64_t fill_in_call_us;
+	struct bitmap_fill_in_stats fill_in;
 };
 
 enum bitmap_trace_source_kind {
@@ -1523,7 +1584,8 @@ static struct bitmap *find_boundary_objects(struct bitmap_index *bitmap_git,
 			fill_in_started = getnanotime();
 			errno = saved_errno;
 		}
-		cb.base = fill_in_bitmap(bitmap_git, revs, cb.base, NULL);
+		cb.base = fill_in_bitmap(bitmap_git, revs, cb.base, NULL,
+					trace_timings ? &stats->fill_in : NULL);
 		if (trace_timings) {
 			int saved_errno = errno;
 
@@ -1704,7 +1766,7 @@ static struct bitmap *find_objects(struct bitmap_index *bitmap_git,
 		 * bitmap already (or it has an on-disk bitmap, since
 		 * OR-ing it in covers all of its ancestors).
 		 */
-		base = fill_in_bitmap(bitmap_git, revs, base, seen);
+		base = fill_in_bitmap(bitmap_git, revs, base, seen, NULL);
 	}
 
 	object_list_free(&not_mapped);
@@ -2329,6 +2391,19 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 				trace2_data_intmax("bitmap", repo,
 						   "haves/boundary-fill-in-call-us",
 						   boundary_stats.fill_in_call_us);
+				if (boundary_stats.pending_after) {
+					if (boundary_stats.fill_in.timings_valid) {
+						trace2_data_intmax("bitmap", repo,
+							"haves/boundary-fill-in-prepare-us",
+							boundary_stats.fill_in.prepare_us);
+						trace2_data_intmax("bitmap", repo,
+							"haves/boundary-fill-in-traverse-us",
+							boundary_stats.fill_in.traverse_us);
+					}
+					trace2_data_intmax("bitmap", repo,
+						"haves/boundary-fill-in-limited",
+						boundary_stats.fill_in.limited);
+				}
 				errno = saved_errno;
 			}
 		} else {
