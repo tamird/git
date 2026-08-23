@@ -434,6 +434,7 @@ static int do_read_blob(const struct object_id *oid, struct oid_stat *oid_stat,
 #define DO_MATCH_EXCLUDE   (1<<0)
 #define DO_MATCH_DIRECTORY (1<<1)
 #define DO_MATCH_LEADING_PATHSPEC (1<<2)
+#define DO_MATCH_STOP_ON_MATCH (1<<3)
 
 /*
  * Does the given pathspec match the given name?  A match is found if
@@ -647,6 +648,8 @@ static int do_match_pathspec(struct index_state *istate,
 				how = 0;
 		}
 		if (how) {
+			if (flags & DO_MATCH_STOP_ON_MATCH)
+				return how;
 			if (retval < how)
 				retval = how;
 			if (seen && seen[i] < how)
@@ -680,6 +683,20 @@ int match_pathspec(struct index_state *istate,
 	unsigned flags = is_dir ? DO_MATCH_DIRECTORY : 0;
 	return match_pathspec_with_flags(istate, ps, name, namelen,
 					 prefix, seen, flags);
+}
+
+int match_pathspec_bool(struct index_state *istate,
+			const struct pathspec *ps,
+			const char *name, int namelen,
+			int prefix, int is_dir)
+{
+	unsigned flags = is_dir ? DO_MATCH_DIRECTORY : 0;
+
+	/* Keep exclude resolution and attribute lookups exhaustive. */
+	if (!(ps->magic & (PATHSPEC_EXCLUDE | PATHSPEC_ATTR)))
+		flags |= DO_MATCH_STOP_ON_MATCH;
+	return !!match_pathspec_with_flags(istate, ps, name, namelen,
+					  prefix, NULL, flags);
 }
 
 int match_leading_pathspec(struct index_state *istate,
