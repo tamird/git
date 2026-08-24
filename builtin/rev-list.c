@@ -941,7 +941,10 @@ int cmd_rev_list(int argc,
 	prepare_maximal_independent(&revs);
 
 	if (revs.tree_objects) {
-		struct tree_mark_stats stats = { 0 };
+		struct tree_mark_stats stats = {
+			.parse_counts_valid = 1,
+			.parse_timings_valid = 1,
+		};
 		int trace_tree_marking =
 			trace2_is_enabled() && revs.diffopt.flags.quick &&
 			revs.read_from_stdin && revs.tag_objects &&
@@ -958,6 +961,8 @@ int cmd_rev_list(int argc,
 		trace2_region_leave("rev-list", "mark_edges_uninteresting",
 				    the_repository);
 		if (trace_tree_marking) {
+			int saved_errno;
+
 			trace2_data_intmax("rev-list", the_repository,
 					   "edge-mark/roots", stats.roots);
 			trace2_data_intmax("rev-list", the_repository,
@@ -968,6 +973,26 @@ int cmd_rev_list(int argc,
 					   stats.trees_expanded);
 			trace2_data_intmax("rev-list", the_repository,
 					   "edge-mark/tree-bytes", stats.tree_bytes);
+			saved_errno = errno;
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/tree-parse-counts-valid",
+					   stats.parse_counts_valid);
+			trace2_data_intmax("rev-list", the_repository,
+					   "edge-mark/tree-parse-timings-valid",
+					   stats.parse_timings_valid);
+			if (stats.parse_counts_valid) {
+				trace2_data_intmax("rev-list", the_repository,
+						   "edge-mark/tree-parse-needed-count",
+						   stats.parse_needed_count);
+				trace2_data_intmax("rev-list", the_repository,
+						   "edge-mark/tree-parse-already-parsed-count",
+						   stats.already_parsed_count);
+			}
+			if (stats.parse_timings_valid)
+				trace2_data_intmax("rev-list", the_repository,
+						   "edge-mark/tree-parse-needed-us",
+						   stats.parse_needed_ns / 1000);
+			errno = saved_errno;
 		}
 	}
 

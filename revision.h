@@ -563,6 +563,16 @@ struct tree_mark_stats {
 	/* Successfully expanded trees and their logical tree-object bytes. */
 	uint64_t trees_expanded;
 	uint64_t tree_bytes;
+	/*
+	 * Parse attempts classified by pre-call parsedness, including failures.
+	 * The caller initializes validity flags; invalidity is sticky.
+	 * Timing covers needed parse calls, not storage reads.
+	 */
+	intmax_t parse_needed_count;
+	intmax_t already_parsed_count;
+	uint64_t parse_needed_ns;
+	int parse_counts_valid;
+	int parse_timings_valid;
 };
 
 void mark_tree_uninteresting(struct repository *r, struct tree *tree);
