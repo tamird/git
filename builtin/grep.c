@@ -26,6 +26,7 @@
 #include "grep-index-ipc.h"
 #include "grep-worktree.h"
 #include "lockfile.h"
+#include "json-writer.h"
 #include "quote.h"
 #include "dir.h"
 #include "pathspec.h"
@@ -1122,7 +1123,7 @@ static int grep_cache_query_content_index_oids(
 	trace2_region_enter("grep", "query_content_index_ipc", repo);
 	query_result = grep_index_ipc_query_with_max_parallel_requests(
 		repo, content_index_query, oids, nr_oids, maybe,
-		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS);
+		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS, NULL);
 	trace2_region_leave("grep", "query_content_index_ipc", repo);
 	if (query_result) {
 		FREE_AND_NULL(content_index_ipc_result);
@@ -2365,6 +2366,8 @@ struct grep_tree_batch_item {
  * The repository and query are fixed for this command. Submodule recursion is
  * excluded, so object IDs alone identify reusable content-index answers.
  */
+#define GREP_TREE_IPC_TRACE_BATCHES 16
+
 struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
@@ -2393,6 +2396,11 @@ struct grep_tree_query_context {
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
 	uint64_t batch_classify_ns;
+	uint64_t ipc_trace_epoch_ns;
+	uint64_t ipc_trace_attempted;
+	unsigned int ipc_trace_retained;
+	unsigned int ipc_trace_clock_invalid;
+	int ipc_trace_count_overflow;
 };
 
 struct grep_tree_batch {
@@ -2421,6 +2429,101 @@ static int grep_tree_rooted_recursive_basename(
 	*basename = recursive + 4;
 	return **basename && !strchr(*basename, '/') &&
 	       !strchr(*basename, '\\');
+}
+
+/*
+ * Retain client intervals, not server timing. Requests may overlap. All clocks
+ * use getnanotime(); zero, reversed, or out-of-envelope endpoints are unusable,
+ * not proof of a clock syscall error. Missing intervals are never zero-filled.
+ */
+static int grep_tree_ipc_interval_valid(uint64_t begin, uint64_t end,
+				       uint64_t lower, uint64_t upper)
+{
+	return begin && end && begin >= lower && end >= begin && end <= upper;
+}
+
+static void grep_tree_ipc_interval(struct json_writer *jw, uint64_t epoch,
+				   uint64_t begin, uint64_t end)
+{
+	jw_object_intmax(jw, "start_offset_us", (begin - epoch) / 1000);
+	jw_object_intmax(jw, "duration_us", (end - begin) / 1000);
+}
+
+static void trace_grep_tree_ipc_batch(
+	struct repository *repo, struct grep_tree_query_context *query,
+	const struct grep_index_ipc_query_trace *trace,
+	uint64_t begin, uint64_t end, int result)
+{
+	int saved_errno = errno;
+	struct json_writer jw = JSON_WRITER_INIT;
+	char key[32];
+	uint64_t epoch = query->ipc_trace_epoch_ns;
+	int valid = epoch && grep_tree_ipc_interval_valid(begin, end, epoch, end);
+
+	if (trace->probe_outcome &&
+	    !grep_tree_ipc_interval_valid(trace->probe_begin_ns,
+					  trace->probe_end_ns, begin, end))
+		valid = 0;
+	for (size_t i = 0; i < trace->requests_started; i++) {
+		const struct grep_index_ipc_request_trace *request = &trace->requests[i];
+
+		if (!grep_tree_ipc_interval_valid(request->begin_ns,
+						  request->end_ns, begin, end))
+			valid = 0;
+	}
+	query->ipc_trace_clock_invalid += !valid;
+	jw_object_begin(&jw, 0);
+	xsnprintf(key, sizeof(key), "batch_%u", query->ipc_trace_retained++);
+	jw_object_inline_begin_object(&jw, key);
+	jw_object_intmax(&jw, "outcome", !!result);
+	jw_object_intmax(&jw, "requests_planned", trace->requests_planned);
+	jw_object_intmax(&jw, "requests_started", trace->requests_started);
+	jw_object_intmax(&jw, "clock_invalid", !valid);
+	if (valid)
+		grep_tree_ipc_interval(&jw, epoch, begin, end);
+	if (trace->probe_outcome) {
+		jw_object_inline_begin_object(&jw, "probe");
+		jw_object_intmax(&jw, "outcome", trace->probe_outcome);
+		if (valid)
+			grep_tree_ipc_interval(&jw, epoch, trace->probe_begin_ns,
+					       trace->probe_end_ns);
+		jw_end(&jw);
+	}
+	for (size_t i = 0; i < trace->requests_started; i++) {
+		const struct grep_index_ipc_request_trace *request = &trace->requests[i];
+
+		xsnprintf(key, sizeof(key), "request_%"PRIuMAX, (uintmax_t)i);
+		jw_object_inline_begin_object(&jw, key);
+		jw_object_intmax(&jw, "objects", request->objects);
+		jw_object_intmax(&jw, "outcome", request->outcome);
+		if (valid)
+			grep_tree_ipc_interval(&jw, epoch, request->begin_ns,
+					       request->end_ns);
+		jw_end(&jw);
+	}
+	if (trace->query_available) {
+		jw_object_inline_begin_object(&jw, "query");
+		jw_object_intmax(&jw, "unique_objects", trace->unique_objects);
+		jw_object_intmax(&jw, "requests_validated", trace->requests_validated);
+		jw_object_intmax(&jw, "unknown", trace->unknown);
+		jw_object_intmax(&jw, "impossible", trace->impossible);
+		jw_object_intmax(&jw, "maybe", trace->maybe);
+		jw_end(&jw);
+	}
+	if (trace->backend_available) {
+		jw_object_inline_begin_object(&jw, "backend");
+		jw_object_intmax(&jw, "persistent", trace->persistent);
+		jw_object_intmax(&jw, "ready_reused", trace->ready_reused);
+		jw_object_intmax(&jw, "cold_attempt", trace->cold_attempt);
+		jw_object_intmax(&jw, "unavailable_prebuild", trace->unavailable_prebuild);
+		jw_object_intmax(&jw, "waited", trace->waited);
+		jw_end(&jw);
+	}
+	jw_end(&jw);
+	jw_end(&jw);
+	trace2_data_json("grep", repo, "content_index_tree_ipc_intervals", &jw);
+	jw_release(&jw);
+	errno = saved_errno;
 }
 
 static int flush_grep_tree_batch(struct grep_tree_batch *batch)
@@ -2462,19 +2565,38 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 	if (query->trace_enabled)
 		query->batch_prepare_ns += getnanotime() - phase_begin;
 	if (oids.nr) {
+		struct grep_index_ipc_query_trace trace;
+		struct grep_index_ipc_query_trace *capture =
+			query->trace_enabled &&
+			query->ipc_trace_retained < GREP_TREE_IPC_TRACE_BATCHES ?
+				&trace : NULL;
 		int query_result;
 
-		if (query->trace_enabled)
+		if (query->trace_enabled) {
+			if (query->ipc_trace_attempted < INTMAX_MAX)
+				query->ipc_trace_attempted++;
+			else
+				query->ipc_trace_count_overflow = 1;
 			phase_begin = getnanotime();
+			if (capture && !query->ipc_trace_retained)
+				query->ipc_trace_epoch_ns = phase_begin;
+		}
 		trace2_region_enter("grep", "query_content_index_ipc",
 				    batch->opt->repo);
 		query_result = grep_index_ipc_query_with_max_parallel_requests(
 			batch->opt->repo, content_index_query, oids.oid, oids.nr,
-			results, GREP_TREE_INDEX_MAX_REQUESTS);
+			results, GREP_TREE_INDEX_MAX_REQUESTS, capture);
 		trace2_region_leave("grep", "query_content_index_ipc",
 				    batch->opt->repo);
-		if (query->trace_enabled)
-			query->batch_ipc_ns += getnanotime() - phase_begin;
+		if (query->trace_enabled) {
+			uint64_t phase_end = getnanotime();
+
+			query->batch_ipc_ns += phase_end - phase_begin;
+			if (capture)
+				trace_grep_tree_ipc_batch(batch->opt->repo, query,
+							 capture, phase_begin,
+							 phase_end, query_result);
+		}
 		if (!query_result) {
 			query->queried += oids.nr;
 			query->batches++;
@@ -3193,6 +3315,21 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_tree_bypassed", query.bypassed);
 		if (query.trace_enabled) {
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_ipc_intervals_attempted",
+				query.ipc_trace_attempted);
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_ipc_intervals_retained",
+				query.ipc_trace_retained);
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_ipc_intervals_omitted",
+				query.ipc_trace_attempted - query.ipc_trace_retained);
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_ipc_intervals_clock_invalid",
+				query.ipc_trace_clock_invalid);
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_ipc_intervals_count_overflow",
+				query.ipc_trace_count_overflow);
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_entries",
 					   query.tree_entries);

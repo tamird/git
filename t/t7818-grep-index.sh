@@ -2209,7 +2209,37 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_basename_rejected 1 \
 		<tree-union.trace &&
 	test_trace2_data grep content_index_tree_object_read_us "[0-9][0-9]*" \
-		<tree-attributes.trace
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_ipc_intervals_attempted 2 <tree.trace &&
+	test_trace2_data grep content_index_tree_ipc_intervals_retained 2 <tree.trace &&
+	test_trace2_data grep content_index_tree_ipc_intervals_omitted 0 <tree.trace &&
+	test_trace2_data grep content_index_tree_ipc_intervals_count_overflow 0 <tree.trace &&
+	test_grep ! "\"batch_2\":{" tree.trace &&
+	test_grep ! "\"request_1\":{" tree.trace &&
+	invalid=$(awk "/\"batch_[01]\":{.*\"clock_invalid\":1/ { n++ }
+		END { print n + 0 }" tree.trace) &&
+	test_trace2_data grep content_index_tree_ipc_intervals_clock_invalid "$invalid" <tree.trace &&
+	for batch in 0 1
+	do
+		prefix="\"batch_$batch\":{" &&
+		number="[0-9][0-9]*" &&
+		interval="\"start_offset_us\":$number,\"duration_us\":$number" &&
+		state="\"outcome\":0,\"requests_planned\":1,\"requests_started\":1" &&
+		test_grep "$prefix$state,\"clock_invalid\":[01]," tree.trace &&
+		test_grep "$prefix.*\"probe\":{\"outcome\":1[,}]" tree.trace &&
+		test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0[,}]" tree.trace &&
+		test_grep "$prefix.*\"query\":{\"unique_objects\":[12],\"requests_validated\":1,\"unknown\":0,\"impossible\":[12],\"maybe\":0}" tree.trace &&
+		test_grep "$prefix.*\"backend\":{\"persistent\":$number,\"ready_reused\":$number,\"cold_attempt\":$number,\"unavailable_prebuild\":$number,\"waited\":$number}" tree.trace &&
+		if grep "$prefix$state,\"clock_invalid\":0," tree.trace >/dev/null
+		then
+			test_grep "$prefix$state,\"clock_invalid\":0,$interval," tree.trace &&
+			test_grep "$prefix.*\"probe\":{\"outcome\":1,$interval}" tree.trace &&
+			test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0,$interval}" tree.trace
+		else
+			test_grep ! "$prefix.*\"start_offset_us\":" tree.trace &&
+			test_grep ! "$prefix.*\"duration_us\":" tree.trace
+		fi || return 1
+	done
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
