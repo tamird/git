@@ -1958,6 +1958,51 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_grep "\"key\":\"content_index_tree_${phase}_us\",\"value\":\"[0-9][0-9]*\"" \
 			tree-attributes.trace || return 1
 	done &&
+	test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_lock_acquire_count 0 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_lock_acquire_us 0 \
+		<tree-attributes.trace &&
+	if test_have_prereq PTHREADS
+	then
+		# Flush a matching root blob before reading the original nested tree.
+		# This starts the lazy workers; --threads=2 alone does not do so.
+		lock_attributes_tree=$({
+			printf "100644 blob %s\ta\n" "$replacement_oid" &&
+			printf "040000 tree %s\tnested\n" "$nested_tree"
+		} | git mktree) &&
+		lock_attributes_commit=$(echo lock-attributes |
+			git commit-tree "$lock_attributes_tree") &&
+		test_path_is_file ".git/objects/$(test_oid_to_path "$nested_tree")" &&
+		git grep --no-content-index --threads=2 "present needle" \
+			"$lock_attributes_commit" -- a nested >expect-tree-positive &&
+		>tree-positive.trace &&
+		env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+			GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=1 \
+			git grep --threads=2 "present needle" \
+				"$lock_attributes_commit" -- a nested >actual-tree-positive &&
+		test_cmp expect-tree-positive actual-tree-positive &&
+		test_trace2_data grep content_index_tree_directories 1 \
+			<tree-positive.trace &&
+		test_trace2_data grep content_index_tree_object_read_bytes \
+			"$((26 + 2 * $(test_oid rawsz)))" <tree-positive.trace &&
+		test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+			<tree-positive.trace &&
+		lock_count=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_lock_acquire_count\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			tree-positive.trace) &&
+		# The loose tree exceeds the header buffer: include both reacquisitions.
+		test "$lock_count" -ge 3 &&
+		lock_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_lock_acquire_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			tree-positive.trace) &&
+		read_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			tree-positive.trace) &&
+		test "$lock_us" -ge 0 &&
+		test "$lock_us" -le "$read_us"
+	fi &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \

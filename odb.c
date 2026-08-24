@@ -26,6 +26,7 @@
 #include "strvec.h"
 #include "submodule.h"
 #include "tmp-objdir.h"
+#include "trace.h"
 #include "trace2.h"
 #include "write-or-die.h"
 
@@ -509,6 +510,97 @@ int odb_has_alternates(struct object_database *odb)
 
 int obj_read_use_lock = 0;
 pthread_mutex_t obj_read_mutex;
+
+static struct {
+	struct obj_read_lock_trace_stats stats;
+	unsigned int active_depth;
+	int prepared;
+} obj_read_lock_trace;
+
+#ifndef NO_PTHREADS
+int obj_read_lock_trace_ready;
+static pthread_t obj_read_lock_trace_owner;
+#endif
+
+void obj_read_lock_trace_prepare(void)
+{
+	int saved_errno = errno;
+
+	if (obj_read_lock_trace.prepared)
+		return;
+	obj_read_lock_trace.prepared = 1;
+	obj_read_lock_trace.stats.valid = 1;
+#ifndef NO_PTHREADS
+	obj_read_lock_trace_owner = pthread_self();
+	obj_read_lock_trace_ready = 1;
+#endif
+	errno = saved_errno;
+}
+
+void obj_read_lock_trace_child_begin(void)
+{
+	if (obj_read_lock_trace.active_depth == UINT_MAX)
+		obj_read_lock_trace.stats.valid = 0;
+	else
+		obj_read_lock_trace.active_depth++;
+}
+
+void obj_read_lock_trace_child_end(void)
+{
+	if (!obj_read_lock_trace.active_depth)
+		obj_read_lock_trace.stats.valid = 0;
+	else
+		obj_read_lock_trace.active_depth--;
+}
+
+void obj_read_lock_trace_snapshot(struct obj_read_lock_trace_stats *stats)
+{
+	*stats = obj_read_lock_trace.stats;
+	if (obj_read_lock_trace.active_depth)
+		stats->valid = 0;
+}
+
+#ifndef NO_PTHREADS
+static uint64_t obj_read_lock_trace_clock(void)
+{
+	int saved_errno = errno;
+	uint64_t now = getnanotime();
+
+	errno = saved_errno;
+	return now;
+}
+
+void obj_read_lock_with_trace(void)
+{
+	int saved_errno = errno;
+	int owner = pthread_equal(pthread_self(), obj_read_lock_trace_owner);
+	uint64_t begin, end;
+
+	errno = saved_errno;
+	/*
+	 * The owner must be checked before accessing mutable producer state.
+	 * Other readers never touch the depth or counters, even while the
+	 * producer releases the recursive mutex for inflation.
+	 */
+	if (!owner || !obj_read_lock_trace.active_depth ||
+	    !obj_read_lock_trace.stats.valid) {
+		pthread_mutex_lock(&obj_read_mutex);
+		return;
+	}
+
+	begin = obj_read_lock_trace_clock();
+	pthread_mutex_lock(&obj_read_mutex);
+	end = obj_read_lock_trace_clock();
+	if (!begin || !end || end < begin ||
+	    obj_read_lock_trace.stats.acquire_count == (uint64_t)INTMAX_MAX ||
+	    end - begin > UINT64_MAX - obj_read_lock_trace.stats.acquire_ns) {
+		obj_read_lock_trace.stats.valid = 0;
+	} else {
+		obj_read_lock_trace.stats.acquire_count++;
+		obj_read_lock_trace.stats.acquire_ns += end - begin;
+	}
+}
+#endif
 
 void enable_obj_read_lock(void)
 {

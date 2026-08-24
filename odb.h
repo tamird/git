@@ -493,13 +493,40 @@ void odb_assert_oid_type(struct object_database *odb,
 void enable_obj_read_lock(void);
 void disable_obj_read_lock(void);
 
+/*
+ * Optional diagnostics for one producer thread. Prepare once, before any
+ * reader workers start; only that producer may begin/end child-read scopes
+ * or take the final snapshot. Acquisition calls, including recursive calls
+ * and inflation reacquisitions, are timed, not mutex hold time or pure wait.
+ */
+struct obj_read_lock_trace_stats {
+	uint64_t acquire_count, acquire_ns;
+	int valid;
+};
+
+void obj_read_lock_trace_prepare(void);
+void obj_read_lock_trace_child_begin(void);
+void obj_read_lock_trace_child_end(void);
+void obj_read_lock_trace_snapshot(struct obj_read_lock_trace_stats *stats);
+
 extern int obj_read_use_lock;
 extern pthread_mutex_t obj_read_mutex;
+#ifndef NO_PTHREADS
+/* Published once before workers; never changed while they can read it. */
+extern int obj_read_lock_trace_ready;
+void obj_read_lock_with_trace(void);
+#endif
 
 static inline void obj_read_lock(void)
 {
-	if(obj_read_use_lock)
-		pthread_mutex_lock(&obj_read_mutex);
+	if (obj_read_use_lock) {
+#ifndef NO_PTHREADS
+		if (obj_read_lock_trace_ready)
+			obj_read_lock_with_trace();
+		else
+#endif
+			pthread_mutex_lock(&obj_read_mutex);
+	}
 }
 
 static inline void obj_read_unlock(void)

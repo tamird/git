@@ -2930,6 +2930,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				int saved_errno = errno;
 
 				query->tree_directories++;
+				obj_read_lock_trace_child_begin();
 				object_read_begin = getnanotime();
 				errno = saved_errno;
 			}
@@ -2940,6 +2941,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				uint64_t object_read_end = getnanotime();
 
 				errno = saved_errno;
+				obj_read_lock_trace_child_end();
 				if (!object_read_begin || !object_read_end ||
 				    object_read_end < object_read_begin ||
 				    object_read_end - object_read_begin >
@@ -3362,6 +3364,21 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_tree_bypassed", query.bypassed);
 		if (query.trace_enabled) {
+			struct obj_read_lock_trace_stats lock_stats;
+
+			/* Keep the existing child-read summary visibility. */
+			obj_read_lock_trace_snapshot(&lock_stats);
+			trace2_data_intmax("grep", the_repository,
+				"content_index_tree_object_read_lock_valid",
+				lock_stats.valid);
+			if (lock_stats.valid) {
+				trace2_data_intmax("grep", the_repository,
+					"content_index_tree_object_read_lock_acquire_count",
+					lock_stats.acquire_count);
+				trace2_data_intmax("grep", the_repository,
+					"content_index_tree_object_read_lock_acquire_us",
+					lock_stats.acquire_ns / 1000);
+			}
 			trace2_data_intmax("grep", the_repository,
 				"content_index_tree_ipc_intervals_attempted",
 				query.ipc_trace_attempted);
@@ -3912,6 +3929,9 @@ int cmd_grep(int argc,
 		trace2_data_intmax("grep", the_repository, "matcher/jit",
 				   matcher_jit);
 	}
+	/* Submodule grep can start readers before grep_objects(). */
+	if (list.nr && trace2_is_enabled())
+		obj_read_lock_trace_prepare();
 	if (num_threads > 1 && recurse_submodules)
 		start_threads(&opt);
 
