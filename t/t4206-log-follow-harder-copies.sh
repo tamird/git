@@ -135,6 +135,59 @@ test_expect_success 'visible final copy still reports its harder-copy status' '
 	test_follow_full_tree_trace "$TRASH_DIRECTORY/follow-final-visible.event"
 '
 
+test_expect_success 'follow harder copies reads an unchanged subtree once' '
+	test_create_repo follow-shared-subtree &&
+	(
+		cd follow-shared-subtree &&
+		mkdir shared &&
+		echo unrelated >shared/aaa &&
+		echo content >shared/source &&
+		git add shared &&
+		test_tick &&
+		git commit -m source &&
+		cp shared/source destination &&
+		git add destination &&
+		test_tick &&
+		git commit -m copy &&
+
+		shared_tree=$(git rev-parse HEAD:shared) &&
+		parent_shared_tree=$(git rev-parse HEAD^:shared) &&
+		test "$shared_tree" = "$parent_shared_tree" &&
+		git repack -a -d -f --window=0 &&
+		set -- .git/objects/pack/*.idx &&
+		test "$#" = 1 &&
+		test_path_is_file "$1" &&
+		pack_index=$1 &&
+		pack_stem=${pack_index##*/} &&
+		pack_stem=${pack_stem%.idx} &&
+		git show-index <"$pack_index" >pack-index &&
+		awk -v oid="$shared_tree" '\''$2 == oid { print $1 }'\'' \
+			pack-index >shared-offset &&
+		test_line_count = 1 shared-offset &&
+		shared_offset=$(cat shared-offset) &&
+		git verify-pack -v "$pack_index" >pack-verify &&
+		test_grep "^$shared_tree tree[[:space:]][[:space:]]*[0-9][0-9]* [0-9][0-9]* $shared_offset$" \
+			pack-verify &&
+		awk "NF == 7 { print }" pack-verify >delta-objects &&
+		test_must_be_empty delta-objects &&
+
+		printf "%s\n" copy source >expect &&
+		git log --follow --format=%s -- destination >actual &&
+		test_cmp expect actual &&
+		printf "%s\n\n" copy >expect &&
+		printf "C100\tshared/source\tdestination\n" >>expect &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2_EVENT="$PWD/follow.event" \
+		GIT_TRACE_PACK_ACCESS="$PWD/pack-access" \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual &&
+		test_cmp expect actual &&
+		test_follow_full_tree_trace "$PWD/follow.event" &&
+		grep "/$pack_stem[.]pack $shared_offset$" pack-access >shared-access &&
+		test_line_count = 1 shared-access
+	)
+'
+
 test_expect_success 'log --follow -B does not BUG' '
 	git switch --orphan break_and_follow_are_icky_so_use_both &&
 

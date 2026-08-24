@@ -452,7 +452,15 @@ static void ll_diff_tree_paths(
 	 */
 	for (i = 0; i < nparent; ++i)
 		tptree[i] = fill_tree_descriptor(opt->repo, &tp[i], parents_oid[i]);
-	ttree = fill_tree_descriptor(opt->repo, &t, oid);
+	if (nparent == 1 && oid && parents_oid[0] &&
+	    oid->algo == parents_oid[0]->algo &&
+	    oideq(oid, parents_oid[0])) {
+		/* tptree[0] owns the buffer; each descriptor has its own cursor. */
+		t = tp[0];
+		ttree = NULL;
+	} else {
+		ttree = fill_tree_descriptor(opt->repo, &t, oid);
+	}
 
 	/* Enable recursion indefinitely */
 	opt->pathspec.recursive = opt->flags.recursive;
