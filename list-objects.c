@@ -24,8 +24,68 @@ struct traversal_context {
 	show_commit_fn show_commit;
 	void *show_data;
 	struct filter *filter;
+	struct list_objects_tree_parse_stats *tree_parse_stats;
 	int depth;
 };
+
+static int tree_parse_time(struct list_objects_tree_parse_stats *stats,
+			   uint64_t *now)
+{
+	int saved_errno = errno;
+	int ret = stats->get_time(now);
+
+	errno = saved_errno;
+	return ret;
+}
+
+static int parse_tree_for_traversal(struct traversal_context *ctx,
+				    struct tree *tree)
+{
+	struct list_objects_tree_parse_stats *stats = ctx->tree_parse_stats;
+	uint64_t started = 0, finished;
+	intmax_t *count;
+	int already_parsed, trace_timing = 0;
+	int ret;
+
+	if (!stats)
+		return repo_parse_tree_gently(the_repository, tree, 1);
+
+	already_parsed = tree->object.parsed;
+	count = already_parsed ? &stats->already_parsed_count :
+				 &stats->parse_needed_count;
+	if (stats->counts_valid) {
+		if (*count == INTMAX_MAX) {
+			stats->counts_valid = 0;
+			stats->timings_valid = 0;
+		} else {
+			(*count)++;
+		}
+	}
+
+	/* Preserve the original call, but do not time its parsed fast path. */
+	if (already_parsed)
+		return repo_parse_tree_gently(the_repository, tree, 1);
+
+	if (stats->timings_valid) {
+		if (tree_parse_time(stats, &started))
+			stats->timings_valid = 0;
+		else
+			trace_timing = 1;
+	}
+
+	ret = repo_parse_tree_gently(the_repository, tree, 1);
+
+	if (trace_timing) {
+		if (tree_parse_time(stats, &finished) || finished < started ||
+		    unsigned_add_overflows(stats->parse_needed_ns,
+					   finished - started))
+			stats->timings_valid = 0;
+		else
+			stats->parse_needed_ns += finished - started;
+	}
+
+	return ret;
+}
 
 static void show_commit(struct traversal_context *ctx,
 			struct commit *commit)
@@ -170,7 +230,7 @@ static void process_tree(struct traversal_context *ctx,
 	if (ctx->depth > revs->repo->settings.max_allowed_tree_depth)
 		die("exceeded maximum allowed tree depth");
 
-	failed_parse = repo_parse_tree_gently(the_repository, tree, 1);
+	failed_parse = parse_tree_for_traversal(ctx, tree);
 	if (failed_parse) {
 		if (revs->ignore_missing_links)
 			return;
@@ -451,18 +511,20 @@ static void do_traverse(struct traversal_context *ctx)
 	strbuf_release(&csp);
 }
 
-void traverse_commit_list_filtered(
+static void traverse_commit_list_filtered_1(
 	struct rev_info *revs,
 	show_commit_fn show_commit,
 	show_object_fn show_object,
 	void *show_data,
-	struct oidset *omitted)
+	struct oidset *omitted,
+	struct list_objects_tree_parse_stats *tree_parse_stats)
 {
 	struct traversal_context ctx = {
 		.revs = revs,
 		.show_object = show_object,
 		.show_commit = show_commit,
 		.show_data = show_data,
+		.tree_parse_stats = tree_parse_stats,
 	};
 
 	if (revs->filter.choice)
@@ -472,4 +534,35 @@ void traverse_commit_list_filtered(
 
 	if (ctx.filter)
 		list_objects_filter__free(ctx.filter);
+}
+
+void traverse_commit_list_filtered(
+	struct rev_info *revs,
+	show_commit_fn show_commit,
+	show_object_fn show_object,
+	void *show_data,
+	struct oidset *omitted)
+{
+	traverse_commit_list_filtered_1(revs, show_commit, show_object,
+				       show_data, omitted, NULL);
+}
+
+void traverse_commit_list_with_tree_parse_stats(
+	struct rev_info *revs,
+	show_commit_fn show_commit,
+	show_object_fn show_object,
+	void *show_data,
+	struct list_objects_tree_parse_stats *stats)
+{
+	if (stats) {
+		int (*get_time)(uint64_t *) = stats->get_time;
+
+		*stats = (struct list_objects_tree_parse_stats) {
+			.get_time = get_time,
+			.counts_valid = 1,
+			.timings_valid = !!get_time,
+		};
+	}
+	traverse_commit_list_filtered_1(revs, show_commit, show_object,
+				       show_data, NULL, stats);
 }

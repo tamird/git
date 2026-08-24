@@ -1166,6 +1166,7 @@ struct bitmap_fill_in_stats {
 	struct bitmap_fill_in_lookup_stats lookup[BITMAP_FILL_IN_LOOKUP_COUNT];
 	int lookup_counts_valid;
 	int lookup_timings_valid;
+	struct list_objects_tree_parse_stats tree_parse;
 };
 
 static int bitmap_fill_in_time(uint64_t *now);
@@ -1245,6 +1246,31 @@ static void trace_bitmap_fill_in_lookups(struct repository *repo,
 		for (i = 0; i < ARRAY_SIZE(time_keys); i++)
 			trace2_data_intmax("bitmap", repo, time_keys[i],
 					   stats->lookup[i].elapsed_ns / 1000);
+}
+
+static void trace_bitmap_fill_in_tree_parses(
+	struct repository *repo, const struct bitmap_fill_in_stats *stats)
+{
+	const struct list_objects_tree_parse_stats *tree_stats = &stats->tree_parse;
+
+	trace2_data_intmax("bitmap", repo,
+		"haves/boundary-fill-in-traverse-tree-parse-counts-valid",
+		tree_stats->counts_valid);
+	trace2_data_intmax("bitmap", repo,
+		"haves/boundary-fill-in-traverse-tree-parse-timings-valid",
+		tree_stats->timings_valid);
+	if (tree_stats->counts_valid) {
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-tree-parse-needed-count",
+			tree_stats->parse_needed_count);
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-tree-parse-already-parsed-count",
+			tree_stats->already_parsed_count);
+	}
+	if (tree_stats->timings_valid)
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-tree-parse-needed-us",
+			tree_stats->parse_needed_ns / 1000);
 }
 
 struct bitmap_show_data {
@@ -1474,7 +1500,14 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 
 	if (trace_timings)
 		trace_timings = !bitmap_fill_in_time(&phase_started);
-	traverse_commit_list(revs, show_commit, show_object, &show_data);
+	if (stats) {
+		stats->tree_parse.get_time = bitmap_fill_in_time;
+		traverse_commit_list_with_tree_parse_stats(revs, show_commit,
+							  show_object, &show_data,
+							  &stats->tree_parse);
+	} else {
+		traverse_commit_list(revs, show_commit, show_object, &show_data);
+	}
 	incdata.lookup_stats = NULL;
 	show_data.lookup_stats = NULL;
 	if (trace_timings && !bitmap_fill_in_time(&phase_finished) &&
@@ -2520,6 +2553,8 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 						boundary_stats.fill_in.limited);
 					trace_bitmap_fill_in_lookups(repo,
 									  &boundary_stats.fill_in);
+					trace_bitmap_fill_in_tree_parses(repo,
+									      &boundary_stats.fill_in);
 				}
 				errno = saved_errno;
 			}
