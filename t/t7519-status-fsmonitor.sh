@@ -620,6 +620,10 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 			diff-index/.git/fsmonitor-diff-actual &&
 		test_trace2_data index preload/sum_lstat 2 \
 			<diff-index/.git/fsmonitor-diff-first.trace &&
+		test_trace2_data fsmonitor fsmn/invalidated 2 \
+			<diff-index/.git/fsmonitor-diff-first.trace &&
+		test_trace2_data fsmonitor query/invalidated 0 \
+			<diff-index/.git/fsmonitor-diff-first.trace &&
 		git -C diff-index ls-files -f >actual.fsmonitor &&
 		grep "^h clean/file$" actual.fsmonitor &&
 		grep "^h dirty/file$" actual.fsmonitor &&
@@ -631,6 +635,49 @@ test_expect_success 'diff-index honors fsmonitor validity' '
 			diff-index/.git/fsmonitor-diff-actual &&
 		test_trace2_data index preload/sum_lstat 0 \
 			<diff-index/.git/fsmonitor-diff-second.trace &&
+		test_trace2_data fsmonitor fsmn/invalidated 0 \
+			<diff-index/.git/fsmonitor-diff-second.trace &&
+		test_trace2_data fsmonitor query/invalidated 0 \
+			<diff-index/.git/fsmonitor-diff-second.trace &&
+		for fsmonitor_origin in query mixed duplicate
+		do
+			: >diff-index/.git/fsmonitor-dirty &&
+			git -C diff-index update-index --fsmonitor-valid -- \
+				clean/file dirty/file &&
+			expected_fsmn_invalidated=0 &&
+			expected_preload_lstat=1 &&
+			if test "$fsmonitor_origin" = mixed
+			then
+				git -C diff-index update-index --no-fsmonitor-valid -- \
+					clean/file &&
+				expected_fsmn_invalidated=1 &&
+				expected_preload_lstat=2
+			fi &&
+			printf "%s\n" dirty/file >diff-index/.git/fsmonitor-dirty &&
+			expected_query_paths=1 &&
+			if test "$fsmonitor_origin" = duplicate
+			then
+				printf "%s\n" dirty/file >>diff-index/.git/fsmonitor-dirty &&
+				expected_query_paths=2
+			fi &&
+			GIT_TEST_PRELOAD_INDEX=true \
+			GIT_TRACE2_EVENT_NESTING=2 \
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/diff-index/.git/fsmonitor-origin-$fsmonitor_origin.trace" \
+				git -C diff-index diff --name-only HEAD^ \
+				>diff-index/.git/fsmonitor-diff-actual &&
+			test_cmp diff-index/.git/fsmonitor-diff-expect \
+				diff-index/.git/fsmonitor-diff-actual &&
+			test_trace2_data fsmonitor fsmn/invalidated "$expected_fsmn_invalidated" \
+				<diff-index/.git/fsmonitor-origin-$fsmonitor_origin.trace &&
+			test_trace2_data fsmonitor query/invalidated 1 \
+				<diff-index/.git/fsmonitor-origin-$fsmonitor_origin.trace &&
+			test_trace2_data fsmonitor apply_count "$expected_query_paths" \
+				<diff-index/.git/fsmonitor-origin-$fsmonitor_origin.trace &&
+			test_trace2_data index preload/sum_lstat "$expected_preload_lstat" \
+				<diff-index/.git/fsmonitor-origin-$fsmonitor_origin.trace ||
+			return 1
+		done &&
+		rm diff-index/.git/fsmonitor-dirty &&
 		for mode in cached optional-locks auto-refresh
 		do
 			git -C diff-index update-index --no-fsmonitor-valid -- \
