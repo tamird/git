@@ -152,6 +152,43 @@ test_grep_producer_stats () {
 	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"grep","key":"producer_' "$producer_trace")" = "$producer_records"
 }
 
+test_grep_packed_content () {
+	packed_content_trace="$1"
+	packed_content_key=content_index_tree_object_read_packed_content
+	test_trace2_data grep "${packed_content_key}_valid" "[01]" \
+		<"$packed_content_trace" || return 1
+	if test_trace2_data grep "${packed_content_key}_valid" 1 \
+		<"$packed_content_trace"
+	then
+		packed_content_records=3
+		test_trace2_data grep "${packed_content_key}_attempt_count" "$2" \
+			<"$packed_content_trace" || return 1
+		case "$2" in
+		0) packed_content_us=0 ;;
+		*) packed_content_us="[0-9][0-9]*" ;;
+		esac
+		test_trace2_data grep "${packed_content_key}_us" "$packed_content_us" \
+			<"$packed_content_trace" || return 1
+		packed_content_us=$(sed -n \
+			"s/.*\"key\":\"${packed_content_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_content_trace") &&
+		packed_content_read_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_content_trace") &&
+		test "$packed_content_us" -le "$packed_content_read_us" || return 1
+	else
+		packed_content_records=1
+		test_grep ! "\"key\":\"${packed_content_key}_attempt_count\"" \
+			"$packed_content_trace" &&
+		test_grep ! "\"key\":\"${packed_content_key}_us\"" \
+			"$packed_content_trace" || return 1
+	fi
+	test "$(grep -c "\"key\":\"${packed_content_key}_" "$packed_content_trace")" = \
+		"$packed_content_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${packed_content_key}_" "$packed_content_trace")" = \
+		"$packed_content_records"
+}
+
 test_grep_worktree_miss_reasons () {
 	test_trace2_data grep \
 		content_index_worktree_unverified_negative_reason_valid 1 <"$1" &&
@@ -2147,6 +2184,9 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		tree-positive.trace) &&
 	test "$((memory_us + cache_us + unpack_us))" -le "$read_us" &&
 	test "$((read_us - memory_us - cache_us - unpack_us))" -le 2 &&
+	# The two packed calls exclude the in-memory empty tree and loose read.
+	test_grep_packed_content tree-positive.trace 2 &&
+	test_grep_packed_content tree-attributes.trace 0 &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \

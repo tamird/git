@@ -1328,6 +1328,34 @@ static void add_delta_base_cache(struct packed_git *p, off_t base_offset,
 	hashmap_add(&delta_base_cache, &ent->ent);
 }
 
+static int packed_content_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
 int packed_object_info_with_index_pos(struct odb_source_packed *source,
 				      struct packed_git *p, off_t obj_offset,
 				      uint32_t *maybe_index_pos, struct object_info *oi)
@@ -1344,10 +1372,28 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 	 * a "real" type later if the caller is interested.
 	 */
 	if (oi->contentp) {
+		struct odb_read_result *result = oi->read_resultp;
+		uint64_t started = 0, finished;
+		int timed = result && !result->packed_content_invalid &&
+			    !packed_content_time(&started);
+
 		*oi->contentp = cache_or_unpack_entry(p->repo, p, obj_offset,
 						      oi->sizep, &type,
 						      oi->read_resultp ?
 						      &oi->read_resultp->kind : NULL);
+		if (result && !result->packed_content_invalid) {
+			if (!timed || packed_content_time(&finished) ||
+			    finished < started ||
+			    result->packed_content_attempt_count ==
+						(uint64_t)INTMAX_MAX ||
+			    finished - started >
+					UINT64_MAX - result->packed_content_ns) {
+				result->packed_content_invalid = 1;
+			} else {
+				result->packed_content_attempt_count++;
+				result->packed_content_ns += finished - started;
+			}
+		}
 		if (!*oi->contentp)
 			type = OBJ_BAD;
 	} else if (oi->sizep || oi->typep || oi->delta_base_oid) {

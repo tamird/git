@@ -301,6 +301,13 @@ struct odb_read_result {
 	enum odb_read_result_kind kind;
 	uint64_t inmemory_nonzero, loose_nonzero, packed_nonzero;
 	int invalid;
+	/*
+	 * Inclusive cache_or_unpack_entry calls, including nonzero-source
+	 * outcomes before a later winner. This is not inflate-only time.
+	 * Clock/count failures invalidate only these optional measurements.
+	 */
+	uint64_t packed_content_attempt_count, packed_content_ns;
+	int packed_content_invalid;
 };
 
 void *odb_read_object_with_result(struct object_database *odb,
