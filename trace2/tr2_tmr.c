@@ -77,6 +77,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "follow-pickaxe/tree-paths",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE] = {
+		.category = "diff",
+		.name = "follow-full-tree",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_DIFFCORE] = {
 		.category = "diff",
 		.name = "follow-pickaxe/diffcore",
@@ -420,9 +425,29 @@ void tr2_emit_final_timers(tr2_tgt_evt_timer_t *fn_apply)
 	 * We assume that our caller is holding the lock.
 	 */
 
-	for (tid = 0; tid < TRACE2_NUMBER_OF_TIMERS; tid++)
-		if (final_timer_block.timer[tid].interval_count)
-			fn_apply(&tr2_timer_metadata[tid],
-				 &final_timer_block.timer[tid],
-				 1);
+	for (tid = 0; tid < TRACE2_NUMBER_OF_TIMERS; tid++) {
+		const struct tr2_timer *timer = &final_timer_block.timer[tid];
+
+		if (!timer->interval_count)
+			continue;
+		fn_apply(&tr2_timer_metadata[tid], timer, 1);
+
+		/*
+		 * Mirror this aggregate for consumers that retain DATA but
+		 * not timer events. Like the timer, it includes only completed
+		 * intervals and uses the existing stopwatch clock/arithmetic.
+		 */
+		if (tid == TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE &&
+		    timer->interval_count <= INTMAX_MAX) {
+			int saved_errno = errno;
+
+			trace2_data_intmax("diff", NULL, "follow-full-tree/count",
+					   timer->interval_count);
+			trace2_data_intmax("diff", NULL, "follow-full-tree-us",
+					   timer->total_ns / 1000);
+			trace2_data_intmax("diff", NULL, "follow-full-tree-max-us",
+					   timer->max_ns / 1000);
+			errno = saved_errno;
+		}
+	}
 }
