@@ -38,10 +38,27 @@ static int traversal_time(struct list_objects_tree_parse_stats *stats,
 	return ret;
 }
 
+static void record_tree_read(struct list_objects_tree_read_stats *stats,
+			     uint64_t count, uint64_t elapsed_ns, int invalid,
+			     uint64_t parse_ns)
+{
+	if (stats->invalid)
+		return;
+	if (invalid || elapsed_ns > parse_ns ||
+	    count > (uint64_t)INTMAX_MAX - stats->attempt_count ||
+	    unsigned_add_overflows(stats->elapsed_ns, elapsed_ns)) {
+		stats->invalid = 1;
+		return;
+	}
+	stats->attempt_count += count;
+	stats->elapsed_ns += elapsed_ns;
+}
+
 static int parse_tree_for_traversal(struct traversal_context *ctx,
 				    struct tree *tree)
 {
 	struct list_objects_tree_parse_stats *stats = ctx->tree_parse_stats;
+	struct odb_read_result result;
 	uint64_t started = 0, finished;
 	intmax_t *count;
 	int already_parsed, trace_timing = 0;
@@ -73,15 +90,39 @@ static int parse_tree_for_traversal(struct traversal_context *ctx,
 			trace_timing = 1;
 	}
 
-	ret = repo_parse_tree_gently(the_repository, tree, 1);
+	if (trace_timing)
+		ret = repo_parse_tree_gently_with_result(the_repository, tree, 1,
+							 &result);
+	else
+		ret = repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (trace_timing) {
 		if (traversal_time(stats, &finished) || finished < started ||
 		    unsigned_add_overflows(stats->parse_needed_ns,
 					   finished - started))
 			stats->timings_valid = 0;
-		else
-			stats->parse_needed_ns += finished - started;
+		else {
+			uint64_t elapsed_ns = finished - started;
+
+			stats->parse_needed_ns += elapsed_ns;
+			record_tree_read(&stats->packed_entry_location,
+					 result.packed_entry_location_attempt_count,
+					 result.packed_entry_location_ns,
+					 result.packed_entry_location_invalid,
+					 elapsed_ns);
+			record_tree_read(&stats->packed_content,
+					 result.packed_content_attempt_count,
+					 result.packed_content_ns,
+					 result.packed_content_invalid, elapsed_ns);
+			/* The two optional intervals must fit in their parent. */
+			if (!stats->packed_entry_location.invalid &&
+			    !stats->packed_content.invalid &&
+			    result.packed_entry_location_ns >
+				elapsed_ns - result.packed_content_ns) {
+				stats->packed_entry_location.invalid = 1;
+				stats->packed_content.invalid = 1;
+			}
+		}
 	}
 
 	return ret;

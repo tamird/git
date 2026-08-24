@@ -183,16 +183,21 @@ int parse_tree_buffer(struct tree *item, void *buffer, unsigned long size)
 	return 0;
 }
 
-int repo_parse_tree_gently(struct repository *r, struct tree *item,
-			   int quiet_on_missing)
+int repo_parse_tree_gently_with_result(struct repository *r, struct tree *item,
+				      int quiet_on_missing,
+				      struct odb_read_result *result)
 {
 	 enum object_type type;
 	 void *buffer;
 	 size_t size;
 
-	if (item->object.parsed)
+	if (item->object.parsed) {
+		if (result)
+			memset(result, 0, sizeof(*result));
 		return 0;
-	buffer = odb_read_object(r->objects, &item->object.oid, &type, &size);
+	}
+	buffer = odb_read_object_with_result(r->objects, &item->object.oid,
+					     &type, &size, result);
 	if (!buffer)
 		return quiet_on_missing ? -1 :
 			error("Could not read %s",
@@ -203,6 +208,12 @@ int repo_parse_tree_gently(struct repository *r, struct tree *item,
 			     oid_to_hex(&item->object.oid));
 	}
 	return parse_tree_buffer(item, buffer, size);
+}
+
+int repo_parse_tree_gently(struct repository *r, struct tree *item,
+			   int quiet_on_missing)
+{
+	return repo_parse_tree_gently_with_result(r, item, quiet_on_missing, NULL);
 }
 
 void free_tree_buffer(struct tree *tree)

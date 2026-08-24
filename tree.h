@@ -3,6 +3,7 @@
 
 #include "object.h"
 
+struct odb_read_result;
 struct pathspec;
 struct repository;
 struct strbuf;
@@ -22,6 +23,10 @@ int parse_tree_buffer(struct tree *item, void *buffer, unsigned long size);
 #define parse_tree_gently(t, q) repo_parse_tree_gently(the_repository, t, q)
 int repo_parse_tree_gently(struct repository *r, struct tree *item,
 			   int quiet_on_missing);
+/* Optional observations of the content read; zeroed on an already-parsed tree. */
+int repo_parse_tree_gently_with_result(struct repository *r, struct tree *item,
+				      int quiet_on_missing,
+				      struct odb_read_result *result);
 #define parse_tree(t) repo_parse_tree(the_repository, t)
 static inline int repo_parse_tree(struct repository *r, struct tree *item)
 {
