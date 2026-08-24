@@ -786,6 +786,10 @@ void refresh_fsmonitor(struct index_state *istate)
 	size_t bol = 0; /* beginning of line */
 	uint64_t last_update;
 	struct strbuf last_update_token = STRBUF_INIT;
+	struct fsmonitor_icase_stats icase_stats = {
+		.exact_dirs = STRSET_INIT,
+		.rejected_paths = STRSET_INIT,
+	};
 	char *buf;
 	unsigned int i;
 	int is_trivial = 0;
@@ -969,11 +973,6 @@ apply_results:
 		 *
 		 * This updates both the cache-entries and the untracked-cache.
 		 */
-		struct fsmonitor_icase_stats icase_stats = {
-			.exact_dirs = STRSET_INIT,
-			.rejected_paths = STRSET_INIT,
-		};
-
 		buf = query_result.buf;
 		observed_untracked = istate->untracked;
 		if (observed_untracked)
@@ -1001,17 +1000,6 @@ apply_results:
 				directory_invalidated_before;
 			have_directory_invalidated = 1;
 		}
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "icase_index/scans", icase_stats.scans);
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "icase_index/resolved",
-				   icase_stats.resolved);
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "icase_index/rejects",
-				   icase_stats.rejects);
-		trace2_data_intmax("fsmonitor", istate->repo,
-				   "icase_index/fallbacks",
-				   icase_stats.fallbacks);
 		strset_clear(&icase_stats.exact_dirs);
 		strset_clear(&icase_stats.rejected_paths);
 
@@ -1054,6 +1042,22 @@ apply_results:
 	}
 	trace2_region_leave("fsmonitor", "apply_results", istate->repo);
 	if (query_success && !is_trivial) {
+		int saved_errno = errno;
+
+		/* Keep these counters visible at the default event nesting limit. */
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/scans", icase_stats.scans);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/resolved",
+				   icase_stats.resolved);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/rejects",
+				   icase_stats.rejects);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "icase_index/fallbacks",
+				   icase_stats.fallbacks);
+		errno = saved_errno;
+
 		trace2_data_intmax("fsmonitor", istate->repo, "apply_count",
 				   count);
 		if (have_directory_invalidated)
