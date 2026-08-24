@@ -28,12 +28,24 @@ void traverse_commit_list_filtered(
 	void *show_data,
 	struct oidset *omitted);
 
+struct list_objects_tree_read_stats {
+	uint64_t attempt_count;
+	uint64_t elapsed_ns;
+	int invalid;
+};
+
 /*
  * Optional aggregate observations of tree parsing and non-commit traversal.
  * "Parse needed" means object.parsed was false, not an ODB or page-cache miss.
  * Such calls include failed attempts; already-parsed calls are counted without
  * clock calls. Timings cover the whole parse-needed call, not only object I/O.
  * Bookkeeping and clock-boundary overhead are not an uninstrumented baseline.
+ *
+ * Packed location/content observations reuse the optional ODB read results.
+ * They include misses and failed attempts before a later source succeeds;
+ * content includes cache copies and unpacking, not just inflation. Only a
+ * successfully started parse-needed clock enables these ODB clocks. NULL or
+ * failed outer clocks leave these timings unavailable, not valid zero totals.
  *
  * Non-commit timing sums sequential traverse_non_commits() calls, including
  * recursive object processing and pending-array cleanup. It includes parse
@@ -53,6 +65,8 @@ struct list_objects_tree_parse_stats {
 	int timings_valid;
 	uint64_t non_commits_ns;
 	int non_commits_timings_valid;
+	struct list_objects_tree_read_stats packed_entry_location;
+	struct list_objects_tree_read_stats packed_content;
 	int (*get_time)(uint64_t *now);
 };
 

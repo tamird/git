@@ -1248,6 +1248,26 @@ static void trace_bitmap_fill_in_lookups(struct repository *repo,
 					   stats->lookup[i].elapsed_ns / 1000);
 }
 
+static void trace_bitmap_fill_in_tree_read(
+	struct repository *repo, const char *name,
+	const struct list_objects_tree_read_stats *stats, int timings_valid)
+{
+	char key[128];
+	int valid = timings_valid && !stats->invalid;
+
+	xsnprintf(key, sizeof(key),
+		  "haves/boundary-fill-in-traverse-tree-read-%s-valid", name);
+	trace2_data_intmax("bitmap", repo, key, valid);
+	if (!valid)
+		return;
+	xsnprintf(key, sizeof(key),
+		  "haves/boundary-fill-in-traverse-tree-read-%s-attempt-count", name);
+	trace2_data_intmax("bitmap", repo, key, stats->attempt_count);
+	xsnprintf(key, sizeof(key),
+		  "haves/boundary-fill-in-traverse-tree-read-%s-us", name);
+	trace2_data_intmax("bitmap", repo, key, stats->elapsed_ns / 1000);
+}
+
 static void trace_bitmap_fill_in_tree_parses(
 	struct repository *repo, const struct bitmap_fill_in_stats *stats)
 {
@@ -1271,6 +1291,12 @@ static void trace_bitmap_fill_in_tree_parses(
 		trace2_data_intmax("bitmap", repo,
 			"haves/boundary-fill-in-traverse-tree-parse-needed-us",
 			tree_stats->parse_needed_ns / 1000);
+	trace_bitmap_fill_in_tree_read(repo, "packed-entry-location",
+				      &tree_stats->packed_entry_location,
+				      tree_stats->timings_valid);
+	trace_bitmap_fill_in_tree_read(repo, "packed-content",
+				      &tree_stats->packed_content,
+				      tree_stats->timings_valid);
 }
 
 static void trace_bitmap_fill_in_noncommits(

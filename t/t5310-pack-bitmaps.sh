@@ -902,6 +902,48 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		fi &&
 		test_cmp positive.noncommits.expect.keys positive.noncommits.actual.keys &&
 
+		tree_read_prefix="haves/boundary-fill-in-traverse-tree-read-" &&
+		: >positive.tree-read.expect.keys &&
+		for bucket in packed-entry-location packed-content
+		do
+			test_grep "$bitmap_data.*\"key\":\"${tree_read_prefix}${bucket}-valid\",\"value\":\"[01]\"" \
+				boundary-positive.trace &&
+			echo "${tree_read_prefix}${bucket}-valid" >>positive.tree-read.expect.keys &&
+			if grep -q "$bitmap_data.*\"key\":\"${tree_read_prefix}${bucket}-valid\",\"value\":\"1\"" \
+				boundary-positive.trace
+			then
+				test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}timings-valid\",\"value\":\"1\"" \
+					boundary-positive.trace &&
+				test_grep "$bitmap_data.*\"key\":\"${tree_read_prefix}${bucket}-attempt-count\",\"value\":\"[1-9][0-9]*\"" \
+					boundary-positive.trace &&
+				test_grep "$bitmap_data.*\"key\":\"${tree_read_prefix}${bucket}-us\",\"value\":\"[0-9][0-9]*\"" \
+					boundary-positive.trace &&
+				bucket_us=$(sed -n "s|.*\"key\":\"${tree_read_prefix}${bucket}-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+					boundary-positive.trace) &&
+				test "$bucket_us" -le "$parse_needed_us" &&
+				cat >>positive.tree-read.expect.keys <<-EOF
+				${tree_read_prefix}${bucket}-attempt-count
+				${tree_read_prefix}${bucket}-us
+				EOF
+			fi || return 1
+		done &&
+		grep "^${tree_read_prefix}" positive.bitmap.keys >positive.tree-read.actual.keys &&
+		test_cmp positive.tree-read.expect.keys positive.tree-read.actual.keys &&
+		if grep -q "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-entry-location-valid\",\"value\":\"1\"" boundary-positive.trace &&
+		   grep -q "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-content-valid\",\"value\":\"1\"" boundary-positive.trace
+		then
+			location_count=$(sed -n "s|.*\"key\":\"${tree_read_prefix}packed-entry-location-attempt-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			content_count=$(sed -n "s|.*\"key\":\"${tree_read_prefix}packed-content-attempt-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			test "$content_count" -le "$location_count" &&
+			location_us=$(sed -n "s|.*\"key\":\"${tree_read_prefix}packed-entry-location-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			content_us=$(sed -n "s|.*\"key\":\"${tree_read_prefix}packed-content-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			test "$((location_us + content_us))" -le "$parse_needed_us"
+		fi &&
+
 		printf "%s\n%s\n" "$want" "^$have" >in &&
 		git rev-list --objects --no-object-names "$want" "^$have" |
 			sort >expect.objects &&
