@@ -113,7 +113,7 @@ struct tr2_timer_block {
  * individual timer in the current thread.
  */
 void tr2_start_timer(enum trace2_timer_id tid);
-void tr2_stop_timer(enum trace2_timer_id tid);
+uint64_t tr2_stop_timer(enum trace2_timer_id tid);
 
 /*
  * Add the current thread's timer data to the global totals.

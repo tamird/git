@@ -1016,15 +1016,15 @@ void trace2_timer_start(enum trace2_timer_id tid)
 	tr2_start_timer(tid);
 }
 
-void trace2_timer_stop(enum trace2_timer_id tid)
+uint64_t trace2_timer_stop(enum trace2_timer_id tid)
 {
 	if (!trace2_enabled)
-		return;
+		return 0;
 
 	if (tid < 0 || tid >= TRACE2_NUMBER_OF_TIMERS)
 		BUG("trace2_timer_stop: invalid timer id: %d", tid);
 
-	tr2_stop_timer(tid);
+	return tr2_stop_timer(tid);
 }
 
 void trace2_counter_add(enum trace2_counter_id cid, uint64_t value)

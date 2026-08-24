@@ -169,6 +169,63 @@ test_expect_success 'diff-filter=C' '
 
 '
 
+test_expect_success 'log traces the terminating get_revision call' '
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2_EVENT="$PWD/log-null-returned.trace" \
+		git log --format=%s --grep="^sixth$" >actual &&
+	echo sixth >expect &&
+	test_cmp expect actual &&
+	GIT_TRACE2_EVENT="$PWD/log-null-empty.trace" \
+		git log --format=%s --grep="^no-such-subject$" >actual &&
+	test_must_be_empty actual &&
+	for mode in returned empty
+	do
+		case "$mode" in
+		returned) returned=1 ;;
+		empty) returned=0 ;;
+		esac &&
+		trace="$PWD/log-null-$mode.trace" &&
+		test_trace2_data log count/returned "$returned" <"$trace" &&
+		test_trace2_data log count/shown "$returned" <"$trace" &&
+		test_trace2_data log count/pathspecs 0 <"$trace" &&
+		test_trace2_data log mode/follow 0 <"$trace" &&
+		grep "\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision\"," \
+			"$trace" >"log-null-$mode.timer" &&
+		test_line_count = 1 "log-null-$mode.timer" &&
+		test_grep "\"intervals\":$((returned + 1))," \
+			"log-null-$mode.timer" &&
+		test_grep ! "\"event\":\"th_timer\".*\"category\":\"log\",\"name\":\"get-revision\"" \
+			"$trace" &&
+		test_grep ! "\"event\":\"region_[^\"]*\".*\"category\":\"log\",\"label\":\"get-revision\"" \
+			"$trace" || return 1
+	done &&
+	for mode in returned empty
+	do
+		trace="$PWD/log-null-$mode.trace" &&
+		test_grep "\"category\":\"log\",\"key\":\"get-revision-null-us\"," "$trace" &&
+		grep "\"category\":\"log\",\"key\":\"get-revision-null-us\"," \
+			"$trace" >log-null.data &&
+		test_line_count = 1 log-null.data &&
+		test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+			log-null.data &&
+		test_trace2_data log get-revision-null-us "[0-9][0-9]*" \
+			<log-null.data &&
+		null_us=$(sed -n "s/.*\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			log-null.data) &&
+		total=$(sed -n "s/.*\"t_total\":\([0-9][0-9]*[.][0-9][0-9]*\),.*/\1/p" \
+			"log-null-$mode.timer") &&
+		test -n "$total" &&
+		awk -v elapsed="$null_us" -v total="$total" -v mode="$mode" "
+			BEGIN {
+				total *= 1000000
+				if (elapsed > total + 1 ||
+				    (mode == \"empty\" && elapsed < total - 1))
+					exit 1
+			}
+		" || return 1
+	done
+'
+
 test_expect_success 'git log --follow' '
 
 	test_when_finished "rm -f log-follow.trace" &&

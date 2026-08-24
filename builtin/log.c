@@ -416,6 +416,7 @@ struct log_trace2_state {
 	uint64_t prepare_begin;
 	uint64_t prepare_end;
 	uint64_t output_ns;
+	uint64_t get_revision_null_ns;
 	uint64_t returned;
 	uint64_t shown;
 	int pending;
@@ -456,8 +457,13 @@ static int cmd_log_walk_no_free(struct rev_info *rev,
 		if (trace)
 			trace2_timer_start(TRACE2_TIMER_ID_LOG_GET_REVISION);
 		commit = get_revision(rev);
-		if (trace)
-			trace2_timer_stop(TRACE2_TIMER_ID_LOG_GET_REVISION);
+		if (trace) {
+			uint64_t ns = trace2_timer_stop(
+				TRACE2_TIMER_ID_LOG_GET_REVISION);
+
+			if (!commit)
+				trace->get_revision_null_ns = ns;
+		}
 		if (!commit)
 			break;
 
@@ -945,6 +951,8 @@ int cmd_log(int argc,
 				   (trace->prepare_end - trace->prepare_begin) / 1000);
 		trace2_data_intmax("log", the_repository, "history-us",
 				   history_ns / 1000);
+		trace2_data_intmax("log", the_repository, "get-revision-null-us",
+				   trace->get_revision_null_ns / 1000);
 		trace2_data_intmax("log", the_repository, "output-us",
 				   trace->output_ns / 1000);
 		trace2_data_intmax("log", the_repository, "finalize-us",
