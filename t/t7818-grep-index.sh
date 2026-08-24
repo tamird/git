@@ -119,6 +119,56 @@ test_grep_timer () {
 	}' "$1"
 }
 
+test_grep_producer_stats () {
+	producer_trace="$1"
+	shift
+	test_trace2_data grep producer_counts_valid 1 <"$producer_trace" || return 1
+	if test_trace2_data grep producer_timings_valid 1 <"$producer_trace"
+	then
+		producer_timings_valid=1
+		producer_records=8
+	else
+		test_trace2_data grep producer_timings_valid 0 <"$producer_trace" ||
+			return 1
+		producer_timings_valid=0
+		producer_records=5
+		test_grep ! '"key":"producer_[^"]*_us"' "$producer_trace" || return 1
+	fi
+	for producer_scope in cache_lock cache_lookup driver_lookup
+	do
+		test_trace2_data grep "producer_$producer_scope"'_count' "$1" \
+			<"$producer_trace" || return 1
+		if test "$producer_timings_valid" = 1
+		then
+			case "$1" in
+			0) producer_us=0 ;;
+			*) producer_us="[0-9][0-9]*" ;;
+			esac
+			test_trace2_data grep "producer_$producer_scope"'_us' "$producer_us" \
+				<"$producer_trace" || return 1
+		fi
+		shift
+	done
+	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"grep","key":"producer_' "$producer_trace")" = "$producer_records"
+}
+
+test_grep_worktree_miss_reasons () {
+	test_trace2_data grep \
+		content_index_worktree_unverified_negative_reason_valid 1 <"$1" &&
+	for reason in lookup_unavailable different identity_unrepresentable \
+		      no_authorized_recovery recovery_unavailable \
+		      no_matching_identity checksum_rejected
+	do
+		case "$reason" in
+		no_authorized_recovery) expected_reason="$2" ;;
+		*) expected_reason=0 ;;
+		esac
+		test_trace2_data grep \
+			"content_index_worktree_unverified_negative_reason_$reason" \
+			"$expected_reason" <"$1" || return 1
+	done
+}
+
 test_grep_workers () {
 	awk -v expected="$2" '
 	/"event":"thread_(start|exit)"/ && /"thread":"th[0-9]+:grep"/ {
@@ -747,6 +797,7 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_grep_timer explicit-thread.trace dispatch/producer-lock 2 &&
 	test_grep_timer explicit-thread.trace dispatch/producer-wait 0 &&
 	test_grep_timer explicit-thread.trace dispatch/worker-drain 1 &&
+	test_grep_producer_stats explicit-thread.trace 0 0 2 &&
 	GIT_TRACE2_EVENT="$PWD/configured-thread.trace" \
 		git -c grep.threads=3 grep --cached --no-content-index \
 			"present needle" >/dev/null &&
@@ -3037,6 +3088,8 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep_timer candidate-clean.trace source/file-read 1 &&
 	test_grep_timer candidate-clean.trace source/file-hash 1 &&
 	test_grep_timer candidate-clean.trace source/object-read 0 &&
+	test_grep_producer_stats candidate-clean.trace 0 1 0 &&
+	test_grep_worktree_miss_reasons candidate-clean.trace 1 &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-negative.trace" git grep \
 		"absent candidate-only needle" -- "ord*" 2>err &&
@@ -3045,6 +3098,7 @@ test_expect_success FSMONITOR_DAEMON \
 		<candidate-negative.trace &&
 	test_trace2_data grep content_index_worktree_unverified_negative 0 \
 		<candidate-negative.trace &&
+	test_grep_worktree_miss_reasons candidate-negative.trace 0 &&
 	git update-index --no-fsmonitor-valid ordinary &&
 	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/candidate-unrefreshed.trace" git grep \
@@ -3052,6 +3106,9 @@ test_expect_success FSMONITOR_DAEMON \
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_worktree_candidates 1 \
 		<candidate-unrefreshed.trace &&
+	test_trace2_data grep content_index_worktree_unverified_negative 0 \
+		<candidate-unrefreshed.trace &&
+	test_grep_worktree_miss_reasons candidate-unrefreshed.trace 0 &&
 	test_grep ! '"category":"index","label":"refresh"' \
 		candidate-unrefreshed.trace &&
 	test_expect_code 1 env \
@@ -3265,7 +3322,22 @@ test_expect_success FSMONITOR_DAEMON \
 	test_grep ! "\"key\":\"$scope_key\"" \
 		.git/candidate-untracked-unsupported.trace &&
 	test_grep ! "\"key\":\"$worktree_key\"" \
-		.git/candidate-untracked-unsupported.trace
+		.git/candidate-untracked-unsupported.trace &&
+	if test_have_prereq PTHREADS
+	then
+		git checkout -- ordinary present &&
+		git status --porcelain >/dev/null &&
+		env GIT_TEST_GREP_LITERAL_PATHS=0 \
+			GIT_TRACE2_EVENT="$PWD/candidate-producer.trace" \
+			git grep --no-content-index --threads=2 -F \
+			-e "ordinary contents" -e "present needle" \
+			-- ordinary present >actual &&
+		printf "%s\n" "ordinary:ordinary contents" \
+			"present:present needle" >expected &&
+		test_cmp expected actual &&
+		test_grep_workers candidate-producer.trace 2 &&
+		test_grep_producer_stats candidate-producer.trace 1 2 2
+	fi
 '
 
 test_expect_success FSMONITOR_DAEMON \
