@@ -163,6 +163,8 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server UNUSED)
 # define GREP_INDEX_IPC_WORKER_RELEASE_RESPONSE_SIGNATURE 0x47495758
 # define GREP_INDEX_IPC_VERSION		     1
 # define GREP_INDEX_IPC_DIAGNOSTIC_VERSION   1
+# define GREP_INDEX_IPC_TIMING_VERSION       2
+# define GREP_INDEX_IPC_TIMING_FOOTER_SIZE (3 * sizeof(uint64_t))
 # define GREP_INDEX_IPC_CAPABILITY_SIZE     (2 * sizeof(uint32_t))
 # define GREP_INDEX_IPC_REQUEST_HEADER_SIZE  (5 * sizeof(uint32_t))
 # define GREP_INDEX_IPC_RESPONSE_HEADER_SIZE (3 * sizeof(uint32_t))
@@ -283,7 +285,7 @@ struct grep_index_ipc_query_task {
 	unsigned char *maybe;
 	struct grep_index_ipc_query_stats stats;
 	struct grep_index_ipc_request_trace *trace;
-	int diagnostic;
+	uint32_t diagnostic_version;
 	int result;
 };
 
@@ -1329,6 +1331,15 @@ cleanup:
 	return result;
 }
 
+static uint64_t grep_index_ipc_trace_clock(void)
+{
+	int saved_errno = errno;
+	uint64_t now = getnanotime();
+
+	errno = saved_errno;
+	return now;
+}
+
 static int grep_index_ipc_handle_request(
 	void *data, const char *request, size_t request_len,
 	ipc_server_reply_cb *reply, struct ipc_server_reply_data *reply_data)
@@ -1344,22 +1355,31 @@ static int grep_index_ipc_handle_request(
 	uint32_t signature, version, format_id, query_len, nr;
 	size_t rawsz = server->repo.hash_algo->rawsz;
 	size_t prepared_min_oids;
-	int diagnostic, use_prepared;
+	int diagnostic, use_prepared, timed;
+	uint64_t request_begin = 0, reply_begin = 0, reply_end = 0;
 	int result = 0;
+
+	/* Only explicitly negotiated v2 queries pay for server timing. */
+	timed = request_len >= 8 &&
+		get_be32(raw) == GREP_INDEX_IPC_DIAGNOSTIC_REQUEST_SIGNATURE &&
+		get_be32(raw + 4) == GREP_INDEX_IPC_TIMING_VERSION;
+	if (timed)
+		request_begin = grep_index_ipc_trace_clock();
 
 	if (request_len >= sizeof(uint32_t) &&
 	    get_be32(request) ==
 		    GREP_INDEX_IPC_CAPABILITY_REQUEST_SIGNATURE) {
 		unsigned char capability[GREP_INDEX_IPC_CAPABILITY_SIZE];
 
-		if (request_len != sizeof(capability) ||
-		    get_be32(raw + sizeof(uint32_t)) !=
-			    GREP_INDEX_IPC_DIAGNOSTIC_VERSION)
+		if (request_len != sizeof(capability))
+			return 0;
+		version = get_be32(raw + sizeof(uint32_t));
+		if (version != GREP_INDEX_IPC_DIAGNOSTIC_VERSION &&
+		    version != GREP_INDEX_IPC_TIMING_VERSION)
 			return 0;
 		put_be32(capability,
 			 GREP_INDEX_IPC_CAPABILITY_RESPONSE_SIGNATURE);
-		put_be32(capability + sizeof(uint32_t),
-			 GREP_INDEX_IPC_DIAGNOSTIC_VERSION);
+		put_be32(capability + sizeof(uint32_t), version);
 		return reply(reply_data, (const char *)capability,
 			     sizeof(capability));
 	}
@@ -1394,8 +1414,9 @@ static int grep_index_ipc_handle_request(
 	nr = get_be32(raw + 16);
 	diagnostic = signature == GREP_INDEX_IPC_DIAGNOSTIC_REQUEST_SIGNATURE;
 	if ((!diagnostic && signature != GREP_INDEX_IPC_REQUEST_SIGNATURE) ||
-	    version != (diagnostic ? GREP_INDEX_IPC_DIAGNOSTIC_VERSION :
-				     GREP_INDEX_IPC_VERSION) ||
+	    (diagnostic ? version != GREP_INDEX_IPC_DIAGNOSTIC_VERSION &&
+			  version != GREP_INDEX_IPC_TIMING_VERSION :
+			  version != GREP_INDEX_IPC_VERSION) ||
 	    format_id != server->repo.hash_algo->format_id ||
 	    query_len > request_len - GREP_INDEX_IPC_REQUEST_HEADER_SIZE ||
 	    nr > (request_len - GREP_INDEX_IPC_REQUEST_HEADER_SIZE -
@@ -1425,9 +1446,7 @@ static int grep_index_ipc_handle_request(
 			       diagnostic ?
 				       GREP_INDEX_IPC_DIAGNOSTIC_RESPONSE_SIGNATURE :
 				       GREP_INDEX_IPC_RESPONSE_SIGNATURE);
-	grep_index_ipc_put_u32(&response,
-			       diagnostic ? GREP_INDEX_IPC_DIAGNOSTIC_VERSION :
-					    GREP_INDEX_IPC_VERSION);
+	grep_index_ipc_put_u32(&response, version);
 	grep_index_ipc_put_u32(&response, nr);
 	if (diagnostic)
 		strbuf_addchars(&response, '\0',
@@ -1488,7 +1507,11 @@ static int grep_index_ipc_handle_request(
 	}
 	trace2_data_intmax("grep-index", &server->repo,
 			   "ipc_query/prepared", !!prepared);
+	if (timed)
+		reply_begin = grep_index_ipc_trace_clock();
 	result = reply(reply_data, response.buf, response.len);
+	if (timed)
+		reply_end = grep_index_ipc_trace_clock();
 	pthread_mutex_lock(&server->request_mutex);
 	if (!--server->active_requests) {
 		struct grep_index_memory *replacement;
@@ -1521,6 +1544,29 @@ static int grep_index_ipc_handle_request(
 	pthread_rwlock_unlock(&server->generation_lock);
 	grep_index_query_free(query);
 	strbuf_release(&response);
+	if (timed) {
+		uint64_t cleanup_end = grep_index_ipc_trace_clock();
+		unsigned char footer[GREP_INDEX_IPC_TIMING_FOOTER_SIZE];
+
+		/*
+		 * Keep cleanup in its original position. Both transports flush
+		 * after this callback returns, so that flush and the footer
+		 * write itself are outside these server-clock durations.
+		 */
+		if (!result) {
+			if (!request_begin || !reply_begin || !reply_end ||
+			    !cleanup_end || reply_begin < request_begin ||
+			    reply_end < reply_begin || cleanup_end < reply_end) {
+				memset(footer, 0xff, sizeof(footer));
+			} else {
+				put_be64(footer, reply_begin - request_begin);
+				put_be64(footer + 8, reply_end - reply_begin);
+				put_be64(footer + 16, cleanup_end - reply_end);
+			}
+			result = reply(reply_data, (const char *)footer,
+				       sizeof(footer));
+		}
+	}
 	return result;
 }
 
@@ -1967,7 +2013,8 @@ enum grep_index_ipc_capability_outcome {
 };
 
 static enum grep_index_ipc_capability_outcome
-grep_index_ipc_query_capability(const char *path)
+grep_index_ipc_query_capability(const char *path, uint32_t requested_version,
+				uint32_t *diagnostic_version)
 {
 	struct ipc_client_connect_options options =
 		IPC_CLIENT_CONNECT_OPTIONS_INIT;
@@ -1977,9 +2024,10 @@ grep_index_ipc_query_capability(const char *path)
 	enum grep_index_ipc_capability_outcome outcome =
 		GREP_INDEX_IPC_CAPABILITY_CONNECT_FAILED;
 
+	*diagnostic_version = 0;
 	grep_index_ipc_put_u32(
 		&request, GREP_INDEX_IPC_CAPABILITY_REQUEST_SIGNATURE);
-	grep_index_ipc_put_u32(&request, GREP_INDEX_IPC_DIAGNOSTIC_VERSION);
+	grep_index_ipc_put_u32(&request, requested_version);
 	options.wait_if_busy = 1;
 	options.uds_disallow_chdir = 1;
 	if (ipc_client_try_connect(path, &options, &connection) !=
@@ -1996,25 +2044,23 @@ grep_index_ipc_query_capability(const char *path)
 	else if (get_be32(response.buf) !=
 		 GREP_INDEX_IPC_CAPABILITY_RESPONSE_SIGNATURE)
 		outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_SIGNATURE;
-	else if (get_be32(response.buf + 4) != GREP_INDEX_IPC_DIAGNOSTIC_VERSION)
-		outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_VERSION;
-	else
-		outcome = GREP_INDEX_IPC_CAPABILITY_AVAILABLE;
+	else {
+		uint32_t version = get_be32(response.buf + 4);
+
+		if (version != GREP_INDEX_IPC_DIAGNOSTIC_VERSION &&
+		    version != requested_version) {
+			outcome = GREP_INDEX_IPC_CAPABILITY_INVALID_VERSION;
+		} else {
+			outcome = GREP_INDEX_IPC_CAPABILITY_AVAILABLE;
+			*diagnostic_version = version;
+		}
+	}
 
 cleanup:
 	ipc_client_close_connection(connection);
 	strbuf_release(&response);
 	strbuf_release(&request);
 	return outcome;
-}
-
-static uint64_t grep_index_ipc_trace_clock(void)
-{
-	int saved_errno = errno;
-	uint64_t now = getnanotime();
-
-	errno = saved_errno;
-	return now;
 }
 
 static void *grep_index_ipc_query_thread(void *data)
@@ -2028,11 +2074,13 @@ static void *grep_index_ipc_query_thread(void *data)
 	struct grep_index_ipc_query_stats stats = { 0 };
 	enum ipc_active_state state;
 	size_t rawsz = task->hash_algo->rawsz;
-	size_t response_header_size = task->diagnostic ?
+	size_t response_header_size = task->diagnostic_version ?
 		GREP_INDEX_IPC_DIAGNOSTIC_RESPONSE_HEADER_SIZE :
 		GREP_INDEX_IPC_RESPONSE_HEADER_SIZE;
-	uint32_t version = task->diagnostic ?
-		GREP_INDEX_IPC_DIAGNOSTIC_VERSION : GREP_INDEX_IPC_VERSION;
+	uint32_t version = task->diagnostic_version ?
+		task->diagnostic_version : GREP_INDEX_IPC_VERSION;
+	size_t footer_size = version == GREP_INDEX_IPC_TIMING_VERSION ?
+		GREP_INDEX_IPC_TIMING_FOOTER_SIZE : 0;
 
 	if (task->trace)
 		task->trace->begin_ns = grep_index_ipc_trace_clock();
@@ -2044,7 +2092,7 @@ static void *grep_index_ipc_query_thread(void *data)
 		     GREP_INDEX_IPC_REQUEST_HEADER_SIZE - task->query_len) /
 			    rawsz)
 		goto done;
-	grep_index_ipc_put_u32(&request, task->diagnostic ?
+	grep_index_ipc_put_u32(&request, task->diagnostic_version ?
 		GREP_INDEX_IPC_DIAGNOSTIC_REQUEST_SIGNATURE :
 		GREP_INDEX_IPC_REQUEST_SIGNATURE);
 	grep_index_ipc_put_u32(&request, version);
@@ -2063,14 +2111,14 @@ static void *grep_index_ipc_query_thread(void *data)
 	if (ipc_client_send_command_to_connection_gently(
 		    connection, request.buf, request.len, &response))
 		goto cleanup;
-	if (response.len != response_header_size + task->nr ||
-	    get_be32(response.buf) != (task->diagnostic ?
+	if (response.len != response_header_size + task->nr + footer_size ||
+	    get_be32(response.buf) != (task->diagnostic_version ?
 		GREP_INDEX_IPC_DIAGNOSTIC_RESPONSE_SIGNATURE :
 		GREP_INDEX_IPC_RESPONSE_SIGNATURE) ||
 	    get_be32(response.buf + 4) != version ||
 	    get_be32(response.buf + 8) != task->nr)
 		goto cleanup;
-	if (task->diagnostic) {
+	if (task->diagnostic_version) {
 		uint64_t objects;
 
 		stats.persistent = get_be32(response.buf + 12);
@@ -2092,6 +2140,24 @@ static void *grep_index_ipc_query_thread(void *data)
 		if (value > GREP_INDEX_IPC_MAYBE)
 			goto cleanup;
 		task->maybe[i] = value;
+	}
+	if (footer_size && task->trace) {
+		const char *footer = response.buf + response_header_size + task->nr;
+		uint64_t pre_reply = get_be64(footer);
+		uint64_t reply_write = get_be64(footer + 8);
+		uint64_t cleanup = get_be64(footer + 16);
+		struct grep_index_ipc_server_trace *server = &task->trace->server;
+
+		/* Timing is advisory; malformed query results never reach here. */
+		server->available = 1;
+		server->timing_invalid = pre_reply == UINT64_MAX ||
+			reply_write >= UINT64_MAX - pre_reply ||
+			cleanup >= UINT64_MAX - pre_reply - reply_write;
+		if (!server->timing_invalid) {
+			server->pre_reply_ns = pre_reply;
+			server->reply_write_ns = reply_write;
+			server->cleanup_ns = cleanup;
+		}
 	}
 	task->stats = stats;
 	task->result = 0;
@@ -2210,7 +2276,7 @@ int grep_index_ipc_query_with_max_parallel_requests(
 	size_t threads_nr = 1;
 	size_t started = 0;
 	int cpus;
-	int diagnostic = 0;
+	uint32_t diagnostic_version = 0;
 	int result = -1;
 
 	if (trace) {
@@ -2264,18 +2330,35 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		trace->requests_planned = threads_nr;
 	if (trace2_is_enabled()) {
 		enum grep_index_ipc_capability_outcome outcome;
+		unsigned int attempts = 1;
 
 		if (trace)
 			trace->probe_begin_ns = grep_index_ipc_trace_clock();
-		outcome = grep_index_ipc_query_capability(path);
+		outcome = grep_index_ipc_query_capability(
+			path, trace ? GREP_INDEX_IPC_TIMING_VERSION :
+				      GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
+			&diagnostic_version);
+		/*
+		 * An old diagnostic server rejects v2 with an empty reply,
+		 * just like a pre-capability server. A second probe preserves
+		 * its backend counts. Errors and malformed replies are not
+		 * evidence that another version is supported.
+		 */
+		if (trace && outcome == GREP_INDEX_IPC_CAPABILITY_EMPTY_REPLY) {
+			attempts++;
+			outcome = grep_index_ipc_query_capability(
+				path, GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
+				&diagnostic_version);
+		}
 		if (trace) {
 			trace->probe_end_ns = grep_index_ipc_trace_clock();
 			trace->probe_outcome = outcome;
+			trace->probe_attempts = attempts;
+			trace->diagnostic_version = diagnostic_version;
 		}
 
 		trace2_data_intmax("grep", repo,
 				   "content_index_ipc_capability", outcome);
-		diagnostic = outcome == GREP_INDEX_IPC_CAPABILITY_AVAILABLE;
 	}
 	CALLOC_ARRAY(tasks, threads_nr);
 	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
@@ -2289,7 +2372,7 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		tasks[i].oids = unique_oids + pos;
 		tasks[i].nr = task_nr;
 		tasks[i].maybe = unique_maybe + pos;
-		tasks[i].diagnostic = diagnostic;
+		tasks[i].diagnostic_version = diagnostic_version;
 		if (trace) {
 			tasks[i].trace = &trace->requests[i];
 			tasks[i].trace->objects = task_nr;
@@ -2337,7 +2420,7 @@ cleanup:
 	if (tasks && trace2_is_enabled()) {
 		grep_index_ipc_trace_query(repo, nr, unique_nr, tasks,
 					   threads_nr, started, result, trace);
-		if (diagnostic)
+		if (diagnostic_version)
 			grep_index_ipc_trace_backend(repo, unique_nr, tasks,
 						     threads_nr, started, result, trace);
 	}

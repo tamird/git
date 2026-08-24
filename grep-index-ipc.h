@@ -47,16 +47,26 @@ int grep_index_ipc_query(struct repository *repo,
 			 const struct grep_index_query *query,
 			 const struct object_id *oids, size_t nr,
 			 unsigned char *maybe);
-/* Optional caller-owned diagnostics; endpoints use getnanotime(). */
+/*
+ * Optional caller-owned diagnostics. Client endpoints use getnanotime();
+ * server stage durations use the server's independent clock and are never
+ * offsets in the client's clock domain.
+ */
+struct grep_index_ipc_server_trace {
+	uint64_t pre_reply_ns, reply_write_ns, cleanup_ns;
+	int available, timing_invalid;
+};
 struct grep_index_ipc_request_trace {
 	uint64_t begin_ns, end_ns;
 	size_t objects;
 	int outcome;
+	struct grep_index_ipc_server_trace server;
 };
 
 struct grep_index_ipc_query_trace {
 	uint64_t probe_begin_ns, probe_end_ns;
 	int probe_outcome;
+	unsigned int probe_attempts, diagnostic_version;
 	size_t requests_planned, requests_started;
 	struct grep_index_ipc_request_trace requests[GREP_INDEX_IPC_MAX_CLIENT_THREADS];
 	int query_available, backend_available;
