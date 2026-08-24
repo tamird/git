@@ -29,14 +29,22 @@ static void assert_index_minimum(struct index_state *istate, size_t pos)
 		    (uintmax_t)pos, istate->cache_nr);
 }
 
-static void fsmonitor_ewah_callback(size_t pos, void *is)
+struct fsmonitor_bitmap_apply {
+	struct index_state *istate;
+	uintmax_t *invalidated;
+};
+
+static void fsmonitor_ewah_callback(size_t pos, void *data)
 {
-	struct index_state *istate = (struct index_state *)is;
+	struct fsmonitor_bitmap_apply *apply = data;
+	struct index_state *istate = apply->istate;
 	struct cache_entry *ce;
 
 	assert_index_minimum(istate, pos + 1);
 
 	ce = istate->cache[pos];
+	if (apply->invalidated && (ce->ce_flags & CE_FSMONITOR_VALID))
+		(*apply->invalidated)++;
 	ce->ce_flags &= ~CE_FSMONITOR_VALID;
 }
 
@@ -195,24 +203,30 @@ static int query_fsmonitor_hook(struct repository *r,
  * work.  This also lets us have a different trace message so that we can
  * see everything that was done as part of the refresh-callback.
  */
-static void invalidate_ce_fsm(struct cache_entry *ce)
+static void invalidate_ce_fsm(struct cache_entry *ce, uintmax_t *invalidated)
 {
 	if (ce->ce_flags & CE_FSMONITOR_VALID) {
 		trace_printf_key(&trace_fsmonitor,
 				 "fsmonitor_refresh_callback INV: '%s'",
 				 ce->name);
 		ce->ce_flags &= ~CE_FSMONITOR_VALID;
+		if (invalidated)
+			(*invalidated)++;
 	}
 }
 
+struct fsmonitor_refresh_stats;
+
 static size_t handle_path_with_trailing_slash(
-	struct index_state *istate, const char *name, int pos);
+	struct index_state *istate, const char *name, int pos,
+	struct fsmonitor_refresh_stats *stats);
 
 #define FSMONITOR_ICASE_SCAN_LIMIT 1024
 
-struct fsmonitor_icase_stats {
+struct fsmonitor_refresh_stats {
 	struct strset exact_dirs;
 	struct strset rejected_paths;
+	uintmax_t *invalidated;
 	size_t scans;
 	size_t resolved;
 	size_t rejects;
@@ -226,7 +240,8 @@ struct fsmonitor_icase_stats {
  * Returns the number of cache-entries that we invalidated.
  */
 static size_t handle_using_name_hash_icase(
-	struct index_state *istate, const char *name)
+	struct index_state *istate, const char *name,
+	struct fsmonitor_refresh_stats *stats)
 {
 	struct cache_entry *ce = NULL;
 
@@ -266,7 +281,7 @@ static size_t handle_using_name_hash_icase(
 	 */
 	untracked_cache_invalidate_trimmed_path(istate, ce->name, 0);
 
-	invalidate_ce_fsm(ce);
+	invalidate_ce_fsm(ce, stats->invalidated);
 	return 1;
 }
 
@@ -278,7 +293,8 @@ static size_t handle_using_name_hash_icase(
  * Returns the number of cache-entries that we invalidated.
  */
 static size_t handle_using_dir_name_hash_icase(
-	struct index_state *istate, const char *name)
+	struct index_state *istate, const char *name,
+	struct fsmonitor_refresh_stats *stats)
 {
 	struct strbuf canonical_path = STRBUF_INIT;
 	int pos;
@@ -321,7 +337,7 @@ static size_t handle_using_dir_name_hash_icase(
 	pos = index_name_pos(istate, canonical_path.buf,
 			     canonical_path.len);
 	nr_in_cone = handle_path_with_trailing_slash(
-		istate, canonical_path.buf, pos);
+		istate, canonical_path.buf, pos, stats);
 	strbuf_release(&canonical_path);
 	return nr_in_cone;
 }
@@ -342,7 +358,7 @@ static int find_icase_match(
 	const char *component_name,
 	size_t component_len,
 	int require_dir,
-	struct fsmonitor_icase_stats *stats,
+	struct fsmonitor_refresh_stats *stats,
 	struct fsmonitor_icase_match *match)
 {
 	int matches = 0;
@@ -427,7 +443,7 @@ static int find_icase_match(
 static size_t handle_using_index_icase(
 	struct index_state *istate,
 	const char *name,
-	struct fsmonitor_icase_stats *stats)
+	struct fsmonitor_refresh_stats *stats)
 {
 	struct strbuf canonical_path = STRBUF_INIT;
 	size_t len = strlen(name);
@@ -557,13 +573,13 @@ static size_t handle_using_index_icase(
 			untracked_cache_invalidate_trimmed_path(
 				istate, canonical_path.buf, 0);
 			for (size_t i = match.start; i < match.end; i++) {
-				invalidate_ce_fsm(istate->cache[i]);
+				invalidate_ce_fsm(istate->cache[i], stats->invalidated);
 				nr_in_cone++;
 			}
 		} else {
 			strbuf_addch(&canonical_path, '/');
 			nr_in_cone = handle_path_with_trailing_slash(
-				istate, canonical_path.buf, match.dir_start);
+				istate, canonical_path.buf, match.dir_start, stats);
 		}
 		stats->resolved++;
 		goto cleanup;
@@ -576,14 +592,14 @@ cleanup:
 use_name_hash:
 	strbuf_release(&canonical_path);
 	stats->fallbacks++;
-	nr_in_cone = handle_using_name_hash_icase(istate, name);
+	nr_in_cone = handle_using_name_hash_icase(istate, name, stats);
 	if (!nr_in_cone)
-		nr_in_cone = handle_using_dir_name_hash_icase(istate, name);
+		nr_in_cone = handle_using_dir_name_hash_icase(istate, name, stats);
 	return nr_in_cone;
 
 invalidate_all:
 	for (size_t i = 0; i < istate->cache_nr; i++)
-		invalidate_ce_fsm(istate->cache[i]);
+		invalidate_ce_fsm(istate->cache[i], stats->invalidated);
 	strbuf_release(&canonical_path);
 	stats->fallbacks++;
 	return istate->cache_nr;
@@ -603,7 +619,8 @@ invalidate_all:
  * Return the number of cache-entries that we invalidated.
  */
 static size_t handle_path_without_trailing_slash(
-	struct index_state *istate, const char *name, int pos)
+	struct index_state *istate, const char *name, int pos,
+	struct fsmonitor_refresh_stats *stats)
 {
 	/*
 	 * Mark the untracked cache dirty for this path (regardless of
@@ -622,7 +639,7 @@ static size_t handle_path_without_trailing_slash(
 		 * cache-entry with the same pathname, nor for a cone
 		 * at that directory. (That is, assume no D/F conflicts.)
 		 */
-		invalidate_ce_fsm(istate->cache[pos]);
+		invalidate_ce_fsm(istate->cache[pos], stats->invalidated);
 		return 1;
 	} else {
 		size_t nr_in_cone;
@@ -640,7 +657,7 @@ static size_t handle_path_without_trailing_slash(
 		strbuf_addch(&work_path, '/');
 		pos = index_name_pos(istate, work_path.buf, work_path.len);
 		nr_in_cone = handle_path_with_trailing_slash(
-			istate, work_path.buf, pos);
+			istate, work_path.buf, pos, stats);
 		strbuf_release(&work_path);
 		return nr_in_cone;
 	}
@@ -679,7 +696,8 @@ static size_t handle_path_without_trailing_slash(
  * untracked or case-incorrect.
  */
 static size_t handle_path_with_trailing_slash(
-	struct index_state *istate, const char *name, int pos)
+	struct index_state *istate, const char *name, int pos,
+	struct fsmonitor_refresh_stats *stats)
 {
 	int i;
 	size_t nr_in_cone = 0;
@@ -700,7 +718,7 @@ static size_t handle_path_with_trailing_slash(
 	for (i = pos; i < istate->cache_nr; i++) {
 		if (!starts_with(istate->cache[i]->name, name))
 			break;
-		invalidate_ce_fsm(istate->cache[i]);
+		invalidate_ce_fsm(istate->cache[i], stats->invalidated);
 		nr_in_cone++;
 	}
 
@@ -710,7 +728,7 @@ static size_t handle_path_with_trailing_slash(
 static void fsmonitor_refresh_callback(
 	struct index_state *istate,
 	char *name,
-	struct fsmonitor_icase_stats *icase_stats)
+	struct fsmonitor_refresh_stats *stats)
 {
 	int len = strlen(name);
 	int pos = index_name_pos(istate, name, len);
@@ -721,9 +739,11 @@ static void fsmonitor_refresh_callback(
 			 name, pos);
 
 	if (name[len - 1] == '/')
-		nr_in_cone = handle_path_with_trailing_slash(istate, name, pos);
+		nr_in_cone = handle_path_with_trailing_slash(
+			istate, name, pos, stats);
 	else
-		nr_in_cone = handle_path_without_trailing_slash(istate, name, pos);
+		nr_in_cone = handle_path_without_trailing_slash(
+			istate, name, pos, stats);
 
 	/*
 	 * If we did not find an exact match for this pathname or any
@@ -733,7 +753,7 @@ static void fsmonitor_refresh_callback(
 	 */
 	if (!nr_in_cone && repo_ignore_case(the_repository))
 		nr_in_cone = handle_using_index_icase(
-			istate, name, icase_stats);
+			istate, name, stats);
 
 	if (nr_in_cone)
 		trace_printf_key(&trace_fsmonitor,
@@ -786,9 +806,11 @@ void refresh_fsmonitor(struct index_state *istate)
 	size_t bol = 0; /* beginning of line */
 	uint64_t last_update;
 	struct strbuf last_update_token = STRBUF_INIT;
-	struct fsmonitor_icase_stats icase_stats = {
+	uintmax_t query_invalidated = 0;
+	struct fsmonitor_refresh_stats icase_stats = {
 		.exact_dirs = STRSET_INIT,
 		.rejected_paths = STRSET_INIT,
+		.invalidated = trace2_is_enabled() ? &query_invalidated : NULL,
 	};
 	char *buf;
 	unsigned int i;
@@ -1045,6 +1067,9 @@ apply_results:
 		int saved_errno = errno;
 
 		/* Keep these counters visible at the default event nesting limit. */
+		if (icase_stats.invalidated)
+			trace2_data_intmax("fsmonitor", istate->repo,
+					   "query/invalidated", query_invalidated);
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "icase_index/scans", icase_stats.scans);
 		trace2_data_intmax("fsmonitor", istate->repo,
@@ -1145,6 +1170,12 @@ void tweak_fsmonitor(struct index_state *istate)
 
 	if (istate->fsmonitor_dirty) {
 		if (fsmonitor_enabled) {
+			uintmax_t invalidated = 0;
+			struct fsmonitor_bitmap_apply apply = {
+				.istate = istate,
+				.invalidated = trace2_is_enabled() ? &invalidated : NULL,
+			};
+
 			/* Mark all entries valid */
 			for (i = 0; i < istate->cache_nr; i++) {
 				if (S_ISGITLINK(istate->cache[i]->ce_mode))
@@ -1154,7 +1185,15 @@ void tweak_fsmonitor(struct index_state *istate)
 
 			/* Mark all previously saved entries as dirty */
 			assert_index_minimum(istate, istate->fsmonitor_dirty->bit_size);
-			ewah_each_bit(istate->fsmonitor_dirty, fsmonitor_ewah_callback, istate);
+			ewah_each_bit(istate->fsmonitor_dirty,
+				      fsmonitor_ewah_callback, &apply);
+			if (apply.invalidated) {
+				int saved_errno = errno;
+
+				trace2_data_intmax("fsmonitor", istate->repo,
+						   "fsmn/invalidated", invalidated);
+				errno = saved_errno;
+			}
 
 			refresh_fsmonitor(istate);
 		}
