@@ -342,12 +342,19 @@ static inline void odb_source_prepare(struct odb_source *source,
  * Read an object from the object database source identified by its object ID.
  * Returns 0 on success, a negative error code otherwise.
  */
+void odb_source_record_read_result(struct odb_source *source,
+				   struct odb_read_result *result, int ret);
+
 static inline int odb_source_read_object_info(struct odb_source *source,
 					      const struct object_id *oid,
 					      struct object_info *oi,
 					      enum object_info_flags flags)
 {
-	return source->read_object_info(source, oid, oi, flags);
+	int ret = source->read_object_info(source, oid, oi, flags);
+
+	if (oi && oi->read_resultp)
+		odb_source_record_read_result(source, oi->read_resultp, ret);
+	return ret;
 }
 
 /*

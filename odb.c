@@ -833,22 +833,33 @@ int odb_pretend_object(struct object_database *odb,
 				       buf, len, type, oid, NULL, NULL, 0);
 }
 
-void *odb_read_object(struct object_database *odb,
-		      const struct object_id *oid,
-		      enum object_type *type,
-		      size_t *size)
+void *odb_read_object_with_result(struct object_database *odb,
+				 const struct object_id *oid,
+				 enum object_type *type, size_t *size,
+				 struct odb_read_result *result)
 {
 	struct object_info oi = OBJECT_INFO_INIT;
 	unsigned flags = OBJECT_INFO_DIE_IF_CORRUPT | OBJECT_INFO_LOOKUP_REPLACE;
 	void *data;
 
+	if (result)
+		memset(result, 0, sizeof(*result));
 	oi.typep = type;
 	oi.sizep = size;
 	oi.contentp = &data;
+	oi.read_resultp = result;
 	if (odb_read_object_info_extended(odb, oid, &oi, flags))
 		return NULL;
 
 	return data;
+}
+
+void *odb_read_object(struct object_database *odb,
+		      const struct object_id *oid,
+		      enum object_type *type,
+		      size_t *size)
+{
+	return odb_read_object_with_result(odb, oid, type, size, NULL);
 }
 
 void *odb_read_object_peeled(struct object_database *odb,

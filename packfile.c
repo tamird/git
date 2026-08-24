@@ -1251,11 +1251,15 @@ static void detach_delta_base_cache_entry(struct delta_base_cache_entry *ent)
 
 static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 				   off_t base_offset, size_t *base_size,
-				   enum object_type *type)
+				   enum object_type *type,
+				   enum odb_read_result_kind *result_kind)
 {
 	struct delta_base_cache_entry *ent;
 
 	ent = get_delta_base_cache_entry(p, base_offset);
+	if (result_kind)
+		*result_kind = ent ? ODB_READ_RESULT_PACKED_CACHE_COPY :
+				    ODB_READ_RESULT_PACKED_UNPACK;
 	if (!ent)
 		return unpack_entry(r, p, base_offset, type, base_size);
 
@@ -1341,7 +1345,9 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 	 */
 	if (oi->contentp) {
 		*oi->contentp = cache_or_unpack_entry(p->repo, p, obj_offset,
-						      oi->sizep, &type);
+						      oi->sizep, &type,
+						      oi->read_resultp ?
+						      &oi->read_resultp->kind : NULL);
 		if (!*oi->contentp)
 			type = OBJ_BAD;
 	} else if (oi->sizep || oi->typep || oi->delta_base_oid) {

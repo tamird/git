@@ -1964,6 +1964,29 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-attributes.trace &&
 	test_trace2_data grep content_index_tree_object_read_lock_acquire_us 0 \
 		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_winner_loose_count 1 \
+		<tree-attributes.trace &&
+	read_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-attributes.trace) &&
+	test_trace2_data grep content_index_tree_object_read_winner_loose_us "$read_us" \
+		<tree-attributes.trace &&
+	for kind in inmemory packed_cache_copy packed_unpack
+	do
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 0 \
+			<tree-attributes.trace &&
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" 0 \
+			<tree-attributes.trace || return 1
+	done &&
+	# The packed lookup returned nonzero; the loose source won the child read.
+	test_trace2_data grep content_index_tree_object_read_inmemory_nonzero_attempts 1 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_packed_nonzero_attempts 1 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+		<tree-attributes.trace &&
 	if test_have_prereq PTHREADS
 	then
 		# Flush a matching root blob before reading the original nested tree.
@@ -2003,6 +2026,76 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test "$lock_us" -ge 0 &&
 		test "$lock_us" -le "$read_us"
 	fi &&
+	# Read a packed delta first, then the base that unpack_entry cached.
+	for i in $(test_seq 1 64)
+	do
+		printf "100644 blob %s\tfile%03d\n" "$replacement_oid" "$i" ||
+			return 1
+	done >backend-tree-entries &&
+	backend_tree_a=$(git mktree <backend-tree-entries) &&
+	printf "100644 blob %s\tlast\n" "$replacement_oid" >>backend-tree-entries &&
+	backend_tree_b=$(git mktree <backend-tree-entries) &&
+	backend_pack=$(printf "%s\n" "$backend_tree_a" "$backend_tree_b" |
+		git pack-objects --window=10 --depth=1 --no-reuse-delta \
+			--no-reuse-object .git/objects/pack/pack) &&
+	test_when_finished "rm -f .git/objects/pack/pack-$backend_pack.pack \
+		.git/objects/pack/pack-$backend_pack.idx \
+		.git/objects/pack/pack-$backend_pack.rev" &&
+	git verify-pack -v ".git/objects/pack/pack-$backend_pack.idx" >backend-pack-info &&
+	awk "\$2 == \"tree\" && NF == 7 { print \$1, \$7 }" \
+		backend-pack-info >backend-delta &&
+	test_line_count = 1 backend-delta &&
+	read backend_delta backend_base <backend-delta &&
+	backend_empty=$(git mktree </dev/null) &&
+	backend_root=$({
+		printf "040000 tree %s\ta-delta\n" "$backend_delta" &&
+		printf "040000 tree %s\tm-empty\n" "$backend_empty" &&
+		printf "040000 tree %s\tz-base\n" "$backend_base"
+	} | git mktree) &&
+	git -c core.deltaBaseCacheLimit=1m grep --no-content-index --threads=1 \
+		"present needle" "$backend_root" -- a-delta m-empty z-base >expect-tree-positive &&
+	>tree-positive.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
+		git -c core.deltaBaseCacheLimit=1m grep --threads=1 \
+			"present needle" "$backend_root" -- a-delta m-empty z-base >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_directories 3 <tree-positive.trace &&
+	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+		<tree-positive.trace &&
+	for kind in inmemory packed_cache_copy packed_unpack
+	do
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 1 \
+			<tree-positive.trace &&
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" "[0-9][0-9]*" \
+			<tree-positive.trace || return 1
+	done &&
+	for kind in loose
+	do
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 0 \
+			<tree-positive.trace &&
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" 0 \
+			<tree-positive.trace || return 1
+	done &&
+	test_trace2_data grep content_index_tree_object_read_inmemory_nonzero_attempts 2 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_object_read_packed_nonzero_attempts 0 \
+		<tree-positive.trace &&
+	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+		<tree-positive.trace &&
+	memory_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_winner_inmemory_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-positive.trace) &&
+	cache_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_winner_packed_cache_copy_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-positive.trace) &&
+	unpack_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_winner_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-positive.trace) &&
+	read_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-positive.trace) &&
+	test "$((memory_us + cache_us + unpack_us))" -le "$read_us" &&
+	test "$((read_us - memory_us - cache_us - unpack_us))" -le 2 &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \

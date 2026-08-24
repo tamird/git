@@ -2381,6 +2381,7 @@ struct grep_tree_query_context {
 	int trace_enabled;
 	int tree_object_read_invalid;
 	int tree_object_read_bytes_overflow;
+	int tree_object_read_source_invalid;
 	size_t batch_size;
 	size_t batch_max_bytes;
 	uint64_t objects;
@@ -2400,6 +2401,12 @@ struct grep_tree_query_context {
 	uint64_t tree_object_read_slow_ns;
 	/* Returned child-tree payload bytes across visits, not storage bytes. */
 	uint64_t tree_object_read_bytes;
+	/* Whole child calls grouped by their winner, not backend-only time. */
+	uint64_t tree_object_read_winner_count[ODB_READ_RESULT_NR];
+	uint64_t tree_object_read_winner_ns[ODB_READ_RESULT_NR];
+	uint64_t tree_object_read_inmemory_nonzero;
+	uint64_t tree_object_read_loose_nonzero;
+	uint64_t tree_object_read_packed_nonzero;
 	uint64_t batch_prepare_ns;
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
@@ -2410,6 +2417,75 @@ struct grep_tree_query_context {
 	unsigned int ipc_trace_clock_invalid;
 	int ipc_trace_count_overflow;
 };
+
+static void grep_tree_record_object_read(struct grep_tree_query_context *query,
+					const struct odb_read_result *result,
+					uint64_t elapsed)
+{
+	enum odb_read_result_kind kind = result->kind;
+
+	if (query->tree_object_read_source_invalid)
+		return;
+	if (result->invalid || kind <= ODB_READ_RESULT_UNKNOWN ||
+	    kind >= ODB_READ_RESULT_NR ||
+	    query->tree_object_read_winner_count[kind] == (uint64_t)INTMAX_MAX ||
+	    elapsed > UINT64_MAX - query->tree_object_read_winner_ns[kind] ||
+	    result->inmemory_nonzero > (uint64_t)INTMAX_MAX -
+				      query->tree_object_read_inmemory_nonzero ||
+	    result->loose_nonzero > (uint64_t)INTMAX_MAX -
+				   query->tree_object_read_loose_nonzero ||
+	    result->packed_nonzero > (uint64_t)INTMAX_MAX -
+				    query->tree_object_read_packed_nonzero) {
+		query->tree_object_read_source_invalid = 1;
+		return;
+	}
+	query->tree_object_read_winner_count[kind]++;
+	query->tree_object_read_winner_ns[kind] += elapsed;
+	query->tree_object_read_inmemory_nonzero += result->inmemory_nonzero;
+	query->tree_object_read_loose_nonzero += result->loose_nonzero;
+	query->tree_object_read_packed_nonzero += result->packed_nonzero;
+}
+
+static void grep_tree_trace_object_read_sources(
+	const struct grep_tree_query_context *query)
+{
+	static const char * const names[ODB_READ_RESULT_NR] = {
+		[ODB_READ_RESULT_INMEMORY] = "inmemory",
+		[ODB_READ_RESULT_LOOSE] = "loose",
+		[ODB_READ_RESULT_PACKED_CACHE_COPY] = "packed_cache_copy",
+		[ODB_READ_RESULT_PACKED_UNPACK] = "packed_unpack",
+	};
+	int valid = !query->tree_object_read_invalid &&
+		    !query->tree_object_read_source_invalid;
+	int saved_errno = errno;
+	char key[96];
+
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_source_valid", valid);
+	if (!valid)
+		goto out;
+	for (int i = ODB_READ_RESULT_INMEMORY; i < ODB_READ_RESULT_NR; i++) {
+		xsnprintf(key, sizeof(key),
+			  "content_index_tree_object_read_winner_%s_count", names[i]);
+		trace2_data_intmax("grep", the_repository, key,
+				  query->tree_object_read_winner_count[i]);
+		xsnprintf(key, sizeof(key),
+			  "content_index_tree_object_read_winner_%s_us", names[i]);
+		trace2_data_intmax("grep", the_repository, key,
+				  query->tree_object_read_winner_ns[i] / 1000);
+	}
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_inmemory_nonzero_attempts",
+		query->tree_object_read_inmemory_nonzero);
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_loose_nonzero_attempts",
+		query->tree_object_read_loose_nonzero);
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_packed_nonzero_attempts",
+		query->tree_object_read_packed_nonzero);
+out:
+	errno = saved_errno;
+}
 
 struct grep_tree_batch {
 	struct grep_opt *opt;
@@ -2925,6 +3001,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			void *data;
 			unsigned long size;
 			uint64_t object_read_begin = 0;
+			struct odb_read_result object_read_result;
 
 			if (query && query->trace_enabled) {
 				int saved_errno = errno;
@@ -2934,8 +3011,10 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				object_read_begin = getnanotime();
 				errno = saved_errno;
 			}
-			data = odb_read_object(the_repository->objects,
-					       &entry.oid, &type, &size);
+			data = odb_read_object_with_result(the_repository->objects,
+					       &entry.oid, &type, &size,
+					       query && query->trace_enabled ?
+					       &object_read_result : NULL);
 			if (query && query->trace_enabled) {
 				int saved_errno = errno;
 				uint64_t object_read_end = getnanotime();
@@ -2952,6 +3031,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						object_read_end - object_read_begin;
 
 					query->tree_object_read_ns += elapsed;
+					grep_tree_record_object_read(query,
+						&object_read_result, elapsed);
 					if (elapsed > query->tree_object_read_max_ns)
 						query->tree_object_read_max_ns = elapsed;
 					/* Slow durations are a subset of the checked total. */
@@ -3412,6 +3493,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_walk_us",
 					   query.tree_walk_ns / 1000);
+			grep_tree_trace_object_read_sources(&query);
 			if (!query.tree_object_read_invalid) {
 				trace2_data_intmax("grep", the_repository,
 						   "content_index_tree_object_read_us",

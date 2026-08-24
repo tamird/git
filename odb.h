@@ -283,6 +283,31 @@ struct odb_source *odb_add_to_alternates_memory(struct object_database *odb,
  * them should arrange to call odb_read_object_info_extended() and give error
  * messages themselves.
  */
+/*
+ * Optional results from one content read. Nonzero leaf-source attempts are
+ * not winners. Recursive reads use their own object_info and do not update
+ * these results; a hash-algorithm conversion of this read keeps them.
+ */
+enum odb_read_result_kind {
+	ODB_READ_RESULT_UNKNOWN,
+	ODB_READ_RESULT_INMEMORY,
+	ODB_READ_RESULT_LOOSE,
+	ODB_READ_RESULT_PACKED_CACHE_COPY,
+	ODB_READ_RESULT_PACKED_UNPACK,
+	ODB_READ_RESULT_NR
+};
+
+struct odb_read_result {
+	enum odb_read_result_kind kind;
+	uint64_t inmemory_nonzero, loose_nonzero, packed_nonzero;
+	int invalid;
+};
+
+void *odb_read_object_with_result(struct object_database *odb,
+				 const struct object_id *oid,
+				 enum object_type *type, size_t *size,
+				 struct odb_read_result *result);
+
 void *odb_read_object(struct object_database *odb,
 		      const struct object_id *oid,
 		      enum object_type *type,
@@ -385,6 +410,9 @@ struct object_info {
 	 * or multiple times in the same source.
 	 */
 	struct odb_source_info *source_infop;
+
+	/* Optional, caller-owned diagnostics for this content read only. */
+	struct odb_read_result *read_resultp;
 
 	/*
 	 * object-info protocol specific. Set by the protocol when the remote
