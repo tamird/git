@@ -510,32 +510,80 @@ test_expect_success 'fetch --all --prune limits auto-follow scans to local tags'
 						return $(i + 2)
 				return ""
 			}
+			function number(name, i, value) {
+				for (i = 2; i < NF; i += 2)
+					if ($i == name) {
+						value = $(i + 1)
+						if (value !~ /^:[0-9]+([.][0-9]+)?[,}]$/)
+							return ""
+						sub(/^:/, "", value)
+						sub(/[,}]$/, "", value)
+						return value
+					}
+				return ""
+			}
 			BEGIN {
 				expected["edge-mark/roots"] = 1
 				expected["edge-mark/roots-already-uninteresting"] = 0
 				expected["edge-mark/trees-expanded"] = 1
 				expected["edge-mark/tree-bytes"] = tree_bytes
+				prefix = "edge-mark/tree-parse-"
+				order["edge-mark/roots"] = 1
+				order["edge-mark/roots-already-uninteresting"] = 2
+				order["edge-mark/trees-expanded"] = 3
+				order["edge-mark/tree-bytes"] = 4
+				order[prefix "counts-valid"] = 5
+				order[prefix "timings-valid"] = 6
+				order[prefix "needed-count"] = 7
+				order[prefix "already-parsed-count"] = 8
+				order[prefix "needed-us"] = 9
 			}
 			{
-				if (field("event") != "data" ||
-				    field("category") != "rev-list")
+				if (field("category") != "rev-list")
+					next
+				event = field("event")
+				sid = field("sid")
+				if (field("label") == "mark_edges_uninteresting") {
+					if (sid == "" || number("nesting") != 1)
+						bad = 1
+					if (event == "region_enter") {
+						if (++entered[sid] != 1)
+							bad = 1
+						enter_line[sid] = NR
+					} else if (event == "region_leave") {
+						elapsed = number("t_rel")
+						if (++left[sid] != 1 ||
+						    entered[sid] != 1 ||
+						    enter_line[sid] >= NR ||
+						    elapsed == "")
+							bad = 1
+						leave_line[sid] = NR
+						edge_us[sid] = elapsed * 1000000
+					}
+					next
+				}
+				if (event != "data")
 					next
 				key = field("key")
 				if (index(key, "edge-mark/") != 1)
 					next
-				sid = field("sid")
 				value = field("value")
-				if (!(key in expected) || sid == "" ||
-				    value !~ /^[0-9]+$/) {
+				if (!(key in order) || sid == "" ||
+				    value !~ /^[0-9]+$/ ||
+				    number("nesting") != 1) {
 					bad = 1
 					next
 				}
-				if (++seen[sid, key] != 1)
+				if (++seen[sid, key] != 1 ||
+				    ++data_nr[sid] != order[key] ||
+				    entered[sid] != 1 || left[sid] != 1 ||
+				    leave_line[sid] >= NR)
 					bad = 1
 				values[sid, key] = value + 0
 				sessions[sid] = 1
 			}
 			END {
+				# Check all original fields before the new assertions.
 				for (sid in sessions) {
 					matched = 1
 					for (key in expected) {
@@ -544,10 +592,42 @@ test_expect_success 'fetch --all --prune limits auto-follow scans to local tags'
 						if (values[sid, key] != expected[key])
 							matched = 0
 					}
-					if (matched)
+					if (matched) {
+						matches[sid] = 1
 						found = 1
+					}
 				}
-				exit (bad || !found)
+				if (bad || !found)
+					exit 1
+				for (sid in sessions)
+					if (seen[sid, prefix "counts-valid"] != 1 ||
+					    values[sid, prefix "counts-valid"] != 1) {
+						print prefix "counts-valid: expected 1"
+						exit 1
+					}
+				for (sid in sessions) {
+					for (key in order)
+						if (key != prefix "needed-us" &&
+						    seen[sid, key] != 1)
+							bad = 1
+					valid = values[sid, prefix "timings-valid"]
+					if (valid != 0 && valid != 1)
+						bad = 1
+					if (seen[sid, prefix "needed-us"] != valid)
+						bad = 1
+					# Allow one microsecond for printed region rounding.
+					if (valid &&
+					    values[sid, prefix "needed-us"] > edge_us[sid] + 1)
+						bad = 1
+					# Equality is specific to this successful fixture.
+					needed = values[sid, prefix "needed-count"]
+					parsed = values[sid, prefix "already-parsed-count"]
+					if (matches[sid] &&
+					    (needed < 1 ||
+					     needed + parsed != values[sid, "edge-mark/trees-expanded"]))
+						bad = 1
+				}
+				exit bad
 			}
 		'\'' auto-tags.trace &&
 		test_grep "^Fetching origin$" fetch.out &&

@@ -70,6 +70,84 @@ static void mark_blob_uninteresting(struct blob *blob)
 static void mark_tree_uninteresting_1(struct repository *r, struct tree *tree,
 				      struct tree_mark_stats *stats);
 
+static int tree_mark_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
+static int parse_tree_for_marking(struct tree *tree,
+				  struct tree_mark_stats *stats)
+{
+	uint64_t started = 0, finished;
+	intmax_t *count;
+	int already_parsed, trace_timing = 0;
+	int ret;
+
+	if (!stats)
+		return repo_parse_tree_gently(the_repository, tree, 1);
+
+	already_parsed = tree->object.parsed;
+	count = already_parsed ? &stats->already_parsed_count :
+				 &stats->parse_needed_count;
+	if (stats->parse_counts_valid) {
+		if (*count == INTMAX_MAX) {
+			stats->parse_counts_valid = 0;
+			stats->parse_timings_valid = 0;
+		} else {
+			(*count)++;
+		}
+	}
+
+	/* Preserve the original call, but do not time its parsed fast path. */
+	if (already_parsed)
+		return repo_parse_tree_gently(the_repository, tree, 1);
+
+	if (stats->parse_timings_valid) {
+		if (tree_mark_time(&started))
+			stats->parse_timings_valid = 0;
+		else
+			trace_timing = 1;
+	}
+
+	ret = repo_parse_tree_gently(the_repository, tree, 1);
+
+	if (trace_timing) {
+		if (tree_mark_time(&finished) || finished < started ||
+		    unsigned_add_overflows(stats->parse_needed_ns,
+					   finished - started))
+			stats->parse_timings_valid = 0;
+		else
+			stats->parse_needed_ns += finished - started;
+	}
+
+	return ret;
+}
+
 static void mark_tree_contents_uninteresting(struct repository *r,
 					     struct tree *tree,
 					     struct tree_mark_stats *stats)
@@ -77,7 +155,7 @@ static void mark_tree_contents_uninteresting(struct repository *r,
 	struct tree_desc desc;
 	struct name_entry entry;
 
-	if (repo_parse_tree_gently(the_repository, tree, 1) < 0)
+	if (parse_tree_for_marking(tree, stats) < 0)
 		return;
 	if (stats) {
 		stats->trees_expanded++;
