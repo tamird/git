@@ -2367,6 +2367,8 @@ struct grep_tree_batch_item {
  * excluded, so object IDs alone identify reusable content-index answers.
  */
 #define GREP_TREE_IPC_TRACE_BATCHES 16
+/* Inclusive slow-call threshold; retain elapsed time, not time above it. */
+#define GREP_TREE_SLOW_OBJECT_READ_NS 1000000
 
 struct grep_tree_query_context {
 	struct oidset impossible;
@@ -2378,6 +2380,7 @@ struct grep_tree_query_context {
 	int rooted_recursive_basename_pathspec;
 	int trace_enabled;
 	int tree_object_read_invalid;
+	int tree_object_read_bytes_overflow;
 	size_t batch_size;
 	size_t batch_max_bytes;
 	uint64_t objects;
@@ -2392,6 +2395,11 @@ struct grep_tree_query_context {
 	uint64_t basename_rejected;
 	uint64_t tree_walk_ns;
 	uint64_t tree_object_read_ns;
+	uint64_t tree_object_read_max_ns;
+	uint64_t tree_object_read_slow_count;
+	uint64_t tree_object_read_slow_ns;
+	/* Returned child-tree payload bytes across visits, not storage bytes. */
+	uint64_t tree_object_read_bytes;
 	uint64_t batch_prepare_ns;
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
@@ -2913,11 +2921,30 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 				errno = saved_errno;
 				if (!object_read_begin || !object_read_end ||
-				    object_read_end < object_read_begin)
+				    object_read_end < object_read_begin ||
+				    object_read_end - object_read_begin >
+					UINT64_MAX - query->tree_object_read_ns)
 					query->tree_object_read_invalid = 1;
-				else if (!query->tree_object_read_invalid)
-					query->tree_object_read_ns +=
+				else if (!query->tree_object_read_invalid) {
+					uint64_t elapsed =
 						object_read_end - object_read_begin;
+
+					query->tree_object_read_ns += elapsed;
+					if (elapsed > query->tree_object_read_max_ns)
+						query->tree_object_read_max_ns = elapsed;
+					/* Slow durations are a subset of the checked total. */
+					if (elapsed >= GREP_TREE_SLOW_OBJECT_READ_NS) {
+						query->tree_object_read_slow_count++;
+						query->tree_object_read_slow_ns += elapsed;
+					}
+				}
+				if (data && !query->tree_object_read_bytes_overflow) {
+					if (size > (uint64_t)INTMAX_MAX -
+						   query->tree_object_read_bytes)
+						query->tree_object_read_bytes_overflow = 1;
+					else
+						query->tree_object_read_bytes += size;
+				}
 			}
 			if (!data) {
 				if (batch)
@@ -3348,10 +3375,27 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_walk_us",
 					   query.tree_walk_ns / 1000);
-			if (!query.tree_object_read_invalid)
+			if (!query.tree_object_read_invalid) {
 				trace2_data_intmax("grep", the_repository,
 						   "content_index_tree_object_read_us",
 						   query.tree_object_read_ns / 1000);
+				trace2_data_intmax("grep", the_repository,
+						   "content_index_tree_object_read_max_us",
+						   query.tree_object_read_max_ns / 1000);
+				trace2_data_intmax("grep", the_repository,
+						   "content_index_tree_object_read_slow_count",
+						   query.tree_object_read_slow_count);
+				trace2_data_intmax("grep", the_repository,
+						   "content_index_tree_object_read_slow_us",
+						   query.tree_object_read_slow_ns / 1000);
+			}
+			trace2_data_intmax("grep", the_repository,
+					   "content_index_tree_object_read_bytes_overflow",
+					   query.tree_object_read_bytes_overflow);
+			if (!query.tree_object_read_bytes_overflow)
+				trace2_data_intmax("grep", the_repository,
+						   "content_index_tree_object_read_bytes",
+						   query.tree_object_read_bytes);
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_batch_prepare_us",
 					   query.batch_prepare_ns / 1000);

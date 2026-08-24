@@ -2210,6 +2210,27 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-union.trace &&
 	test_trace2_data grep content_index_tree_object_read_us "[0-9][0-9]*" \
 		<tree-attributes.trace &&
+	read_us=$(sed -n \
+		"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		tree-attributes.trace) &&
+	test_trace2_data grep content_index_tree_object_read_max_us "$read_us" \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_bytes_overflow 0 \
+		<tree-attributes.trace &&
+	test_trace2_data grep content_index_tree_object_read_bytes \
+		"$((26 + 2 * $(test_oid rawsz)))" <tree-attributes.trace &&
+	if test "$read_us" -ge 1000
+	then
+		test_trace2_data grep content_index_tree_object_read_slow_count 1 \
+			<tree-attributes.trace &&
+		test_trace2_data grep content_index_tree_object_read_slow_us "$read_us" \
+			<tree-attributes.trace
+	else
+		test_trace2_data grep content_index_tree_object_read_slow_count 0 \
+			<tree-attributes.trace &&
+		test_trace2_data grep content_index_tree_object_read_slow_us 0 \
+			<tree-attributes.trace
+	fi &&
 	test_trace2_data grep content_index_tree_ipc_intervals_attempted 2 <tree.trace &&
 	test_trace2_data grep content_index_tree_ipc_intervals_retained 2 <tree.trace &&
 	test_trace2_data grep content_index_tree_ipc_intervals_omitted 0 <tree.trace &&
