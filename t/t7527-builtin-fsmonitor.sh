@@ -1684,12 +1684,18 @@ test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
 	echo xx >>file_case_wrong/dir1/dir2/dir3/FILE-3-A &&
 	echo xx >>file_case_wrong/dir1/dir2/dir4/file-4-a &&
 
+	# Check visibility at the default depth, not the harness depth.
+	GIT_TRACE2_EVENT_NESTING=2 \
 	GIT_TRACE2_EVENT="$PWD/file_case_wrong-try3.trace2" \
 	GIT_TRACE_FSMONITOR="$PWD/file_case_wrong-try3.log" \
 		git -C file_case_wrong --no-optional-locks status --short \
 			--untracked-files=no \
 			>"$PWD/file_case_wrong-try3.out" &&
+	test_trace2_data fsmonitor icase_index/scans "[1-9][0-9]*" \
+		<"$PWD/file_case_wrong-try3.trace2" &&
 	test_trace2_data fsmonitor icase_index/resolved 2 \
+		<"$PWD/file_case_wrong-try3.trace2" &&
+	test_trace2_data fsmonitor icase_index/rejects "[0-9][0-9]*" \
 		<"$PWD/file_case_wrong-try3.trace2" &&
 	test_trace2_data fsmonitor icase_index/fallbacks 0 \
 		<"$PWD/file_case_wrong-try3.trace2" &&
