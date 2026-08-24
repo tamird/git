@@ -166,6 +166,13 @@ static struct {
 #endif
 } input_read_trace;
 
+/* Only populated during the serial thin-pack repair pass. */
+static struct {
+	struct object_entry *first_appended;
+	uintmax_t reuses;
+	uintmax_t reconstructions;
+} thin_base_trace;
+
 /*
  * outgoing_links is guarded by read_mutex, and record_outgoing_links is
  * read-only in a thread.
@@ -719,6 +726,9 @@ static void *unpack_data(struct object_entry *obj,
 
 static void *get_data_from_pack(struct object_entry *obj)
 {
+	if (thin_base_trace.first_appended &&
+	    obj >= thin_base_trace.first_appended)
+		thin_base_trace.reconstructions++;
 	return unpack_data(obj, NULL, NULL);
 }
 
@@ -1171,10 +1181,13 @@ static int compare_ref_delta_entry(const void *a, const void *b)
 	return oidcmp(&delta_a->oid, &delta_b->oid);
 }
 
-static void *threaded_second_pass(void *data)
+/* Takes ownership of preloaded_data, if supplied for the next base object. */
+static void process_deltas(struct object_entry *preloaded_obj,
+			   void *preloaded_data)
 {
-	if (data)
-		set_thread_data(data);
+	if (preloaded_obj &&
+	    (threads_active || preloaded_obj != objects + nr_dispatched))
+		BUG("preloaded delta base is not the next serial object");
 	for (;;) {
 		struct base_data *parent = NULL;
 		struct object_entry *child_obj = NULL;
@@ -1271,11 +1284,18 @@ static void *threaded_second_pass(void *data)
 					/*
 					 * Since this child has its own delta children,
 					 * we will need this data in the future.
-					 * Inflate now so that future iterations will
-					 * have access to this object's data while
-					 * outside the work mutex.
+					 * Reuse the verified thin-pack base, or inflate
+					 * now, so that future iterations have its data
+					 * while outside the work mutex.
 					 */
-					child->data = get_data_from_pack(child_obj);
+					if (child_obj == preloaded_obj) {
+						child->data = preloaded_data;
+						preloaded_data = NULL;
+						if (thin_base_trace.first_appended)
+							thin_base_trace.reuses++;
+					} else {
+						child->data = get_data_from_pack(child_obj);
+					}
 					child->size = child_obj->size;
 				}
 			}
@@ -1329,6 +1349,14 @@ static void *threaded_second_pass(void *data)
 		}
 		work_unlock();
 	}
+	free(preloaded_data);
+}
+
+static void *threaded_second_pass(void *data)
+{
+	if (data)
+		set_thread_data(data);
+	process_deltas(NULL, NULL);
 	return NULL;
 }
 
@@ -1601,6 +1629,9 @@ static void fix_unresolved_deltas(struct hashfile *f)
 	struct ref_delta_entry **sorted_by_pos;
 	int i;
 
+	if (input_read_trace.enabled)
+		thin_base_trace.first_appended = objects + nr_objects;
+
 	/*
 	 * Since many unresolved deltas may well be themselves base objects
 	 * for more unresolved deltas, we really want to include the
@@ -1636,6 +1667,7 @@ static void fix_unresolved_deltas(struct hashfile *f)
 
 	for (i = 0; i < nr_ref_deltas; i++) {
 		struct ref_delta_entry *d = sorted_by_pos[i];
+		struct object_entry *base_obj;
 		enum object_type type;
 		void *data;
 		size_t size;
@@ -1653,16 +1685,17 @@ static void fix_unresolved_deltas(struct hashfile *f)
 
 		/*
 		 * Add this as an object to the objects array and call
-		 * threaded_second_pass() (which will pick up the added
-		 * object).
+		 * process_deltas(), which takes ownership of the verified
+		 * buffer and picks up the added object. Its normal cache
+		 * admission and pruning still allow later pack-file reloads.
 		 */
-		append_obj_to_pack(f, d->oid.hash, data, size, type);
-		free(data);
-		threaded_second_pass(NULL);
+		base_obj = append_obj_to_pack(f, d->oid.hash, data, size, type);
+		process_deltas(base_obj, data);
 
 		display_progress(progress, nr_resolved_deltas);
 	}
 	free(sorted_by_pos);
+	thin_base_trace.first_appended = NULL;
 }
 
 static const char *derive_filename(const char *pack_name, const char *strip,
@@ -2260,10 +2293,21 @@ int cmd_index_pack(int argc,
 	if (quiet_delta)
 		trace2_region_leave("index-pack", "conclude-pack",
 				    the_repository);
-	if (input_read_trace.enabled)
+	if (input_read_trace.enabled) {
+		int saved_errno;
+
 		trace2_data_intmax("index-pack", the_repository,
 				   "conclude/appended-bases",
 				   nr_objects - nr_objects_before_conclude);
+		saved_errno = errno;
+		trace2_data_intmax("index-pack", the_repository,
+				   "conclude/appended-base-reuses",
+				   thin_base_trace.reuses);
+		trace2_data_intmax("index-pack", the_repository,
+				   "conclude/appended-base-reconstructions",
+				   thin_base_trace.reconstructions);
+		errno = saved_errno;
+	}
 	free(ofs_deltas);
 	free(ref_deltas);
 	if (strict)

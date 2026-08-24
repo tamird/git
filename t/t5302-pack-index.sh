@@ -155,6 +155,10 @@ test_expect_success PTHREADS 'index-pack shares one wide delta root among worker
 		data conclude/appended-bases "0"
 		EOF
 		test_cmp parallel-conclude.expect parallel-conclude.actual &&
+		test_trace2_data index-pack conclude/appended-base-reuses 0 \
+			<parallel-stdin.trace &&
+		test_trace2_data index-pack conclude/appended-base-reconstructions 0 \
+			<parallel-stdin.trace &&
 		test_grep ! "\"category\":\"index-pack\",\"key\":\"conclude/fix-thin-us\"" \
 			parallel-stdin.trace &&
 		test_grep ! "\"category\":\"index-pack\",\"key\":\"conclude/finalize-thin-us\"" \
