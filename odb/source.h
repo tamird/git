@@ -404,13 +404,21 @@ static inline void odb_source_prepare(struct odb_source *source,
  * non-NULL it will be populated with a human-readable message that describes
  * the failure.
  */
+void odb_source_record_read_result(struct odb_source *source,
+				   struct odb_read_result *result, int ret);
+
 static inline enum odb_read_status odb_source_read_object_info(struct odb_source *source,
 							       const struct object_id *oid,
 							       struct object_info *oi,
 							       enum object_info_flags flags,
 							       struct strbuf *errmsg)
 {
-	return source->read_object_info(source, oid, oi, flags, errmsg);
+	enum odb_read_status ret = source->read_object_info(source, oid, oi,
+							  flags, errmsg);
+
+	if (oi && oi->read_resultp)
+		odb_source_record_read_result(source, oi->read_resultp, ret);
+	return ret;
 }
 
 /*
