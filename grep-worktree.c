@@ -651,8 +651,16 @@ static int recovery_checksum_valid(struct grep_worktree_cache *cache)
 	return cache->recovery_checksum_valid;
 }
 
+static void record_cache_miss(enum grep_worktree_cache_miss_reason *reason,
+			      enum grep_worktree_cache_miss_reason value)
+{
+	if (reason)
+		*reason = value;
+}
+
 static int recovery_contains_oid(struct grep_worktree_cache *cache,
-				 const struct object_id *entry_oid)
+				 const struct object_id *entry_oid,
+				 enum grep_worktree_cache_miss_reason *reason)
 {
 	const unsigned char *entries;
 	const unsigned char *hash = entry_oid->hash;
@@ -662,11 +670,21 @@ static int recovery_contains_oid(struct grep_worktree_cache *cache,
 	uint32_t lo;
 	int slot;
 
-	if (cache->recovery_invalid ||
-	    is_null_oid(&cache->recovery_checksum))
+	if (cache->recovery_invalid) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_RECOVERY_UNAVAILABLE);
 		return 0;
-	if (!cache->recovery_map && !load_recovery(cache))
+	}
+	if (is_null_oid(&cache->recovery_checksum)) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_NO_AUTHORIZED_RECOVERY);
 		return 0;
+	}
+	if (!cache->recovery_map && !load_recovery(cache)) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_RECOVERY_UNAVAILABLE);
+		return 0;
+	}
 	slot = cache->recovery_slot;
 	entries = cache->recovery_entries;
 	bucket = get_be16(hash);
@@ -680,27 +698,37 @@ static int recovery_contains_oid(struct grep_worktree_cache *cache,
 		int cmp = memcmp(entries + i * rawsz, hash, rawsz);
 
 		if (!cmp) {
-			if (!recovery_checksum_valid(cache))
+			if (!recovery_checksum_valid(cache)) {
+				record_cache_miss(reason,
+					GREP_WORKTREE_CACHE_MISS_CHECKSUM_REJECTED);
 				return 0;
+			}
 			if (slot != cache->recovery_slot)
-				return recovery_contains_oid(cache, entry_oid);
+				return recovery_contains_oid(cache, entry_oid, reason);
 			return 1;
 		}
 		if (cmp > 0)
 			break;
 	}
+	/* A nonmatching map need not have passed its deferred checksum check. */
+	record_cache_miss(reason,
+			 GREP_WORKTREE_CACHE_MISS_NO_MATCHING_IDENTITY);
 	return 0;
 }
 
 static int recovery_contains(struct grep_worktree_cache *cache,
-			     const struct cache_entry *ce)
+			     const struct cache_entry *ce,
+			     enum grep_worktree_cache_miss_reason *reason)
 {
 	struct object_id entry_oid;
 
 	if (grep_worktree_entry_identity_hash(&cache->entry_identity, ce,
-					      &entry_oid))
+					      &entry_oid)) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_IDENTITY_UNREPRESENTABLE);
 		return 0;
-	return recovery_contains_oid(cache, &entry_oid);
+	}
+	return recovery_contains_oid(cache, &entry_oid, reason);
 }
 
 static void allocate_cache_bitmaps(struct grep_worktree_cache *cache)
@@ -858,20 +886,30 @@ disable:
 	return NULL;
 }
 
-enum grep_worktree_cache_result grep_worktree_cache_lookup(
-	struct grep_worktree_cache *cache, size_t pos)
+enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(
+	struct grep_worktree_cache *cache, size_t pos,
+	enum grep_worktree_cache_miss_reason *reason)
 {
 	unsigned char mask;
 	size_t split_base_pos;
 
-	if (!cache || !cache->equal || pos >= cache->istate->cache_nr)
+	record_cache_miss(reason, GREP_WORKTREE_CACHE_MISS_NONE);
+	if (!cache || !cache->equal || pos >= cache->istate->cache_nr) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE);
 		return GREP_WORKTREE_CACHE_UNKNOWN;
+	}
 	if (!grep_worktree_cache_entry_eligible(
-		    cache->istate->cache[pos]))
+		    cache->istate->cache[pos])) {
+		record_cache_miss(reason,
+				 GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE);
 		return GREP_WORKTREE_CACHE_UNKNOWN;
+	}
 	mask = 1u << (pos & 7);
-	if (cache->different[pos >> 3] & mask)
+	if (cache->different[pos >> 3] & mask) {
+		record_cache_miss(reason, GREP_WORKTREE_CACHE_MISS_DIFFERENT);
 		return GREP_WORKTREE_CACHE_UNKNOWN;
+	}
 	if (cache->equal[pos >> 3] & mask) {
 		if (split_base_position(cache, pos, &split_base_pos) &&
 		    update_cache_bit(cache->split_base_equal,
@@ -888,7 +926,7 @@ enum grep_worktree_cache_result grep_worktree_cache_lookup(
 	}
 	if (cache->recovered[pos >> 3] & mask)
 		return GREP_WORKTREE_CACHE_EQUAL;
-	if (recovery_contains(cache, cache->istate->cache[pos])) {
+	if (recovery_contains(cache, cache->istate->cache[pos], reason)) {
 		if (!(cache->recovered[pos >> 3] & mask)) {
 			cache->recovered[pos >> 3] |= mask;
 			cache->recovered_identity++;
@@ -896,6 +934,12 @@ enum grep_worktree_cache_result grep_worktree_cache_lookup(
 		return GREP_WORKTREE_CACHE_EQUAL;
 	}
 	return GREP_WORKTREE_CACHE_UNKNOWN;
+}
+
+enum grep_worktree_cache_result grep_worktree_cache_lookup(
+	struct grep_worktree_cache *cache, size_t pos)
+{
+	return grep_worktree_cache_lookup_with_reason(cache, pos, NULL);
 }
 
 void grep_worktree_cache_record(struct grep_worktree_cache *cache, size_t pos,
@@ -1068,7 +1112,7 @@ static enum grep_worktree_prepare_outcome prepare_recovery(
 		if (!(cache->equal[i >> 3] & mask)) {
 			if (trace_enabled)
 				recovery_lookups++;
-			if (!recovery_contains_oid(cache, &entry_oid))
+			if (!recovery_contains_oid(cache, &entry_oid, NULL))
 				continue;
 		}
 		oid_array_append(&entries, &entry_oid);
@@ -1653,7 +1697,7 @@ merge_current:
 		for (size_t i = 0; i < cache->negative_entries.nr; i++) {
 			if (recovery_contains_oid(
 				    &current,
-				    &cache->negative_entries.oid[i])) {
+				    &cache->negative_entries.oid[i], NULL)) {
 				negative_resolved[i] = 1;
 				recovery_conflicts = 1;
 			}
@@ -1724,7 +1768,7 @@ merge_current:
 			if (different[i >> 3] & mask ||
 			    (!(equal[i >> 3] & mask) &&
 			     !recovery_contains(
-				     &current, current.istate->cache[i]))) {
+				     &current, current.istate->cache[i], NULL))) {
 				recovery_still_valid = 0;
 				break;
 			}

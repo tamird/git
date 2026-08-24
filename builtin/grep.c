@@ -79,6 +79,138 @@ static enum worktree_blob_cache_mode worktree_blob_cache_mode =
 	WORKTREE_BLOB_CACHE_ALWAYS;
 static struct grep_worktree_cache *worktree_cache;
 
+enum grep_producer_scope {
+	GREP_PRODUCER_CACHE_LOCK,
+	GREP_PRODUCER_CACHE_LOOKUP,
+	GREP_PRODUCER_DRIVER_LOOKUP,
+	GREP_PRODUCER_SCOPE_NR,
+};
+
+struct grep_producer_stats {
+	intmax_t count[GREP_PRODUCER_SCOPE_NR];
+	uint64_t ns[GREP_PRODUCER_SCOPE_NR];
+	int counts_valid;
+	int timings_valid;
+};
+
+/* Only the main producer reads this pointer; consumers never update it. */
+static struct grep_producer_stats *producer_stats;
+
+static int grep_producer_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
+static int grep_producer_begin(enum grep_producer_scope scope, uint64_t *started)
+{
+	if (!producer_stats)
+		return 0;
+	if (producer_stats->counts_valid) {
+		if (producer_stats->count[scope] == INTMAX_MAX) {
+			producer_stats->counts_valid = 0;
+			producer_stats->timings_valid = 0;
+		} else {
+			producer_stats->count[scope]++;
+		}
+	}
+	if (!producer_stats->timings_valid)
+		return 0;
+	if (grep_producer_time(started)) {
+		producer_stats->timings_valid = 0;
+		return 0;
+	}
+	return 1;
+}
+
+static void grep_producer_end(enum grep_producer_scope scope, uint64_t started)
+{
+	uint64_t finished;
+
+	if (grep_producer_time(&finished) || finished < started ||
+	    unsigned_add_overflows(producer_stats->ns[scope], finished - started))
+		producer_stats->timings_valid = 0;
+	else
+		producer_stats->ns[scope] += finished - started;
+}
+
+static void trace_grep_producer_stats(const struct grep_producer_stats *stats)
+{
+	static const char * const names[GREP_PRODUCER_SCOPE_NR] = {
+		[GREP_PRODUCER_CACHE_LOCK] = "cache_lock",
+		[GREP_PRODUCER_CACHE_LOOKUP] = "cache_lookup",
+		[GREP_PRODUCER_DRIVER_LOOKUP] = "driver_lookup",
+	};
+	char key[64];
+	int saved_errno = errno;
+
+	trace2_data_intmax("grep", the_repository, "producer_counts_valid",
+			  stats->counts_valid);
+	trace2_data_intmax("grep", the_repository, "producer_timings_valid",
+			  stats->timings_valid);
+	for (int i = 0; i < GREP_PRODUCER_SCOPE_NR; i++) {
+		if (stats->counts_valid) {
+			xsnprintf(key, sizeof(key), "producer_%s_count", names[i]);
+			trace2_data_intmax("grep", the_repository, key, stats->count[i]);
+		}
+		if (stats->timings_valid) {
+			xsnprintf(key, sizeof(key), "producer_%s_us", names[i]);
+			trace2_data_intmax("grep", the_repository, key, stats->ns[i] / 1000);
+		}
+	}
+	errno = saved_errno;
+}
+
+static void trace_worktree_miss_reasons(struct repository *repo,
+				       const intmax_t *counts, int valid)
+{
+	static const char * const names[GREP_WORKTREE_CACHE_MISS_NR] = {
+		[GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE] = "lookup_unavailable",
+		[GREP_WORKTREE_CACHE_MISS_DIFFERENT] = "different",
+		[GREP_WORKTREE_CACHE_MISS_IDENTITY_UNREPRESENTABLE] = "identity_unrepresentable",
+		[GREP_WORKTREE_CACHE_MISS_NO_AUTHORIZED_RECOVERY] = "no_authorized_recovery",
+		[GREP_WORKTREE_CACHE_MISS_RECOVERY_UNAVAILABLE] = "recovery_unavailable",
+		[GREP_WORKTREE_CACHE_MISS_NO_MATCHING_IDENTITY] = "no_matching_identity",
+		[GREP_WORKTREE_CACHE_MISS_CHECKSUM_REJECTED] = "checksum_rejected",
+	};
+	char key[96];
+	int saved_errno = errno;
+
+	trace2_data_intmax("grep", repo,
+			  "content_index_worktree_unverified_negative_reason_valid", valid);
+	if (valid)
+		for (int i = GREP_WORKTREE_CACHE_MISS_NONE + 1;
+		     i < GREP_WORKTREE_CACHE_MISS_NR; i++) {
+			xsnprintf(key, sizeof(key),
+				  "content_index_worktree_unverified_negative_reason_%s",
+				  names[i]);
+			trace2_data_intmax("grep", repo, key, counts[i]);
+		}
+	errno = saved_errno;
+}
+
 static pthread_t *threads;
 static int threads_started;
 static pthread_t worker_lease_thread;
@@ -307,8 +439,15 @@ static void grep_result_cache_add(struct grep_opt *opt,
 static int add_work(struct grep_opt *opt, struct grep_source *gs,
 		    size_t worktree_blob_pos)
 {
-	if (opt->binary != GREP_BINARY_TEXT)
+	if (opt->binary != GREP_BINARY_TEXT) {
+		uint64_t started = 0;
+		int timed = grep_producer_begin(GREP_PRODUCER_DRIVER_LOOKUP,
+					       &started);
+
 		grep_source_load_driver(gs, opt->repo->index);
+		if (timed)
+			grep_producer_end(GREP_PRODUCER_DRIVER_LOOKUP, started);
+	}
 
 	trace2_timer_start(TRACE2_TIMER_ID_GREP_PRODUCER_LOCK);
 	grep_lock();
@@ -2036,6 +2175,8 @@ static int grep_cache(struct grep_opt *opt,
 						repo->index->cache_nr;
 				uint64_t rejected = 0;
 				uint64_t unverified_negative = 0;
+				intmax_t miss_counts[GREP_WORKTREE_CACHE_MISS_NR] = { 0 };
+				int miss_counts_valid = 1;
 
 				if (literal_selected) {
 					/*
@@ -2060,6 +2201,8 @@ static int grep_cache(struct grep_opt *opt,
 						!ce_intent_to_add(ce) &&
 						(ce->ce_flags & CE_VALID);
 					int unverified = 0;
+					enum grep_worktree_cache_miss_reason miss_reason =
+						GREP_WORKTREE_CACHE_MISS_NONE;
 
 					if (!literal_selected &&
 					    (ce_skip_worktree(ce) ||
@@ -2068,9 +2211,9 @@ static int grep_cache(struct grep_opt *opt,
 					if (!known_equal &&
 					    grep_worktree_cache_entry_eligible(ce)) {
 						known_equal =
-							grep_worktree_cache_lookup(
-								worktree_cache,
-								i) ==
+							grep_worktree_cache_lookup_with_reason(
+								worktree_cache, i,
+								producer_stats ? &miss_reason : NULL) ==
 							GREP_WORKTREE_CACHE_EQUAL;
 						unverified = !known_equal;
 					}
@@ -2092,8 +2235,17 @@ static int grep_cache(struct grep_opt *opt,
 						    NULL, 0))
 						continue;
 					/* The file read must still prove raw-byte equality. */
-					if (unverified && !(maybe[i / 8] & bit))
+					if (unverified && !(maybe[i / 8] & bit)) {
 						unverified_negative++;
+						if (producer_stats && miss_counts_valid) {
+							if (miss_reason <= GREP_WORKTREE_CACHE_MISS_NONE ||
+							    miss_reason >= GREP_WORKTREE_CACHE_MISS_NR ||
+							    miss_counts[miss_reason] == INTMAX_MAX)
+								miss_counts_valid = 0;
+							else
+								miss_counts[miss_reason]++;
+						}
+					}
 					ALLOC_GROW(
 						selected,
 						selected_nr + 1,
@@ -2105,6 +2257,9 @@ static int grep_cache(struct grep_opt *opt,
 					"grep", repo,
 					"content_index_worktree_unverified_negative",
 					unverified_negative);
+				if (producer_stats)
+					trace_worktree_miss_reasons(
+						repo, miss_counts, miss_counts_valid);
 				if (literal_selected) {
 					trace2_data_intmax(
 						"grep", repo,
@@ -2281,11 +2436,25 @@ static int grep_cache(struct grep_opt *opt,
 				worktree_cache;
 			int use_worktree_blob;
 
-			if (can_cache && threads_started)
+			if (can_cache && threads_started) {
+				uint64_t started = 0;
+				int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOCK,
+							       &started);
+
 				grep_lock();
-			if (can_cache)
+				if (timed)
+					grep_producer_end(GREP_PRODUCER_CACHE_LOCK, started);
+			}
+			if (can_cache) {
+				uint64_t started = 0;
+				int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOOKUP,
+							       &started);
+
 				cache_result = grep_worktree_cache_lookup(
 					worktree_cache, pos);
+				if (timed)
+					grep_producer_end(GREP_PRODUCER_CACHE_LOOKUP, started);
+			}
 			if (can_cache && threads_started)
 				grep_unlock();
 			use_worktree_blob =
@@ -3680,6 +3849,11 @@ int cmd_grep(int argc,
 	uint64_t t_compile_begin = 0, t_compile_end = 0;
 	uint64_t t_dispatch_end = 0;
 	int phases_ready = 0;
+	struct grep_producer_stats local_producer_stats = {
+		.counts_valid = 1,
+		.timings_valid = 1,
+	};
+	int producer_stats_ready = 0;
 	int trace_worktree_finalize = 0;
 	int requested_threads = 0, selected_threads = 0;
 	int matcher_type = 0;
@@ -4011,6 +4185,7 @@ int cmd_grep(int argc,
 		trace2_data_intmax("grep", the_repository, "matcher/jit",
 				   matcher_jit);
 	}
+	producer_stats = trace2_is_enabled() ? &local_producer_stats : NULL;
 	/* Submodule grep can start readers before grep_objects(). */
 	if (list.nr && trace2_is_enabled())
 		obj_read_lock_trace_prepare();
@@ -4071,6 +4246,8 @@ int cmd_grep(int argc,
 	if (threads_started)
 		hit |= wait_all();
 	t_dispatch_end = getnanotime();
+	producer_stats_ready = !!producer_stats;
+	producer_stats = NULL;
 	trace_worktree_finalize = !!worktree_cache;
 	selected_threads = num_threads;
 	if (content_index_negative_entries) {
@@ -4094,6 +4271,7 @@ int cmd_grep(int argc,
 	ret = !hit;
 
 out:
+	producer_stats = NULL;
 	if (worker_lease_id) {
 		if (trace_worktree_finalize)
 			trace2_timer_start(
@@ -4171,6 +4349,8 @@ out:
 				   requested_threads);
 		trace2_data_intmax("grep", the_repository, "threads/selected",
 				   selected_threads);
+		if (producer_stats_ready)
+			trace_grep_producer_stats(&local_producer_stats);
 	}
 	return ret;
 }
