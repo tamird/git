@@ -2551,6 +2551,7 @@ struct grep_tree_query_context {
 	int tree_object_read_invalid;
 	int tree_object_read_bytes_overflow;
 	int tree_object_read_source_invalid;
+	int tree_object_read_packed_content_invalid;
 	size_t batch_size;
 	size_t batch_max_bytes;
 	uint64_t objects;
@@ -2576,6 +2577,8 @@ struct grep_tree_query_context {
 	uint64_t tree_object_read_inmemory_nonzero;
 	uint64_t tree_object_read_loose_nonzero;
 	uint64_t tree_object_read_packed_nonzero;
+	uint64_t tree_object_read_packed_content_attempt_count;
+	uint64_t tree_object_read_packed_content_ns;
 	uint64_t batch_prepare_ns;
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
@@ -2593,6 +2596,23 @@ static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 {
 	enum odb_read_result_kind kind = result->kind;
 
+	/* Independent of the final source and its whole-call winner buckets. */
+	if (!query->tree_object_read_packed_content_invalid) {
+		if (result->packed_content_invalid ||
+		    result->packed_content_ns > elapsed ||
+		    result->packed_content_attempt_count >
+			(uint64_t)INTMAX_MAX -
+			query->tree_object_read_packed_content_attempt_count ||
+		    result->packed_content_ns > UINT64_MAX -
+			query->tree_object_read_packed_content_ns) {
+			query->tree_object_read_packed_content_invalid = 1;
+		} else {
+			query->tree_object_read_packed_content_attempt_count +=
+				result->packed_content_attempt_count;
+			query->tree_object_read_packed_content_ns +=
+				result->packed_content_ns;
+		}
+	}
 	if (query->tree_object_read_source_invalid)
 		return;
 	if (result->invalid || kind <= ODB_READ_RESULT_UNKNOWN ||
@@ -2626,9 +2646,23 @@ static void grep_tree_trace_object_read_sources(
 	};
 	int valid = !query->tree_object_read_invalid &&
 		    !query->tree_object_read_source_invalid;
+	/* An invalid outer clock can have skipped recording a child entirely. */
+	int packed_content_valid = !query->tree_object_read_invalid &&
+				   !query->tree_object_read_packed_content_invalid;
 	int saved_errno = errno;
 	char key[96];
 
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_packed_content_valid",
+		packed_content_valid);
+	if (packed_content_valid) {
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_content_attempt_count",
+			query->tree_object_read_packed_content_attempt_count);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_content_us",
+			query->tree_object_read_packed_content_ns / 1000);
+	}
 	trace2_data_intmax("grep", the_repository,
 		"content_index_tree_object_read_source_valid", valid);
 	if (!valid)
