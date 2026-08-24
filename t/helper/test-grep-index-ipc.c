@@ -106,6 +106,13 @@ enum query_protocol_scenario {
 	QUERY_ORIGIN_SUM,
 	QUERY_ORIGIN_OVERFLOW,
 	QUERY_WAIT,
+	QUERY_OLD_DIAGNOSTIC,
+	QUERY_CAP_V1,
+	QUERY_TIMING_ZERO,
+	QUERY_TIMING_INVALID,
+	QUERY_TIMING_MIXED,
+	QUERY_TIMING_SUM_MAX,
+	QUERY_TIMING_OVERFLOW,
 	QUERY_EOF,
 };
 
@@ -114,6 +121,7 @@ struct query_protocol_test {
 	const char *path;
 	const struct strbuf *request;
 	enum query_protocol_scenario scenario;
+	int capture;
 	unsigned int capability_requests;
 	unsigned int legacy_requests;
 	unsigned int diagnostic_requests;
@@ -132,27 +140,34 @@ static void query_protocol_response(struct query_protocol_test *test,
 				    const char *request, size_t request_len,
 				    struct strbuf *response)
 {
-	unsigned char data[34] = { 0 };
+	unsigned char data[58] = { 0 };
 	uint32_t signature = request_len >= 4 ? get_be32(request) : 0;
+	uint32_t version = test->capture &&
+		test->scenario != QUERY_OLD_DIAGNOSTIC &&
+		test->scenario != QUERY_CAP_V1 ? 2 : 1;
 	size_t response_len;
 
 	if (signature == QUERY_CAPABILITY_REQUEST) {
 		test->capability_requests++;
-		if (request_len != 8 || get_be32(request + 4) != 1) {
+		if (request_len != 8 ||
+		    get_be32(request + 4) !=
+			    (test->capture && test->capability_requests == 1 ? 2 : 1)) {
 			test->bad_request = 1;
 			return;
 		}
-		if (test->scenario == QUERY_LEGACY)
+		if (test->scenario == QUERY_LEGACY ||
+		    (test->scenario == QUERY_OLD_DIAGNOSTIC &&
+		     get_be32(request + 4) == 2))
 			return;
 		put_be32(data, QUERY_CAPABILITY_RESPONSE);
-		put_be32(data + 4, 1);
+		put_be32(data + 4, version);
 		response_len = 8;
 		switch (test->scenario) {
 		case QUERY_CAP_MAGIC:
 			put_be32(data, QUERY_LEGACY_RESPONSE);
 			break;
 		case QUERY_CAP_VERSION:
-			put_be32(data + 4, 2);
+			put_be32(data + 4, test->capture ? 3 : 2);
 			break;
 		case QUERY_CAP_SHORT:
 			response_len--;
@@ -175,8 +190,11 @@ static void query_protocol_response(struct query_protocol_test *test,
 		test->bad_request = 1;
 		return;
 	}
+	if (signature == QUERY_LEGACY_REQUEST)
+		version = 1;
 	if (request_len != test->request->len ||
-	    memcmp(request + 4, test->request->buf + 4, request_len - 4)) {
+	    get_be32(request + 4) != version ||
+	    memcmp(request + 8, test->request->buf + 8, request_len - 8)) {
 		test->bad_request = 1;
 		return;
 	}
@@ -192,17 +210,23 @@ static void query_protocol_response(struct query_protocol_test *test,
 		return;
 
 	put_be32(data, QUERY_DIAGNOSTIC_RESPONSE);
-	put_be32(data + 4, 1);
+	put_be32(data + 4, version);
 	put_be32(data + 8, 1);
 	put_be32(data + 16, 1); /* ready_reused */
 	data[32] = GREP_INDEX_IPC_MAYBE;
 	response_len = 33;
+	if (version == 2) {
+		put_be64(data + 33, 1001);
+		put_be64(data + 41, 2002);
+		put_be64(data + 49, 3003);
+		response_len += 24;
+	}
 	switch (test->scenario) {
 	case QUERY_MAGIC:
 		put_be32(data, QUERY_LEGACY_RESPONSE);
 		break;
 	case QUERY_VERSION:
-		put_be32(data + 4, 2);
+		put_be32(data + 4, version + 1);
 		break;
 	case QUERY_COUNT:
 		put_be32(data + 8, 2);
@@ -230,6 +254,21 @@ static void query_protocol_response(struct query_protocol_test *test,
 		put_be32(data + 12, 1);
 		put_be32(data + 16, 0);
 		put_be32(data + 28, 1);
+		break;
+	case QUERY_TIMING_ZERO:
+		memset(data + 33, 0, 24);
+		break;
+	case QUERY_TIMING_INVALID:
+		memset(data + 33, 0xff, 24);
+		break;
+	case QUERY_TIMING_MIXED:
+		put_be64(data + 41, UINT64_MAX);
+		break;
+	case QUERY_TIMING_SUM_MAX:
+	case QUERY_TIMING_OVERFLOW:
+		put_be64(data + 33, UINT64_MAX - 10);
+		put_be64(data + 41, 7);
+		put_be64(data + 49, test->scenario == QUERY_TIMING_SUM_MAX ? 3 : 4);
 		break;
 	default:
 		break;
@@ -285,7 +324,8 @@ static int query_protocol_check(struct query_protocol_test *test,
 static int query_protocol_query(const struct grep_index_query *query,
 				const struct object_id *oid,
 				unsigned char *value, int expected_backend,
-				unsigned int expected_capability)
+				unsigned int expected_capability,
+				struct grep_index_ipc_query_trace *trace)
 {
 	int result;
 
@@ -294,7 +334,8 @@ static int query_protocol_query(const struct grep_index_query *query,
 			   "query-protocol/expected", expected_backend);
 	trace2_data_intmax("test-grep-index-ipc", the_repository,
 			   "query-protocol/capability", expected_capability);
-	result = grep_index_ipc_query(the_repository, query, oid, 1, value);
+	result = grep_index_ipc_query_with_max_parallel_requests(
+		the_repository, query, oid, 1, value, 0, trace);
 	trace2_data_intmax("test-grep-index-ipc", the_repository,
 			   "query-protocol/end", 1);
 	return result;
@@ -302,17 +343,22 @@ static int query_protocol_query(const struct grep_index_query *query,
 
 static int query_protocol_no_listener(const char *path,
 				      const struct grep_index_query *query,
-				      const struct object_id *oid)
+				      const struct object_id *oid, int capture)
 {
+	struct grep_index_ipc_query_trace trace;
 	unsigned char value = 0xa5;
 	int result;
 
 	if (query_protocol_check_path(path))
 		return -1;
-	result = query_protocol_query(query, oid, &value, 0, 2);
+	result = query_protocol_query(query, oid, &value, 0, 2,
+				      capture ? &trace : NULL);
 	if (result != -1 || value != 0xa5)
 		return error("missing query endpoint changed result %d/%u",
 			     result, value);
+	if (capture && (trace.probe_attempts != 1 || trace.diagnostic_version ||
+			trace.requests[0].server.available))
+		return error("missing endpoint retained server timing");
 	return 0;
 }
 
@@ -327,9 +373,20 @@ static int query_protocol_run(struct query_protocol_test *test,
 		.uds_disallow_chdir = 1,
 	};
 	struct ipc_server_data *server = NULL;
+	struct grep_index_ipc_query_trace trace;
 	unsigned char value = 0xa5;
 	int legacy = !traced || test->scenario <= QUERY_CAP_LONG;
-	int success = legacy || test->scenario == QUERY_VALID;
+	int success = legacy || test->scenario == QUERY_VALID ||
+		test->scenario == QUERY_OLD_DIAGNOSTIC ||
+		test->scenario == QUERY_CAP_V1 ||
+		(test->scenario >= QUERY_TIMING_ZERO &&
+		 test->scenario <= QUERY_TIMING_OVERFLOW);
+	unsigned int capabilities = !traced ? 0 :
+		test->capture && (test->scenario == QUERY_LEGACY ||
+				  test->scenario == QUERY_OLD_DIAGNOSTIC) ? 2 : 1;
+	unsigned int version = legacy ? 0 :
+		test->capture && test->scenario != QUERY_OLD_DIAGNOSTIC &&
+		test->scenario != QUERY_CAP_V1 ? 2 : 1;
 	int result;
 
 	if (query_protocol_check_path(test->path) ||
@@ -339,12 +396,42 @@ static int query_protocol_run(struct query_protocol_test *test,
 	ipc_server_start_async(server);
 	result = query_protocol_query(query, oid, &value,
 				      legacy ? 0 : success ? 1 : 2,
-				      expected_capability);
+				      expected_capability,
+				      test->capture ? &trace : NULL);
 	ipc_server_stop_async(server);
 	ipc_server_await(server);
 	ipc_server_free(server);
-	return query_protocol_check(test, result, value, traced,
-				    legacy, !legacy, success);
+	if (query_protocol_check(test, result, value, capabilities,
+				 legacy, !legacy, success))
+		return -1;
+	if (test->capture) {
+		const struct grep_index_ipc_server_trace *server =
+			&trace.requests[0].server;
+		int available = traced && version == 2 && success;
+		int invalid = available && test->scenario >= QUERY_TIMING_INVALID &&
+			test->scenario <= QUERY_TIMING_OVERFLOW;
+		int durations = available && !invalid &&
+			test->scenario != QUERY_TIMING_ZERO;
+
+		if (trace.probe_attempts != capabilities ||
+		    trace.diagnostic_version != version ||
+		    trace.probe_outcome != expected_capability ||
+		    server->available != available ||
+		    server->timing_invalid != invalid ||
+		    server->pre_reply_ns != (durations ? 1001 : 0) ||
+		    server->reply_write_ns != (durations ? 2002 : 0) ||
+		    server->cleanup_ns != (durations ? 3003 : 0))
+			return error("%s: incorrect captured server timing", test->name);
+		if (traced && (trace.requests_planned != 1 ||
+			       trace.requests_started != 1 ||
+			       trace.requests_validated != success ||
+			       trace.backend_available != !legacy ||
+			       trace.ready_reused != (!legacy && success) ||
+			       trace.persistent || trace.cold_attempt ||
+			       trace.unavailable_prebuild || trace.waited))
+			return error("%s: captured backend counts changed", test->name);
+	}
+	return 0;
 }
 
 static int query_protocol_send(const char *path, const struct strbuf *request,
@@ -365,12 +452,15 @@ static int query_protocol_send(const char *path, const struct strbuf *request,
 	return result;
 }
 
-static int query_protocol_legacy_server(const char *path,
-					const struct strbuf *request)
+static int query_protocol_server(const char *path,
+				 const struct strbuf *request)
 {
 	struct grep_index_ipc_server *server = NULL;
 	struct strbuf response = STRBUF_INIT;
-	unsigned char expected[13] = { 0 };
+	struct strbuf probe = STRBUF_INIT;
+	struct strbuf diagnostic = STRBUF_INIT;
+	unsigned char expected[33] = { 0 };
+	const char *failure = "legacy query response changed";
 	char *worker_path = grep_index_ipc_worker_path(the_repository);
 	int result = -1;
 
@@ -384,18 +474,72 @@ static int query_protocol_legacy_server(const char *path,
 				      path, worker_path, 1))
 		goto cleanup;
 	grep_index_ipc_server_start(server);
-	if (!query_protocol_send(path, request, &response) &&
-	    response.len == sizeof(expected) &&
-	    !memcmp(response.buf, expected, sizeof(expected)))
-		result = 0;
+	if (query_protocol_send(path, request, &response) ||
+	    response.len != 13 || memcmp(response.buf, expected, 13))
+		goto stop;
+
+	strbuf_addbuf(&diagnostic, request);
+	put_be32(diagnostic.buf, QUERY_DIAGNOSTIC_REQUEST);
+	for (uint32_t version = 1; version <= 2; version++) {
+		size_t reply_size = sizeof(expected) + (version == 2 ? 24 : 0);
+
+		/* Old clients must retain their exact capability and reply. */
+		strbuf_reset(&probe);
+		query_protocol_put_u32(&probe, QUERY_CAPABILITY_REQUEST);
+		query_protocol_put_u32(&probe, version);
+		strbuf_reset(&response);
+		failure = version == 1 ? "capability v1 response changed" :
+					"missing capability v2 response";
+		if (query_protocol_send(path, &probe, &response) ||
+		    response.len != 8 ||
+		    get_be32(response.buf) != QUERY_CAPABILITY_RESPONSE ||
+		    get_be32(response.buf + 4) != version)
+			goto stop;
+
+		put_be32(diagnostic.buf + 4, version);
+		memset(expected, 0, sizeof(expected));
+		put_be32(expected, QUERY_DIAGNOSTIC_RESPONSE);
+		put_be32(expected + 4, version);
+		put_be32(expected + 8, 1);
+		put_be32(expected + 24, 1); /* unavailable_prebuild */
+		expected[32] = GREP_INDEX_IPC_UNKNOWN;
+		strbuf_reset(&response);
+		failure = version == 1 ? "diagnostic v1 response changed" :
+					"missing diagnostic v2 timing footer";
+		if (query_protocol_send(path, &diagnostic, &response) ||
+		    response.len != reply_size ||
+		    memcmp(response.buf, expected, sizeof(expected)))
+			goto stop;
+		if (version == 2) {
+			uint64_t pre_reply = get_be64(response.buf + 33);
+			uint64_t reply_write = get_be64(response.buf + 41);
+			uint64_t cleanup = get_be64(response.buf + 49);
+
+			failure = "invalid server timing footer";
+			if (pre_reply == UINT64_MAX || reply_write == UINT64_MAX ||
+			    cleanup == UINT64_MAX) {
+				if (pre_reply != UINT64_MAX ||
+				    reply_write != UINT64_MAX ||
+				    cleanup != UINT64_MAX)
+					goto stop;
+			} else if (reply_write >= UINT64_MAX - pre_reply ||
+				   cleanup >= UINT64_MAX - pre_reply - reply_write) {
+				goto stop;
+			}
+		}
+	}
+	result = 0;
+
+stop:
 	grep_index_ipc_server_stop(server);
 	grep_index_ipc_server_await(server);
 	grep_index_ipc_server_free(server);
-
 cleanup:
+	strbuf_release(&diagnostic);
+	strbuf_release(&probe);
 	strbuf_release(&response);
 	free(worker_path);
-	return result ? error("legacy query response changed") : 0;
+	return result ? error("%s", failure) : 0;
 }
 
 #ifndef GIT_WINDOWS_NATIVE
@@ -491,7 +635,8 @@ static int query_protocol_eof(const char *path,
 			      const struct strbuf *request,
 			      const struct grep_index_query *query,
 			      const struct object_id *oid,
-			      enum query_protocol_signature drop_signature)
+			      enum query_protocol_signature drop_signature,
+			      int capture)
 {
 	int capability_eof = drop_signature == QUERY_CAPABILITY_REQUEST;
 	struct unix_stream_listen_opts opts = {
@@ -504,11 +649,13 @@ static int query_protocol_eof(const char *path,
 			.path = path,
 			.request = request,
 			.scenario = QUERY_EOF,
+			.capture = capture,
 		},
 		.drop_signature = drop_signature,
 		.abort_fd = -1,
 	};
 	struct unix_ss_socket *socket = NULL;
+	struct grep_index_ipc_query_trace trace;
 	struct strbuf stop = STRBUF_INIT;
 	struct strbuf response = STRBUF_INIT;
 	pthread_t thread;
@@ -535,7 +682,8 @@ static int query_protocol_eof(const char *path,
 	/* The worker now owns both the listener and its pathname. */
 	result = query_protocol_query(query, oid, &value,
 				      capability_eof ? 0 : 2,
-				      capability_eof ? 3 : 1);
+				      capability_eof ? 3 : 1,
+				      capture ? &trace : NULL);
 	/* A replay must finish before this synchronous call returns. */
 	strbuf_addstr(&stop, "STOP");
 	stop_result = query_protocol_send(path, &stop, &response);
@@ -550,16 +698,21 @@ static int query_protocol_eof(const char *path,
 		return error("EOF query endpoint did not stop cleanly");
 	}
 	strbuf_release(&response);
-	return query_protocol_check(&eof.test, result, value, 1,
-				    capability_eof, !capability_eof,
-				    capability_eof);
+	if (query_protocol_check(&eof.test, result, value, 1,
+				 capability_eof, !capability_eof, capability_eof))
+		return -1;
+	if (capture && (trace.probe_attempts != 1 ||
+			trace.diagnostic_version != (capability_eof ? 0 : 2) ||
+			trace.requests[0].server.available))
+		return error("EOF query retained server timing or retried a probe");
+	return 0;
 }
 #endif
 
-static int test_query_protocol(int traced)
+static int test_query_protocol(int traced, int capture)
 {
 	/* Pin the numeric Trace2 contract independently of the private producer. */
-	static const struct {
+	static const struct query_protocol_case {
 		enum query_protocol_scenario scenario;
 		const char *name;
 		unsigned int expected_capability;
@@ -581,7 +734,34 @@ static int test_query_protocol(int traced)
 		{ QUERY_ORIGIN_SUM, "diagnostic origin sum", 1 },
 		{ QUERY_ORIGIN_OVERFLOW, "diagnostic origin overflow", 1 },
 		{ QUERY_WAIT, "diagnostic wait count", 1 },
+	}, captured_scenarios[] = {
+		{ QUERY_LEGACY, "captured legacy fallback", 4 },
+		{ QUERY_OLD_DIAGNOSTIC, "captured old diagnostic fallback", 1 },
+		{ QUERY_CAP_V1, "direct diagnostic v1 advertisement", 1 },
+		{ QUERY_CAP_MAGIC, "captured capability magic", 6 },
+		{ QUERY_CAP_VERSION, "captured capability version", 7 },
+		{ QUERY_CAP_SHORT, "captured short capability", 5 },
+		{ QUERY_CAP_LONG, "captured long capability", 5 },
+		{ QUERY_VALID, "valid timing footer", 1 },
+		{ QUERY_MAGIC, "timing reply magic", 1 },
+		{ QUERY_VERSION, "timing reply version", 1 },
+		{ QUERY_COUNT, "timing reply count", 1 },
+		{ QUERY_SHORT, "short timing footer", 1 },
+		{ QUERY_LONG, "long timing footer", 1 },
+		{ QUERY_CLASS, "invalid class with timing footer", 1 },
+		{ QUERY_ORIGIN_SUM, "timing backend sum", 1 },
+		{ QUERY_ORIGIN_OVERFLOW, "timing backend overflow", 1 },
+		{ QUERY_WAIT, "timing backend wait count", 1 },
+		{ QUERY_TIMING_ZERO, "zero server durations", 1 },
+		{ QUERY_TIMING_INVALID, "unavailable server clock", 1 },
+		{ QUERY_TIMING_MIXED, "mixed timing sentinels", 1 },
+		{ QUERY_TIMING_SUM_MAX, "reserved timing sum", 1 },
+		{ QUERY_TIMING_OVERFLOW, "overflowing timing sum", 1 },
 	};
+	const struct query_protocol_case *cases =
+		capture ? captured_scenarios : scenarios;
+	size_t cases_nr = capture ? ARRAY_SIZE(captured_scenarios) :
+				    ARRAY_SIZE(scenarios);
 	struct grep_index_query *query;
 	struct strbuf request = STRBUF_INIT;
 	struct object_id oid;
@@ -607,34 +787,36 @@ static int test_query_protocol(int traced)
 	if (!traced) {
 		struct query_protocol_test test = {
 			.name = "untraced legacy query",
+			.capture = 1,
 			.path = path,
 			.request = &request,
 			.scenario = QUERY_VALID,
 		};
 
 		if (query_protocol_run(&test, query, &oid, 0, 0) ||
-		    query_protocol_legacy_server(path, &request))
+		    query_protocol_server(path, &request))
 			goto cleanup;
 	} else {
-		if (query_protocol_no_listener(path, query, &oid))
+		if (query_protocol_no_listener(path, query, &oid, capture))
 			goto cleanup;
-		for (size_t i = 0; i < ARRAY_SIZE(scenarios); i++) {
+		for (size_t i = 0; i < cases_nr; i++) {
 			struct query_protocol_test test = {
-				.name = scenarios[i].name,
+				.name = cases[i].name,
 				.path = path,
 				.request = &request,
-				.scenario = scenarios[i].scenario,
+				.scenario = cases[i].scenario,
+				.capture = capture,
 			};
 
 			if (query_protocol_run(&test, query, &oid, 1,
-					       scenarios[i].expected_capability))
+					       cases[i].expected_capability))
 				goto cleanup;
 		}
 #ifndef GIT_WINDOWS_NATIVE
 		if (query_protocol_eof(path, &request, query, &oid,
-				       QUERY_CAPABILITY_REQUEST) ||
+				       QUERY_CAPABILITY_REQUEST, capture) ||
 		    query_protocol_eof(path, &request, query, &oid,
-				       QUERY_DIAGNOSTIC_REQUEST))
+				       QUERY_DIAGNOSTIC_REQUEST, capture))
 			goto cleanup;
 #endif
 	}
@@ -875,13 +1057,15 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 	if (argc == 3 && !strcmp(argv[1], "query-wait"))
 		return test_query_wait(argv[2]);
 	if (argc == 3 && !strcmp(argv[1], "query-protocol") &&
-	    (!strcmp(argv[2], "traced") || !strcmp(argv[2], "untraced")))
-		return test_query_protocol(!strcmp(argv[2], "traced"));
+	    (!strcmp(argv[2], "traced") || !strcmp(argv[2], "untraced") ||
+	     !strcmp(argv[2], "captured")))
+		return test_query_protocol(strcmp(argv[2], "untraced") != 0,
+					   !strcmp(argv[2], "captured"));
 #endif
 	if (argc != 5 || strtol_i(argv[1], 10, &requested) ||
 	    requested < 1)
 		die("usage: test-tool grep-index-ipc query-wire\n"
-		    "   or: test-tool grep-index-ipc query-protocol <traced|untraced>\n"
+		    "   or: test-tool grep-index-ipc query-protocol <traced|untraced|captured>\n"
 		    "   or: test-tool grep-index-ipc query-wait <object-id>\n"
 		    "   or: test-tool grep-index-ipc <workers> "
 		    "<start> <acquired> <release>");

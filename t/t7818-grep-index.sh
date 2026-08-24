@@ -445,7 +445,10 @@ test_expect_success 'content index query wire versions' '
 			capability_eof=1
 		fi &&
 		test_content_index_ipc_backend query-protocol.trace \
-			"$backend_failures" "$capability_eof"
+			"$backend_failures" "$capability_eof" &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT="$PWD/query-protocol.trace" \
+			GIT_TRACE2_PERF=0 \
+			test-tool grep-index-ipc query-protocol captured
 	fi
 '
 
@@ -2247,18 +2250,26 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		interval="\"start_offset_us\":$number,\"duration_us\":$number" &&
 		state="\"outcome\":0,\"requests_planned\":1,\"requests_started\":1" &&
 		test_grep "$prefix$state,\"clock_invalid\":[01]," tree.trace &&
-		test_grep "$prefix.*\"probe\":{\"outcome\":1[,}]" tree.trace &&
+		probe="\"probe\":{\"outcome\":1,\"attempts\":1,\"diagnostic_version\":2" &&
+		test_grep "$prefix.*$probe[,}]" tree.trace &&
 		test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0[,}]" tree.trace &&
 		test_grep "$prefix.*\"query\":{\"unique_objects\":[12],\"requests_validated\":1,\"unknown\":0,\"impossible\":[12],\"maybe\":0}" tree.trace &&
 		test_grep "$prefix.*\"backend\":{\"persistent\":$number,\"ready_reused\":$number,\"cold_attempt\":$number,\"unavailable_prebuild\":$number,\"waited\":$number}" tree.trace &&
+		server="\"server\":{\"timing_invalid\":1}" &&
+		if grep "$prefix.*\"server\":{\"timing_invalid\":0," tree.trace >/dev/null
+		then
+			server="\"server\":{\"timing_invalid\":0,\"pre_reply_us\":$number,\"reply_write_us\":$number,\"cleanup_us\":$number}"
+		fi &&
 		if grep "$prefix$state,\"clock_invalid\":0," tree.trace >/dev/null
 		then
 			test_grep "$prefix$state,\"clock_invalid\":0,$interval," tree.trace &&
-			test_grep "$prefix.*\"probe\":{\"outcome\":1,$interval}" tree.trace &&
-			test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0,$interval}" tree.trace
+			test_grep "$prefix.*$probe,$interval}" tree.trace &&
+			test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0,$interval,$server}" tree.trace
 		else
 			test_grep ! "$prefix.*\"start_offset_us\":" tree.trace &&
-			test_grep ! "$prefix.*\"duration_us\":" tree.trace
+			test_grep ! "$prefix.*\"duration_us\":" tree.trace &&
+			test_grep "$prefix.*$probe}" tree.trace &&
+			test_grep "$prefix.*\"request_0\":{\"objects\":[12],\"outcome\":0,$server}" tree.trace
 		fi || return 1
 	done
 '

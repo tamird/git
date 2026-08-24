@@ -2440,9 +2440,10 @@ static int grep_tree_rooted_recursive_basename(
 }
 
 /*
- * Retain client intervals, not server timing. Requests may overlap. All clocks
- * use getnanotime(); zero, reversed, or out-of-envelope endpoints are unusable,
- * not proof of a clock syscall error. Missing intervals are never zero-filled.
+ * Client intervals may overlap. Their getnanotime() endpoints must be nonzero,
+ * ordered, and within the enclosing client interval; failure is not proof of
+ * a clock syscall error. Server durations have independent validity and are
+ * never subtracted from this epoch. Missing timing is never zero-filled.
  */
 static int grep_tree_ipc_interval_valid(uint64_t begin, uint64_t end,
 				       uint64_t lower, uint64_t upper)
@@ -2486,12 +2487,15 @@ static void trace_grep_tree_ipc_batch(
 	jw_object_intmax(&jw, "outcome", !!result);
 	jw_object_intmax(&jw, "requests_planned", trace->requests_planned);
 	jw_object_intmax(&jw, "requests_started", trace->requests_started);
+	/* This flag governs client offsets, not the server clock. */
 	jw_object_intmax(&jw, "clock_invalid", !valid);
 	if (valid)
 		grep_tree_ipc_interval(&jw, epoch, begin, end);
 	if (trace->probe_outcome) {
 		jw_object_inline_begin_object(&jw, "probe");
 		jw_object_intmax(&jw, "outcome", trace->probe_outcome);
+		jw_object_intmax(&jw, "attempts", trace->probe_attempts);
+		jw_object_intmax(&jw, "diagnostic_version", trace->diagnostic_version);
 		if (valid)
 			grep_tree_ipc_interval(&jw, epoch, trace->probe_begin_ns,
 					       trace->probe_end_ns);
@@ -2507,6 +2511,22 @@ static void trace_grep_tree_ipc_batch(
 		if (valid)
 			grep_tree_ipc_interval(&jw, epoch, request->begin_ns,
 					       request->end_ns);
+		if (request->server.available) {
+			const struct grep_index_ipc_server_trace *server =
+				&request->server;
+
+			jw_object_inline_begin_object(&jw, "server");
+			jw_object_intmax(&jw, "timing_invalid", server->timing_invalid);
+			if (!server->timing_invalid) {
+				jw_object_intmax(&jw, "pre_reply_us",
+						 server->pre_reply_ns / 1000);
+				jw_object_intmax(&jw, "reply_write_us",
+						 server->reply_write_ns / 1000);
+				jw_object_intmax(&jw, "cleanup_us",
+						 server->cleanup_ns / 1000);
+			}
+			jw_end(&jw);
+		}
 		jw_end(&jw);
 	}
 	if (trace->query_available) {
