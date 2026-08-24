@@ -9,6 +9,7 @@ struct object_id;
 struct repository;
 
 #define GREP_INDEX_IPC_PREPARED_MIN_OIDS 4096
+#define GREP_INDEX_IPC_MAX_CLIENT_THREADS 8
 
 char *grep_index_ipc_path(struct repository *repo);
 char *grep_index_ipc_worker_path(struct repository *repo);
@@ -46,10 +47,29 @@ int grep_index_ipc_query(struct repository *repo,
 			 const struct grep_index_query *query,
 			 const struct object_id *oids, size_t nr,
 			 unsigned char *maybe);
+/* Optional caller-owned diagnostics; endpoints use getnanotime(). */
+struct grep_index_ipc_request_trace {
+	uint64_t begin_ns, end_ns;
+	size_t objects;
+	int outcome;
+};
+
+struct grep_index_ipc_query_trace {
+	uint64_t probe_begin_ns, probe_end_ns;
+	int probe_outcome;
+	size_t requests_planned, requests_started;
+	struct grep_index_ipc_request_trace requests[GREP_INDEX_IPC_MAX_CLIENT_THREADS];
+	int query_available, backend_available;
+	size_t unique_objects, requests_validated;
+	size_t unknown, impossible, maybe;
+	uint64_t persistent, ready_reused, cold_attempt;
+	uint64_t unavailable_prebuild, waited;
+};
+
 int grep_index_ipc_query_with_max_parallel_requests(
 	struct repository *repo, const struct grep_index_query *query,
 	const struct object_id *oids, size_t nr, unsigned char *maybe,
-	size_t max_parallel_requests);
+	size_t max_parallel_requests, struct grep_index_ipc_query_trace *trace);
 int grep_index_ipc_query_index(struct repository *repo,
 			       const struct grep_index_query *query,
 			       const struct object_id *index_identity,
