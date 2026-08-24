@@ -29,16 +29,21 @@ void traverse_commit_list_filtered(
 	struct oidset *omitted);
 
 /*
- * Optional aggregate observations of repo_parse_tree_gently() calls.
+ * Optional aggregate observations of tree parsing and non-commit traversal.
  * "Parse needed" means object.parsed was false, not an ODB or page-cache miss.
  * Such calls include failed attempts; already-parsed calls are counted without
  * clock calls. Timings cover the whole parse-needed call, not only object I/O.
  * Bookkeeping and clock-boundary overhead are not an uninstrumented baseline.
  *
+ * Non-commit timing sums sequential traverse_non_commits() calls, including
+ * recursive object processing and pending-array cleanup. It includes parse
+ * timing, but excludes revision iteration and queuing root trees. Its separate
+ * validity flag does not affect parse counts or timings.
+ *
  * The caller supplies get_time: zero means a checked monotonic nanosecond value,
- * nonzero invalidates timings. NULL disables timings, but not counts. Traversal
- * resets all other fields, preserves errno around each clock call, and retains
- * neither the stats pointer nor the callback after the synchronous walk.
+ * nonzero invalidates the corresponding timings. NULL disables timings, but not
+ * counts. Traversal resets all other fields, preserves errno around each clock
+ * call, and retains neither the stats pointer nor the callback after the walk.
  */
 struct list_objects_tree_parse_stats {
 	intmax_t parse_needed_count;
@@ -46,6 +51,8 @@ struct list_objects_tree_parse_stats {
 	uint64_t parse_needed_ns;
 	int counts_valid;
 	int timings_valid;
+	uint64_t non_commits_ns;
+	int non_commits_timings_valid;
 	int (*get_time)(uint64_t *now);
 };
 
