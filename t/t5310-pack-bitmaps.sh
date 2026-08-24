@@ -793,6 +793,45 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		echo haves/boundary-fill-in-limited >>positive.expect.keys &&
 		test_cmp positive.expect.keys positive.actual.keys &&
 
+		lookup_prefix="haves/boundary-fill-in-traverse-lookup-" &&
+		test_grep "$bitmap_data.*\"key\":\"${lookup_prefix}counts-valid\",\"value\":\"1\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"${lookup_prefix}timings-valid\",\"value\":\"[01]\"" \
+			boundary-positive.trace &&
+		for bucket in include-all show-tree show-nontree
+		do
+			test_grep "$bitmap_data.*\"key\":\"${lookup_prefix}${bucket}-count\",\"value\":\"[1-9][0-9]*\"" \
+				boundary-positive.trace || return 1
+		done &&
+		include_count=$(sed -n "s|.*\"key\":\"${lookup_prefix}include-all-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+			boundary-positive.trace) &&
+		show_tree_count=$(sed -n "s|.*\"key\":\"${lookup_prefix}show-tree-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+			boundary-positive.trace) &&
+		test "$include_count" -ge "$show_tree_count" &&
+		grep "^${lookup_prefix}" positive.bitmap.keys >positive.lookup.actual.keys &&
+		cat >positive.lookup.expect.keys <<-EOF &&
+		${lookup_prefix}counts-valid
+		${lookup_prefix}timings-valid
+		${lookup_prefix}include-all-count
+		${lookup_prefix}show-tree-count
+		${lookup_prefix}show-nontree-count
+		EOF
+		if grep -q "$bitmap_data.*\"key\":\"${lookup_prefix}timings-valid\",\"value\":\"1\"" \
+			boundary-positive.trace
+		then
+			for bucket in include-all show-tree show-nontree
+			do
+				test_grep "$bitmap_data.*\"key\":\"${lookup_prefix}${bucket}-us\",\"value\":\"[0-9][0-9]*\"" \
+					boundary-positive.trace || return 1
+			done &&
+			cat >>positive.lookup.expect.keys <<-EOF
+			${lookup_prefix}include-all-us
+			${lookup_prefix}show-tree-us
+			${lookup_prefix}show-nontree-us
+			EOF
+		fi &&
+		test_cmp positive.lookup.expect.keys positive.lookup.actual.keys &&
+
 		printf "%s\n%s\n" "$want" "^$have" >in &&
 		git rev-list --objects --no-object-names "$want" "^$have" |
 			sort >expect.objects &&

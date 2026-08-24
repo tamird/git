@@ -785,10 +785,13 @@ int bitmap_index_contains_pack(struct bitmap_index *bitmap, struct packed_git *p
 	return 0;
 }
 
+struct bitmap_fill_in_stats;
+
 struct include_data {
 	struct bitmap_index *bitmap_git;
 	struct bitmap *base;
 	struct bitmap *seen;
+	struct bitmap_fill_in_stats *lookup_stats;
 };
 
 struct bitmap_lookup_table_triplet {
@@ -1143,9 +1146,111 @@ static int ext_index_add_object(struct bitmap_index *bitmap_git,
 	return bitmap_pos + bitmap_num_objects_total(bitmap_git);
 }
 
+enum bitmap_fill_in_lookup_kind {
+	BITMAP_FILL_IN_LOOKUP_INCLUDE_ALL,
+	BITMAP_FILL_IN_LOOKUP_SHOW_TREE,
+	BITMAP_FILL_IN_LOOKUP_SHOW_NONTREE,
+	BITMAP_FILL_IN_LOOKUP_COUNT
+};
+
+struct bitmap_fill_in_lookup_stats {
+	intmax_t count;
+	uint64_t elapsed_ns;
+};
+
+struct bitmap_fill_in_stats {
+	uint64_t prepare_us;
+	uint64_t traverse_us;
+	int limited;
+	int timings_valid;
+	struct bitmap_fill_in_lookup_stats lookup[BITMAP_FILL_IN_LOOKUP_COUNT];
+	int lookup_counts_valid;
+	int lookup_timings_valid;
+};
+
+static int bitmap_fill_in_time(uint64_t *now);
+
+/*
+ * Count lookup calls, not objects: an included tree may reach both callbacks.
+ * Only fill traversal activates measurement; commit and other walks do not.
+ */
+static int bitmap_position_for_fill_in(struct bitmap_index *bitmap_git,
+				       const struct object_id *oid,
+				       struct bitmap_fill_in_stats *stats,
+				       enum bitmap_fill_in_lookup_kind kind)
+{
+	struct bitmap_fill_in_lookup_stats *lookup;
+	uint64_t started = 0, finished;
+	int trace_timing = 0;
+	int pos;
+
+	if (!stats)
+		return bitmap_position(bitmap_git, oid);
+
+	lookup = &stats->lookup[kind];
+	if (stats->lookup_counts_valid) {
+		if (lookup->count == INTMAX_MAX) {
+			stats->lookup_counts_valid = 0;
+			stats->lookup_timings_valid = 0;
+		} else {
+			lookup->count++;
+		}
+	}
+	if (stats->lookup_timings_valid) {
+		if (bitmap_fill_in_time(&started))
+			stats->lookup_timings_valid = 0;
+		else
+			trace_timing = 1;
+	}
+
+	pos = bitmap_position(bitmap_git, oid);
+
+	if (trace_timing) {
+		if (bitmap_fill_in_time(&finished) || finished < started ||
+		    unsigned_add_overflows(lookup->elapsed_ns, finished - started))
+			stats->lookup_timings_valid = 0;
+		else
+			lookup->elapsed_ns += finished - started;
+	}
+
+	return pos;
+}
+
+static void trace_bitmap_fill_in_lookups(struct repository *repo,
+					 const struct bitmap_fill_in_stats *stats)
+{
+	static const char * const count_keys[BITMAP_FILL_IN_LOOKUP_COUNT] = {
+		"haves/boundary-fill-in-traverse-lookup-include-all-count",
+		"haves/boundary-fill-in-traverse-lookup-show-tree-count",
+		"haves/boundary-fill-in-traverse-lookup-show-nontree-count"
+	};
+	static const char * const time_keys[BITMAP_FILL_IN_LOOKUP_COUNT] = {
+		"haves/boundary-fill-in-traverse-lookup-include-all-us",
+		"haves/boundary-fill-in-traverse-lookup-show-tree-us",
+		"haves/boundary-fill-in-traverse-lookup-show-nontree-us"
+	};
+	size_t i;
+
+	trace2_data_intmax("bitmap", repo,
+			   "haves/boundary-fill-in-traverse-lookup-counts-valid",
+			   stats->lookup_counts_valid);
+	trace2_data_intmax("bitmap", repo,
+			   "haves/boundary-fill-in-traverse-lookup-timings-valid",
+			   stats->lookup_timings_valid);
+	if (stats->lookup_counts_valid)
+		for (i = 0; i < ARRAY_SIZE(count_keys); i++)
+			trace2_data_intmax("bitmap", repo, count_keys[i],
+					   stats->lookup[i].count);
+	if (stats->lookup_timings_valid)
+		for (i = 0; i < ARRAY_SIZE(time_keys); i++)
+			trace2_data_intmax("bitmap", repo, time_keys[i],
+					   stats->lookup[i].elapsed_ns / 1000);
+}
+
 struct bitmap_show_data {
 	struct bitmap_index *bitmap_git;
 	struct bitmap *base;
+	struct bitmap_fill_in_stats *lookup_stats;
 };
 
 static void show_object(struct object *object, const char *name, void *data_)
@@ -1153,7 +1258,11 @@ static void show_object(struct object *object, const char *name, void *data_)
 	struct bitmap_show_data *data = data_;
 	int bitmap_pos;
 
-	bitmap_pos = bitmap_position(data->bitmap_git, &object->oid);
+	bitmap_pos = bitmap_position_for_fill_in(data->bitmap_git, &object->oid,
+						 data->lookup_stats,
+						 object->type == OBJ_TREE ?
+						 BITMAP_FILL_IN_LOOKUP_SHOW_TREE :
+						 BITMAP_FILL_IN_LOOKUP_SHOW_NONTREE);
 
 	if (bitmap_pos < 0)
 		bitmap_pos = ext_index_add_object(data->bitmap_git, object,
@@ -1249,7 +1358,9 @@ static int should_include_obj(struct object *obj, void *_data)
 	struct include_data *data = _data;
 	int bitmap_pos;
 
-	bitmap_pos = bitmap_position(data->bitmap_git, &obj->oid);
+	bitmap_pos = bitmap_position_for_fill_in(data->bitmap_git, &obj->oid,
+						 data->lookup_stats,
+						 BITMAP_FILL_IN_LOOKUP_INCLUDE_ALL);
 	if (bitmap_pos < 0)
 		return 1;
 	if ((data->seen && bitmap_get(data->seen, bitmap_pos)) ||
@@ -1280,13 +1391,6 @@ static int add_commit_to_bitmap(struct bitmap_index *bitmap_git,
 
 	return 1;
 }
-
-struct bitmap_fill_in_stats {
-	uint64_t prepare_us;
-	uint64_t traverse_us;
-	int limited;
-	int timings_valid;
-};
 
 static int bitmap_fill_in_time(uint64_t *now)
 {
@@ -1335,6 +1439,7 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 	incdata.bitmap_git = bitmap_git;
 	incdata.base = base;
 	incdata.seen = seen;
+	incdata.lookup_stats = NULL;
 
 	revs->include_check = should_include;
 	revs->include_check_obj = should_include_obj;
@@ -1358,10 +1463,20 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 
 	show_data.bitmap_git = bitmap_git;
 	show_data.base = base;
+	show_data.lookup_stats = NULL;
+	if (stats) {
+		memset(stats->lookup, 0, sizeof(stats->lookup));
+		stats->lookup_counts_valid = 1;
+		stats->lookup_timings_valid = 1;
+		incdata.lookup_stats = stats;
+		show_data.lookup_stats = stats;
+	}
 
 	if (trace_timings)
 		trace_timings = !bitmap_fill_in_time(&phase_started);
 	traverse_commit_list(revs, show_commit, show_object, &show_data);
+	incdata.lookup_stats = NULL;
+	show_data.lookup_stats = NULL;
 	if (trace_timings && !bitmap_fill_in_time(&phase_finished) &&
 	    phase_finished >= phase_started) {
 		stats->traverse_us = (phase_finished - phase_started) / 1000;
@@ -2403,6 +2518,8 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 					trace2_data_intmax("bitmap", repo,
 						"haves/boundary-fill-in-limited",
 						boundary_stats.fill_in.limited);
+					trace_bitmap_fill_in_lookups(repo,
+									  &boundary_stats.fill_in);
 				}
 				errno = saved_errno;
 			}
