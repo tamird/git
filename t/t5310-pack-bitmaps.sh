@@ -832,6 +832,44 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		fi &&
 		test_cmp positive.lookup.expect.keys positive.lookup.actual.keys &&
 
+		tree_parse_prefix="haves/boundary-fill-in-traverse-tree-parse-" &&
+		test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}counts-valid\",\"value\":\"1\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}timings-valid\",\"value\":\"[01]\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}needed-count\",\"value\":\"[1-9][0-9]*\"" \
+			boundary-positive.trace &&
+		test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}already-parsed-count\",\"value\":\"[0-9][0-9]*\"" \
+			boundary-positive.trace &&
+		parse_needed_count=$(sed -n "s|.*\"key\":\"${tree_parse_prefix}needed-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+			boundary-positive.trace) &&
+		already_parsed_count=$(sed -n "s|.*\"key\":\"${tree_parse_prefix}already-parsed-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+			boundary-positive.trace) &&
+		test "$((parse_needed_count + already_parsed_count))" -eq "$show_tree_count" &&
+		grep "^${tree_parse_prefix}" positive.bitmap.keys >positive.tree-parse.actual.keys &&
+		cat >positive.tree-parse.expect.keys <<-EOF &&
+		${tree_parse_prefix}counts-valid
+		${tree_parse_prefix}timings-valid
+		${tree_parse_prefix}needed-count
+		${tree_parse_prefix}already-parsed-count
+		EOF
+		if grep -q "$bitmap_data.*\"key\":\"${tree_parse_prefix}timings-valid\",\"value\":\"1\"" \
+			boundary-positive.trace
+		then
+			test_grep "$bitmap_data.*\"key\":\"${tree_parse_prefix}needed-us\",\"value\":\"[0-9][0-9]*\"" \
+				boundary-positive.trace &&
+			parse_needed_us=$(sed -n "s|.*\"key\":\"${tree_parse_prefix}needed-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			fill_traverse_us=$(sed -n "s|.*\"key\":\"haves/boundary-fill-in-traverse-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			if test -n "$fill_traverse_us"
+			then
+				test "$parse_needed_us" -le "$fill_traverse_us"
+			fi &&
+			echo "${tree_parse_prefix}needed-us" >>positive.tree-parse.expect.keys
+		fi &&
+		test_cmp positive.tree-parse.expect.keys positive.tree-parse.actual.keys &&
+
 		printf "%s\n%s\n" "$want" "^$have" >in &&
 		git rev-list --objects --no-object-names "$want" "^$have" |
 			sort >expect.objects &&

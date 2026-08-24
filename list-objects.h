@@ -28,6 +28,34 @@ void traverse_commit_list_filtered(
 	void *show_data,
 	struct oidset *omitted);
 
+/*
+ * Optional aggregate observations of repo_parse_tree_gently() calls.
+ * "Parse needed" means object.parsed was false, not an ODB or page-cache miss.
+ * Such calls include failed attempts; already-parsed calls are counted without
+ * clock calls. Timings cover the whole parse-needed call, not only object I/O.
+ * Bookkeeping and clock-boundary overhead are not an uninstrumented baseline.
+ *
+ * The caller supplies get_time: zero means a checked monotonic nanosecond value,
+ * nonzero invalidates timings. NULL disables timings, but not counts. Traversal
+ * resets all other fields, preserves errno around each clock call, and retains
+ * neither the stats pointer nor the callback after the synchronous walk.
+ */
+struct list_objects_tree_parse_stats {
+	intmax_t parse_needed_count;
+	intmax_t already_parsed_count;
+	uint64_t parse_needed_ns;
+	int counts_valid;
+	int timings_valid;
+	int (*get_time)(uint64_t *now);
+};
+
+void traverse_commit_list_with_tree_parse_stats(
+	struct rev_info *revs,
+	show_commit_fn show_commit,
+	show_object_fn show_object,
+	void *show_data,
+	struct list_objects_tree_parse_stats *stats);
+
 static inline void traverse_commit_list(
 	struct rev_info *revs,
 	show_commit_fn show_commit,
