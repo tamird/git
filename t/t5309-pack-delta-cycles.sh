@@ -129,7 +129,9 @@ test_expect_success 'index-pack detects missing base objects' '
 	region_enter conclude-pack
 	EOF
 	test_cmp missing-base-conclude.expect missing-base-conclude.actual &&
-	test_conclude_phase_times missing-base.trace
+	test_conclude_phase_times missing-base.trace &&
+	test_grep ! "\"category\":\"index-pack\",\"key\":\"conclude/appended-base-" \
+		missing-base.trace
 '
 
 test_expect_success 'index-pack detects REF_DELTA cycles' '
@@ -198,11 +200,69 @@ test_expect_success 'index-pack works with thin pack A->B->C with B on disk' '
 	REF_DELTA $B $C
 	EOF
 
+	test "$(git -C server cat-file -s "$B")" -gt 1 &&
+	test "$(git -C server cat-file -s "$C")" -gt 1 &&
 	git clone "file://$(pwd)/server" client &&
 	(
 		cd client &&
-		git index-pack --fix-thin --stdin <../thin.pack
-	)
+		for cache_limit in 32m 1
+		do
+			GIT_TRACE2_EVENT="$PWD/thin-reuse-$cache_limit.trace" \
+				git -c core.deltaBaseCacheLimit=$cache_limit \
+				index-pack --fix-thin --stdin --threads=1 \
+				--no-rev-index <../thin.pack \
+				>"thin-reuse-$cache_limit.out" &&
+			test_line_count = 1 "thin-reuse-$cache_limit.out" &&
+			read thin_kind thin_hash <"thin-reuse-$cache_limit.out" &&
+			test "$thin_kind" = pack &&
+			thin_path=".git/objects/pack/pack-$thin_hash" &&
+			cp "$thin_path.pack" "thin-reuse-$cache_limit.pack" &&
+			cp "$thin_path.idx" "thin-reuse-$cache_limit.idx" &&
+			git index-pack --no-rev-index \
+				-o "thin-reuse-$cache_limit-reindexed.idx" \
+				"thin-reuse-$cache_limit.pack" &&
+			cmp "thin-reuse-$cache_limit.idx" \
+				"thin-reuse-$cache_limit-reindexed.idx" &&
+			for object in "$A" "$B" "$C"
+			do
+				git cat-file -p "$object" >actual-object &&
+				git -C ../server cat-file -p "$object" >expect-object &&
+				test_cmp expect-object actual-object || exit 1
+			done &&
+			test_trace2_data index-pack conclude/unresolved-deltas 2 \
+				<"thin-reuse-$cache_limit.trace" &&
+			test_trace2_data index-pack conclude/appended-bases 2 \
+				<"thin-reuse-$cache_limit.trace" &&
+			rm "$thin_path.pack" "$thin_path.idx" ||
+			exit 1
+		done &&
+		test_cmp thin-reuse-32m.out thin-reuse-1.out &&
+		cmp thin-reuse-32m.pack thin-reuse-1.pack &&
+		cmp thin-reuse-32m.idx thin-reuse-1.idx
+	) &&
+	echo "repaired thin-pack stdout:" &&
+	cat client/thin-reuse-32m.out &&
+	for trace in cycle-repair.trace client/thin-reuse-32m.trace \
+		client/thin-reuse-1.trace
+	do
+		echo "$trace" &&
+		grep "\"category\":\"index-pack\",\"key\":\"conclude/appended-base-" "$trace" &&
+		test "$(grep -c "\"category\":\"index-pack\",\"key\":\"conclude/appended-base-" "$trace")" = 2 ||
+		return 1
+	done &&
+	# All output and repair checks precede the reconstruction witness.
+	test_trace2_data index-pack conclude/appended-base-reconstructions 0 \
+		<client/thin-reuse-32m.trace &&
+	test_trace2_data index-pack conclude/appended-base-reuses 2 \
+		<client/thin-reuse-32m.trace &&
+	test_trace2_data index-pack conclude/appended-base-reconstructions "[1-9][0-9]*" \
+		<client/thin-reuse-1.trace &&
+	test_trace2_data index-pack conclude/appended-base-reuses 2 \
+		<client/thin-reuse-1.trace &&
+	test_trace2_data index-pack conclude/appended-base-reconstructions 0 \
+		<cycle-repair.trace &&
+	test_trace2_data index-pack conclude/appended-base-reuses 1 \
+		<cycle-repair.trace
 '
 
 test_done
