@@ -1273,6 +1273,20 @@ static void trace_bitmap_fill_in_tree_parses(
 			tree_stats->parse_needed_ns / 1000);
 }
 
+static void trace_bitmap_fill_in_noncommits(
+	struct repository *repo, const struct bitmap_fill_in_stats *stats)
+{
+	const struct list_objects_tree_parse_stats *tree_stats = &stats->tree_parse;
+
+	trace2_data_intmax("bitmap", repo,
+		"haves/boundary-fill-in-traverse-noncommits-timings-valid",
+		tree_stats->non_commits_timings_valid);
+	if (tree_stats->non_commits_timings_valid)
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-noncommits-us",
+			tree_stats->non_commits_ns / 1000);
+}
+
 struct bitmap_show_data {
 	struct bitmap_index *bitmap_git;
 	struct bitmap *base;
@@ -1512,9 +1526,16 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 	show_data.lookup_stats = NULL;
 	if (trace_timings && !bitmap_fill_in_time(&phase_finished) &&
 	    phase_finished >= phase_started) {
-		stats->traverse_us = (phase_finished - phase_started) / 1000;
+		uint64_t traverse_ns = phase_finished - phase_started;
+
+		stats->traverse_us = traverse_ns / 1000;
 		stats->timings_valid = 1;
+		if (stats->tree_parse.non_commits_ns > traverse_ns)
+			stats->tree_parse.non_commits_timings_valid = 0;
 	}
+	/* A valid subtotal requires a checked enclosing traversal measurement. */
+	if (stats && !stats->timings_valid)
+		stats->tree_parse.non_commits_timings_valid = 0;
 
 	revs->include_check = NULL;
 	revs->include_check_obj = NULL;
@@ -2555,6 +2576,8 @@ struct bitmap_index *prepare_bitmap_walk(struct rev_info *revs,
 									  &boundary_stats.fill_in);
 					trace_bitmap_fill_in_tree_parses(repo,
 									      &boundary_stats.fill_in);
+					trace_bitmap_fill_in_noncommits(repo,
+									     &boundary_stats.fill_in);
 				}
 				errno = saved_errno;
 			}

@@ -870,6 +870,38 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		fi &&
 		test_cmp positive.tree-parse.expect.keys positive.tree-parse.actual.keys &&
 
+		noncommits_prefix="haves/boundary-fill-in-traverse-noncommits-" &&
+		test_grep "$bitmap_data.*\"key\":\"${noncommits_prefix}timings-valid\",\"value\":\"[01]\"" \
+			boundary-positive.trace &&
+		grep "^${noncommits_prefix}" positive.bitmap.keys >positive.noncommits.actual.keys &&
+		echo "${noncommits_prefix}timings-valid" >positive.noncommits.expect.keys &&
+		if grep -q "$bitmap_data.*\"key\":\"${noncommits_prefix}timings-valid\",\"value\":\"1\"" \
+			boundary-positive.trace
+		then
+			test_grep "$bitmap_data.*\"key\":\"${noncommits_prefix}us\",\"value\":\"[0-9][0-9]*\"" \
+				boundary-positive.trace &&
+			noncommits_us=$(sed -n "s|.*\"key\":\"${noncommits_prefix}us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			fill_traverse_us=$(sed -n "s|.*\"key\":\"haves/boundary-fill-in-traverse-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+				boundary-positive.trace) &&
+			test -n "$fill_traverse_us" &&
+			test "$noncommits_us" -le "$fill_traverse_us" &&
+			if grep -q "$bitmap_data.*\"key\":\"${tree_parse_prefix}timings-valid\",\"value\":\"1\"" boundary-positive.trace &&
+			   grep -q "$bitmap_data.*\"key\":\"${lookup_prefix}timings-valid\",\"value\":\"1\"" boundary-positive.trace
+			then
+				leaf_us=$parse_needed_us &&
+				for bucket in include-all show-tree show-nontree
+				do
+					bucket_us=$(sed -n "s|.*\"key\":\"${lookup_prefix}${bucket}-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+						boundary-positive.trace) &&
+					leaf_us=$((leaf_us + bucket_us)) || return 1
+				done &&
+				test "$leaf_us" -le "$noncommits_us"
+			fi &&
+			echo "${noncommits_prefix}us" >>positive.noncommits.expect.keys
+		fi &&
+		test_cmp positive.noncommits.expect.keys positive.noncommits.actual.keys &&
+
 		printf "%s\n%s\n" "$want" "^$have" >in &&
 		git rev-list --objects --no-object-names "$want" "^$have" |
 			sort >expect.objects &&

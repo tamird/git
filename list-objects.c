@@ -28,8 +28,8 @@ struct traversal_context {
 	int depth;
 };
 
-static int tree_parse_time(struct list_objects_tree_parse_stats *stats,
-			   uint64_t *now)
+static int traversal_time(struct list_objects_tree_parse_stats *stats,
+			  uint64_t *now)
 {
 	int saved_errno = errno;
 	int ret = stats->get_time(now);
@@ -67,7 +67,7 @@ static int parse_tree_for_traversal(struct traversal_context *ctx,
 		return repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (stats->timings_valid) {
-		if (tree_parse_time(stats, &started))
+		if (traversal_time(stats, &started))
 			stats->timings_valid = 0;
 		else
 			trace_timing = 1;
@@ -76,7 +76,7 @@ static int parse_tree_for_traversal(struct traversal_context *ctx,
 	ret = repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (trace_timing) {
-		if (tree_parse_time(stats, &finished) || finished < started ||
+		if (traversal_time(stats, &finished) || finished < started ||
 		    unsigned_add_overflows(stats->parse_needed_ns,
 					   finished - started))
 			stats->timings_valid = 0;
@@ -432,8 +432,18 @@ static void add_pending_tree(struct rev_info *revs, struct tree *tree)
 static void traverse_non_commits(struct traversal_context *ctx,
 				 struct strbuf *base)
 {
+	struct list_objects_tree_parse_stats *stats = ctx->tree_parse_stats;
+	uint64_t started = 0, finished;
+	int trace_timing = 0;
+
 	assert(base->len == 0);
 
+	if (stats && stats->non_commits_timings_valid) {
+		if (traversal_time(stats, &started))
+			stats->non_commits_timings_valid = 0;
+		else
+			trace_timing = 1;
+	}
 	for (size_t i = 0; i < ctx->revs->pending.nr; i++) {
 		struct object_array_entry *pending = ctx->revs->pending.objects + i;
 		struct object *obj = pending->item;
@@ -460,6 +470,14 @@ static void traverse_non_commits(struct traversal_context *ctx,
 		    oid_to_hex(&obj->oid), name);
 	}
 	object_array_clear(&ctx->revs->pending);
+	if (trace_timing) {
+		if (traversal_time(stats, &finished) || finished < started ||
+		    unsigned_add_overflows(stats->non_commits_ns,
+					   finished - started))
+			stats->non_commits_timings_valid = 0;
+		else
+			stats->non_commits_ns += finished - started;
+	}
 }
 
 static void do_traverse(struct traversal_context *ctx)
@@ -561,6 +579,7 @@ void traverse_commit_list_with_tree_parse_stats(
 			.get_time = get_time,
 			.counts_valid = 1,
 			.timings_valid = !!get_time,
+			.non_commits_timings_valid = !!get_time,
 		};
 	}
 	traverse_commit_list_filtered_1(revs, show_commit, show_object,
