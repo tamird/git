@@ -792,6 +792,8 @@ struct include_data {
 	struct bitmap *base;
 	struct bitmap *seen;
 	struct bitmap_fill_in_stats *lookup_stats;
+	const struct object *included_tree;
+	int included_tree_pos;
 };
 
 struct bitmap_lookup_table_triplet {
@@ -1313,22 +1315,22 @@ static void trace_bitmap_fill_in_noncommits(
 			tree_stats->non_commits_ns / 1000);
 }
 
-struct bitmap_show_data {
-	struct bitmap_index *bitmap_git;
-	struct bitmap *base;
-	struct bitmap_fill_in_stats *lookup_stats;
-};
-
 static void show_object(struct object *object, const char *name, void *data_)
 {
-	struct bitmap_show_data *data = data_;
-	int bitmap_pos;
+	struct include_data *data = data_;
+	int bitmap_pos = -1;
 
-	bitmap_pos = bitmap_position_for_fill_in(data->bitmap_git, &object->oid,
-						 data->lookup_stats,
-						 object->type == OBJ_TREE ?
-						 BITMAP_FILL_IN_LOOKUP_SHOW_TREE :
-						 BITMAP_FILL_IN_LOOKUP_SHOW_NONTREE);
+	if (object == data->included_tree)
+		bitmap_pos = data->included_tree_pos;
+	data->included_tree = NULL;
+
+	if (bitmap_pos < 0)
+		bitmap_pos = bitmap_position_for_fill_in(data->bitmap_git,
+							 &object->oid,
+							 data->lookup_stats,
+							 object->type == OBJ_TREE ?
+							 BITMAP_FILL_IN_LOOKUP_SHOW_TREE :
+							 BITMAP_FILL_IN_LOOKUP_SHOW_NONTREE);
 
 	if (bitmap_pos < 0)
 		bitmap_pos = ext_index_add_object(data->bitmap_git, object,
@@ -1424,6 +1426,7 @@ static int should_include_obj(struct object *obj, void *_data)
 	struct include_data *data = _data;
 	int bitmap_pos;
 
+	data->included_tree = NULL;
 	bitmap_pos = bitmap_position_for_fill_in(data->bitmap_git, &obj->oid,
 						 data->lookup_stats,
 						 BITMAP_FILL_IN_LOOKUP_INCLUDE_ALL);
@@ -1433,6 +1436,11 @@ static int should_include_obj(struct object *obj, void *_data)
 	     bitmap_get(data->base, bitmap_pos)) {
 		obj->flags |= SEEN;
 		return 0;
+	}
+	if (obj->type == OBJ_TREE) {
+		/* Let show_object() reuse this known tree position. */
+		data->included_tree = obj;
+		data->included_tree_pos = bitmap_pos;
 	}
 	return 1;
 }
@@ -1494,8 +1502,7 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 				     struct bitmap *seen,
 				     struct bitmap_fill_in_stats *stats)
 {
-	struct include_data incdata;
-	struct bitmap_show_data show_data;
+	struct include_data incdata = { 0 };
 	uint64_t phase_started = 0, phase_finished;
 	int trace_timings = 0;
 
@@ -1527,15 +1534,11 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 	if (stats)
 		stats->limited = revs->limited;
 
-	show_data.bitmap_git = bitmap_git;
-	show_data.base = base;
-	show_data.lookup_stats = NULL;
 	if (stats) {
 		memset(stats->lookup, 0, sizeof(stats->lookup));
 		stats->lookup_counts_valid = 1;
 		stats->lookup_timings_valid = 1;
 		incdata.lookup_stats = stats;
-		show_data.lookup_stats = stats;
 	}
 
 	if (trace_timings)
@@ -1543,13 +1546,12 @@ static struct bitmap *fill_in_bitmap(struct bitmap_index *bitmap_git,
 	if (stats) {
 		stats->tree_parse.get_time = bitmap_fill_in_time;
 		traverse_commit_list_with_tree_parse_stats(revs, show_commit,
-							  show_object, &show_data,
+							  show_object, &incdata,
 							  &stats->tree_parse);
 	} else {
-		traverse_commit_list(revs, show_commit, show_object, &show_data);
+		traverse_commit_list(revs, show_commit, show_object, &incdata);
 	}
 	incdata.lookup_stats = NULL;
-	show_data.lookup_stats = NULL;
 	if (trace_timings && !bitmap_fill_in_time(&phase_finished) &&
 	    phase_finished >= phase_started) {
 		uint64_t traverse_ns = phase_finished - phase_started;

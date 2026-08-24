@@ -714,13 +714,24 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		test_commit packed &&
 		git rev-list --objects --no-object-names HEAD ^HEAD^ \
 			>packed.objects &&
-		git pack-objects .git/objects/pack/pack \
-			<packed.objects >/dev/null &&
+		second_pack=$(git pack-objects .git/objects/pack/pack \
+			<packed.objects) &&
 		git multi-pack-index write --no-bitmap &&
 		test_path_is_file "${pack%.pack}.bitmap" &&
 		test_path_is_file "$midx" &&
 		test_path_is_missing "$midx-$(midx_checksum "$objdir").bitmap" &&
 		base=$(git rev-parse HEAD) &&
+		base_tree=$(git rev-parse "$base^{tree}") &&
+		list_packed_objects "${pack%.pack}.idx" >selected-pack.objects &&
+		list_packed_objects ".git/objects/pack/pack-$second_pack.idx" \
+			>second-pack.objects &&
+		test_grep ! "^$base_tree$" selected-pack.objects &&
+		test_grep "^$base_tree$" second-pack.objects &&
+		git log --format=%T "$base^" "^$bitmap_have" >selected-trees.raw &&
+		sort -u selected-trees.raw >selected-trees &&
+		test_line_count = 63 selected-trees &&
+		grep -Fxf selected-pack.objects selected-trees >selected-tree-members &&
+		test_cmp selected-trees selected-tree-members &&
 		test_commit unindexed-have &&
 		have=$(git rev-parse HEAD) &&
 		git checkout -b unindexed-want "$base" &&
@@ -845,7 +856,8 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 			boundary-positive.trace) &&
 		already_parsed_count=$(sed -n "s|.*\"key\":\"${tree_parse_prefix}already-parsed-count\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
 			boundary-positive.trace) &&
-		test "$((parse_needed_count + already_parsed_count))" -eq "$show_tree_count" &&
+		test "$((parse_needed_count + already_parsed_count))" -eq 64 &&
+		test "$include_count" -ge "$((parse_needed_count + already_parsed_count))" &&
 		grep "^${tree_parse_prefix}" positive.bitmap.keys >positive.tree-parse.actual.keys &&
 		cat >positive.tree-parse.expect.keys <<-EOF &&
 		${tree_parse_prefix}counts-valid
@@ -957,7 +969,8 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		test_line_count = 3 actual.objects &&
 		test_grep ! "\"label\":\"haves/boundary\"" boundary.trace &&
 		test_grep ! "\"key\":\"haves/boundary-fill-in-" boundary.trace &&
-		test_grep ! "\"key\":\"bitmap/misses\"" boundary.trace
+		test_grep ! "\"key\":\"bitmap/misses\"" boundary.trace &&
+		test "$show_tree_count" -eq 1
 	)
 '
 
