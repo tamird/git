@@ -605,7 +605,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	struct diff_options diff_opts;
 	struct diff_queue_struct *q = &diff_queued_diff;
 	struct diff_filepair *choice;
-	int i;
+	int i, saved_errno;
 
 	/*
 	 * follow-rename code is very specific, we need exactly one
@@ -638,7 +638,13 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_opts.rename_score = opt->rename_score;
 	diff_opts.rename_limit = opt->rename_limit;
 	diff_setup_done(&diff_opts);
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
+	errno = saved_errno;
 	ll_diff_tree_oid(old_oid, new_oid, base, &diff_opts);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
+	errno = saved_errno;
 	diffcore_std(&diff_opts);
 	clear_pathspec(&diff_opts.pathspec);
 
