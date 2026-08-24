@@ -311,7 +311,7 @@ void tr2_start_timer(enum trace2_timer_id tid)
 	t->start_ns = getnanotime();
 }
 
-void tr2_stop_timer(enum trace2_timer_id tid)
+uint64_t tr2_stop_timer(enum trace2_timer_id tid)
 {
 	struct tr2tls_thread_ctx *ctx = tr2tls_get_self();
 	struct tr2_timer *t = &ctx->timer_block.timer[tid];
@@ -322,7 +322,7 @@ void tr2_stop_timer(enum trace2_timer_id tid)
 
 	t->recursion_count--;
 	if (t->recursion_count)
-		return; /* still in recursive call(s) */
+		return 0; /* still in recursive call(s) */
 
 	ns_now = getnanotime();
 	ns_interval = ns_now - t->start_ns;
@@ -348,6 +348,8 @@ void tr2_stop_timer(enum trace2_timer_id tid)
 	ctx->used_any_timer = 1;
 	if (tr2_timer_metadata[tid].want_per_thread_events)
 		ctx->used_any_per_thread_timer = 1;
+
+	return ns_interval;
 }
 
 void tr2_update_final_timers(void)

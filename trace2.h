@@ -574,13 +574,18 @@ enum trace2_timer_id {
  *
  * Timer events are emitted at thread and program exit.
  *
+ * Stop returns the completed outermost interval in nanoseconds, not the
+ * accumulated total. It returns zero when tracing is disabled or a recursive
+ * interval remains open. A completed interval may also be zero, so zero is
+ * not a validity indicator. Stopping an inactive timer is invalid usage.
+ *
  * Note: Since the stopwatch API routines do not generate individual
  * events, they do not take (file, line) arguments.  Similarly, the
  * category and timer name values are defined at compile-time in the
  * timer definitions array, so they are not needed here in the API.
  */
 void trace2_timer_start(enum trace2_timer_id tid);
-void trace2_timer_stop(enum trace2_timer_id tid);
+uint64_t trace2_timer_stop(enum trace2_timer_id tid);
 
 /*
  * Define the set of global counters.
