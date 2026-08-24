@@ -189,6 +189,52 @@ test_grep_packed_content () {
 		"$packed_content_records"
 }
 
+test_grep_packed_entry_location () {
+	packed_entry_location_trace="$1"
+	packed_entry_location_key=content_index_tree_object_read_packed_entry_location
+	test_trace2_data grep "${packed_entry_location_key}_valid" "[01]" \
+		<"$packed_entry_location_trace" || return 1
+	if test_trace2_data grep "${packed_entry_location_key}_valid" 1 \
+		<"$packed_entry_location_trace"
+	then
+		packed_entry_location_records=3
+		test_trace2_data grep "${packed_entry_location_key}_attempt_count" "$2" \
+			<"$packed_entry_location_trace" || return 1
+		case "$2" in
+		0) packed_entry_location_us=0 ;;
+		*) packed_entry_location_us="[0-9][0-9]*" ;;
+		esac
+		test_trace2_data grep "${packed_entry_location_key}_us" "$packed_entry_location_us" \
+			<"$packed_entry_location_trace" || return 1
+		packed_entry_location_us=$(sed -n \
+			"s/.*\"key\":\"${packed_entry_location_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_entry_location_trace") &&
+		packed_entry_location_read_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_entry_location_trace") &&
+		test "$packed_entry_location_us" -le "$packed_entry_location_read_us" || return 1
+		if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+			<"$packed_entry_location_trace"
+		then
+			packed_entry_location_content_us=$(sed -n \
+				"s/.*\"key\":\"content_index_tree_object_read_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				"$packed_entry_location_trace") &&
+			test "$((packed_entry_location_us + packed_entry_location_content_us))" \
+				-le "$packed_entry_location_read_us" || return 1
+		fi
+	else
+		packed_entry_location_records=1
+		test_grep ! "\"key\":\"${packed_entry_location_key}_attempt_count\"" \
+			"$packed_entry_location_trace" &&
+		test_grep ! "\"key\":\"${packed_entry_location_key}_us\"" \
+			"$packed_entry_location_trace" || return 1
+	fi
+	test "$(grep -c "\"key\":\"${packed_entry_location_key}_" "$packed_entry_location_trace")" = \
+		"$packed_entry_location_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${packed_entry_location_key}_" "$packed_entry_location_trace")" = \
+		"$packed_entry_location_records"
+}
+
 test_grep_worktree_miss_reasons () {
 	test_trace2_data grep \
 		content_index_worktree_unverified_negative_reason_valid 1 <"$1" &&
@@ -2187,6 +2233,9 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	# The two packed calls exclude the in-memory empty tree and loose read.
 	test_grep_packed_content tree-positive.trace 2 &&
 	test_grep_packed_content tree-attributes.trace 0 &&
+	# Entry location also counts the packed miss before the loose winner.
+	test_grep_packed_entry_location tree-positive.trace 2 &&
+	test_grep_packed_entry_location tree-attributes.trace 1 &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \

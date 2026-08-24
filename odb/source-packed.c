@@ -34,14 +34,45 @@ static int find_pack_entry(struct odb_source_packed *store,
 	return 0;
 }
 
+static int packed_entry_location_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
 static int odb_source_packed_read_object_info(struct odb_source *source,
 					      const struct object_id *oid,
 					      struct object_info *oi,
 					      enum object_info_flags flags)
 {
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
+	struct odb_read_result *result =
+		oi && oi->contentp ? oi->read_resultp : NULL;
 	struct pack_entry e;
-	int ret;
+	uint64_t started = 0, finished;
+	int ret, found, timed = 0;
 
 	/*
 	 * In case the first read didn't surface the object, we have to reload
@@ -51,7 +82,23 @@ static int odb_source_packed_read_object_info(struct odb_source *source,
 	if (flags & OBJECT_INFO_SECOND_READ)
 		odb_source_prepare(source, ODB_PREPARE_FLUSH_CACHES);
 
-	if (!find_pack_entry(packed, oid, &e))
+	if (result && !result->packed_entry_location_invalid)
+		timed = !packed_entry_location_time(&started);
+	found = find_pack_entry(packed, oid, &e);
+	if (result && !result->packed_entry_location_invalid) {
+		if (!timed || packed_entry_location_time(&finished) ||
+		    finished < started ||
+		    result->packed_entry_location_attempt_count ==
+						(uint64_t)INTMAX_MAX ||
+		    finished - started >
+					UINT64_MAX - result->packed_entry_location_ns) {
+			result->packed_entry_location_invalid = 1;
+		} else {
+			result->packed_entry_location_attempt_count++;
+			result->packed_entry_location_ns += finished - started;
+		}
+	}
+	if (!found)
 		return 1;
 
 	/*

@@ -308,6 +308,13 @@ struct odb_read_result {
 	 */
 	uint64_t packed_content_attempt_count, packed_content_ns;
 	int packed_content_invalid;
+	/*
+	 * Inclusive find_pack_entry calls for this content read, including
+	 * misses before a later source wins. Explicit second-read cache
+	 * refresh precedes this interval; packed-content decoding follows it.
+	 */
+	uint64_t packed_entry_location_attempt_count, packed_entry_location_ns;
+	int packed_entry_location_invalid;
 };
 
 void *odb_read_object_with_result(struct object_database *odb,
