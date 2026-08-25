@@ -79,7 +79,7 @@ void tr2tls_pop_self(void);
  * have region[0] that was pushed in trace2_thread_start() if
  * the thread exits normally.
  */
-void tr2tls_pop_unwind_self(void);
+void tr2tls_pop_unwind_self(uint64_t us_now);
 
 /*
  * Compute the elapsed time since the innermost region in the
