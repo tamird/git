@@ -536,7 +536,9 @@ test_expect_success 'cleanup commit messages (verbatim option,-t)' '
 test_expect_success 'cleanup commit messages (verbatim option,-F)' '
 
 	echo >>negative &&
-	git commit --cleanup=verbatim -F expect -a &&
+	GIT_TRACE2_EVENT_NESTING=2 \
+	GIT_TRACE2_EVENT="$PWD/commit-message-file.trace" \
+		git commit --cleanup=verbatim -F expect -a &&
 	commit_body HEAD >actual &&
 	test_cmp expect actual
 
@@ -545,20 +547,40 @@ test_expect_success 'cleanup commit messages (verbatim option,-F)' '
 test_expect_success 'cleanup commit messages (verbatim option,-m)' '
 
 	echo >>negative &&
-	git commit --cleanup=verbatim -m "$mesg_with_comment_and_newlines" -a &&
+	GIT_TRACE2_EVENT_NESTING=2 \
+	GIT_TRACE2_EVENT="$PWD/commit-message-option.trace" \
+		git commit --cleanup=verbatim -m "$mesg_with_comment_and_newlines" -a &&
 	commit_body HEAD >actual &&
 	test_cmp expect actual
 
 '
 
-test_expect_success 'cleanup commit messages (whitespace option,-F)' '
+test_expect_success 'cleanup commit messages (whitespace option,-F stdin)' '
 
 	echo >>negative &&
 	test_write_lines "" "# text" "" >text &&
 	echo "# text" >expect &&
-	git commit --cleanup=whitespace -F text -a &&
+	GIT_TRACE2_EVENT_NESTING=2 \
+	GIT_TRACE2_EVENT="$PWD/commit-message-stdin.trace" \
+		git commit --cleanup=whitespace -F - -a <text &&
 	commit_body HEAD >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+
+	# Check all three message sources before checking trace output.
+	printf "region_enter\nregion_leave\n" >expect_regions &&
+	for input in file stdin
+	do
+		grep "\"thread\":\"main\".*\"nesting\":1,\"category\":\"commit\",\"label\":\"message-input\"" \
+			commit-message-$input.trace >input-regions &&
+		sed -n "s/.*\"event\":\"\\([^\"]*\\)\".*/\\1/p" \
+			input-regions >actual_regions &&
+		test_cmp expect_regions actual_regions &&
+		grep "\"event\":\"region_leave\".*\"t_rel\":[0-9]" input-regions &&
+		test_trace2_data diff index/cached-traversal 1 \
+			<commit-message-$input.trace || return 1
+	done &&
+	test_grep ! "\"category\":\"commit\",\"label\":\"message-input\"" \
+		commit-message-option.trace
 
 '
 
