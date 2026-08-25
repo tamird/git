@@ -1,7 +1,28 @@
+load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
+
+# Opt-in measurement, not a performance gate. Use -c opt --stamp and the
+# intended platform; the runner records the exact executable's identity.
+py_test(
+    name = "trace2-overhead-benchmark",
+    size = "medium",
+    srcs = ["trace2-overhead-benchmark.py"],
+    args = [
+        "$(rlocationpath //:git)",
+        "$(COMPILATION_MODE)",
+    ],
+    data = ["//:git"],
+    main = "trace2-overhead-benchmark.py",
+    tags = [
+        "exclusive",
+        "manual",
+        "no-remote",
+    ],
+    deps = ["@rules_python//python/runfiles"],
+)
 
 COMMON_TEST_DATA = [
     "//:git",
