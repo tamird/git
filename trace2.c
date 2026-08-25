@@ -146,7 +146,7 @@ static void tr2main_atexit_handler(void)
 	 * does not appear nested.  This improves the appearance of
 	 * the trace output if someone calls die(), for example.
 	 */
-	tr2tls_pop_unwind_self();
+	tr2tls_pop_unwind_self(us_now);
 
 	/*
 	 * Some timers want per-thread details.  If the main thread
@@ -723,7 +723,7 @@ void trace2_thread_exit_fl(const char *file, int line)
 	 * for the outer-most region (which we pushed when the thread
 	 * started).  This gives us the run time of the thread.
 	 */
-	tr2tls_pop_unwind_self();
+	tr2tls_pop_unwind_self(us_now);
 	us_elapsed_thread = tr2tls_region_elasped_self(us_now);
 
 	/*

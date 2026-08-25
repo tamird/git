@@ -341,4 +341,9 @@ test_expect_success 'unsafe URLs are redacted by default' '
 	test_grep "remote.origin.url=https://user:pwd@example.com" unredacted.normal
 '
 
+test_expect_success PTHREADS 'lazy thread timing uses the event timestamp' '
+	test_when_finished "rm trace.normal" &&
+	GIT_TRACE2="$(pwd)/trace.normal" test-tool trace2 011thread_time
+'
+
 test_done

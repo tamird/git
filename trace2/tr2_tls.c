@@ -63,7 +63,7 @@ struct tr2tls_thread_ctx *tr2tls_create_self(const char *thread_base_name,
 	return ctx;
 }
 
-struct tr2tls_thread_ctx *tr2tls_get_self(void)
+static struct tr2tls_thread_ctx *tr2tls_get_self_at(const uint64_t *us_start)
 {
 	struct tr2tls_thread_ctx *ctx;
 
@@ -75,12 +75,19 @@ struct tr2tls_thread_ctx *tr2tls_get_self(void)
 	/*
 	 * If the current thread's thread-proc did not call
 	 * trace2_thread_start(), then the thread will not have any
-	 * thread-local storage.  Create it now and silently continue.
+	 * thread-local storage.  Use the caller's event timestamp, if supplied,
+	 * so the implicit region does not start after the event being timed.
 	 */
 	if (!ctx)
-		ctx = tr2tls_create_self("unknown", getnanotime() / 1000);
+		ctx = tr2tls_create_self("unknown", us_start ? *us_start :
+					getnanotime() / 1000);
 
 	return ctx;
+}
+
+struct tr2tls_thread_ctx *tr2tls_get_self(void)
+{
+	return tr2tls_get_self_at(NULL);
 }
 
 int tr2tls_is_main_thread(void)
@@ -122,9 +129,9 @@ void tr2tls_pop_self(void)
 	ctx->nr_open_regions--;
 }
 
-void tr2tls_pop_unwind_self(void)
+void tr2tls_pop_unwind_self(uint64_t us_now)
 {
-	struct tr2tls_thread_ctx *ctx = tr2tls_get_self();
+	struct tr2tls_thread_ctx *ctx = tr2tls_get_self_at(&us_now);
 
 	while (ctx->nr_open_regions > 1)
 		tr2tls_pop_self();
@@ -135,7 +142,7 @@ uint64_t tr2tls_region_elasped_self(uint64_t us)
 	struct tr2tls_thread_ctx *ctx;
 	uint64_t us_start;
 
-	ctx = tr2tls_get_self();
+	ctx = tr2tls_get_self_at(&us);
 	if (!ctx->nr_open_regions)
 		return 0;
 

@@ -7,7 +7,9 @@
 #include "exec-cmd.h"
 #include "config.h"
 #include "repository.h"
+#include "trace.h"
 #include "trace2.h"
+#include "trace2/tr2_tls.h"
 
 typedef int(fn_unit_test)(int argc, const char **argv);
 
@@ -233,6 +235,44 @@ static int ut_010bug_BUG(int argc UNUSED, const char **argv UNUSED)
 {
 	bug("a %s message", "bug");
 	BUG("a %s message", "BUG");
+}
+
+static void *ut_011thread_time_thread_proc(void *data)
+{
+	int *result = data;
+	int attempts;
+	uint64_t us_event = getnanotime() / 1000;
+	uint64_t us_elapsed, us_later;
+
+	/* Delay after sampling without registering this thread with Trace2. */
+	for (attempts = 0; attempts < 100; attempts++) {
+		sleep_millisec(1);
+		if (getnanotime() / 1000 > us_event)
+			break;
+	}
+	if (attempts == 100)
+		die("clock did not advance");
+
+	us_elapsed = tr2tls_region_elasped_self(us_event);
+	us_later = getnanotime() / 1000;
+	*result = us_elapsed != 0 ||
+		tr2tls_region_elasped_self(us_later) != us_later - us_event;
+	trace2_thread_exit();
+	return NULL;
+}
+
+static int ut_011thread_time(int argc UNUSED, const char **argv UNUSED)
+{
+	pthread_t thread;
+	int result;
+
+	if (!trace2_is_enabled())
+		die("trace2 must be enabled");
+	if (pthread_create(&thread, NULL, ut_011thread_time_thread_proc, &result))
+		die("failed to create thread");
+	if (pthread_join(thread, NULL))
+		die("failed to join thread");
+	return result;
 }
 
 /*
@@ -543,6 +583,7 @@ static struct unit_test ut_table[] = {
 	{ ut_008bug,      "008bug",    "" },
 	{ ut_009bug_BUG,  "009bug_BUG","" },
 	{ ut_010bug_BUG,  "010bug_BUG","" },
+	{ ut_011thread_time, "011thread_time", "" },
 
 	{ ut_100timer,    "100timer",  "<count> <ms_delay>" },
 	{ ut_101timer,    "101timer",  "<count> <ms_delay> <threads>" },
