@@ -4201,6 +4201,11 @@ int cmd_grep(int argc,
 	if (opt.invert)
 		opt.only_matching = 0;
 
+	/* Filename-only output does not need binary classification. */
+	if (opt.name_only && opt.binary == GREP_BINARY_DEFAULT &&
+	    !opt.allow_textconv)
+		opt.binary = GREP_BINARY_TEXT;
+
 	/*
 	 * We have to find "--" in a separate pass, because its presence
 	 * influences how we will parse arguments that come before it.

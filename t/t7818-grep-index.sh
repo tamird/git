@@ -881,6 +881,16 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_grep_timer explicit-thread.trace dispatch/producer-wait 0 &&
 	test_grep_timer explicit-thread.trace dispatch/worker-drain 1 &&
 	test_grep_producer_stats explicit-thread.trace 0 0 2 &&
+	test_when_finished "rm -f name-only-thread.trace" &&
+	GIT_TRACE2_EVENT="$PWD/name-only-thread.trace" \
+		git grep --cached --no-content-index --threads=3 -l \
+			-F -e "ordinary contents" -e "present needle" \
+			-- ordinary present >actual &&
+	printf "%s\n" ordinary present >expect &&
+	test_cmp expect actual &&
+	test_grep_workers name-only-thread.trace 3 &&
+	test_grep_timer name-only-thread.trace source/object-read 2 &&
+	test_grep_producer_stats name-only-thread.trace 0 0 0 &&
 	GIT_TRACE2_EVENT="$PWD/configured-thread.trace" \
 		git -c grep.threads=3 grep --cached --no-content-index \
 			"present needle" >/dev/null &&

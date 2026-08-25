@@ -29,6 +29,8 @@ test_expect_success 'git grep -ah ina a' '
 
 test_expect_success 'git grep -I ina a' '
 	test_must_fail git grep -I ina a >actual &&
+	test_must_be_empty actual &&
+	test_must_fail git grep -I -l file a >actual &&
 	test_must_be_empty actual
 '
 
@@ -41,13 +43,19 @@ test_expect_success 'git grep -c ina a' '
 test_expect_success 'git grep -l ina a' '
 	echo a >expect &&
 	git grep -l ina a >actual &&
+	test_cmp expect actual &&
+	git grep --threads=1 -l -W -p -F -e absent -e file a >actual &&
 	test_cmp expect actual
 '
 
 test_expect_success 'git grep -L bar a' '
 	echo a >expect &&
 	git grep -L bar a >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	git grep -l -L bar a >actual &&
+	test_cmp expect actual &&
+	test_must_fail git grep -l -L file a >actual &&
+	test_must_be_empty actual
 '
 
 test_expect_success 'git grep -q ina a' '
@@ -135,6 +143,9 @@ test_expect_success 'grep does not honor textconv' '
 test_expect_success 'grep --textconv honors textconv' '
 	echo "a:binaryQfileQm[*]cQ*æQð" >expect &&
 	git grep --textconv Qfile >actual &&
+	test_cmp expect actual &&
+	echo a >expect &&
+	git grep --textconv -l Qfile >actual &&
 	test_cmp expect actual
 '
 
