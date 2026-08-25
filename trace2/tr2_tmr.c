@@ -102,6 +102,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "filter",
 		.want_per_thread_events = 0,
 	},
+	/* Iterative filtering includes formatting, item cleanup, and stdio. */
+	[TRACE2_TIMER_ID_REF_FILTER_ITERATIVE_FILTER_FORMAT] = {
+		.category = "ref-filter",
+		.name = "iterative/filter-format",
+		.want_per_thread_events = 0,
+	},
 	/* Sorting includes sort-populate; format-output includes stdio. */
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE] = {
 		.category = "ref-filter",

@@ -3774,6 +3774,7 @@ void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 {
 	if (can_do_iterative_format(filter, sorting)) {
 		int save_commit_buffer_orig;
+		int saved_errno;
 		struct ref_filter_and_format_cbdata ref_cbdata = {
 			.filter = filter,
 			.format = format,
@@ -3782,7 +3783,13 @@ void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 		save_commit_buffer_orig = save_commit_buffer;
 		save_commit_buffer = 0;
 
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_REF_FILTER_ITERATIVE_FILTER_FORMAT);
+		errno = saved_errno;
 		do_filter_refs(filter, type, filter_and_format_one, &ref_cbdata);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_REF_FILTER_ITERATIVE_FILTER_FORMAT);
+		errno = saved_errno;
 
 		save_commit_buffer = save_commit_buffer_orig;
 	} else {
