@@ -294,20 +294,66 @@ static void discard_unused_subtrees(struct cache_tree *it)
 	}
 }
 
-int cache_tree_fully_valid(struct cache_tree *it)
+struct cache_tree_validation_stats {
+	uintmax_t nodes;
+	uintmax_t object_checks;
+};
+
+static int cache_tree_fully_valid_internal(struct cache_tree *it,
+					 struct cache_tree_validation_stats *stats)
 {
 	int i;
 	if (!it)
 		return 0;
-	if (it->entry_count < 0 ||
-	    !odb_has_object(the_repository->objects, &it->oid,
+	if (stats)
+		stats->nodes++;
+	if (it->entry_count < 0)
+		return 0;
+	if (stats)
+		stats->object_checks++;
+	if (!odb_has_object(the_repository->objects, &it->oid,
 			    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
 		return 0;
 	for (i = 0; i < it->subtree_nr; i++) {
-		if (!cache_tree_fully_valid(it->down[i]->cache_tree))
+		if (!cache_tree_fully_valid_internal(it->down[i]->cache_tree, stats))
 			return 0;
 	}
 	return 1;
+}
+
+int cache_tree_fully_valid(struct cache_tree *it)
+{
+	return cache_tree_fully_valid_internal(it, NULL);
+}
+
+static void trace_cache_tree_validation(const struct cache_tree_validation_stats *stats,
+				       int valid, int skipped)
+{
+	/*
+	 * write_index_as_tree() runs on the command's main thread. Accumulate
+	 * completed validations across index states, matching the validate
+	 * region's cumulative time. Calls include explicit skips; the rest
+	 * are valid or invalid. Object checks count odb_has_object() calls,
+	 * not unique OIDs or backend filesystem probes.
+	 */
+	static struct {
+		uintmax_t calls, valid, skipped;
+		struct cache_tree_validation_stats work;
+	} totals;
+	int saved_errno = errno;
+
+	totals.calls++;
+	totals.valid += valid;
+	totals.skipped += skipped;
+	totals.work.nodes += stats->nodes;
+	totals.work.object_checks += stats->object_checks;
+	trace2_data_intmax("cache_tree", NULL, "validate/calls-total", totals.calls);
+	trace2_data_intmax("cache_tree", NULL, "validate/valid-total", totals.valid);
+	trace2_data_intmax("cache_tree", NULL, "validate/skipped-total", totals.skipped);
+	trace2_data_intmax("cache_tree", NULL, "validate/nodes-total", totals.work.nodes);
+	trace2_data_intmax("cache_tree", NULL, "validate/object-checks-total",
+			   totals.work.object_checks);
+	errno = saved_errno;
 }
 
 static int must_check_existence(const struct cache_entry *ce)
@@ -836,9 +882,11 @@ struct tree *write_in_core_index_as_tree(struct repository *repo,
 int write_index_as_tree(struct object_id *oid, struct index_state *index_state, const char *index_path, int flags, const char *prefix)
 {
 	int entries, was_valid;
+	struct cache_tree_validation_stats validation = { 0 };
 	struct lock_file lock_file = LOCK_INIT;
 	int ret;
 	int write_index = !(flags & WRITE_TREE_NO_INDEX_WRITE);
+	int trace_validation = trace2_is_enabled();
 
 	flags &= ~WRITE_TREE_NO_INDEX_WRITE;
 	if (write_index)
@@ -853,8 +901,12 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 
 	trace2_region_enter("cache_tree", "validate", index_state->repo);
 	was_valid = !(flags & WRITE_TREE_IGNORE_CACHE_TREE) &&
-		    cache_tree_fully_valid(cache_tree_get(index_state));
+		    cache_tree_fully_valid_internal(cache_tree_get(index_state),
+					   trace_validation ? &validation : NULL);
 	trace2_region_leave("cache_tree", "validate", index_state->repo);
+	if (trace_validation)
+		trace_cache_tree_validation(&validation, was_valid,
+					    !!(flags & WRITE_TREE_IGNORE_CACHE_TREE));
 
 	ret = write_index_as_tree_internal(oid, index_state, was_valid, flags,
 					   prefix);

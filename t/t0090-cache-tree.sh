@@ -386,10 +386,46 @@ test_expect_success 'switching trees does not invalidate shared index' '
 
 test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_commit use-valid &&
+	test_when_finished "git checkout -- use-valid.t &&
+		rm -f .git/cache-tree-validate.trace .git/cache-tree-ignore.trace \
+			.git/cache-tree-stash.trace" &&
+	test-tool dump-cache-tree >actual &&
+	nodes=$(grep -cv "#(ref)" actual) &&
+	git rev-parse HEAD^{tree} >expect &&
 
 	# write-tree with a valid cache-tree should skip cache_tree_update
-	GIT_TRACE2_PERF="$(pwd)/trace.output" git write-tree &&
-	test_grep ! region_enter.*cache_tree.*update trace.output
+	GIT_TRACE2_PERF="$(pwd)/trace.output" \
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-validate.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 git write-tree >actual &&
+	test_cmp expect actual &&
+	test_grep ! region_enter.*cache_tree.*update trace.output &&
+	test_trace2_data cache_tree validate/calls-total 1 <.git/cache-tree-validate.trace &&
+	test_trace2_data cache_tree validate/valid-total 1 <.git/cache-tree-validate.trace &&
+	test_trace2_data cache_tree validate/skipped-total 0 <.git/cache-tree-validate.trace &&
+	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-validate.trace &&
+	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate.trace &&
+
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-ignore.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		git --no-optional-locks write-tree --ignore-cache-tree >actual &&
+	test_cmp expect actual &&
+	test_trace2_data cache_tree validate/calls-total 1 <.git/cache-tree-ignore.trace &&
+	test_trace2_data cache_tree validate/valid-total 0 <.git/cache-tree-ignore.trace &&
+	test_trace2_data cache_tree validate/skipped-total 1 <.git/cache-tree-ignore.trace &&
+	test_trace2_data cache_tree validate/nodes-total 0 <.git/cache-tree-ignore.trace &&
+	test_trace2_data cache_tree validate/object-checks-total 0 <.git/cache-tree-ignore.trace &&
+
+	echo changed >>use-valid.t &&
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-stash.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 git stash create >/dev/null &&
+	test_trace2_data cache_tree validate/calls-total 2 <.git/cache-tree-stash.trace &&
+	test_trace2_data cache_tree validate/valid-total 1 <.git/cache-tree-stash.trace >actual &&
+	test_line_count = 2 actual &&
+	test_trace2_data cache_tree validate/skipped-total 0 <.git/cache-tree-stash.trace >actual &&
+	test_line_count = 2 actual &&
+	test_trace2_data cache_tree validate/nodes-total "$((nodes + 1))" <.git/cache-tree-stash.trace &&
+	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-stash.trace >actual &&
+	test_line_count = 2 actual
 '
 
 test_done
