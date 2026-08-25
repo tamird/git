@@ -780,6 +780,21 @@ static void change_data_free(void *util, const char *str UNUSED)
 	free(d);
 }
 
+/* Time only the input read, not message cleanup or the editor. */
+static ssize_t read_commit_message_input(struct strbuf *sb, const char *path)
+{
+	int saved_errno = errno;
+	ssize_t ret;
+
+	trace2_region_enter("commit", "message-input", the_repository);
+	errno = saved_errno;
+	ret = path ? strbuf_read_file(sb, path, 0) : strbuf_read(sb, 0, 0);
+	saved_errno = errno;
+	trace2_region_leave("commit", "message-input", the_repository);
+	errno = saved_errno;
+	return ret;
+}
+
 static int prepare_to_commit(const char *index_file, const char *prefix,
 			     struct commit *current_head,
 			     struct wt_status *s,
@@ -828,11 +843,11 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 	} else if (logfile && !strcmp(logfile, "-")) {
 		if (isatty(0))
 			fprintf(stderr, _("(reading log message from standard input)\n"));
-		if (strbuf_read(&sb, 0, 0) < 0)
+		if (read_commit_message_input(&sb, NULL) < 0)
 			die_errno(_("could not read log from standard input"));
 		hook_arg1 = "message";
 	} else if (logfile) {
-		if (strbuf_read_file(&sb, logfile, 0) < 0)
+		if (read_commit_message_input(&sb, logfile) < 0)
 			die_errno(_("could not read log file '%s'"),
 				  logfile);
 		hook_arg1 = "message";
