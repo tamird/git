@@ -1123,9 +1123,10 @@ test_expect_success 'pending stat results do not outlive one directory read' '
 		GIT_EDITOR=: &&
 		GIT_TEST_UNTRACKED_CACHE_THREADS=0 &&
 		GIT_TRACE2_EVENT="$PWD/.git/twice-event" &&
+		GIT_TRACE2_EVENT_NESTING=2 &&
 		GIT_TRACE2_PERF="$PWD/.git/twice-perf" &&
 		export GIT_INDEX_FILE GIT_EDITOR GIT_TEST_UNTRACKED_CACHE_THREADS \
-			GIT_TRACE2_EVENT GIT_TRACE2_PERF &&
+			GIT_TRACE2_EVENT GIT_TRACE2_EVENT_NESTING GIT_TRACE2_PERF &&
 		test_must_fail git -c core.fsmonitor=false \
 			-c commit.status=true \
 			-c trailer.probe.cmd="echo created >b/new && test-tool chmtime +1 b && echo probe" \
@@ -1140,7 +1141,17 @@ test_expect_success 'pending stat results do not outlive one directory read' '
 		test_trace2_data status untracked/cache-use-fsmonitor 0 \
 			<.git/twice-event &&
 		test_grep ! "parallel-lstat:[1-9]" .git/twice-perf &&
-		test_grep "b/new" .git/twice-out
+		test_grep "b/new" .git/twice-out &&
+		grep "\"event\":\"timer\".*\"category\":\"untracked_cache\"" \
+			.git/twice-event >.git/twice-timers &&
+		test_line_count = 3 .git/twice-timers &&
+		for timer in revalidate revalidate/stat revalidate/ignore
+		do
+			test_grep "\"name\":\"$timer\",\"intervals\":1," \
+				.git/twice-timers || return 1
+		done &&
+		test_grep ! "\"event\":\"th_timer\".*\"category\":\"untracked_cache\"" \
+			.git/twice-event
 	)
 '
 

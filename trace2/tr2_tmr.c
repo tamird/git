@@ -301,6 +301,25 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "dispatch/worker-drain",
 		.want_per_thread_events = 0,
 	},
+	/*
+	 * Pending revalidation includes its disjoint stat and ignore phases.
+	 * The stat timer includes task preparation, worker execution, and joins.
+	 */
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE] = {
+		.category = "untracked_cache",
+		.name = "revalidate",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_STAT] = {
+		.category = "untracked_cache",
+		.name = "revalidate/stat",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE] = {
+		.category = "untracked_cache",
+		.name = "revalidate/ignore",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

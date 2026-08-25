@@ -3571,7 +3571,7 @@ static int revalidate_pending_untracked_cache(struct dir_struct *dir,
 {
 	struct untracked_cache *uc = dir->untracked;
 	struct strbuf path = STRBUF_INIT;
-	int ret = -1;
+	int ret = -1, saved_errno;
 
 	clear_directory_excludes(dir);
 	if (istate->repo != the_repository || uc != istate->untracked)
@@ -3587,8 +3587,22 @@ static int revalidate_pending_untracked_cache(struct dir_struct *dir,
 	    dir->internal.excludes_file_result == UNTRACKED_IGNORE_INDETERMINATE)
 		return -1;
 	validate_untracked_global_excludes(dir);
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_STAT);
+	errno = saved_errno;
 	validate_untracked_stats(uc->root, istate, &uc->fsmonitor_resync_cutoff);
-	if (revalidate_untracked_ignores(dir, istate, uc->root, &path))
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_STAT);
+	errno = saved_errno;
+
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE);
+	errno = saved_errno;
+	ret = revalidate_untracked_ignores(dir, istate, uc->root, &path);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE);
+	errno = saved_errno;
+	if (ret)
 		goto done;
 	uc->fsmonitor_resync = 0;
 	memset(&uc->fsmonitor_resync_cutoff, 0, sizeof(uc->fsmonitor_resync_cutoff));
@@ -3746,7 +3760,15 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	/* Validate $GIT_COMMON_DIR/info/exclude and core.excludesfile. */
 	root = dir->untracked->root;
 	if (dir->untracked->fsmonitor_resync) {
-		if (revalidate_pending_untracked_cache(dir, istate))
+		int ret, saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE);
+		errno = saved_errno;
+		ret = revalidate_pending_untracked_cache(dir, istate);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE);
+		errno = saved_errno;
+		if (ret)
 			return NULL;
 		*revalidated = 1;
 	}
