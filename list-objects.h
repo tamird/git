@@ -43,7 +43,8 @@ struct list_objects_tree_read_stats {
  *
  * Packed location/content observations reuse the optional ODB read results.
  * They include misses and failed attempts before a later source succeeds;
- * content includes cache copies and unpacking, not just inflation. Only a
+ * content includes cache copies and unpacking, not just inflation. Cache-copy
+ * measurements are a subset of packed content, not a sibling interval. Only a
  * successfully started parse-needed clock enables these ODB clocks. NULL or
  * failed outer clocks leave these timings unavailable, not valid zero totals.
  *
@@ -67,6 +68,7 @@ struct list_objects_tree_parse_stats {
 	int non_commits_timings_valid;
 	struct list_objects_tree_read_stats packed_entry_location;
 	struct list_objects_tree_read_stats packed_content;
+	struct list_objects_tree_read_stats packed_cache_copy;
 	int (*get_time)(uint64_t *now);
 };
 

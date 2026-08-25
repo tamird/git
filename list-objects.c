@@ -114,6 +114,11 @@ static int parse_tree_for_traversal(struct traversal_context *ctx,
 					 result.packed_content_attempt_count,
 					 result.packed_content_ns,
 					 result.packed_content_invalid, elapsed_ns);
+			record_tree_read(&stats->packed_cache_copy,
+					 result.packed_cache_copy_attempt_count,
+					 result.packed_cache_copy_ns,
+					 result.packed_content_invalid,
+					 result.packed_content_ns);
 			/* The two optional intervals must fit in their parent. */
 			if (!stats->packed_entry_location.invalid &&
 			    !stats->packed_content.invalid &&
