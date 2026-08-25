@@ -1669,10 +1669,11 @@ struct repository *repo UNUSED)
 	    status_format != STATUS_FORMAT_PORCELAIN_V2)
 		progress_flag = REFRESH_PROGRESS;
 	repo_read_index(the_repository);
-	/* Restore a missing tree early so refresh can reuse its tracked bitmap. */
+	/* Restore missing or pending trees early to reuse their tracked bitmaps. */
 	if ((!optional_locks ||
 	     (the_repository->index->untracked &&
-	      !the_repository->index->untracked->root)) &&
+	      (!the_repository->index->untracked->root ||
+	       the_repository->index->untracked->fsmonitor_resync))) &&
 	    !s.pathspec.nr &&
 	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
 	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&

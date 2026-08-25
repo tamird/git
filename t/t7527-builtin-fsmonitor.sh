@@ -2260,7 +2260,114 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-clean-third.trace &&
 		git hash-object .git/index >../untracked-restart-clean-index.after &&
 		test_cmp ../untracked-restart-clean-index.before \
-			../untracked-restart-clean-index.after
+			../untracked-restart-clean-index.after &&
+		git status --porcelain -uno >../untracked-restart-pending.uno &&
+		test_must_be_empty ../untracked-restart-pending.uno &&
+		test-tool dump-untracked-cache state \
+			>../untracked-restart-pending.state &&
+		test_grep "^pending " ../untracked-restart-pending.state &&
+		git hash-object .git/index >../untracked-restart-pending.before &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-pending-warm.trace" \
+			git --no-optional-locks status --porcelain \
+			>../untracked-restart-pending-warm.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-pending-warm.out &&
+		test_trace2_data status untracked/cache-root-present 1 \
+			<../untracked-restart-pending-warm.trace &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<../untracked-restart-pending-warm.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../untracked-restart-pending-warm.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+			<../untracked-restart-pending-warm.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-can-skip 1 \
+			<../untracked-restart-pending-warm.trace &&
+		git hash-object .git/index >../untracked-restart-pending.after &&
+		test_cmp ../untracked-restart-pending.before \
+			../untracked-restart-pending.after &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-pending-locked.trace" \
+			git status --porcelain \
+			>../untracked-restart-pending-locked.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-pending-locked.out &&
+		test_trace2_data status index/optional-lock acquired \
+			<../untracked-restart-pending-locked.trace &&
+		test_trace2_data status untracked-cache/restore-attempted 1 \
+			<../untracked-restart-pending-locked.trace &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-pending-locked.trace &&
+		test_trace2_data fsmonitor tracked-cache/restored "[1-9][0-9]*" \
+			<../untracked-restart-pending-locked.trace &&
+		test_trace2_data status untracked/cache-resync 0 \
+			<../untracked-restart-pending-locked.trace &&
+		test_trace2_data status untracked/directories-visited 0 \
+			<../untracked-restart-pending-locked.trace &&
+		test_grep ! "\"category\":\"untracked_cache\".*\"name\":\"revalidate\"" \
+			../untracked-restart-pending-locked.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../untracked-restart-pending-locked.trace &&
+		test-tool dump-untracked-cache state \
+			>../untracked-restart-pending-published.state &&
+		test_grep "^trusted$" ../untracked-restart-pending-published.state &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-pending-published.trace" \
+			git status --porcelain \
+			>../untracked-restart-pending-published.out &&
+		test_cmp ../untracked-restart-clean.expect \
+			../untracked-restart-pending-published.out &&
+		test_trace2_data status untracked-cache/restore-attempted 0 \
+			<../untracked-restart-pending-published.trace &&
+		for restore_case in index token unsupported
+		do
+			restore_prefix="../untracked-restart-pending-$restore_case" &&
+			test-tool fsmonitor-client flush >"$restore_prefix.flush" &&
+			git status --porcelain -uno >"$restore_prefix.uno" &&
+			test-tool dump-untracked-cache state >"$restore_prefix.state" &&
+			test_grep "^pending " "$restore_prefix.state" &&
+			GIT_TRACE2_EVENT="$PWD/$restore_prefix-warm.trace" \
+				git --no-optional-locks status --porcelain \
+				>"$restore_prefix-warm.out" &&
+			test_trace2_data status untracked/cache-resync 1 \
+				<"$restore_prefix-warm.trace" &&
+			test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+				<"$restore_prefix-warm.trace" &&
+			test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+				<"$restore_prefix-warm.trace" &&
+			restore_mode=true &&
+			restore_result=miss &&
+			case "$restore_case" in
+			index)
+				git update-index --assume-unchanged -- steady/deep/tracked
+				;;
+			token)
+				echo modified >>tracked
+				;;
+			unsupported)
+				restore_mode=false &&
+				restore_result=unsupported
+				;;
+			esac &&
+			git --no-optional-locks -c core.fsmonitor=false \
+				-c core.untrackedCache=false status --porcelain \
+				>"$restore_prefix.expect" &&
+			GIT_TRACE2_EVENT="$PWD/$restore_prefix.trace" \
+				git -c core.fsmonitor="$restore_mode" status --porcelain \
+				>"$restore_prefix.actual" &&
+			test_cmp "$restore_prefix.expect" "$restore_prefix.actual" &&
+			test_trace2_data status index/optional-lock acquired \
+				<"$restore_prefix.trace" &&
+			test_trace2_data status untracked-cache/restore-attempted 1 \
+				<"$restore_prefix.trace" &&
+			test_trace2_data status untracked-cache/restore "$restore_result" \
+				<"$restore_prefix.trace" &&
+			test_trace2_data status untracked/cache-root-present 1 \
+				<"$restore_prefix.trace" &&
+			test_trace2_data status untracked/cache-resync 1 \
+				<"$restore_prefix.trace" &&
+			! have_t2_data_event fsmonitor tracked-cache/restored \
+				<"$restore_prefix.trace" &&
+			! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+				<"$restore_prefix.trace" || return 1
+		done
 	)
 '
 
