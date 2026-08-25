@@ -425,4 +425,165 @@ test_expect_success 'stash with all negative' '
 	test_cmp expect actual
 '
 
+test_expect_success 'recursive excludes prune descendants but retain boundary reads' '
+	cat >expect-exclude <<-\EOF &&
+	HEAD:file
+	HEAD:sub/file
+	HEAD:sub/file2
+	HEAD:sub2/file
+	EOF
+	>exclude-literal.trace &&
+	GIT_TRACE2_EVENT="$PWD/exclude-literal.trace" \
+		git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(glob)**/*" ":(exclude)sub/sub" >actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	test_trace2_data grep content_index_tree_directories 3 <exclude-literal.trace &&
+	>exclude-recursive.trace &&
+	GIT_TRACE2_EVENT="$PWD/exclude-recursive.trace" \
+		git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(glob)**/*" ":(exclude)sub/sub/**" >actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	# Before the optimization this is 4: sub/sub/sub is unnecessarily read.
+	test_trace2_data grep content_index_tree_directories 3 <exclude-recursive.trace
+'
+
+test_expect_success 'recursive excludes preserve other pathspec modes' '
+	for excluded in \
+		":(exclude,glob)sub/sub/**" \
+		":(exclude,top)sub/sub/**" \
+		":(exclude,icase)SUB/SUB/**" \
+		":(exclude,attr:!prune)sub/sub/**" \
+		":(exclude)sub/s*/**" \
+		":(exclude)sub/sub/*"
+	do
+		>exclude-mode.trace &&
+		GIT_TRACE2_EVENT="$PWD/exclude-mode.trace" \
+			git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+			":(glob)**/*" "$excluded" >actual-exclude &&
+		test_cmp expect-exclude actual-exclude &&
+		test_trace2_data grep content_index_tree_directories 4 <exclude-mode.trace ||
+		return 1
+	done &&
+	>exclude-mode.trace &&
+	GIT_TRACE2_EVENT="$PWD/exclude-mode.trace" \
+		git grep --no-content-index --threads=1 --max-depth=1 -L \
+		"never matches" HEAD -- ":(glob)**/*" ":(exclude)sub/sub/**" \
+		>actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	test_trace2_data grep content_index_tree_directories 4 <exclude-mode.trace &&
+	>exclude-mode.trace &&
+	GIT_TRACE2_EVENT="$PWD/exclude-mode.trace" \
+		git grep --no-content-index --threads=1 --recurse-submodules -L \
+		"never matches" HEAD -- ":(glob)**/*" ":(exclude)sub/sub/**" \
+		>actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	test_trace2_data grep content_index_tree_directories 4 <exclude-mode.trace &&
+	git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(glob)**/*" >expect-exclude-all &&
+	git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(glob)**/*" ":(exclude,literal)sub/sub/**" >actual-exclude &&
+	test_cmp expect-exclude-all actual-exclude &&
+	git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(exclude)sub/sub/**" ":(glob)**/*" >actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(exclude)sub/sub/**" >actual-exclude &&
+	test_cmp expect-exclude actual-exclude &&
+	git -C sub grep --no-content-index --threads=1 --full-name -L \
+		"never matches" HEAD -- ":(glob)**/*" ":(exclude)sub/**" >actual-exclude &&
+	printf "HEAD:sub/file\nHEAD:sub/file2\n" >expect-exclude-prefix &&
+	test_cmp expect-exclude-prefix actual-exclude
+'
+
+test_expect_success 'setup distinct excluded trees and non-directory entries' '
+	exclude_blob=$(git rev-parse HEAD:file) &&
+	exclude_kept=$(git rev-parse HEAD:sub2) &&
+	exclude_commit=$(git rev-parse HEAD) &&
+	exclude_deep=$(printf "100644 blob %s\tonly-excluded\n" "$exclude_blob" |
+		git mktree) &&
+	test "$exclude_deep" != "$exclude_kept" &&
+	exclude_boundary=$({
+		printf "100644 blob %s\ta\n" "$exclude_blob" &&
+		printf "160000 commit %s\tgitlink\n" "$exclude_commit" &&
+		printf "120000 blob %s\tlink\n" "$exclude_blob" &&
+		printf "040000 tree %s\tz\n" "$exclude_deep"
+	} | git mktree) &&
+	exclude_outer=$({
+		printf "100644 blob %s\tfile\n" "$exclude_blob" &&
+		printf "040000 tree %s\tsub\n" "$exclude_boundary"
+	} | git mktree) &&
+	exclude_root=$({
+		printf "100644 blob %s\tfile\n" "$exclude_blob" &&
+		printf "040000 tree %s\tsub\n" "$exclude_outer" &&
+		printf "040000 tree %s\tsub2\n" "$exclude_kept"
+	} | git mktree) &&
+	printf "%s:file\n%s:sub/file\n%s:sub2/file\n" \
+		"$exclude_root" "$exclude_root" "$exclude_root" >expect-exclude-objects &&
+	git grep --no-content-index --threads=1 -L "never matches" "$exclude_root" -- \
+		":(glob)**/*" ":(exclude)sub/sub/**" >actual-exclude &&
+	test_cmp expect-exclude-objects actual-exclude &&
+	git grep --no-content-index --threads=1 -L "never matches" HEAD -- \
+		":(glob)**/*" ":(exclude)file/**" >actual-exclude &&
+	test_cmp expect-exclude-all actual-exclude
+'
+
+test_expect_success 'recursive excludes still parse the already-read boundary buffer' '
+	git cat-file tree "$exclude_boundary" >exclude-corrupt.raw &&
+	printf broken >>exclude-corrupt.raw &&
+	exclude_corrupt=$(git hash-object --literally -w -t tree exclude-corrupt.raw) &&
+	exclude_corrupt_outer=$(printf "040000 tree %s\tsub\n" "$exclude_corrupt" |
+		git mktree) &&
+	exclude_corrupt_root=$(printf "040000 tree %s\tsub\n" "$exclude_corrupt_outer" |
+		git mktree) &&
+	test_must_fail git grep --no-content-index --threads=1 -L "never matches" \
+		"$exclude_corrupt_root" -- ":(glob)**/*" ":(exclude,glob)sub/sub/**" \
+		>expect-exclude-corrupt 2>expect-exclude-error &&
+	test_must_fail git grep --no-content-index --threads=1 -L "never matches" \
+		"$exclude_corrupt_root" -- ":(glob)**/*" ":(exclude)sub/sub/**" \
+		>actual-exclude-corrupt 2>actual-exclude-error &&
+	test_cmp expect-exclude-corrupt actual-exclude-corrupt &&
+	test_cmp expect-exclude-error actual-exclude-error &&
+	test_grep "too-short tree object" actual-exclude-error
+'
+
+test_expect_success 'recursive excludes avoid missing descendants, not boundary or included trees' '
+	exclude_deep_path=.git/objects/$(test_oid_to_path "$exclude_deep") &&
+	exclude_boundary_path=.git/objects/$(test_oid_to_path "$exclude_boundary") &&
+	test_path_is_file "$exclude_deep_path" &&
+	test_path_is_file "$exclude_boundary_path" &&
+	mv "$exclude_deep_path" "$exclude_deep_path.save" &&
+	test_when_finished "mv \"$exclude_deep_path.save\" \"$exclude_deep_path\"" &&
+	git grep --no-content-index --threads=1 -L "never matches" "$exclude_root" -- \
+		":(glob)**/*" ":(exclude)sub/sub/**" >actual-exclude 2>exclude-error &&
+	test_cmp expect-exclude-objects actual-exclude &&
+	test_must_be_empty exclude-error &&
+	test_must_fail git grep --no-content-index --threads=1 -L "never matches" \
+		"$exclude_root" -- ":(glob)**/*" >actual-exclude 2>exclude-error &&
+	test_grep "$exclude_deep" exclude-error &&
+	mv "$exclude_boundary_path" "$exclude_boundary_path.save" &&
+	test_when_finished "test ! -f \"$exclude_boundary_path.save\" ||
+		mv \"$exclude_boundary_path.save\" \"$exclude_boundary_path\"" &&
+	test_must_fail git grep --no-content-index --threads=1 -L "never matches" \
+		"$exclude_root" -- ":(glob)**/*" ":(exclude)sub/sub/**" \
+		>actual-exclude 2>exclude-error &&
+	test_grep "$exclude_boundary" exclude-error &&
+	mv "$exclude_boundary_path.save" "$exclude_boundary_path" &&
+	# Both the prefetch walk and the main walk must leave the missing descendant alone.
+	test_config remote.exclude-missing.promisor true &&
+	test_config remote.exclude-missing.url "$PWD/exclude-missing-remote" &&
+	>exclude-promisor.trace &&
+	GIT_TRACE2_EVENT="$PWD/exclude-promisor.trace" \
+		git grep --no-content-index --threads=1 -L "never matches" "$exclude_root" -- \
+		":(glob)**/*" ":(exclude)sub/sub/**" >actual-exclude 2>exclude-error &&
+	test_cmp expect-exclude-objects actual-exclude &&
+	test_must_be_empty exclude-error &&
+	test_region grep prefetch_blobs exclude-promisor.trace &&
+	test_grep ! "\"key\":\"fetch_count\"" exclude-promisor.trace &&
+	>exclude-promisor.trace &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/exclude-promisor.trace" \
+		git grep --no-content-index --threads=1 -L "never matches" "$exclude_root" -- \
+		":(glob)**/*" >actual-exclude 2>exclude-error &&
+	test_trace2_data promisor fetch_count 1 <exclude-promisor.trace
+'
+
 test_done

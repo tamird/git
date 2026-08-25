@@ -3042,6 +3042,36 @@ static void flush_grep_tree_batch_before_die(struct grep_tree_batch *batch)
 		wait_all();
 }
 
+/*
+ * Unlike shared tree walkers, grep does not report directory entries.
+ * A default-wildcard double-star exclusion covers child trees once the
+ * current base is inside its literal prefix. Still parse the current
+ * descriptor so errors in the already-read tree retain their normal handling.
+ */
+static int grep_tree_contents_excluded(const struct repository *repo,
+					const struct pathspec *pathspec,
+					const struct strbuf *base, int tn_len)
+{
+	size_t baselen = base->len - tn_len;
+
+	if (recurse_submodules || repo->submodule_prefix ||
+	    !(pathspec->magic & PATHSPEC_EXCLUDE) ||
+	    (pathspec->magic & PATHSPEC_MAXDEPTH))
+		return 0;
+	for (int i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		int prefix_len = item->len - 2;
+
+		if (item->magic == PATHSPEC_EXCLUDE && item->len > 3 &&
+		    item->nowildcard_len == prefix_len &&
+		    baselen >= (size_t)prefix_len &&
+		    !memcmp(item->match + prefix_len - 1, "/**", 3) &&
+		    !memcmp(base->buf + tn_len, item->match, prefix_len))
+			return 1;
+	}
+	return 0;
+}
+
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
 		     int check_attr, struct grep_tree_batch *batch,
@@ -3055,6 +3085,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
 	int onestar_suffix_pathspec = query && query->onestar_suffix_pathspec;
+	int skip_subdirectories = query &&
+		grep_tree_contents_excluded(repo, pathspec, base, tn_len);
 
 	/*
 	 * A root directory named exactly like any pattern admits descendants
@@ -3210,6 +3242,12 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			}
 		}
 
+		if (skip_subdirectories && S_ISDIR(entry.mode)) {
+			if (query->trace_enabled)
+				query->pathspec_rejected++;
+			continue;
+		}
+
 		strbuf_add(base, entry.path, te_len);
 
 		if (S_ISREG(entry.mode)) {
@@ -3356,6 +3394,8 @@ static void collect_blob_oids_for_tree(struct repository *repo,
 	int old_baselen = base->len;
 	struct strbuf name = STRBUF_INIT;
 	enum interesting match = entry_not_interesting;
+	int skip_subdirectories =
+		grep_tree_contents_excluded(repo, pathspec, base, tn_len);
 
 	while (tree_entry(tree, &entry)) {
 		if (match != all_entries_interesting) {
@@ -3370,6 +3410,9 @@ static void collect_blob_oids_for_tree(struct repository *repo,
 			if (match == entry_not_interesting)
 				continue;
 		}
+
+		if (skip_subdirectories && S_ISDIR(entry.mode))
+			continue;
 
 		strbuf_add(base, entry.path, tree_entry_len(&entry));
 

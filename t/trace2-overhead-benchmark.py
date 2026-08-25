@@ -217,16 +217,18 @@ class Workload:
     expected_stdout: bytes
     required_timers: dict[str, int]
     tree_read_revisions: int = 0
+    allowed_tree_directories: tuple[int, ...] = ()
 
 
-def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
+def trace_coverage(
+    path: Path, workload: Workload, observed_tree_counts: dict[str, int],
+) -> dict[str, object]:
     timers: Counter[str] = Counter()
     events: Counter[str] = Counter()
     sessions: set[str] = set()
     tree_values: dict[str, int] = {}
     tree_counts = {
         "count/revisions": workload.tree_read_revisions,
-        "content_index_tree_directories": (SMALL_FILES // 10 + 1) * workload.tree_read_revisions,
     }
     tree_times = ("content_index_tree_walk_us", "content_index_tree_object_read_us")
     with path.open() as source:
@@ -241,7 +243,8 @@ def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
                     raise AssertionError("tree-only grep must exit with no matches")
                 key = event.get("key")
                 if (event["event"] == "data" and event.get("category") == "grep"
-                        and (key in tree_counts or key in tree_times)):
+                        and (key in tree_counts or key in tree_times
+                             or key == "content_index_tree_directories")):
                     if key in tree_values or event.get("thread") != "main":
                         raise AssertionError("tree DATA must occur once on the main thread")
                     tree_values[key] = int(event["value"])
@@ -260,6 +263,12 @@ def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
             raise AssertionError("tree-only grep must have one complete process")
         if any(tree_values.get(key) != expected for key, expected in tree_counts.items()):
             raise AssertionError(f"tree traversal count mismatch: {tree_values}")
+        directories = tree_values.get("content_index_tree_directories", -1)
+        if directories not in workload.allowed_tree_directories:
+            raise AssertionError(f"unexpected child-tree count: {tree_values}")
+        previous = observed_tree_counts.setdefault(workload.name, directories)
+        if directories != previous:
+            raise AssertionError("child-tree count changed between identical commands")
         if not 0 <= tree_values[tree_times[1]] <= tree_values[tree_times[0]]:
             raise AssertionError("child-read time must be nonnegative and contained in tree-walk time")
     return {"bytes": path.stat().st_size, "events": dict(events),
@@ -305,6 +314,7 @@ def summarize(samples: list[Sample]) -> dict[str, object]:
 
 def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) -> dict[str, object]:
     samples: dict[str, list[Sample]] = {workload.name: [] for workload in workloads}
+    observed_tree_counts: dict[str, int] = {}
     conditions = tuple((workload, mode) for workload in workloads for mode in MODES)
     if len(workloads) == 1:
         orders = tuple(tuple((workloads[0], mode) for mode in order) for order in ORDERS)
@@ -327,7 +337,7 @@ def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) 
                 raise AssertionError(f"{workload.name}/{mode}: output parity failed")
             if workload.checkout:
                 workload.fixture.verify_checkout()
-            coverage = (trace_coverage(git.trace, workload)
+            coverage = (trace_coverage(git.trace, workload, observed_tree_counts)
                         if mode == "event-file" else None)
             git.remaining_seconds()
             if round_index >= 0:
@@ -366,9 +376,12 @@ def packed_grep_workload(fixture: Fixture, name: str, path: str, count: int) -> 
     })
 
 
-def tree_read_workload(git: Git, fixture: Fixture) -> tuple[Workload, dict[str, object]]:
-    # Verify outside the sample that repeated revisions retain initial misses:
-    # unpack_entry caches delta bases, not every object it returns.
+def tree_read_workload(
+    git: Git, fixture: Fixture, *, exclude_trees: bool = False,
+) -> tuple[Workload, dict[str, object]]:
+    # Verify the unchanged packed fixture outside the sample. Without exclusions,
+    # repeated revisions retain initial misses: unpack_entry caches delta bases,
+    # not every object it returns.
     listing = git.run(fixture.repo, ("ls-tree", "-r", "-d", "HEAD")).stdout
     children = [line.split() for line in listing.decode().splitlines()]
     child_oids = [fields[2] for fields in children]
@@ -400,8 +413,8 @@ def tree_read_workload(git: Git, fixture: Fixture) -> tuple[Workload, dict[str, 
         raise AssertionError(
             f"expected one tree delta between {first} and {second}; got {tree_delta_bases}"
         )
-    # A successful delta read inserts its base before returning, initializing
-    # the cache by child read 3 regardless of which member was packed as delta.
+    # Without exclusions, a successful delta read initializes the cache by child
+    # read 3 regardless of which member was packed as delta.
     delta_oid, base_oid = next(iter(tree_delta_bases.items()))
     never_base = len(set(child_oids) - delta_bases)
     if not never_base:
@@ -416,22 +429,38 @@ def tree_read_workload(git: Git, fixture: Fixture) -> tuple[Workload, dict[str, 
         "known_initial_cache_misses_lower_bound": never_base * TREE_READ_REVISIONS,
         "child_cache_copy_upper_bound": (child_count - never_base) * TREE_READ_REVISIONS,
     }
-    workload = Workload("grep-packed-tree-reads", fixture, (
+    allowed_counts = (child_count * TREE_READ_REVISIONS,)
+    if exclude_trees:
+        allowed_counts += (TREE_READ_REVISIONS,)
+        # The skipped seed trees do not initialize the delta-base cache. Keep
+        # only fixture facts and explicit baseline/pruned work expectations.
+        geometry = {
+            "pack_sha256": geometry["pack_sha256"],
+            "child_trees_per_revision": child_count,
+            "exclusion": ":(exclude)data/**",
+            "expected_tree_directories": {
+                "baseline": allowed_counts[0], "pruned": allowed_counts[1],
+            },
+        }
+    name = "grep-packed-tree-excludes" if exclude_trees else "grep-packed-tree-reads"
+    workload = Workload(name, fixture, (
         "grep", "--no-content-index", "--threads=1", "--fixed-strings",
         "trace2-overhead-needle", *("HEAD",) * TREE_READ_REVISIONS,
         "--", ":(glob)**/__trace2_absent__",
+        *((":(exclude)data/**",) if exclude_trees else ()),
     ), False, b"", {
         "grep/source/object-read": 0, "grep/source/process": 0,
         "grep/dispatch/producer-lock": 0, "grep/dispatch/worker-drain": 0,
-    }, tree_read_revisions=TREE_READ_REVISIONS)
+    }, tree_read_revisions=TREE_READ_REVISIONS, allowed_tree_directories=allowed_counts)
     return workload, geometry
 
 
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
-            or (len(sys.argv) == 4 and sys.argv[3] != "--tree-reads-only")):
+            or (len(sys.argv) == 4 and sys.argv[3] not in (
+                "--tree-reads-only", "--tree-excludes-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
-                         "and optional --test_arg=--tree-reads-only")
+                         "and optional --test_arg=--tree-reads-only or --tree-excludes-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -480,13 +509,24 @@ def main() -> None:
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
         small = make_fixture(git, root, streaming=False, tree_reads_only=len(sys.argv) == 4)
         if len(sys.argv) == 4:
-            workload, report["tree_read_geometry"] = tree_read_workload(git, small)
+            exclude_trees = sys.argv[3] == "--tree-excludes-only"
+            workload, report["tree_read_geometry"] = tree_read_workload(
+                git, small, exclude_trees=exclude_trees,
+            )
             report["limitations"] = [
                 "Repeated revisions amplify packed child-tree reads, not unique OIDs or cold-cache I/O.",
                 "The non-delta-base count proves an initial-miss lower bound, not the production cache mixture.",
                 "A/B requires matched harness, pack, build options and trace mode; on/off ratios are not patch effects.",
                 "No blobs, workers, daemon or OG processing; no performance threshold.",
             ]
+            if exclude_trees:
+                report["limitations"] = [
+                    "The existing packed fixture is unchanged; only the exclusion pathspec is added.",
+                    "The candidate can skip covered child-tree reads; both versions still read and parse the boundary tree.",
+                    "Each binary must consistently produce the exact baseline or pruned count; compare those counts with the pinned binary identity.",
+                    "A/B requires matched harness, pack, build options and trace mode; work reduction is not a latency measurement.",
+                    "No blobs, workers, daemon or OG processing; no cold-cache or natural-workload savings claim, and no performance threshold.",
+                ]
             report.update(benchmark(git, (workload,)))
             git.remaining_seconds()
             report["status"] = "complete"
