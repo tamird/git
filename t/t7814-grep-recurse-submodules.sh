@@ -163,7 +163,18 @@ test_expect_success FSMONITOR_DAEMON \
 	env GIT_TRACE2_EVENT="$PWD/recurse-content-index.trace" \
 		git grep -F -e "(3|4)" --recurse-submodules HEAD >actual &&
 	test_cmp expect actual &&
-	! test_grep content_index_tree recurse-content-index.trace
+	# Counts and child reads cover the superproject, not submodule trees.
+	test_trace2_data grep content_index_tree_entries 5 <recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_directories 1 <recurse-content-index.trace &&
+	for phase in walk object_read
+	do
+		test_trace2_data grep "content_index_tree_${phase}_us" \
+			"[0-9][0-9]*" <recurse-content-index.trace || return 1
+	done &&
+	# Permit only the four walk fields, not tree query/batch/IPC fields.
+	test "$(grep -c "\"key\":\"content_index_tree_" \
+		recurse-content-index.trace)" = 4 &&
+	test_grep ! query_content_index_ipc recurse-content-index.trace
 '
 
 test_expect_success 'grep result cache uses stable repository identity' '
