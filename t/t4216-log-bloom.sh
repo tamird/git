@@ -427,7 +427,70 @@ test_expect_success 'version 3 factors multi-path Bloom queries' '
 			":(exclude)second/shared/lock" >actual &&
 		test_cmp expect actual &&
 		test_grep "\"trie_steps\":[1-9]" \
-			"$TRASH_DIRECTORY/multi-path.perf"
+			"$TRASH_DIRECTORY/multi-path.perf" &&
+
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2_EVENT="$PWD/null-prune-empty.trace" \
+			git -c core.commitGraph=false log -8 --format=%s HEAD -- \
+				absent-one absent-two >actual-empty &&
+		test_must_be_empty actual-empty &&
+		GIT_TRACE2_EVENT="$PWD/null-prune-limit.trace" \
+			git -c core.commitGraph=false log -1 --format=%s HEAD -- \
+				unrelated first/shared/lock >actual-limit &&
+		echo other >expect-limit &&
+		test_cmp expect-limit actual-limit &&
+		for mode in empty limit
+		do
+			case "$mode" in
+			empty) returned=0 ;;
+			limit) returned=1 ;;
+			esac &&
+			trace="$PWD/null-prune-$mode.trace" &&
+			test_trace2_data log count/returned "$returned" <"$trace" &&
+			test_trace2_data log count/shown "$returned" <"$trace" &&
+			test_trace2_data log count/pathspecs 2 <"$trace" &&
+			test_trace2_data log mode/follow 0 <"$trace" &&
+			test_trace2_data bloom active 0 <"$trace" &&
+			test_trace2_data log get-revision-null-us "[0-9][0-9]*" \
+				<"$trace" &&
+			grep "\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision\"," \
+				"$trace" >null-prune.timer &&
+			test_line_count = 1 null-prune.timer &&
+			test_grep "\"intervals\":$((returned + 1))," \
+				null-prune.timer || return 1
+		done &&
+		prune_prefix=get-revision-null-prune-diff- &&
+		for mode in empty limit
+		do
+			case "$mode" in
+			empty) count=5 ;;
+			limit) count=0 ;;
+			esac &&
+			trace="$PWD/null-prune-$mode.trace" &&
+			test_trace2_data log "${prune_prefix}count" "$count" <"$trace" &&
+			keys=count &&
+			if grep "\"category\":\"log\",\"key\":\"${prune_prefix}us\"," "$trace"
+			then
+				keys="$keys us" &&
+				test_trace2_data log "${prune_prefix}us" "[0-9][0-9]*" \
+					<"$trace" &&
+				prune_us=$(sed -n "s/.*\"key\":\"${prune_prefix}us\",\"value\":\"\\([0-9]*\\)\".*/\\1/p" "$trace") &&
+				null_us=$(sed -n "s/.*\"key\":\"get-revision-null-us\",\"value\":\"\\([0-9]*\\)\".*/\\1/p" "$trace") &&
+				test "$prune_us" -le "$null_us"
+			fi &&
+			if test "$mode" = limit
+			then
+				test_trace2_data log "${prune_prefix}us" 0 <"$trace"
+			fi &&
+			for key in $keys
+			do
+				grep "\"category\":\"log\",\"key\":\"${prune_prefix}$key\"," \
+					"$trace" >null-prune.data &&
+				test_line_count = 1 null-prune.data &&
+				test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+					null-prune.data || return 1
+			done || return 1
+		done
 	)
 '
 

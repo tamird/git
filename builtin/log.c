@@ -417,6 +417,7 @@ struct log_trace2_state {
 	uint64_t prepare_end;
 	uint64_t output_ns;
 	uint64_t get_revision_null_ns;
+	struct revision_prune_diff_stats get_revision_null_prune_diff;
 	uint64_t returned;
 	uint64_t shown;
 	int pending;
@@ -450,19 +451,30 @@ static int cmd_log_walk_no_free(struct rev_info *rev,
 	 * retain that state information if replacing rev->diffopt in this loop
 	 */
 	while (1) {
+		struct revision_prune_diff_stats prune_stats;
 		uint64_t output_begin = 0;
 		int shown;
 
 		/* Include the terminating NULL call, but no output-loop work. */
-		if (trace)
+		if (trace) {
+			memset(&prune_stats, 0, sizeof(prune_stats));
+			prune_stats.counts_valid = 1;
+			prune_stats.timings_valid = 1;
+			rev->prune_diff_stats = &prune_stats;
 			trace2_timer_start(TRACE2_TIMER_ID_LOG_GET_REVISION);
+		}
 		commit = get_revision(rev);
 		if (trace) {
 			uint64_t ns = trace2_timer_stop(
 				TRACE2_TIMER_ID_LOG_GET_REVISION);
 
-			if (!commit)
+			rev->prune_diff_stats = NULL;
+			if (!commit) {
 				trace->get_revision_null_ns = ns;
+				if (prune_stats.elapsed_ns > ns)
+					prune_stats.timings_valid = 0;
+				trace->get_revision_null_prune_diff = prune_stats;
+			}
 		}
 		if (!commit)
 			break;
@@ -939,6 +951,8 @@ int cmd_log(int argc,
 	if (trace) {
 		uint64_t end = getnanotime();
 		uint64_t history_ns = walk_end - trace->prepare_end;
+		const struct revision_prune_diff_stats *prune_diff =
+			&trace->get_revision_null_prune_diff;
 
 		if (history_ns >= trace->output_ns)
 			history_ns -= trace->output_ns;
@@ -953,6 +967,13 @@ int cmd_log(int argc,
 				   history_ns / 1000);
 		trace2_data_intmax("log", the_repository, "get-revision-null-us",
 				   trace->get_revision_null_ns / 1000);
+		if (prune_diff->counts_valid)
+			trace2_data_intmax("log", the_repository,
+				"get-revision-null-prune-diff-count", prune_diff->count);
+		if (prune_diff->timings_valid)
+			trace2_data_intmax("log", the_repository,
+				"get-revision-null-prune-diff-us",
+				prune_diff->elapsed_ns / 1000);
 		trace2_data_intmax("log", the_repository, "output-us",
 				   trace->output_ns / 1000);
 		trace2_data_intmax("log", the_repository, "finalize-us",

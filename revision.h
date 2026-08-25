@@ -86,6 +86,18 @@ enum follow_bloom_elision_state {
 	FOLLOW_BLOOM_ELISION_ACTIVE,
 };
 
+/*
+ * Optional statistics for ordinary path-pruning tree diffs performed during
+ * one get_revision() call. The caller initializes and owns the collector;
+ * rev_info only borrows it for the duration of that call.
+ */
+struct revision_prune_diff_stats {
+	uint64_t count;
+	uint64_t elapsed_ns;
+	unsigned int counts_valid:1;
+	unsigned int timings_valid:1;
+};
+
 struct rev_cmdline_info {
 	unsigned int nr;
 	unsigned int alloc;
@@ -347,6 +359,7 @@ struct rev_info {
 	/* diff info for patches and for paths limiting */
 	struct diff_options diffopt;
 	struct diff_options pruning;
+	struct revision_prune_diff_stats *prune_diff_stats;
 	struct diff_pickaxe_index *pickaxe_index;
 
 	struct reflog_walk_info *reflog_info;
