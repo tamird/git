@@ -1390,8 +1390,15 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 					UINT64_MAX - result->packed_content_ns) {
 				result->packed_content_invalid = 1;
 			} else {
+				uint64_t elapsed_ns = finished - started;
+
 				result->packed_content_attempt_count++;
-				result->packed_content_ns += finished - started;
+				result->packed_content_ns += elapsed_ns;
+				/* Subset additions fit in the checked content totals. */
+				if (result->kind == ODB_READ_RESULT_PACKED_CACHE_COPY) {
+					result->packed_cache_copy_attempt_count++;
+					result->packed_cache_copy_ns += elapsed_ns;
+				}
 			}
 		}
 		if (!*oi->contentp)

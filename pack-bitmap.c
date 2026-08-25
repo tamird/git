@@ -1299,6 +1299,16 @@ static void trace_bitmap_fill_in_tree_parses(
 	trace_bitmap_fill_in_tree_read(repo, "packed-content",
 				      &tree_stats->packed_content,
 				      tree_stats->timings_valid);
+	if (tree_stats->timings_valid &&
+	    !tree_stats->packed_content.invalid &&
+	    !tree_stats->packed_cache_copy.invalid) {
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-tree-cache-copy-attempt-count",
+			tree_stats->packed_cache_copy.attempt_count);
+		trace2_data_intmax("bitmap", repo,
+			"haves/boundary-fill-in-traverse-tree-cache-copy-us",
+			tree_stats->packed_cache_copy.elapsed_ns / 1000);
+	}
 }
 
 static void trace_bitmap_fill_in_noncommits(

@@ -970,7 +970,119 @@ test_expect_success 'test-tool bitmap write determines bitmap selection' '
 		test_grep ! "\"label\":\"haves/boundary\"" boundary.trace &&
 		test_grep ! "\"key\":\"haves/boundary-fill-in-" boundary.trace &&
 		test_grep ! "\"key\":\"bitmap/misses\"" boundary.trace &&
-		test "$show_tree_count" -eq 1
+		test "$show_tree_count" -eq 1 &&
+
+		# Read a packed delta before its base, then reverse that order.
+		cache_blob=$(printf "cache-copy fixture\n" | git hash-object -w --stdin) &&
+		for i in $(test_seq 1 64)
+		do
+			printf "100644 blob %s\tfile%03d\n" "$cache_blob" "$i" ||
+				return 1
+		done >cache-tree-entries &&
+		cache_tree_a=$(git mktree <cache-tree-entries) &&
+		printf "100644 blob %s\tlast\n" "$cache_blob" >>cache-tree-entries &&
+		cache_tree_b=$(git mktree <cache-tree-entries) &&
+		cache_pack=$(printf "%s\n" "$cache_tree_a" "$cache_tree_b" |
+			git pack-objects --window=10 --depth=1 --no-reuse-delta \
+				--no-reuse-object .git/objects/pack/pack) &&
+		git verify-pack -v ".git/objects/pack/pack-$cache_pack.idx" \
+			>cache-pack-info &&
+		awk "\$2 == \"tree\" && NF == 7 { print \$1, \$7 }" \
+			cache-pack-info >cache-delta &&
+		test_line_count = 1 cache-delta &&
+		read cache_delta cache_base <cache-delta &&
+		git prune-packed &&
+		git multi-pack-index write --no-bitmap &&
+		for order in delta-first base-first
+		do
+			if test "$order" = delta-first
+			then
+				cache_first=$cache_delta &&
+				cache_last=$cache_base
+			else
+				cache_first=$cache_base &&
+				cache_last=$cache_delta
+			fi &&
+			cache_root=$(printf "040000 tree %s\ta\n040000 tree %s\tz\n" \
+				"$cache_first" "$cache_last" | git mktree) &&
+			cache_boundary=$(echo boundary |
+				git commit-tree "$cache_root" -p "$bitmap_have") &&
+			cache_have=$(echo have |
+				git commit-tree "$cache_root" -p "$cache_boundary") &&
+			cache_want=$(echo want |
+				git commit-tree "$cache_root" -p "$cache_boundary") &&
+			printf "%s\n%s\n%s\n" \
+				"$cache_want" "^$cache_have" "^$bitmap_have" >cache.in &&
+			git rev-list --objects --no-object-names \
+				"$cache_want" "^$cache_have" "^$bitmap_have" >cache.expect.raw &&
+			sort cache.expect.raw >cache.expect.objects &&
+			(
+				sane_unset GIT_TRACE2_EVENT_NESTING &&
+				GIT_TEST_PACK_USE_BITMAP_BOUNDARY_TRAVERSAL=1 \
+				GIT_TRACE2_EVENT="$PWD/cache-copy-$order.trace" \
+					git -c core.multiPackIndex=true \
+						-c core.deltaBaseCacheLimit=1m \
+						-c pack.useBitmapBoundaryTraversal=true \
+						pack-objects --use-bitmap-index --stdout --revs \
+						<cache.in >cache-copy-$order.pack
+			) &&
+			git index-pack cache-copy-$order.pack &&
+			list_packed_objects cache-copy-$order.idx >cache.actual.objects &&
+			test_cmp cache.expect.objects cache.actual.objects &&
+			test_line_count = 1 cache.actual.objects &&
+			test_grep "$bitmap_data.*\"key\":\"source/kind\",\"value\":\"2\"" \
+				cache-copy-$order.trace &&
+			test_grep "$bitmap_data.*\"key\":\"haves/root-with-bitmap\",\"value\":\"1\"" \
+				cache-copy-$order.trace &&
+			test_grep "$bitmap_data.*\"key\":\"haves/root-without-bitmap\",\"value\":\"1\"" \
+				cache-copy-$order.trace &&
+			test_grep "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-content-valid\",\"value\":\"[01]\"" \
+				cache-copy-$order.trace &&
+			if grep -q "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-content-valid\",\"value\":\"1\"" \
+				cache-copy-$order.trace
+			then
+				test_grep "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-content-attempt-count\",\"value\":\"2\"" \
+					cache-copy-$order.trace
+			fi || return 1
+		done &&
+		cache_prefix="haves/boundary-fill-in-traverse-tree-cache-copy-" &&
+		cache_data="\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":2,.*\"category\":\"bitmap\"" &&
+		for order in delta-first base-first
+		do
+			if test "$order" = delta-first
+			then
+				cache_count=1
+			else
+				cache_count=0
+			fi &&
+			if grep -q "$bitmap_data.*\"key\":\"${tree_read_prefix}packed-content-valid\",\"value\":\"1\"" \
+				cache-copy-$order.trace
+			then
+				test_grep "$cache_data.*\"key\":\"${cache_prefix}attempt-count\",\"value\":\"$cache_count\"" \
+					cache-copy-$order.trace &&
+				test_grep "$cache_data.*\"key\":\"${cache_prefix}us\",\"value\":\"[0-9][0-9]*\"" \
+					cache-copy-$order.trace &&
+				for field in attempt-count us
+				do
+					grep "\"key\":\"${cache_prefix}${field}\"" \
+						cache-copy-$order.trace >cache-field &&
+					test_line_count = 1 cache-field || return 1
+				done &&
+				cache_us=$(sed -n \
+					"s|.*\"key\":\"${cache_prefix}us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+					cache-copy-$order.trace) &&
+				content_us=$(sed -n \
+					"s|.*\"key\":\"${tree_read_prefix}packed-content-us\",\"value\":\"\\([0-9]*\\)\".*|\\1|p" \
+					cache-copy-$order.trace) &&
+				test "$cache_us" -le "$content_us" &&
+				if test "$cache_count" -eq 0
+				then
+					test "$cache_us" -eq 0
+				fi
+			else
+				test_grep ! "\"key\":\"${cache_prefix}" cache-copy-$order.trace
+			fi || return 1
+		done
 	)
 '
 

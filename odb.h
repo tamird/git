@@ -308,6 +308,8 @@ struct odb_read_result {
 	 */
 	uint64_t packed_content_attempt_count, packed_content_ns;
 	int packed_content_invalid;
+	/* Cache-copy subset of the checked packed-content totals above. */
+	uint64_t packed_cache_copy_attempt_count, packed_cache_copy_ns;
 	/*
 	 * Inclusive find_pack_entry calls for this content read, including
 	 * misses before a later source wins. Explicit second-read cache
