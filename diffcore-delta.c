@@ -208,8 +208,8 @@ int diffcore_count_changes(struct repository *r,
 	d = dst_count->data;
 	for (;;) {
 		unsigned dst_cnt, src_cnt;
-		if (!s->cnt)
-			break; /* we checked all in src */
+		if (!s->cnt || !d->cnt)
+			break; /* either input is exhausted */
 		while (d->cnt) {
 			if (d->hashval >= s->hashval)
 				break;

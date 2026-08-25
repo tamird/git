@@ -989,4 +989,41 @@ test_expect_success '--shortstat --dirstat should output only one dirstat' '
 	test_line_count = 1 actual_diff_shortstat_dirstat_files
 '
 
+test_expect_success 'dirstat and rename count unmatched spans' '
+	test_create_repo span-tails &&
+	(
+		cd span-tails &&
+		# The newline-terminated a, b and c spans have ascending hashes.
+		mkdir a-reference b-empty c-source-tail d-destination-tail &&
+		printf "a\nb\nc\n" >b-empty/file &&
+		cp b-empty/file c-source-tail/file &&
+		printf "a\nb\nb\n" >d-destination-tail/file &&
+		git add b-empty c-source-tail d-destination-tail &&
+		git commit -m base &&
+		>b-empty/file &&
+		cp d-destination-tail/file c-source-tail/file &&
+		printf "a\nb\nc\n" >d-destination-tail/file &&
+		# Added references match the damage from modifications: 6, 4, 4 bytes.
+		printf "r\ns\nt\n" >a-reference/b-empty &&
+		printf "r\ns\n" >a-reference/c-source-tail &&
+		cp a-reference/c-source-tail a-reference/d-destination-tail &&
+		git add a-reference b-empty c-source-tail d-destination-tail &&
+
+		for dir in b-empty c-source-tail d-destination-tail
+		do
+			printf "  50.0%% a-reference/\n  50.0%% %s/\n" "$dir" >expect &&
+			git diff --cached --no-renames --dirstat=changes,0 HEAD -- \
+				"a-reference/$dir" "$dir/file" >actual &&
+			test_cmp expect actual || return 1
+		done &&
+
+		git mv c-source-tail/file c-source-tail/renamed &&
+		printf "R066\tc-source-tail/file\tc-source-tail/renamed\n" >expect &&
+		GIT_TRACE2_EVENT="$PWD/rename.trace" \
+			git diff --cached -M --name-status HEAD -- c-source-tail >actual &&
+		test_cmp expect actual &&
+		test_trace2_data diff rename/inexact/content_compared 1 <rename.trace
+	)
+'
+
 test_done
