@@ -177,7 +177,17 @@ test_expect_success FSMONITOR_DAEMON \
 		test_trace2_data grep "content_index_tree_object_read_$field" 1 \
 			<recurse-content-index.trace || return 1
 	done &&
-	tree_field_count=21 &&
+	test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_visits 1 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 1 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
+		<recurse-content-index.trace &&
+	tree_field_count=26 &&
 	for phase in packed_content packed_entry_location
 	do
 		test_trace2_data grep "content_index_tree_object_read_${phase}_valid" \

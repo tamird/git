@@ -2337,6 +2337,81 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-no-batch.trace &&
 	test_grep_packed_content tree-no-batch.trace 2 &&
 	test_grep_packed_entry_location tree-no-batch.trace 2 &&
+	for tree_sample_trace in tree-positive.trace tree-no-batch.trace
+	do
+		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
+			<"$tree_sample_trace" &&
+		test_trace2_data grep content_index_tree_object_read_sampled_visits 3 \
+			<"$tree_sample_trace" &&
+		test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 3 \
+			<"$tree_sample_trace" &&
+		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
+			<"$tree_sample_trace" &&
+		test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
+			<"$tree_sample_trace" &&
+		test "$(grep -c "\"key\":\"content_index_tree_object_read_sample" \
+			"$tree_sample_trace")" = 5 || return 1
+	done &&
+	# Reusing a tree OID still reports each path in full.
+	tree_sample_root=$({
+		printf "040000 tree %s\ta\n" "$nested_tree" &&
+		printf "040000 tree %s\tz\n" "$nested_tree"
+	} | git mktree) &&
+	git grep --no-content-index --threads=1 "present needle" \
+		"$tree_sample_root" >expect-tree-positive &&
+	>tree-no-batch.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-no-batch.trace" \
+		GIT_TRACE2_EVENT_NESTING=1 \
+		git grep --no-content-index --threads=1 "present needle" \
+			"$tree_sample_root" >actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_directories 2 <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_visits 2 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 1 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 1 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
+		<tree-no-batch.trace &&
+	# The cap counts visits, including repeated in-memory empty trees.
+	for i in $(test_seq 1 4096)
+	do
+		printf "040000 tree %s\ta%04d\n" "$backend_empty" "$i" || return 1
+	done >tree-sample-entries &&
+	for tree_sample_truncated in 0 1
+	do
+		tree_sample_status=1 &&
+		if test "$tree_sample_truncated" = 1
+		then
+			# The first unsampled tree must still be read and searched.
+			printf "040000 tree %s\tz\n" "$nested_tree" >>tree-sample-entries &&
+			tree_sample_status=0
+		fi &&
+		tree_sample_root=$(git mktree <tree-sample-entries) &&
+		test_expect_code "$tree_sample_status" \
+			git grep --no-content-index --threads=1 "present needle" \
+				"$tree_sample_root" >expect-tree-positive &&
+		>tree-no-batch.trace &&
+		test_expect_code "$tree_sample_status" \
+			env GIT_TRACE2_EVENT="$PWD/tree-no-batch.trace" \
+				GIT_TRACE2_EVENT_NESTING=1 \
+				git grep --no-content-index --threads=1 "present needle" \
+					"$tree_sample_root" >actual-tree-positive &&
+		test_cmp expect-tree-positive actual-tree-positive &&
+		test_trace2_data grep content_index_tree_directories \
+			"$((4096 + tree_sample_truncated))" <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
+			<tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sampled_visits 4096 \
+			<tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 1 \
+			<tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 4095 \
+			<tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sample_truncated \
+			"$tree_sample_truncated" <tree-no-batch.trace || return 1
+	done &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \

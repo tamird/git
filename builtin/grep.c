@@ -2536,12 +2536,17 @@ struct grep_tree_batch_item {
  * excluded, so object IDs alone identify reusable content-index answers.
  */
 #define GREP_TREE_IPC_TRACE_BATCHES 16
+/* Bound a prefix of child-read visits, not the number of distinct OIDs. */
+#define GREP_TREE_OID_SAMPLE_LIMIT 4096
 /* Inclusive slow-call threshold; retain elapsed time, not time above it. */
 #define GREP_TREE_SLOW_OBJECT_READ_NS 1000000
 
 struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
+	struct oidset tree_oid_sample;
+	unsigned int tree_oid_sample_visits;
+	int tree_oid_sample_truncated;
 	int ipc_available;
 	int onestar_suffix_pathspec;
 	int recursive_basename_pathspec;
@@ -2698,6 +2703,24 @@ static void grep_tree_trace_object_read_sources(
 	int saved_errno = errno;
 	char key[96];
 
+	if (query->tree_oid_sample_visits) {
+		unsigned int unique = oidset_size(&query->tree_oid_sample);
+
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_sample_limit",
+			GREP_TREE_OID_SAMPLE_LIMIT);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_sampled_visits",
+			query->tree_oid_sample_visits);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_sampled_unique_oids", unique);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_sampled_repeat_visits",
+			query->tree_oid_sample_visits - unique);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_sample_truncated",
+			query->tree_oid_sample_truncated);
+	}
 	trace2_data_intmax("grep", the_repository,
 		"content_index_tree_object_read_packed_content_valid",
 		packed_content_valid);
@@ -3305,6 +3328,16 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				int saved_errno = errno;
 
 				query->tree_directories++;
+				if (!query->tree_oid_sample_truncated) {
+					if (query->tree_oid_sample_visits ==
+					    GREP_TREE_OID_SAMPLE_LIMIT) {
+						query->tree_oid_sample_truncated = 1;
+					} else {
+						oidset_insert(&query->tree_oid_sample,
+							      &entry.oid);
+						query->tree_oid_sample_visits++;
+					}
+				}
 				obj_read_lock_trace_child_begin();
 				object_read_begin = getnanotime();
 				errno = saved_errno;
@@ -3615,6 +3648,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 	struct grep_tree_query_context query = {
 		.impossible = OIDSET_INIT,
 		.maybe = OIDSET_INIT,
+		.tree_oid_sample = OIDSET_INIT,
 		.ipc_available = -1,
 		.recursive_basename_pathspec =
 			!recurse_submodules && pathspec->nr &&
@@ -3842,8 +3876,14 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		}
 		errno = saved_errno;
 	}
-	oidset_clear(&query.impossible);
-	oidset_clear(&query.maybe);
+	{
+		int saved_errno = errno;
+
+		oidset_clear(&query.tree_oid_sample);
+		oidset_clear(&query.impossible);
+		oidset_clear(&query.maybe);
+		errno = saved_errno;
+	}
 	return hit;
 }
 
