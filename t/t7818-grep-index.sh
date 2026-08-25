@@ -2090,11 +2090,61 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test "$(grep -c "\"key\":\"content_index_tree_$field\"" \
 			tree-no-batch.trace)" = 1 || return 1
 	done &&
+	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_lock_acquire_count 0 \
+		<tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_lock_acquire_us 0 \
+		<tree-no-batch.trace &&
+	for kind in inmemory loose packed_cache_copy packed_unpack
+	do
+		case "$kind" in
+		loose) tree_read_expected=1 ;;
+		*) tree_read_expected=0 ;;
+		esac &&
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" \
+			"$tree_read_expected" <tree-no-batch.trace &&
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" \
+			"[0-9][0-9]*" <tree-no-batch.trace || return 1
+	done &&
+	for kind in inmemory packed
+	do
+		test_trace2_data grep "content_index_tree_object_read_${kind}_nonzero_attempts" \
+			1 <tree-no-batch.trace || return 1
+	done &&
+	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+		<tree-no-batch.trace &&
+	test_grep_packed_content tree-no-batch.trace 0 &&
+	test_grep_packed_entry_location tree-no-batch.trace 1 &&
+	for field in $(sed -n \
+		"s/.*\"key\":\"\(content_index_tree_object_read_[^\"]*\)\".*/\1/p" \
+		tree-no-batch.trace)
+	do
+		test_grep "\"thread\":\"main\".*\"nesting\":1.*\"key\":\"$field\"" \
+			tree-no-batch.trace &&
+		test "$(grep -c "\"key\":\"$field\"" tree-no-batch.trace)" = 1 || return 1
+	done &&
 	for field in objects queried rejected batches bypassed batch_ ipc_
 	do
 		test_grep ! "\"key\":\"content_index_tree_$field" \
 			tree-no-batch.trace || return 1
 	done &&
+	# A flat tree has no child reads and must not gain zero-valued details.
+	git grep --no-content-index --threads=1 "present needle" "$nested_tree" \
+		>expect-tree-positive &&
+	>tree-no-batch.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-no-batch.trace" \
+		GIT_TRACE2_EVENT_NESTING=1 \
+		git grep --no-content-index --threads=1 "present needle" "$nested_tree" \
+			>actual-tree-positive &&
+	test_cmp expect-tree-positive actual-tree-positive &&
+	test_trace2_data grep content_index_tree_entries 2 <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_directories 0 <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_walk_us "[0-9][0-9]*" <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_us 0 <tree-no-batch.trace &&
+	test "$(grep -c "\"key\":\"content_index_tree_" tree-no-batch.trace)" = 4 &&
 	test_trace2_data grep content_index_tree_objects 2 \
 		<tree-attributes.trace &&
 	test_trace2_data grep content_index_tree_queried 1 \
@@ -2210,8 +2260,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		printf "040000 tree %s\tm-empty\n" "$backend_empty" &&
 		printf "040000 tree %s\tz-base\n" "$backend_base"
 	} | git mktree) &&
-	git -c core.deltaBaseCacheLimit=1m grep --no-content-index --threads=1 \
-		"present needle" "$backend_root" -- a-delta m-empty z-base >expect-tree-positive &&
+	>tree-no-batch.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-no-batch.trace" \
+		GIT_TRACE2_EVENT_NESTING=1 \
+		git -c core.deltaBaseCacheLimit=1m grep --no-content-index --threads=1 \
+			"present needle" "$backend_root" -- a-delta m-empty z-base \
+			>expect-tree-positive &&
 	>tree-positive.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 		git -c core.deltaBaseCacheLimit=1m grep --threads=1 \
@@ -2260,6 +2314,19 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	# Entry location also counts the packed miss before the loose winner.
 	test_grep_packed_entry_location tree-positive.trace 2 &&
 	test_grep_packed_entry_location tree-attributes.trace 1 &&
+	# The unbatched baseline traversed the same delta/cache/in-memory fixture.
+	test_trace2_data grep content_index_tree_directories 3 <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+		<tree-no-batch.trace &&
+	for kind in inmemory packed_cache_copy packed_unpack
+	do
+		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" \
+			1 <tree-no-batch.trace || return 1
+	done &&
+	test_trace2_data grep content_index_tree_object_read_winner_loose_count 0 \
+		<tree-no-batch.trace &&
+	test_grep_packed_content tree-no-batch.trace 2 &&
+	test_grep_packed_entry_location tree-no-batch.trace 2 &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&
 	git grep --no-content-index "present needle" "$attributes_commit" -- \
