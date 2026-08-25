@@ -1915,7 +1915,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 				  tree-bypass.trace tree-fallback.trace \
 				  tree-byte-fallback.trace \
 				  tree-missing.trace \
-				  tree-attributes.trace \
+				  tree-attributes.trace tree-no-batch.trace \
 				  tree-corrupt.trace \
 				  tree-corrupt-trailing.trace" &&
 	git config core.fsmonitor true &&
@@ -2058,9 +2058,13 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		git mktree) &&
 	attributes_commit=$(echo attributes |
 		git commit-tree "$attributes_tree") &&
-	git grep --no-content-index "present needle" "$attributes_commit" -- \
-		nested ":(glob)other/**/text" ":(glob)another/**/text" \
-		>expect-tree-attributes &&
+	>tree-no-batch.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-no-batch.trace" \
+		GIT_TRACE2_EVENT_NESTING=1 \
+		git grep --no-content-index --threads=1 \
+			"present needle" "$attributes_commit" -- \
+			nested ":(glob)other/**/text" ":(glob)another/**/text" \
+			>expect-tree-attributes &&
 	>tree-attributes.trace &&
 	env GIT_TRACE2_EVENT="$PWD/tree-attributes.trace" \
 		GIT_TRACE2_EVENT_NESTING=2 \
@@ -2071,6 +2075,26 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_grep "Binary file .*:nested/binary matches" \
 		expect-tree-attributes &&
 	test_grep ":nested/text:present needle" expect-tree-attributes &&
+	test_trace2_data grep execution-us "[0-9][0-9]*" <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_entries 3 <tree-no-batch.trace &&
+	test_trace2_data grep content_index_tree_directories 1 <tree-no-batch.trace &&
+	for phase in walk object_read
+	do
+		test_trace2_data grep "content_index_tree_${phase}_us" \
+			"[0-9][0-9]*" <tree-no-batch.trace || return 1
+	done &&
+	for field in entries directories walk_us object_read_us
+	do
+		test_grep "\"thread\":\"main\".*\"nesting\":1.*\"key\":\"content_index_tree_$field\"" \
+			tree-no-batch.trace &&
+		test "$(grep -c "\"key\":\"content_index_tree_$field\"" \
+			tree-no-batch.trace)" = 1 || return 1
+	done &&
+	for field in objects queried rejected batches bypassed batch_ ipc_
+	do
+		test_grep ! "\"key\":\"content_index_tree_$field" \
+			tree-no-batch.trace || return 1
+	done &&
 	test_trace2_data grep content_index_tree_objects 2 \
 		<tree-attributes.trace &&
 	test_trace2_data grep content_index_tree_queried 1 \

@@ -2548,6 +2548,8 @@ struct grep_tree_query_context {
 	int recursive_basename_all_directories;
 	int rooted_recursive_basename_pathspec;
 	int trace_enabled;
+	/* At least one root grep_tree() call returned normally. */
+	int tree_walk_completed;
 	int tree_object_read_invalid;
 	int tree_object_read_bytes_overflow;
 	int tree_object_read_source_invalid;
@@ -3527,8 +3529,10 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 			tree_begin = getnanotime();
 		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
 				obj->type == OBJ_COMMIT, batch_ptr, query);
-		if (query->trace_enabled)
+		if (query->trace_enabled) {
 			query->tree_walk_ns += getnanotime() - tree_begin;
+			query->tree_walk_completed = 1;
+		}
 		if (batch_ptr) {
 			hit |= flush_grep_tree_batch(batch_ptr);
 			free(batch.items);
@@ -3766,6 +3770,24 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 					   "content_index_tree_batch_classify_us",
 					   query.batch_classify_ns / 1000);
 		}
+	} else if (query.trace_enabled && query.tree_walk_completed) {
+		int saved_errno = errno;
+
+		/* A completed walk need not have reached a nonempty batch flush. */
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_entries",
+				   query.tree_entries);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_directories",
+				   query.tree_directories);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_walk_us",
+				   query.tree_walk_ns / 1000);
+		if (!query.tree_object_read_invalid)
+			trace2_data_intmax("grep", the_repository,
+					   "content_index_tree_object_read_us",
+					   query.tree_object_read_ns / 1000);
+		errno = saved_errno;
 	}
 	oidset_clear(&query.impossible);
 	oidset_clear(&query.maybe);
