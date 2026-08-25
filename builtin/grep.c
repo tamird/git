@@ -2659,6 +2659,26 @@ static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 	query->tree_object_read_packed_nonzero += result->packed_nonzero;
 }
 
+static void grep_tree_trace_object_read_lock(void)
+{
+	struct obj_read_lock_trace_stats lock_stats;
+	int saved_errno = errno;
+
+	obj_read_lock_trace_snapshot(&lock_stats);
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_lock_valid",
+		lock_stats.valid);
+	if (lock_stats.valid) {
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_lock_acquire_count",
+			lock_stats.acquire_count);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_lock_acquire_us",
+			lock_stats.acquire_ns / 1000);
+	}
+	errno = saved_errno;
+}
+
 static void grep_tree_trace_object_read_sources(
 	const struct grep_tree_query_context *query)
 {
@@ -3687,21 +3707,7 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_tree_bypassed", query.bypassed);
 		if (query.trace_enabled) {
-			struct obj_read_lock_trace_stats lock_stats;
-
-			/* Keep the existing child-read summary visibility. */
-			obj_read_lock_trace_snapshot(&lock_stats);
-			trace2_data_intmax("grep", the_repository,
-				"content_index_tree_object_read_lock_valid",
-				lock_stats.valid);
-			if (lock_stats.valid) {
-				trace2_data_intmax("grep", the_repository,
-					"content_index_tree_object_read_lock_acquire_count",
-					lock_stats.acquire_count);
-				trace2_data_intmax("grep", the_repository,
-					"content_index_tree_object_read_lock_acquire_us",
-					lock_stats.acquire_ns / 1000);
-			}
+			grep_tree_trace_object_read_lock();
 			trace2_data_intmax("grep", the_repository,
 				"content_index_tree_ipc_intervals_attempted",
 				query.ipc_trace_attempted);
@@ -3787,6 +3793,10 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 			trace2_data_intmax("grep", the_repository,
 					   "content_index_tree_object_read_us",
 					   query.tree_object_read_ns / 1000);
+		if (query.tree_directories) {
+			grep_tree_trace_object_read_lock();
+			grep_tree_trace_object_read_sources(&query);
+		}
 		errno = saved_errno;
 	}
 	oidset_clear(&query.impossible);

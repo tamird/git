@@ -171,9 +171,30 @@ test_expect_success FSMONITOR_DAEMON \
 		test_trace2_data grep "content_index_tree_${phase}_us" \
 			"[0-9][0-9]*" <recurse-content-index.trace || return 1
 	done &&
-	# Permit only the four walk fields, not tree query/batch/IPC fields.
+	# Child-read details do not imply tree query/batch/IPC activity.
+	for field in source_valid lock_valid
+	do
+		test_trace2_data grep "content_index_tree_object_read_$field" 1 \
+			<recurse-content-index.trace || return 1
+	done &&
+	tree_field_count=21 &&
+	for phase in packed_content packed_entry_location
+	do
+		test_trace2_data grep "content_index_tree_object_read_${phase}_valid" \
+			"[01]" <recurse-content-index.trace || return 1
+		if test_trace2_data grep "content_index_tree_object_read_${phase}_valid" \
+			1 <recurse-content-index.trace
+		then
+			tree_field_count=$((tree_field_count + 2))
+		fi
+	done &&
 	test "$(grep -c "\"key\":\"content_index_tree_" \
-		recurse-content-index.trace)" = 4 &&
+		recurse-content-index.trace)" = "$tree_field_count" &&
+	for field in objects queried rejected batches bypassed batch_ ipc_
+	do
+		test_grep ! "\"key\":\"content_index_tree_$field" \
+			recurse-content-index.trace || return 1
+	done &&
 	test_grep ! query_content_index_ipc recurse-content-index.trace
 '
 
