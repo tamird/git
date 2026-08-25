@@ -436,8 +436,16 @@ int ie_match_stat(struct index_state *istate,
 	if (!changed && is_racy_timestamp(istate, ce)) {
 		if (assume_racy_is_modified)
 			changed |= DATA_CHANGED;
-		else
+		else {
+			int saved_errno = errno;
+
+			trace2_timer_start(TRACE2_TIMER_ID_INDEX_RACY_CHECK);
+			errno = saved_errno;
 			changed |= ce_modified_check_fs(istate, ce, st);
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_INDEX_RACY_CHECK);
+			errno = saved_errno;
+		}
 	}
 
 	return changed;

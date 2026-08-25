@@ -327,6 +327,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_TIMER_ID_INDEX_RACY_CHECK] = {
+		.category = "index",
+		.name = "racy-check",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 
