@@ -41,6 +41,7 @@ MODES: tuple[Mode, ...] = ("off", "event-null", "event-file")
 # All six permutations balance position and each directed within-round pair.
 ORDERS = tuple(itertools.permutations(MODES))
 SMALL_FILES = 4000
+TREE_READ_REVISIONS = 256
 STREAM_FILES = 8
 STREAM_BYTES = 8 * 1024 * 1024
 BUDGET_SECONDS = 180
@@ -101,7 +102,8 @@ class Git:
             ("-c", setting) for setting in CONFIG
         ), *args]
 
-    def run(self, repo: Path, args: tuple[str, ...], mode: Mode = "off") -> Measurement:
+    def run(self, repo: Path, args: tuple[str, ...], mode: Mode = "off",
+            *, expected_returncode: int = 0) -> Measurement:
         env = dict(self.environment)
         env["GIT_TRACE2_EVENT"] = {
             "off": "0", "event-null": os.devnull, "event-file": str(self.trace)
@@ -130,7 +132,7 @@ class Git:
                 raise
         elapsed = time.perf_counter() - start
         after = child_cpu()
-        if process.returncode:
+        if process.returncode != expected_returncode:
             raise subprocess.CalledProcessError(
                 process.returncode, command, output=stdout, stderr=stderr,
             )
@@ -161,7 +163,7 @@ class Fixture:
                 raise AssertionError(f"checkout content changed: {name}")
 
 
-def make_fixture(git: Git, root: Path, streaming: bool) -> Fixture:
+def make_fixture(git: Git, root: Path, streaming: bool, *, tree_reads_only: bool = False) -> Fixture:
     repo = root / ("streaming" if streaming else "small")
     repo.mkdir()
     git.run(repo, ("init", "--quiet", "--initial-branch=main", "--template=", "."))
@@ -185,8 +187,16 @@ def make_fixture(git: Git, root: Path, streaming: bool) -> Fixture:
         # external filters or platform-specific encodings. Trees are distinct.
         write(".gitattributes", b"*.txt text=auto eol=crlf\n")
         for index in range(SMALL_FILES):
-            content = f"trace2-overhead-needle {index:06d}\n" + "x" * 2000 + "\n"
-            write(f"data/{index // 10:04d}/{index:06d}.txt",
+            # Only the tree-read mode makes the first two directories differ
+            # by one blob, so packing can delta one against the other.
+            directory = f"{index // 10:04d}"
+            if tree_reads_only and index < 20:
+                # A shared suffix keeps the pair adjacent in name-hash order.
+                directory += "-seed"
+            name = index - 10 if tree_reads_only and 10 <= index < 20 else index
+            content_index = index - 10 if tree_reads_only and 10 <= index < 19 else index
+            content = f"trace2-overhead-needle {content_index:06d}\n" + "x" * 2000 + "\n"
+            write(f"data/{directory}/{name:06d}.txt",
                   content.replace("\n", "\r\n").encode())
     git.run(repo, ("add", "--all"))
     git.run(repo, ("commit", "--quiet", "-m", "benchmark fixture"))
@@ -206,12 +216,19 @@ class Workload:
     checkout: bool
     expected_stdout: bytes
     required_timers: dict[str, int]
+    tree_read_revisions: int = 0
 
 
 def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
     timers: Counter[str] = Counter()
     events: Counter[str] = Counter()
     sessions: set[str] = set()
+    tree_values: dict[str, int] = {}
+    tree_counts = {
+        "count/revisions": workload.tree_read_revisions,
+        "content_index_tree_directories": (SMALL_FILES // 10 + 1) * workload.tree_read_revisions,
+    }
+    tree_times = ("content_index_tree_walk_us", "content_index_tree_object_read_us")
     with path.open() as source:
         for line in source:
             event = json.loads(line)
@@ -219,6 +236,15 @@ def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
             sessions.add(event["sid"])
             if event["event"] == "timer":
                 timers[f"{event['category']}/{event['name']}"] += event["intervals"]
+            if workload.tree_read_revisions:
+                if event["event"] in ("exit", "atexit") and event["code"] != 1:
+                    raise AssertionError("tree-only grep must exit with no matches")
+                key = event.get("key")
+                if (event["event"] == "data" and event.get("category") == "grep"
+                        and (key in tree_counts or key in tree_times)):
+                    if key in tree_values or event.get("thread") != "main":
+                        raise AssertionError("tree DATA must occur once on the main thread")
+                    tree_values[key] = int(event["value"])
     if not events["version"] or not events["exit"]:
         raise AssertionError("expected a complete Trace2 event stream")
     for name, minimum in workload.required_timers.items():
@@ -226,10 +252,19 @@ def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
             raise AssertionError(f"{name}: expected >= {minimum} intervals, got {timers[name]}")
         if not workload.checkout and timers[name] != minimum:
             raise AssertionError(f"{name}: expected exactly {minimum} intervals")
-    if not workload.checkout and (events["thread_start"] != 4 or events["thread_exit"] != 4):
-        raise AssertionError("both grep sizes must start and finish four workers")
+    workers = 0 if workload.tree_read_revisions else 4
+    if not workload.checkout and (events["thread_start"] != workers or events["thread_exit"] != workers):
+        raise AssertionError(f"{workload.name}: unexpected worker count")
+    if workload.tree_read_revisions:
+        if len(sessions) != 1 or any(events[name] != 1 for name in ("version", "start", "exit", "atexit")):
+            raise AssertionError("tree-only grep must have one complete process")
+        if any(tree_values.get(key) != expected for key, expected in tree_counts.items()):
+            raise AssertionError(f"tree traversal count mismatch: {tree_values}")
+        if not 0 <= tree_values[tree_times[1]] <= tree_values[tree_times[0]]:
+            raise AssertionError("child-read time must be nonnegative and contained in tree-walk time")
     return {"bytes": path.stat().st_size, "events": dict(events),
-            "processes": len(sessions), "timer_intervals": dict(timers)}
+            "processes": len(sessions), "timer_intervals": dict(timers),
+            **({"tree_values": tree_values} if workload.tree_read_revisions else {})}
 
 
 @dataclass(frozen=True)
@@ -286,7 +321,8 @@ def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) 
             git.remaining_seconds()
             if workload.checkout:
                 workload.fixture.prepare_checkout()
-            measured = git.run(workload.fixture.repo, workload.args, mode)
+            measured = git.run(workload.fixture.repo, workload.args, mode,
+                               expected_returncode=1 if workload.tree_read_revisions else 0)
             if measured.stdout != workload.expected_stdout or measured.stderr:
                 raise AssertionError(f"{workload.name}/{mode}: output parity failed")
             if workload.checkout:
@@ -330,9 +366,72 @@ def packed_grep_workload(fixture: Fixture, name: str, path: str, count: int) -> 
     })
 
 
+def tree_read_workload(git: Git, fixture: Fixture) -> tuple[Workload, dict[str, object]]:
+    # Verify outside the sample that repeated revisions retain initial misses:
+    # unpack_entry caches delta bases, not every object it returns.
+    listing = git.run(fixture.repo, ("ls-tree", "-r", "-d", "HEAD")).stdout
+    children = [line.split() for line in listing.decode().splitlines()]
+    child_oids = [fields[2] for fields in children]
+    if [fields[3] for fields in children[:3]] != ["data", "data/0000-seed", "data/0001-seed"]:
+        raise AssertionError("the delta/base pair must precede the bulk tree reads")
+    child_count = SMALL_FILES // 10 + 1
+    if len(child_oids) != child_count or len(set(child_oids)) != child_count:
+        raise AssertionError("expected 401 distinct child trees")
+    indexes = list((fixture.repo / ".git/objects/pack").glob("*.idx"))
+    if len(indexes) != 1:
+        raise AssertionError("expected one fixture pack")
+    packed_trees: dict[str, int] = {}
+    delta_bases: set[str] = set()
+    tree_delta_bases: dict[str, str] = {}
+    for line in git.run(fixture.repo, ("verify-pack", "-v", str(indexes[0]))).stdout.decode().splitlines():
+        fields = line.split()
+        if len(fields) not in (5, 7) or fields[1] not in ("blob", "tree", "commit", "tag"):
+            continue
+        if fields[1] == "tree":
+            packed_trees[fields[0]] = int(fields[2])
+        if len(fields) == 7:
+            delta_bases.add(fields[6])
+            if fields[1] == "tree":
+                tree_delta_bases[fields[0]] = fields[6]
+    if any(packed_trees.get(oid, 0) <= 0 for oid in child_oids):
+        raise AssertionError("every child tree must be packed and nonempty")
+    first, second = child_oids[1:3]
+    if tree_delta_bases not in ({first: second}, {second: first}):
+        raise AssertionError(
+            f"expected one tree delta between {first} and {second}; got {tree_delta_bases}"
+        )
+    # A successful delta read inserts its base before returning, initializing
+    # the cache by child read 3 regardless of which member was packed as delta.
+    delta_oid, base_oid = next(iter(tree_delta_bases.items()))
+    never_base = len(set(child_oids) - delta_bases)
+    if not never_base:
+        raise AssertionError("fixture does not prove repeated initial cache misses")
+    geometry = {
+        "pack_sha256": file_hash(indexes[0].with_suffix(".pack")),
+        "child_trees_per_revision": child_count,
+        "cache_initializing_tree_delta": delta_oid,
+        "cache_initializing_tree_base": base_oid,
+        "cache_initialized_by_child_read": 3,
+        "child_trees_never_delta_bases": never_base,
+        "known_initial_cache_misses_lower_bound": never_base * TREE_READ_REVISIONS,
+        "child_cache_copy_upper_bound": (child_count - never_base) * TREE_READ_REVISIONS,
+    }
+    workload = Workload("grep-packed-tree-reads", fixture, (
+        "grep", "--no-content-index", "--threads=1", "--fixed-strings",
+        "trace2-overhead-needle", *("HEAD",) * TREE_READ_REVISIONS,
+        "--", ":(glob)**/__trace2_absent__",
+    ), False, b"", {
+        "grep/source/object-read": 0, "grep/source/process": 0,
+        "grep/dispatch/producer-lock": 0, "grep/dispatch/worker-drain": 0,
+    }, tree_read_revisions=TREE_READ_REVISIONS)
+    return workload, geometry
+
+
 def main() -> None:
-    if len(sys.argv) != 3 or sys.argv[2] != "opt":
-        raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp")
+    if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
+            or (len(sys.argv) == 4 and sys.argv[3] != "--tree-reads-only")):
+        raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
+                         "and optional --test_arg=--tree-reads-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -379,7 +478,19 @@ def main() -> None:
     try:
         report["git_sha256"] = file_hash(git_path)
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
-        small = make_fixture(git, root, streaming=False)
+        small = make_fixture(git, root, streaming=False, tree_reads_only=len(sys.argv) == 4)
+        if len(sys.argv) == 4:
+            workload, report["tree_read_geometry"] = tree_read_workload(git, small)
+            report["limitations"] = [
+                "Repeated revisions amplify packed child-tree reads, not unique OIDs or cold-cache I/O.",
+                "The non-delta-base count proves an initial-miss lower bound, not the production cache mixture.",
+                "A/B requires matched harness, pack, build options and trace mode; on/off ratios are not patch effects.",
+                "No blobs, workers, daemon or OG processing; no performance threshold.",
+            ]
+            report.update(benchmark(git, (workload,)))
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         git.remaining_seconds()
         streaming = make_fixture(git, root, streaming=True)
         git.remaining_seconds()
