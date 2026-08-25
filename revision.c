@@ -70,7 +70,7 @@ static void mark_blob_uninteresting(struct blob *blob)
 static void mark_tree_uninteresting_1(struct repository *r, struct tree *tree,
 				      struct tree_mark_stats *stats);
 
-static int tree_mark_time(uint64_t *now)
+static int revision_trace_time(uint64_t *now)
 {
 #if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
 	struct timespec timestamp;
@@ -128,7 +128,7 @@ static int parse_tree_for_marking(struct tree *tree,
 		return repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (stats->parse_timings_valid) {
-		if (tree_mark_time(&started))
+		if (revision_trace_time(&started))
 			stats->parse_timings_valid = 0;
 		else
 			trace_timing = 1;
@@ -137,7 +137,7 @@ static int parse_tree_for_marking(struct tree *tree,
 	ret = repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (trace_timing) {
-		if (tree_mark_time(&finished) || finished < started ||
+		if (revision_trace_time(&finished) || finished < started ||
 		    unsigned_add_overflows(stats->parse_needed_ns,
 					   finished - started))
 			stats->parse_timings_valid = 0;
@@ -1204,6 +1204,38 @@ void revision_bloom_filter_finish_diff(struct rev_info *revs,
 		revision_bloom_filter_refresh(revs);
 }
 
+static void diff_tree_for_pruning(struct rev_info *revs,
+				  const struct object_id *old_oid,
+				  const struct object_id *new_oid)
+{
+	struct revision_prune_diff_stats *stats = revs->prune_diff_stats;
+	uint64_t started = 0, finished;
+
+	if (!stats) {
+		diff_tree_oid(old_oid, new_oid, "", &revs->pruning);
+		return;
+	}
+
+	if (stats->timings_valid && revision_trace_time(&started))
+		stats->timings_valid = 0;
+
+	diff_tree_oid(old_oid, new_oid, "", &revs->pruning);
+
+	if (stats->timings_valid) {
+		if (revision_trace_time(&finished) || finished < started ||
+		    unsigned_add_overflows(stats->elapsed_ns, finished - started))
+			stats->timings_valid = 0;
+		else
+			stats->elapsed_ns += finished - started;
+	}
+	if (stats->counts_valid) {
+		if (stats->count == (uint64_t)INTMAX_MAX)
+			stats->counts_valid = 0;
+		else
+			stats->count++;
+	}
+}
+
 static int rev_compare_tree(struct rev_info *revs,
 			    struct commit *parent, struct commit *commit, int nth_parent)
 {
@@ -1244,7 +1276,7 @@ static int rev_compare_tree(struct rev_info *revs,
 
 	tree_difference = REV_TREE_SAME;
 	revs->pruning.flags.has_changes = 0;
-	diff_tree_oid(&t1->object.oid, &t2->object.oid, "", &revs->pruning);
+	diff_tree_for_pruning(revs, &t1->object.oid, &t2->object.oid);
 
 	if (!nth_parent)
 		if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
@@ -1272,7 +1304,7 @@ static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit,
 
 	tree_difference = REV_TREE_SAME;
 	revs->pruning.flags.has_changes = 0;
-	diff_tree_oid(NULL, &t1->object.oid, "", &revs->pruning);
+	diff_tree_for_pruning(revs, NULL, &t1->object.oid);
 
 	if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
 	    tree_difference == REV_TREE_SAME)
