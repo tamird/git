@@ -391,6 +391,8 @@ struct dir_struct {
 		unsigned can_prune_replay:1;
 		/* Cached stat results belong to this read_directory() call only. */
 		unsigned stat_prevalidated:1;
+		/* Excludes pending revalidation and non-traversal ignore consumers. */
+		unsigned trace_normal_ignore_loads:1;
 		size_t icase_scan_budget_used;
 
 		/* Stats about the traversal */

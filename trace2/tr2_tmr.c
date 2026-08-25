@@ -321,6 +321,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_TIMER_ID_DIR_IGNORE_LOAD] = {
+		.category = "dir",
+		.name = "ignore-load",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 

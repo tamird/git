@@ -1953,9 +1953,21 @@ static enum untracked_ignore_load_result prep_exclude(struct dir_struct *dir,
 			pl->src = strbuf_detach(&sb, NULL);
 			if (untracked)
 				oidcpy(&oid_stat.oid, &untracked->exclude_oid);
+			if (dir->internal.trace_normal_ignore_loads) {
+				int saved_errno = errno;
+
+				trace2_timer_start(TRACE2_TIMER_ID_DIR_IGNORE_LOAD);
+				errno = saved_errno;
+			}
 			add_patterns(pl->src, pl->src, stk->baselen, pl, istate,
 				     PATTERN_NOFOLLOW,
 				     untracked ? &oid_stat : NULL, &loaded);
+			if (dir->internal.trace_normal_ignore_loads) {
+				int saved_errno = errno;
+
+				trace2_timer_stop(TRACE2_TIMER_ID_DIR_IGNORE_LOAD);
+				errno = saved_errno;
+			}
 		}
 		if (loaded == UNTRACKED_IGNORE_INDETERMINATE)
 			result = loaded;
@@ -3937,9 +3949,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 			}
 		}
 	}
+	dir->internal.trace_normal_ignore_loads = trace2_is_enabled();
 	if (!len || treat_leading_path(dir, istate, path, len, pathspec))
 		read_directory_recursive(dir, istate, path, len, untracked,
 					 untracked_prune, 0, 0, pathspec);
+	dir->internal.trace_normal_ignore_loads = 0;
 	if (dir->internal.repaired_subtrees)
 		istate->cache_changed |= UNTRACKED_CHANGED;
 done:

@@ -1151,6 +1151,13 @@ test_expect_success 'pending stat results do not outlive one directory read' '
 				.git/twice-timers || return 1
 		done &&
 		test_grep ! "\"event\":\"th_timer\".*\"category\":\"untracked_cache\"" \
+			.git/twice-event &&
+		grep "\"event\":\"timer\".*\"category\":\"dir\"" \
+			.git/twice-event >.git/twice-dir-timers &&
+		test_line_count = 1 .git/twice-dir-timers &&
+		test_grep "\"name\":\"ignore-load\",\"intervals\":3," \
+			.git/twice-dir-timers &&
+		test_grep ! "\"event\":\"th_timer\".*\"category\":\"dir\"" \
 			.git/twice-event
 	)
 '
