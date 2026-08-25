@@ -208,7 +208,7 @@ class Workload:
     required_timers: dict[str, int]
 
 
-def trace_coverage(path: Path, required: dict[str, int]) -> dict[str, object]:
+def trace_coverage(path: Path, workload: Workload) -> dict[str, object]:
     timers: Counter[str] = Counter()
     events: Counter[str] = Counter()
     sessions: set[str] = set()
@@ -221,9 +221,13 @@ def trace_coverage(path: Path, required: dict[str, int]) -> dict[str, object]:
                 timers[f"{event['category']}/{event['name']}"] += event["intervals"]
     if not events["version"] or not events["exit"]:
         raise AssertionError("expected a complete Trace2 event stream")
-    for name, minimum in required.items():
+    for name, minimum in workload.required_timers.items():
         if timers[name] < minimum:
             raise AssertionError(f"{name}: expected >= {minimum} intervals, got {timers[name]}")
+        if not workload.checkout and timers[name] != minimum:
+            raise AssertionError(f"{name}: expected exactly {minimum} intervals")
+    if not workload.checkout and (events["thread_start"] != 4 or events["thread_exit"] != 4):
+        raise AssertionError("both grep sizes must start and finish four workers")
     return {"bytes": path.stat().st_size, "events": dict(events),
             "processes": len(sessions), "timer_intervals": dict(timers)}
 
@@ -255,19 +259,30 @@ def summarize(samples: list[Sample]) -> dict[str, object]:
                     "median": statistics.median(available),
                     "min": min(available), "max": max(available),
                 }
-        off = [sample for sample in samples if sample.mode == "off"]
-        ratios = [sample.wall_seconds / baseline.wall_seconds
-                  for sample, baseline in zip(selected, off)]
+        off = {sample.round: sample for sample in samples if sample.mode == "off"}
+        ratios = [sample.wall_seconds / off[sample.round].wall_seconds for sample in selected]
+        deltas = [sample.wall_seconds - off[sample.round].wall_seconds for sample in selected]
         values["median_paired_wall_ratio_to_off"] = statistics.median(ratios)
+        values["median_paired_wall_delta_seconds"] = statistics.median(deltas)
         summary[mode] = values
     return summary
 
 
-def benchmark(git: Git, workload: Workload) -> dict[str, object]:
-    samples: list[Sample] = []
-    # Two warmups per mode; no sample is a cold-cache measurement.
-    for round_index, order in enumerate((MODES, tuple(reversed(MODES)), *ORDERS), -2):
-        for position, mode in enumerate(order):
+def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) -> dict[str, object]:
+    samples: dict[str, list[Sample]] = {workload.name: [] for workload in workloads}
+    conditions = tuple((workload, mode) for workload in workloads for mode in MODES)
+    if len(workloads) == 1:
+        orders = tuple(tuple((workloads[0], mode) for mode in order) for order in ORDERS)
+    else:
+        # Balanced six-condition crossover: each (size, mode) occupies each
+        # position once; every directed within-round predecessor occurs once.
+        orders = tuple(
+            tuple(conditions[(column + row) % 6] for column in (0, 1, 5, 2, 4, 3))
+            for row in range(6)
+        )
+    # Two warmups per condition; no sample is a cold-cache measurement.
+    for round_index, order in enumerate((conditions, tuple(reversed(conditions)), *orders), -2):
+        for position, (workload, mode) in enumerate(order):
             git.remaining_seconds()
             if workload.checkout:
                 workload.fixture.prepare_checkout()
@@ -276,23 +291,43 @@ def benchmark(git: Git, workload: Workload) -> dict[str, object]:
                 raise AssertionError(f"{workload.name}/{mode}: output parity failed")
             if workload.checkout:
                 workload.fixture.verify_checkout()
-            coverage = (trace_coverage(git.trace, workload.required_timers)
+            coverage = (trace_coverage(git.trace, workload)
                         if mode == "event-file" else None)
             git.remaining_seconds()
             if round_index >= 0:
-                samples.append(Sample(
+                samples[workload.name].append(Sample(
                     mode, round_index, position, measured.wall_seconds,
                     measured.child_user_seconds, measured.child_system_seconds, coverage,
                 ))
-    summary = summarize(samples)
-    print(workload.name, json.dumps(summary, separators=(",", ":")), flush=True)
-    return {
-        "argv": git.command(workload.args),
-        "files": len(workload.fixture.files),
-        "packed_objects": workload.fixture.object_counts,
-        "stdout_sha256": hashlib.sha256(workload.expected_stdout).hexdigest(),
-        "samples": [asdict(sample) for sample in samples], "summary": summary,
-    }
+    results: dict[str, object] = {}
+    for workload in workloads:
+        selected = samples[workload.name]
+        summary = summarize(selected)
+        print(workload.name, json.dumps(summary, separators=(",", ":")), flush=True)
+        results[workload.name] = {
+            "argv": git.command(workload.args),
+            "fixture_files": len(workload.fixture.files),
+            "selected_files": (len(workload.fixture.files) if workload.checkout
+                               else len(workload.expected_stdout.splitlines())),
+            "packed_objects": workload.fixture.object_counts,
+            "stdout_sha256": hashlib.sha256(workload.expected_stdout).hexdigest(),
+            "orders": [[(item.name, mode) for item, mode in order] for order in orders],
+            "samples": [asdict(sample) for sample in selected], "summary": summary,
+        }
+    return results
+
+
+def packed_grep_workload(fixture: Fixture, name: str, path: str, count: int) -> Workload:
+    selected = sorted(filename for filename in fixture.files if filename.startswith(path + "/"))
+    if len(selected) != count:
+        raise AssertionError(f"{name}: fixture selection changed")
+    return Workload(name, fixture, (
+        "grep", "--threads=4", "--fixed-strings", "--files-with-matches",
+        "trace2-overhead-needle", "HEAD", "--", path,
+    ), False, b"".join(f"HEAD:{filename}\n".encode() for filename in selected), {
+        "grep/source/object-read": count, "grep/source/process": count,
+        "grep/dispatch/producer-lock": count, "grep/dispatch/worker-drain": 1,
+    })
 
 
 def main() -> None:
@@ -328,13 +363,14 @@ def main() -> None:
         "cpu_count": os.cpu_count(), "compilation_mode": sys.argv[2],
         "git_path": str(git_path),
         "trace_settings": {"brief": 1, "nesting": 2, "modes": MODES},
-        "orders": ORDERS, "warmups_per_mode": 2,
+        "warmups_per_mode": 2,
         "budget_seconds": BUDGET_SECONDS, "stream_bytes_per_file": STREAM_BYTES,
         "budget_enforcement": "Soft Git-launch/work-boundary budget; Bazel supplies the hard outer timeout.",
         "limitations": [
             "Same optimized binary on/off measures total enabled tracing, not a particular patch.",
             "No older-binary comparison or deployed-binary byte-identity claim.",
             "Warm OS caches; file tracing uses buffered filesystem writes, not durable fsync.",
+            "Two grep sizes distinguish shared/fixed from workload-scaling cost, not per-object or recent-patch causality: directories, output, and scheduling also vary.",
             "No OG wrapper or postprocessing, daemon, content-index IPC, or cold-cache measurement.",
             "Packed-only fixtures and object-read timers prove packed reads; daemon-only tree provenance events are not emitted.",
             "Child CPU is RUSAGE_CHILDREN when available; parent fixture/parser CPU is excluded.",
@@ -347,14 +383,14 @@ def main() -> None:
         git.remaining_seconds()
         streaming = make_fixture(git, root, streaming=True)
         git.remaining_seconds()
-        workloads = (
-            Workload("checkout-small", small, ("reset", "--hard", "--quiet", "HEAD"), True, b"", {
+        workload_groups = (
+            (Workload("checkout-small", small, ("reset", "--hard", "--quiet", "HEAD"), True, b"", {
                 "unpack_trees/queue-entries/prepare-entry": SMALL_FILES,
                 **{f"pcheckout/item/{phase}": SMALL_FILES for phase in (
                     "prepare", "read-blob", "convert", "write-buffer", "finalize"
                 )},
-            }),
-            Workload("checkout-streaming", streaming, ("reset", "--hard", "--quiet", "HEAD"), True, b"", {
+            }),),
+            (Workload("checkout-streaming", streaming, ("reset", "--hard", "--quiet", "HEAD"), True, b"", {
                 "unpack_trees/queue-entries/prepare-entry": STREAM_FILES,
                 "pcheckout/item/prepare": STREAM_FILES,
                 "pcheckout/item/finalize": STREAM_FILES,
@@ -363,17 +399,16 @@ def main() -> None:
                     ("read-filter", STREAM_FILES * (STREAM_BYTES // 16384 + 1)),
                     ("write", STREAM_FILES * (STREAM_BYTES // 16384)),
                 )},
-            }),
-            Workload("grep-packed-tree", small, (
-                "grep", "--threads=4", "--fixed-strings", "--files-with-matches",
-                "trace2-overhead-needle", "HEAD", "--", "data",
-            ), False, b"".join(
-                f"HEAD:{name}\n".encode() for name in sorted(small.files) if name != ".gitattributes"
-            ), {"grep/source/object-read": SMALL_FILES, "grep/source/process": SMALL_FILES}),
+            }),),
+            (
+                packed_grep_workload(small, "grep-packed-tree-10", "data/0000", 10),
+                packed_grep_workload(small, "grep-packed-tree", "data", SMALL_FILES),
+            ),
         )
-        for workload in workloads:
-            print(f"Measuring {workload.name}: 2 warmups + 6 samples per mode", flush=True)
-            report[workload.name] = benchmark(git, workload)
+        for workloads in workload_groups:
+            names = ", ".join(workload.name for workload in workloads)
+            print(f"Measuring {names}: 2 warmups + 6 samples per condition", flush=True)
+            report.update(benchmark(git, workloads))
         git.remaining_seconds()
         report["status"] = "complete"
     finally:
