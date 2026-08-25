@@ -42,6 +42,7 @@ MODES: tuple[Mode, ...] = ("off", "event-null", "event-file")
 ORDERS = tuple(itertools.permutations(MODES))
 SMALL_FILES = 4000
 TREE_READ_REVISIONS = 256
+REFS_COMMANDS_PER_SAMPLE = 128
 STREAM_FILES = 8
 STREAM_BYTES = 8 * 1024 * 1024
 BUDGET_SECONDS = 180
@@ -481,12 +482,103 @@ def tree_read_workload(
     return workload, geometry
 
 
+def refs_trace_intervals(path: Path) -> int:
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    counts = Counter(event["event"] for event in events)
+    if (len({event["sid"] for event in events}) != 1
+            or any(counts[name] != 1 for name in ("version", "start", "exit", "atexit"))
+            or any(event.get("code") != 0 for event in events
+                   if event["event"] in ("exit", "atexit"))
+            or counts["child_start"] or counts["thread_start"] or counts["thread_exit"]):
+        raise AssertionError("ref listing must have one successful, complete main process")
+    summaries = 0
+    for event in events:
+        if event.get("category") != "ref-filter":
+            continue
+        name = event.get("name", event.get("label", ""))
+        if name.startswith("materialized/"):
+            raise AssertionError("ref listing unexpectedly used materialized formatting")
+        if name == "iterative/filter-format":
+            if (event["event"] != "timer" or event.get("thread") != "main"
+                    or event.get("intervals") != 1):
+                raise AssertionError("iterative timing must be one completed main-thread summary")
+            summaries += 1
+    if summaries > 1:
+        raise AssertionError("ref listing must have at most one iterative summary")
+    return summaries
+
+
+def benchmark_refs(git: Git, fixture: Fixture) -> dict[str, object]:
+    args = ("for-each-ref", "--format=%(refname)", "refs/heads/main")
+    expected = b"refs/heads/main\n"
+    refs_before = git.run(fixture.repo, ("show-ref",))
+    if (refs_before.stderr or len(refs_before.stdout.splitlines()) != 1
+            or not refs_before.stdout.endswith(b" refs/heads/main\n")):
+        raise AssertionError("ref fixture must contain only its original main ref")
+    samples: list[Sample] = []
+    records: list[dict[str, object]] = []
+    observed_intervals: int | None = None
+    for round_index, order in enumerate((MODES, tuple(reversed(MODES)), *ORDERS), -2):
+        for position, mode in enumerate(order):
+            measurements: list[Measurement] = []
+            for _ in range(REFS_COMMANDS_PER_SAMPLE):
+                measured = git.run(fixture.repo, args, mode)
+                if measured.stdout != expected or measured.stderr:
+                    raise AssertionError(f"ref listing/{mode}: output parity failed")
+                if mode == "event-file":
+                    intervals = refs_trace_intervals(git.trace)
+                    if observed_intervals is not None and intervals != observed_intervals:
+                        raise AssertionError("iterative timer changed between identical commands")
+                    observed_intervals = intervals
+                measurements.append(measured)
+            if (fixture.repo / ".git/index").read_bytes() != fixture.index:
+                raise AssertionError("read-only ref listing changed the index")
+            git.remaining_seconds()
+            user = [item.child_user_seconds for item in measurements]
+            system = [item.child_system_seconds for item in measurements]
+            sample = Sample(
+                mode, round_index, position,
+                sum(item.wall_seconds for item in measurements),
+                sum(value for value in user if value is not None)
+                if all(value is not None for value in user) else None,
+                sum(value for value in system if value is not None)
+                if all(value is not None for value in system) else None,
+                {"processes": REFS_COMMANDS_PER_SAMPLE,
+                 "iterative_intervals_per_command": observed_intervals}
+                if mode == "event-file" else None,
+            )
+            if round_index >= 0:
+                samples.append(sample)
+                records.append({
+                    **asdict(sample),
+                    "commands": [[item.wall_seconds, item.child_user_seconds,
+                                  item.child_system_seconds] for item in measurements],
+                })
+    refs_after = git.run(fixture.repo, ("show-ref",))
+    if refs_after.stderr or refs_after.stdout != refs_before.stdout:
+        raise AssertionError("read-only ref listing changed refs")
+    summary = summarize(samples)
+    print("refs-iterative", json.dumps(summary, separators=(",", ":")), flush=True)
+    return {"refs-iterative": {
+        "argv": git.command(args), "fixture_files": len(fixture.files),
+        "packed_objects": fixture.object_counts,
+        "refs_sha256": hashlib.sha256(refs_before.stdout).hexdigest(),
+        "stdout_sha256": hashlib.sha256(expected).hexdigest(),
+        "commands_per_sample": REFS_COMMANDS_PER_SAMPLE,
+        "sample_unit": "Sum of 128 separately timed direct Git processes.",
+        "command_columns": ["wall_seconds", "child_user_seconds", "child_system_seconds"],
+        "orders": ORDERS, "iterative_intervals_per_command": observed_intervals,
+        "samples": records, "summary": summary,
+    }}
+
+
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
-                "--tree-reads-only", "--tree-excludes-only", "--status-only"))):
+                "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
-                         "and optional --test_arg=--tree-reads-only, --tree-excludes-only or --status-only")
+                         "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
+                         "--status-only or --refs-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -535,8 +627,28 @@ def main() -> None:
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
         small = make_fixture(
             git, root, streaming=False,
-            tree_reads_only=len(sys.argv) == 4 and sys.argv[3] != "--status-only",
+            tree_reads_only=len(sys.argv) == 4 and sys.argv[3] not in ("--status-only", "--refs-only"),
         )
+        if len(sys.argv) == 4 and sys.argv[3] == "--refs-only":
+            pack, = (small.repo / ".git/objects/pack").glob("*.pack")
+            report["refs_geometry"] = {
+                "pack_sha256": file_hash(pack), "tracked_files": len(small.files),
+                "benchmark_sha256": file_hash(Path(__file__)),
+            }
+            report["limitations"] = [
+                "Each mode has six retained 128-command aggregate samples, not 768 independent samples; divide grouped timings by 128 for per-command contrasts.",
+                "Startup and output collection remain included; aggregation cannot remove drift or guarantee timer-cost resolution.",
+                "Incremental cost requires matched A1/B/A2 source, binary, harness, pack, refs and modes; same-binary on/off measures all enabled tracing.",
+                "Match the consistently absent/present iterative timer to pinned baseline/candidate identity; every file-traced command is validated outside timing.",
+                "The new timer also enlarges per-thread arrays and summary scans; this command cannot establish cumulative overhead for other workloads.",
+                "No natural-workload, OG, cold-cache, timer-only CPU or negligible-cost claim; no performance threshold or adaptive rerun.",
+                "Fixture, trace reset/parsing and validation are excluded; sum user+system per sample before computing CPU medians.",
+            ]
+            report.update(benchmark_refs(git, small))
+            small.verify_checkout()
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         if len(sys.argv) == 4 and sys.argv[3] == "--status-only":
             args = ("--no-optional-locks", "status", "--porcelain")
             disabled = git.run(small.repo, (*args, "--untracked-files=no"), "event-file")
