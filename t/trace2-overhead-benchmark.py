@@ -218,6 +218,7 @@ class Workload:
     required_timers: dict[str, int]
     tree_read_revisions: int = 0
     allowed_tree_directories: tuple[int, ...] = ()
+    status_scan: bool = False
 
 
 def trace_coverage(
@@ -227,6 +228,12 @@ def trace_coverage(
     events: Counter[str] = Counter()
     sessions: set[str] = set()
     tree_values: dict[str, int] = {}
+    status_values: dict[str, int] = {}
+    status_counts = {
+        "untracked/directories-visited": SMALL_FILES // 10 + 2,
+        "untracked/paths-visited": SMALL_FILES + SMALL_FILES // 10 + 3,
+        "count/changed": 0, "count/untracked": 0, "count/ignored": 0,
+    }
     tree_counts = {
         "count/revisions": workload.tree_read_revisions,
     }
@@ -238,6 +245,15 @@ def trace_coverage(
             sessions.add(event["sid"])
             if event["event"] == "timer":
                 timers[f"{event['category']}/{event['name']}"] += event["intervals"]
+            if workload.status_scan:
+                if event["event"] in ("exit", "atexit") and event["code"] != 0:
+                    raise AssertionError("status must exit successfully")
+                key = event.get("key")
+                if (event["event"] == "data" and event.get("category") == "status"
+                        and (key in status_counts or key == "untracked/fill-us")):
+                    if key in status_values or event.get("thread") != "main":
+                        raise AssertionError("status DATA must occur once on the main thread")
+                    status_values[key] = int(event["value"])
             if workload.tree_read_revisions:
                 if event["event"] in ("exit", "atexit") and event["code"] != 1:
                     raise AssertionError("tree-only grep must exit with no matches")
@@ -255,12 +271,18 @@ def trace_coverage(
             raise AssertionError(f"{name}: expected >= {minimum} intervals, got {timers[name]}")
         if not workload.checkout and timers[name] != minimum:
             raise AssertionError(f"{name}: expected exactly {minimum} intervals")
-    workers = 0 if workload.tree_read_revisions else 4
+    workers = 0 if workload.tree_read_revisions or workload.status_scan else 4
     if not workload.checkout and (events["thread_start"] != workers or events["thread_exit"] != workers):
         raise AssertionError(f"{workload.name}: unexpected worker count")
-    if workload.tree_read_revisions:
+    if workload.tree_read_revisions or workload.status_scan:
         if len(sessions) != 1 or any(events[name] != 1 for name in ("version", "start", "exit", "atexit")):
-            raise AssertionError("tree-only grep must have one complete process")
+            raise AssertionError("workload must have one complete process")
+    if workload.status_scan:
+        if any(status_values.get(key) != expected for key, expected in status_counts.items()):
+            raise AssertionError(f"status traversal count mismatch: {status_values}")
+        if status_values.get("untracked/fill-us", -1) < 0:
+            raise AssertionError("status must report nonnegative fill wall time")
+    if workload.tree_read_revisions:
         if any(tree_values.get(key) != expected for key, expected in tree_counts.items()):
             raise AssertionError(f"tree traversal count mismatch: {tree_values}")
         directories = tree_values.get("content_index_tree_directories", -1)
@@ -273,7 +295,8 @@ def trace_coverage(
             raise AssertionError("child-read time must be nonnegative and contained in tree-walk time")
     return {"bytes": path.stat().st_size, "events": dict(events),
             "processes": len(sessions), "timer_intervals": dict(timers),
-            **({"tree_values": tree_values} if workload.tree_read_revisions else {})}
+            **({"tree_values": tree_values} if workload.tree_read_revisions else {}),
+            **({"status_values": status_values} if workload.status_scan else {})}
 
 
 @dataclass(frozen=True)
@@ -339,6 +362,9 @@ def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) 
                 workload.fixture.verify_checkout()
             coverage = (trace_coverage(git.trace, workload, observed_tree_counts)
                         if mode == "event-file" else None)
+            if (workload.status_scan and
+                    (workload.fixture.repo / ".git/index").read_bytes() != workload.fixture.index):
+                raise AssertionError("read-only status changed the index")
             git.remaining_seconds()
             if round_index >= 0:
                 samples[workload.name].append(Sample(
@@ -353,7 +379,7 @@ def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) 
         results[workload.name] = {
             "argv": git.command(workload.args),
             "fixture_files": len(workload.fixture.files),
-            "selected_files": (len(workload.fixture.files) if workload.checkout
+            "selected_files": (len(workload.fixture.files) if workload.checkout or workload.status_scan
                                else len(workload.expected_stdout.splitlines())),
             "packed_objects": workload.fixture.object_counts,
             "stdout_sha256": hashlib.sha256(workload.expected_stdout).hexdigest(),
@@ -458,9 +484,9 @@ def tree_read_workload(
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
-                "--tree-reads-only", "--tree-excludes-only"))):
+                "--tree-reads-only", "--tree-excludes-only", "--status-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
-                         "and optional --test_arg=--tree-reads-only or --tree-excludes-only")
+                         "and optional --test_arg=--tree-reads-only, --tree-excludes-only or --status-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -507,7 +533,44 @@ def main() -> None:
     try:
         report["git_sha256"] = file_hash(git_path)
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
-        small = make_fixture(git, root, streaming=False, tree_reads_only=len(sys.argv) == 4)
+        small = make_fixture(
+            git, root, streaming=False,
+            tree_reads_only=len(sys.argv) == 4 and sys.argv[3] != "--status-only",
+        )
+        if len(sys.argv) == 4 and sys.argv[3] == "--status-only":
+            args = ("--no-optional-locks", "status", "--porcelain")
+            disabled = git.run(small.repo, (*args, "--untracked-files=no"), "event-file")
+            disabled_events = [json.loads(line) for line in git.trace.read_text().splitlines()]
+            disabled_counts = Counter(event["event"] for event in disabled_events)
+            if (disabled.stdout or disabled.stderr
+                    or len({event["sid"] for event in disabled_events}) != 1
+                    or any(disabled_counts[name] != 1 for name in ("version", "start", "exit", "atexit"))
+                    or any(event["code"] != 0 for event in disabled_events
+                           if event["event"] in ("exit", "atexit"))
+                    or any(event.get("category") == "status" and event.get("key") == "untracked/fill-us"
+                           for event in disabled_events)):
+                raise AssertionError("status -uno must complete without untracked fill measurements")
+            workload = Workload("status-untracked-scan", small, (
+                *args, "--untracked-files=normal",
+            ), False, b"", {}, status_scan=True)
+            pack, = (small.repo / ".git/objects/pack").glob("*.pack")
+            report["status_geometry"] = {
+                "pack_sha256": file_hash(pack), "tracked_files": len(small.files),
+                "directories_visited": SMALL_FILES // 10 + 2,
+                "paths_visited": SMALL_FILES + SMALL_FILES // 10 + 3,
+                "untracked_disabled_fill_events": 0,
+            }
+            report["limitations"] = [
+                "Read-only clean status re-enumerates the fixture with fsmonitor and untracked cache disabled.",
+                "A/B requires matched harness, fixture, build options and trace mode; same-binary on/off ratios measure all enabled tracing.",
+                "When available, per-sample user/system CPU covers the whole command, not just directory fill; fixture and trace parsing are excluded.",
+                "No daemon, OG processing, cold-cache or natural-workload claim; no performance threshold.",
+            ]
+            report.update(benchmark(git, (workload,)))
+            small.verify_checkout()
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         if len(sys.argv) == 4:
             exclude_trees = sys.argv[3] == "--tree-excludes-only"
             workload, report["tree_read_geometry"] = tree_read_workload(
