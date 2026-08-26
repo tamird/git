@@ -882,7 +882,18 @@ int cmd_log_reflog(int argc,
 	struct log_config cfg;
 	struct rev_info rev;
 	struct setup_revision_opt opt;
+	struct log_trace2_state reflog_state = { 0 };
+	struct log_trace2_state *trace = NULL;
+	uint64_t walk_end = 0;
 	int ret;
+
+	if (trace2_is_enabled()) {
+		int saved_errno = errno;
+
+		trace = &reflog_state;
+		trace->begin = getnanotime();
+		errno = saved_errno;
+	}
 
 	log_config_init(&cfg);
 	init_diff_ui_defaults();
@@ -902,10 +913,48 @@ int cmd_log_reflog(int argc,
 	rev.always_show_header = 1;
 	cmd_log_init_finish(argc, argv, prefix, &rev, &opt, &cfg);
 
-	ret = cmd_log_walk(&rev, NULL);
+	ret = cmd_log_walk(&rev, trace);
+	if (trace) {
+		int saved_errno = errno;
+
+		walk_end = getnanotime();
+		errno = saved_errno;
+	}
 
 	release_revisions(&rev);
 	log_config_release(&cfg);
+	if (trace) {
+		int saved_errno = errno;
+		uint64_t end = getnanotime();
+		uint64_t history_ns = walk_end - trace->prepare_end;
+
+		if (history_ns >= trace->output_ns)
+			history_ns -= trace->output_ns;
+		else
+			history_ns = 0;
+
+		/*
+		 * Reuse the log walk's measurements without attributing this
+		 * command to the ordinary log execution scope.
+		 */
+		trace2_data_intmax("reflog", the_repository, "setup-us",
+				   (trace->prepare_begin - trace->begin) / 1000);
+		trace2_data_intmax("reflog", the_repository, "prepare-us",
+				   (trace->prepare_end - trace->prepare_begin) / 1000);
+		trace2_data_intmax("reflog", the_repository, "history-us",
+				   history_ns / 1000);
+		trace2_data_intmax("reflog", the_repository, "output-us",
+				   trace->output_ns / 1000);
+		trace2_data_intmax("reflog", the_repository, "finalize-us",
+				   (end - walk_end) / 1000);
+		trace2_data_intmax("reflog", the_repository, "execution-us",
+				   (end - trace->begin) / 1000);
+		trace2_data_intmax("reflog", the_repository, "count/returned",
+				   trace->returned);
+		trace2_data_intmax("reflog", the_repository, "count/shown",
+				   trace->shown);
+		errno = saved_errno;
+	}
 	return ret;
 }
 

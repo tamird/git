@@ -106,6 +106,102 @@ test_expect_success setup '
 	test_line_count = 4 output
 '
 
+reflog_trace () {
+	reflog_trace_file=$1 &&
+	shift &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+	GIT_TRACE2_EVENT="$PWD/$reflog_trace_file" git "$@"
+}
+
+test_reflog_trace () {
+	sed -n '/"event":"data",/s/.*"category":"reflog","key":"\([^"]*\)","value":"\([0-9][0-9]*\)".*/\1 \2/p' \
+		"$1" >reflog.data &&
+	test_line_count = 8 reflog.data &&
+	awk -v count="$2" '
+		{ if (seen[$1]++) exit 1; value[$1] = $2 }
+		END {
+			n = split("setup-us prepare-us history-us output-us finalize-us execution-us count/returned count/shown", keys, " ")
+			for (i = 1; i <= n; i++)
+				if (!(keys[i] in value))
+					exit 1
+			for (i = 1; i <= 5; i++)
+				sum += value[keys[i]]
+			if (value["execution-us"] < sum ||
+			    value["execution-us"] - sum > 4 ||
+			    value["count/returned"] != count ||
+			    value["count/shown"] != count)
+				exit 1
+		}
+	' reflog.data
+}
+
+test_expect_success 'reflog reports its own normal-return execution scope' '
+	test_when_finished "rm -f reflog-*.trace" &&
+	(
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		cat >expect-reflog <<-EOF &&
+		main@{0} $K commit: monkey
+		main@{1} $J commit: sheep
+		main@{2} $L commit: dragon
+		main@{3} $H commit (initial): rabbit
+		EOF
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git reflog show --format="%gd %H %gs" refs/heads/main \
+			>actual 2>err &&
+		test_cmp expect-reflog actual &&
+		test_must_be_empty err &&
+		reflog_trace reflog-show.trace reflog show \
+			--format="%gd %H %gs" refs/heads/main >actual 2>err &&
+		test_cmp expect-reflog actual &&
+		test_must_be_empty err &&
+		reflog_trace reflog-no-walk.trace reflog show --no-walk \
+			--format="%gd %H %gs" refs/heads/main >actual 2>err &&
+		test_cmp expect-reflog actual &&
+		test_must_be_empty err &&
+		reflog_trace reflog-log-g.trace log -g \
+			--format="%gd %H %gs" refs/heads/main >actual 2>err &&
+		test_cmp expect-reflog actual &&
+		test_must_be_empty err &&
+		cutoff=$(git log -1 --format=%cI) &&
+		printf "%s\n" "commit: monkey" "commit: monkey" >expect &&
+		reflog_trace reflog-all.trace reflog show --all \
+			--since="$cutoff" --format=%gs >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		reflog_trace reflog-empty.trace reflog show -n 0 \
+			--format=%gs refs/heads/main >actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+		echo "$K" >expect &&
+		reflog_trace reflog-show-object.trace show -s --format=%H HEAD \
+			>actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/reflog-invalid.trace" \
+			test_must_fail git reflog show --not-a-valid-option \
+			>actual 2>err &&
+		test_must_be_empty actual &&
+		test_grep "unrecognized argument: --not-a-valid-option" err &&
+
+		# All existing output and status oracles precede missing-field checks.
+		test_grep "\"category\":\"reflog\",\"key\":\"setup-us\"" \
+			reflog-show.trace &&
+		test_reflog_trace reflog-show.trace 4 &&
+		test_reflog_trace reflog-no-walk.trace 4 &&
+		test_reflog_trace reflog-all.trace 2 &&
+		test_reflog_trace reflog-empty.trace 0 &&
+		test_grep ! "\"category\":\"log\",\"key\":\"execution-us\"" \
+			reflog-show.trace &&
+		test_grep "\"category\":\"log\",\"key\":\"execution-us\"" \
+			reflog-log-g.trace &&
+		for trace_file in reflog-log-g.trace reflog-show-object.trace reflog-invalid.trace
+		do
+			test_grep ! "\"category\":\"reflog\"" "$trace_file" || exit 1
+		done
+	)
+'
+
 test_expect_success 'correct usage on sub-command -h' '
 	git reflog expire -h >err &&
 	test_grep "git reflog expire" err
