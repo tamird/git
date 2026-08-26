@@ -4,6 +4,29 @@ test_description='git show'
 
 . ./test-lib.sh
 
+test_show_timers () {
+	show_trace=$1 &&
+	shift &&
+	if test "$#" -eq 0
+	then
+		test_grep ! "\"event\":\"timer\".*\"category\":\"show\"," \
+			"$show_trace" || return 1
+	else
+		grep "\"event\":\"timer\".*\"category\":\"show\"," \
+			"$show_trace" >.git/show-control-timers &&
+		test_line_count = "$#" .git/show-control-timers &&
+		for show_timer
+		do
+			test_grep "\"name\":\"$show_timer\",\"intervals\":1," \
+				.git/show-control-timers || return 1
+		done || return 1
+	fi &&
+	test_grep ! "\"event\":\"th_timer\".*\"category\":\"show\"," \
+		"$show_trace" &&
+	test_grep ! "\"event\":\"data\".*\"category\":\"show\"," \
+		"$show_trace"
+}
+
 test_expect_success setup '
 	echo hello world >foo &&
 	H=$(git hash-object -w foo) &&
@@ -14,7 +37,14 @@ test_expect_success setup '
 '
 
 test_expect_success 'showing a tag that point at a missing object' '
-	test_must_fail git --no-pager show foo-tag
+	test_must_fail git --no-pager show foo-tag >actual 2>err &&
+	GIT_TRACE2_EVENT="$PWD/.git/show-missing-tag-event" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		test_expect_code 255 git --no-pager show foo-tag \
+		>actual.traced 2>err.traced &&
+	test_cmp actual actual.traced &&
+	test_cmp err err.traced &&
+	test_show_timers .git/show-missing-tag-event execution setup dispatch
 '
 
 test_expect_success 'set up a bit of history' '
@@ -35,7 +65,54 @@ test_expect_success 'showing two commits' '
 	EOF
 	git show main2 main3 >actual &&
 	grep ^commit actual >actual.filtered &&
-	test_cmp expect actual.filtered
+	test_cmp expect actual.filtered &&
+	GIT_TRACE2_EVENT="$PWD/.git/show-commits-event" \
+		git show main2 main3 >actual.traced 2>actual.traced.err &&
+	test_cmp actual actual.traced &&
+	test_must_be_empty actual.traced.err &&
+	grep "\"event\":\"timer\".*\"category\":\"show\"," \
+		.git/show-commits-event >.git/show-timers &&
+	test_line_count = 3 .git/show-timers &&
+	for name in execution setup dispatch
+	do
+		test_grep "\"name\":\"$name\",\"intervals\":1," \
+			.git/show-timers || return 1
+	done &&
+	test_grep ! "\"event\":\"th_timer\".*\"category\":\"show\"," \
+		.git/show-commits-event &&
+	test_grep ! "\"event\":\"data\".*\"category\":\"show\"," \
+		.git/show-commits-event
+'
+
+test_expect_success 'show timers cover object dispatch and revision walks' '
+	for show_case in range tree tag blob
+	do
+		case "$show_case" in
+		range) set -- main1..main3 ;;
+		tree) set -- main1: ;;
+		tag) set -- annotated ;;
+		blob) set -- main1:main1.t ;;
+		esac &&
+		git show "$@" >actual 2>err &&
+		GIT_TRACE2_EVENT="$PWD/.git/show-$show_case-event" \
+		GIT_TRACE2_EVENT_NESTING=2 \
+			git show "$@" >actual.traced 2>err.traced &&
+		test_cmp actual actual.traced &&
+		test_cmp err err.traced &&
+		test_show_timers ".git/show-$show_case-event" \
+			execution setup dispatch || return 1
+	done
+'
+
+test_expect_success 'show timers include normal nonzero returns' '
+	test_expect_code 1 git show --exit-code main2 >actual 2>err &&
+	GIT_TRACE2_EVENT="$PWD/.git/show-exit-code-event" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		test_expect_code 1 git show --exit-code main2 \
+		>actual.traced 2>err.traced &&
+	test_cmp actual actual.traced &&
+	test_cmp err err.traced &&
+	test_show_timers .git/show-exit-code-event execution setup dispatch
 '
 
 test_expect_success 'showing a tree' '
@@ -182,11 +259,25 @@ test_expect_success 'no-patch output does not access the tree' '
 		>actual 2>err &&
 	test_must_be_empty actual &&
 	test_grep "unable to read tree" err &&
+	GIT_TRACE2_EVENT="$PWD/.git/show-broken-tree-event" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		test_expect_code 128 git show --no-patch --exit-code --format=%s \
+		$commit >actual.traced 2>err.traced &&
+	test_cmp actual actual.traced &&
+	test_cmp err err.traced &&
+	test_show_timers .git/show-broken-tree-event setup &&
 	test_must_fail git show $commit
 '
 
 test_expect_success 'show --graph is forbidden' '
-  test_must_fail git show --graph HEAD
+	test_must_fail git show --graph HEAD >actual 2>err &&
+	GIT_TRACE2_EVENT="$PWD/.git/show-graph-event" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		test_expect_code 128 git show --graph HEAD \
+		>actual.traced 2>err.traced &&
+	test_cmp actual actual.traced &&
+	test_cmp err err.traced &&
+	test_show_timers .git/show-graph-event
 '
 
 test_expect_success 'show unmerged index' '

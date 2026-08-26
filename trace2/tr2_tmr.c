@@ -333,6 +333,23 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	/* Execution includes setup, dispatch, and cleanup, not process teardown. */
+	[TRACE2_TIMER_ID_SHOW_EXECUTION] = {
+		.category = "show",
+		.name = "execution",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SHOW_SETUP] = {
+		.category = "show",
+		.name = "setup",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_SHOW_DISPATCH] = {
+		.category = "show",
+		.name = "dispatch",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 

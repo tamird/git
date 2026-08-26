@@ -745,7 +745,12 @@ int cmd_show(int argc,
 	struct setup_revision_opt opt;
 	struct pathspec match_all;
 	int ret = 0;
+	int saved_errno;
 
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_SHOW_EXECUTION);
+	trace2_timer_start(TRACE2_TIMER_ID_SHOW_SETUP);
+	errno = saved_errno;
 	log_config_init(&cfg);
 	init_diff_ui_defaults();
 	repo_config(the_repository, git_log_config, &cfg);
@@ -768,10 +773,21 @@ int cmd_show(int argc,
 	opt.tweak = show_setup_revisions_tweak;
 	cmd_log_init(argc, argv, prefix, &rev, &opt, &cfg);
 
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_SHOW_SETUP);
+	trace2_timer_start(TRACE2_TIMER_ID_SHOW_DISPATCH);
+	errno = saved_errno;
+
 	if (!rev.no_walk) {
 		ret = cmd_log_walk(&rev, NULL);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_SHOW_DISPATCH);
+		errno = saved_errno;
 		release_revisions(&rev);
 		log_config_release(&cfg);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_SHOW_EXECUTION);
+		errno = saved_errno;
 		return ret;
 	}
 
@@ -841,10 +857,16 @@ int cmd_show(int argc,
 		}
 	}
 
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_SHOW_DISPATCH);
+	errno = saved_errno;
 	rev.diffopt.no_free = 0;
 	diff_free(&rev.diffopt);
 	release_revisions(&rev);
 	log_config_release(&cfg);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_SHOW_EXECUTION);
+	errno = saved_errno;
 
 	return ret;
 }
