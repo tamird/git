@@ -44,6 +44,8 @@ SMALL_FILES = 4000
 TREE_READ_REVISIONS = 256
 REFS_COMMANDS_PER_SAMPLE = 128
 FOLLOW_SOURCES = (4000, 100000)
+FOLLOW_ADDITIONS = (0, 4096, 65536)
+FOLLOW_INPUT_LIMIT = 8 * 1024 * 1024
 STREAM_FILES = 8
 STREAM_BYTES = 8 * 1024 * 1024
 BUDGET_SECONDS = 180
@@ -588,10 +590,13 @@ class FollowFixture:
     import_sha256: str
     refs: bytes
     object_counts: str
+    additions: int = 0
+    tree_input_sha256: dict[str, str] | None = None
 
 
-def make_follow_fixture(git: Git, root: Path, sources: int) -> FollowFixture:
-    repo = root / f"follow-{sources}"
+def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 0,
+                        bulk_trees: bool = False) -> FollowFixture:
+    repo = root / (f"follow-{sources}" + (f"-additions-{additions}" if additions else ""))
     repo.mkdir()
     git.run(repo, ("init", "--bare", "--quiet", "--initial-branch=base", "--template=", "."))
     # Each 64-byte line is one similarity span. Replacing one of 100 equally
@@ -601,6 +606,35 @@ def make_follow_fixture(git: Git, root: Path, sources: int) -> FollowFixture:
     source = line * 100
     edited = line * 49 + replacement + line * 50
     noise = b"unrelated small source\n"
+    tree_oids: dict[str, str] = {}
+    tree_input_sha256: dict[str, str] | None = None
+    if bulk_trees:
+        # fast-import scans existing siblings for each M path. Installing
+        # prebuilt flat trees avoids quadratic setup without changing geometry.
+        def write_setup_object(args: tuple[str, ...], data: bytes) -> str:
+            if len(data) > FOLLOW_INPUT_LIMIT:
+                raise AssertionError(f"follow setup input exceeded its fixed bound: {args}")
+            written = git.run(repo, args, input_data=data)
+            oid = written.stdout
+            if (written.stderr or len(oid) not in (41, 65) or oid[-1:] != b"\n"
+                    or any(byte not in b"0123456789abcdef" for byte in oid[:-1])):
+                raise AssertionError(f"expected one full object ID from {args}: {written}")
+            return oid[:-1].decode("ascii")
+
+        noise_oid = write_setup_object(("hash-object", "-w", "--stdin"), noise)
+        source_oid = write_setup_object(("hash-object", "-w", "--stdin"), source)
+        tree_inputs = {
+            "sources": b"".join(f"100644 blob {noise_oid}\t{number:08d}\n".encode()
+                                for number in range(sources - 1))
+                       + f"100644 blob {source_oid}\tsource\n".encode(),
+        }
+        if additions:
+            tree_inputs["added"] = b"".join(f"100644 blob {noise_oid}\t{number:08d}\n".encode()
+                                            for number in range(additions))
+        tree_input_sha256 = {}
+        for name, data in tree_inputs.items():
+            tree_oids[name] = write_setup_object(("mktree",), data)
+            tree_input_sha256[name] = hashlib.sha256(data).hexdigest()
     stream = bytearray()
 
     def append_data(content: bytes) -> None:
@@ -619,14 +653,22 @@ def make_follow_fixture(git: Git, root: Path, sources: int) -> FollowFixture:
         if parent is not None:
             stream.extend(f"from :{parent}\n".encode())
         if kind == "base":
-            for number in range(sources - 1):
-                stream.extend(f"M 100644 :1 sources/{number:08d}\n".encode())
-            stream.extend(b"M 100644 :2 sources/source\n")
+            if bulk_trees:
+                stream.extend(f"M 040000 {tree_oids['sources']} sources\n".encode())
+            else:
+                for number in range(sources - 1):
+                    stream.extend(f"M 100644 :1 sources/{number:08d}\n".encode())
+                stream.extend(b"M 100644 :2 sources/source\n")
         else:
             stream.extend(f"M 100644 :{2 if kind == 'exact' else 3} destination\n".encode())
+            if bulk_trees and additions:
+                stream.extend(f"M 040000 {tree_oids['added']} added\n".encode())
+            else:
+                for number in range(additions):
+                    stream.extend(f"M 100644 :1 added/{number:08d}\n".encode())
         stream.extend(b"\n")
     stream.extend(b"done\n")
-    if len(stream) > 8 * 1024 * 1024:
+    if len(stream) > FOLLOW_INPUT_LIMIT:
         raise AssertionError("follow fixture import exceeded its fixed input bound")
     imported = git.run(repo, ("fast-import", "--quiet", "--done"), input_data=bytes(stream))
     if imported.stdout or imported.stderr:
@@ -648,19 +690,23 @@ def make_follow_fixture(git: Git, root: Path, sources: int) -> FollowFixture:
     listing = git.run(repo, ("ls-tree", "-r", "--name-only", revisions["base"]))
     if listing.stdout != expected_sources or listing.stderr:
         raise AssertionError("follow fixture source geometry changed")
+    expected_additions = b"".join(f"A\tadded/{number:08d}\n".encode() for number in range(additions))
+    expected_additions += b"A\tdestination\n"
     for kind in FOLLOW_KINDS:
         added = git.run(repo, ("diff-tree", "--no-commit-id", "--name-status", "-r",
                                revisions["base"], revisions[kind]))
-        if added.stdout != b"A\tdestination\n" or added.stderr:
-            raise AssertionError("each copy commit must add only its destination")
+        if added.stdout != expected_additions or added.stderr:
+            raise AssertionError("copy commit additions differ from the specified destination and noise")
     counts = git.run(repo, ("count-objects", "-v")).stdout.decode()
     parsed = dict(value.split(": ", 1) for value in counts.splitlines())
-    if int(parsed["count"]) != 0 or int(parsed["in-pack"]) != 10:
-        raise AssertionError("expected three blobs, four trees and three packed commits")
+    # Both child commits share the added subtree and reuse the source noise blob.
+    packed_objects = 11 if additions else 10
+    if int(parsed["count"]) != 0 or int(parsed["in-pack"]) != packed_objects:
+        raise AssertionError(f"expected {packed_objects} packed objects and no loose objects: {counts}")
     pack, = (repo / "objects/pack").glob("*.pack")
     refs = git.run(repo, ("show-ref",)).stdout
     return FollowFixture(repo, sources, revisions, trees, file_hash(pack),
-                         hashlib.sha256(stream).hexdigest(), refs, counts)
+                         hashlib.sha256(stream).hexdigest(), refs, counts, additions, tree_input_sha256)
 
 
 def follow_trace_coverage(path: Path, fixture: FollowFixture, kind: FollowKind) -> dict[str, object]:
@@ -692,7 +738,7 @@ def follow_trace_coverage(path: Path, fixture: FollowFixture, kind: FollowKind) 
             completed.append(event["count"])
     if (len(timers) != 1 or completed != [1]
             or values.get("follow-full-tree/count") != 1
-            or values.get("follow-full-tree/eligible-additions") != 0):
+            or values.get("follow-full-tree/eligible-additions") != fixture.additions):
         raise AssertionError(f"follow full-tree geometry changed: {values}")
     full_tree_us = values.get("follow-full-tree-us", -1)
     timer_seconds = float(timers[0]["t_total"])
@@ -721,15 +767,28 @@ def follow_args(fixture: FollowFixture, kind: FollowKind) -> tuple[str, ...]:
             "--format=%s", "-n1", fixture.revisions[kind], "--", "destination")
 
 
-def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, FollowFixture]) -> dict[str, object]:
+def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, ...], *,
+                     additions_only: bool = False) -> dict[str, object]:
     results: dict[str, object] = {}
     for kind in FOLLOW_KINDS:
         conditions = tuple((fixture, mode) for fixture in fixtures for mode in MODES)
-        orders = tuple(
-            tuple(conditions[(column + row) % 6] for column in (0, 1, 5, 2, 4, 3))
-            for row in range(6)
-        )
-        samples: dict[int, list[Sample]] = {fixture.sources: [] for fixture in fixtures}
+        if additions_only:
+            # Six mode permutations and rotating fixture blocks balance each
+            # marginal position, not every carryover pair of nine conditions.
+            orders_list = []
+            for row, mode_order in enumerate(ORDERS):
+                offset = row % len(fixtures)
+                rotated = fixtures[offset:] + fixtures[:offset]
+                orders_list.append(tuple((fixture, mode) for fixture in rotated for mode in mode_order))
+            orders = tuple(orders_list)
+        else:
+            orders = tuple(
+                tuple(conditions[(column + row) % 6] for column in (0, 1, 5, 2, 4, 3))
+                for row in range(6)
+            )
+        samples: dict[tuple[int, int], list[Sample]] = {
+            (fixture.sources, fixture.additions): [] for fixture in fixtures
+        }
         expected = (f"{kind} copy\n\nC{'100' if kind == 'exact' else '099'}\t"
                     "sources/source\tdestination\n").encode()
         for round_index, order in enumerate((conditions, tuple(reversed(conditions)), *orders), -2):
@@ -737,19 +796,19 @@ def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, FollowFixture]) ->
                 measured = git.run(fixture.repo, follow_args(fixture, kind), mode)
                 if measured.stdout != expected or measured.stderr:
                     raise AssertionError(
-                        f"follow-{fixture.sources}-{kind}/{mode}: expected {expected!r}; "
+                        f"{fixture.repo.name}-{kind}/{mode}: expected {expected!r}; "
                         f"stdout={measured.stdout!r}, stderr={measured.stderr!r}"
                     )
                 coverage = follow_trace_coverage(git.trace, fixture, kind) if mode == "event-file" else None
                 git.remaining_seconds()
                 if round_index >= 0:
-                    samples[fixture.sources].append(Sample(
+                    samples[fixture.sources, fixture.additions].append(Sample(
                         mode, round_index, position, measured.wall_seconds,
                         measured.child_user_seconds, measured.child_system_seconds, coverage,
                     ))
         for fixture in fixtures:
-            name = f"follow-{fixture.sources}-{kind}"
-            selected = samples[fixture.sources]
+            name = f"{fixture.repo.name}-{kind}"
+            selected = samples[fixture.sources, fixture.additions]
             summary = summarize(selected)
             for mode in MODES:
                 cpu = [sample.child_user_seconds + sample.child_system_seconds
@@ -764,8 +823,10 @@ def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, FollowFixture]) ->
             results[name] = {
                 "argv": git.command(follow_args(fixture, kind)),
                 "revision": fixture.revisions[kind], "unchanged_sources": fixture.sources,
+                **({"additions": fixture.additions} if additions_only else {}),
                 "expected_stdout": expected.decode(), "stdout_sha256": hashlib.sha256(expected).hexdigest(),
-                "orders": [[(item.sources, mode) for item, mode in order] for order in orders],
+                "orders": [[(item.sources, item.additions, mode) if additions_only else (item.sources, mode)
+                            for item, mode in order] for order in orders],
                 "samples": [asdict(sample) for sample in selected], "summary": summary,
                 "full_tree_wall_seconds": {"median": statistics.median(native),
                                            "min": min(native), "max": max(native)},
@@ -777,16 +838,21 @@ def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, FollowFixture]) ->
         pack, = (fixture.repo / "objects/pack").glob("*.pack")
         if file_hash(pack) != fixture.pack_sha256:
             raise AssertionError("read-only follow changed the fixture pack")
+        if additions_only:
+            counts = git.run(fixture.repo, ("count-objects", "-v"))
+            if counts.stdout.decode() != fixture.object_counts or counts.stderr:
+                raise AssertionError("read-only follow changed the fixture object counts")
     return results
 
 
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
-                "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only", "--follow-only"))):
+                "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only",
+                "--follow-only", "--follow-additions-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
                          "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
-                         "--status-only, --refs-only or --follow-only")
+                         "--status-only, --refs-only, --follow-only or --follow-additions-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -833,12 +899,20 @@ def main() -> None:
     try:
         report["git_sha256"] = file_hash(git_path)
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
-        if len(sys.argv) == 4 and sys.argv[3] == "--follow-only":
+        if len(sys.argv) == 4 and sys.argv[3] in ("--follow-only", "--follow-additions-only"):
+            additions_only = sys.argv[3] == "--follow-additions-only"
             small_sources, large_sources = FOLLOW_SOURCES
-            fixtures = (make_follow_fixture(git, root, small_sources),
-                        make_follow_fixture(git, root, large_sources))
+            if additions_only:
+                fixtures = tuple(make_follow_fixture(git, root, large_sources, additions=additions,
+                                                     bulk_trees=True)
+                                 for additions in FOLLOW_ADDITIONS)
+            else:
+                fixtures = (make_follow_fixture(git, root, small_sources),
+                            make_follow_fixture(git, root, large_sources))
             report["follow_geometry"] = [{
                 "unchanged_sources": fixture.sources, "revisions": fixture.revisions,
+                **({"additions": fixture.additions, "tree_input_sha256": fixture.tree_input_sha256}
+                   if additions_only else {}),
                 "trees": fixture.trees, "pack_sha256": fixture.pack_sha256,
                 "import_sha256": fixture.import_sha256, "refs_sha256": hashlib.sha256(fixture.refs).hexdigest(),
                 "packed_objects": fixture.object_counts,
@@ -846,12 +920,16 @@ def main() -> None:
             report["benchmark_sha256"] = file_hash(Path(__file__))
             report["limitations"] = [
                 "Compare fixed A1/B/A2 binaries with identical harness, import, trees, revisions, pack, build flags, modes and sample order; on/off is not a patch effect.",
-                "Each of four size/copy conditions has six samples per tracing mode, with two unretained warmups per mode; no adaptive sizes, repeats or threshold.",
+                ("Each of six additions/copy conditions has six samples per tracing mode, with two unretained warmups per mode; fixture-block and mode positions are balanced, not all carryover pairs; no adaptive sizes, repeats or threshold."
+                 if additions_only else
+                 "Each of four size/copy conditions has six samples per tracing mode, with two unretained warmups per mode; no adaptive sizes, repeats or threshold."),
                 "Primary CPU is user+system summed within each sample before summarizing; wall includes startup/output collection, and native full-tree wall scopes only traced commands.",
-                "One destination and many identical small unrelated sources isolate unchanged-pair scaling; edited copies use unlimited rename candidates and are not the production candidate mixture.",
+                ("Fixed unchanged sources and added noise isolate additions; N0 is the unchanged-heavy control, and unlimited edited-copy candidates are not the production mixture."
+                 if additions_only else
+                 "One destination and many identical small unrelated sources isolate unchanged-pair scaling; edited copies use unlimited rename candidates and are not the production candidate mixture."),
                 "Bare packed fixtures, warm caches, no checkout, daemon, OG, cold-cache, per-child RSS or natural-workload savings claim.",
             ]
-            report.update(benchmark_follow(git, fixtures))
+            report.update(benchmark_follow(git, fixtures, additions_only=additions_only))
             git.remaining_seconds()
             report["status"] = "complete"
             return

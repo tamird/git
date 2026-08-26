@@ -671,6 +671,51 @@ test_expect_success 'exact rename does not need to fetch the blob lazily' '
 	test_grep "[?]$FILE_HASH" out
 '
 
+test_expect_success 'follow exact rename does not fetch an unrelated added blob' '
+	test_create_repo follow-leaf-exact &&
+	test_commit -C follow-leaf-exact create-a-file file.txt "some dummy content" &&
+	git -C follow-leaf-exact mv file.txt new-file.txt &&
+	echo unrelated >follow-leaf-exact/noise &&
+	git -C follow-leaf-exact add noise &&
+	test_tick &&
+	git -C follow-leaf-exact commit -m rename-the-file &&
+	FILE_HASH=$(git -C follow-leaf-exact rev-parse HEAD:new-file.txt) &&
+	NOISE_HASH=$(git -C follow-leaf-exact rev-parse HEAD:noise) &&
+	test_config -C follow-leaf-exact uploadpack.allowfilter 1 &&
+	test_config -C follow-leaf-exact uploadpack.allowanysha1inwant 1 &&
+	git clone --filter=blob:none --bare \
+		"file://$PWD/follow-leaf-exact" follow-leaf-exact.git &&
+	git -C follow-leaf-exact.git rev-list --objects --missing=print HEAD >missing &&
+	test_grep "[?]$FILE_HASH" missing &&
+	test_grep "[?]$NOISE_HASH" missing &&
+	printf "rename-the-file\n\nR100\tfile.txt\tnew-file.txt\n" >expect-leaf &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+	GIT_TRACE_PACKET="$PWD/follow-leaf-exact.packet" \
+		git -C follow-leaf-exact.git log --follow --name-status \
+		--format=%s -n1 -- new-file.txt >actual-leaf 2>err-leaf &&
+	test_cmp expect-leaf actual-leaf &&
+	test_must_be_empty err-leaf &&
+	test_path_is_missing follow-leaf-exact.packet &&
+	git -C follow-leaf-exact.git rev-list --objects --missing=print HEAD >missing &&
+	test_grep "[?]$FILE_HASH" missing &&
+	test_grep "[?]$NOISE_HASH" missing &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+	GIT_TRACE2_EVENT="$PWD/follow-leaf-exact.event" \
+	GIT_TRACE_PACKET="$PWD/follow-leaf-exact-traced.packet" \
+		git -C follow-leaf-exact.git log --follow --name-status \
+		--format=%s -n1 -- new-file.txt >actual-leaf-traced 2>err-leaf-traced &&
+	test_cmp actual-leaf actual-leaf-traced &&
+	test_cmp err-leaf err-leaf-traced &&
+	test_path_is_missing follow-leaf-exact-traced.packet &&
+	test_trace2_data diff follow-full-tree/eligible-additions 1 \
+		<follow-leaf-exact.event &&
+	test_trace2_data diff follow-full-tree/count 1 <follow-leaf-exact.event &&
+	git -C follow-leaf-exact.git rev-list --objects --missing=print HEAD >missing &&
+	test_grep "[?]$FILE_HASH" missing &&
+	test_grep "[?]$NOISE_HASH" missing
+'
+
 test_expect_success 'lazy-fetch when accessing object not in the_repository' '
 	rm -rf full partial.git &&
 	test_create_repo full &&

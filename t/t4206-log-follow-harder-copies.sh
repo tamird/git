@@ -10,6 +10,26 @@ test_description='Test --follow should always find copies hard in git log.
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff.sh
 
+test_follow_leaf_result () {
+	follow_leaf_expect=$1 &&
+	follow_leaf_additions=$2 &&
+	follow_leaf_walks=$3 &&
+	follow_leaf_event=$4 &&
+	shift 4 &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+		git "$@" >actual-leaf 2>err-leaf &&
+	test_cmp "$follow_leaf_expect" actual-leaf &&
+	test_must_be_empty err-leaf &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+	GIT_TRACE2_EVENT="$PWD/$follow_leaf_event" \
+		git "$@" >actual-leaf-traced 2>err-leaf-traced &&
+	test_cmp actual-leaf actual-leaf-traced &&
+	test_cmp err-leaf err-leaf-traced &&
+	test_follow_additions_trace "$PWD/$follow_leaf_event" \
+		"$follow_leaf_additions" "$follow_leaf_walks"
+}
+
 test_follow_additions_trace () {
 	follow_additions_trace="$1"
 	follow_additions_expected="$2"
@@ -332,6 +352,56 @@ test_expect_success 'follow counts completed walks but excludes additions with a
 	)
 '
 
+test_expect_success 'follow preserves command-line and configured orderfiles' '
+	(
+		cd follow-eligible-additions &&
+		tip=$(git rev-parse --verify HEAD) &&
+		printf "%s\n" destination middle >leaf-order &&
+		for order_source in command-line configured
+		do
+			if test "$order_source" = configured
+			then
+				set -- -c diff.orderFile=leaf-order \
+					log --follow --name-status --format=%s \
+					-n2 -O /dev/null &&
+				additions=0
+			else
+				set -- log --follow --name-status --format=%s \
+					-n2 -O leaf-order &&
+				additions=5
+			fi &&
+			test_follow_leaf_result expect "$additions" 2 \
+				"leaf-$order_source.event" \
+				"$@" "$tip" -- destination ||
+			return 1
+		done
+	)
+'
+
+test_expect_success 'follow retains the configured orderfile error behind a command-line override' '
+	(
+		cd follow-eligible-additions &&
+		tip=$(git rev-parse --verify HEAD) &&
+		test_path_is_missing missing-leaf-order &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			test_expect_code 128 git -c diff.orderFile=missing-leaf-order \
+			log --follow --name-status --format=%s -n2 \
+			-O /dev/null "$tip" -- destination \
+			>actual-leaf-missing 2>err-leaf-missing &&
+		test_must_be_empty actual-leaf-missing &&
+		test_grep "failed to read orderfile" err-leaf-missing &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/leaf-missing.event" \
+			test_expect_code 128 git -c diff.orderFile=missing-leaf-order \
+			log --follow --name-status --format=%s -n2 \
+			-O /dev/null "$tip" -- destination \
+			>actual-leaf-missing-traced 2>err-leaf-missing-traced &&
+		test_cmp actual-leaf-missing actual-leaf-missing-traced &&
+		test_cmp err-leaf-missing err-leaf-missing-traced
+	)
+'
+
 test_expect_success SYMLINKS 'follow counts added symlinks but not gitlinks or old-side paths' '
 	(
 		cd follow-eligible-additions &&
@@ -601,6 +671,71 @@ test_expect_success SYMLINKS 'follow preserves unchanged symlink copy sources' '
 				"$expected_additions" 2 ||
 			return 1
 		done
+	)
+'
+
+test_expect_success 'follow preserves directory choices and recursive directory pathspecs' '
+	test_create_repo follow-leaf-directory &&
+	(
+		cd follow-leaf-directory &&
+		test_tick &&
+		git commit --allow-empty -m base &&
+		mkdir dir &&
+		echo child >dir/child &&
+		echo noise >noise &&
+		git add dir noise &&
+		test_tick &&
+		git commit -m add &&
+		printf "A\tdir\n" >expect &&
+		test_follow_leaf_result expect 2 1 directory.event \
+			diff-tree --no-commit-id --follow --name-status \
+			HEAD^ HEAD -- dir &&
+		printf "A\tdir/child\n" >expect &&
+		test_follow_leaf_result expect 2 1 directory-recursive.event \
+			diff-tree -r --no-commit-id --follow --name-status \
+			HEAD^ HEAD -- dir
+	)
+'
+
+test_expect_success 'follow preserves a gitlink hidden by the configured submodule policy' '
+	test_create_repo follow-leaf-gitlink &&
+	(
+		cd follow-leaf-gitlink &&
+		test_tick &&
+		git commit --allow-empty -m base &&
+		base=$(git rev-parse HEAD) &&
+		echo noise >noise &&
+		git add noise &&
+		git update-index --add --cacheinfo 160000,$base,sub &&
+		test_tick &&
+		git commit -m add &&
+		printf "add\n\nA\tsub\n" >expect &&
+		test_follow_leaf_result expect 1 1 gitlink.event \
+			-c diff.ignoreSubmodules=all log --follow --name-status \
+			--format=%s -n1 --ignore-submodules=none HEAD -- sub
+	)
+'
+
+test_expect_success 'follow preserves a reversed regular-file deletion' '
+	test_create_repo follow-leaf-reverse &&
+	(
+		cd follow-leaf-reverse &&
+		echo content >deleted &&
+		git add deleted &&
+		test_tick &&
+		git commit -m base &&
+		git rm deleted &&
+		echo noise >noise &&
+		git add noise &&
+		test_tick &&
+		git commit -m change &&
+		printf "A\tdeleted\n" >expect &&
+		test_follow_leaf_result expect 1 1 reverse.event \
+			diff-tree -R -r --no-commit-id --follow --name-status \
+			HEAD^ HEAD -- deleted &&
+		test_follow_leaf_result expect 1 1 reverse-no-renames.event \
+			diff-tree -R -r --no-commit-id --follow --no-renames \
+			--name-status HEAD^ HEAD -- deleted
 	)
 '
 

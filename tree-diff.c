@@ -629,17 +629,28 @@ static void follow_change(struct diff_options *opt,
 			    old_dirty_submodule, new_dirty_submodule);
 }
 
-static void count_follow_additions(struct diff_options *opt, int addremove,
-				   unsigned mode, const struct object_id *oid,
-				   int oid_valid, const char *path,
-				   unsigned dirty_submodule)
+struct follow_addremove_data {
+	uint64_t *eligible_additions;
+	int skip_additions;
+};
+
+static void follow_addremove(struct diff_options *opt, int addremove,
+			     unsigned mode, const struct object_id *oid,
+			     int oid_valid, const char *path,
+			     unsigned dirty_submodule)
 {
-	uint64_t *eligible_additions = opt->change_fn_data;
+	struct follow_addremove_data *data = opt->change_fn_data;
 	int saved_errno = errno;
 
 	if (addremove == '+' && !S_ISGITLINK(mode) &&
-	    strcmp(opt->single_follow, path))
-		(*eligible_additions)++;
+	    strcmp(opt->single_follow, path)) {
+		if (data->eligible_additions)
+			(*data->eligible_additions)++;
+		if (data->skip_additions) {
+			errno = saved_errno;
+			return;
+		}
+	}
 
 	errno = saved_errno;
 	diff_addremove(opt, addremove, mode, oid, oid_valid, path,
@@ -653,6 +664,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	struct diff_options diff_opts;
 	struct diff_queue_struct *q = &diff_queued_diff;
 	struct diff_filepair *choice;
+	struct follow_addremove_data addremove_data = { 0 };
 	uint64_t eligible_additions = 0;
 	int i, saved_errno;
 
@@ -694,10 +706,18 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	 * orderfile read if it empties the queue. Exclude both cases from the
 	 * candidate count, but still record every completed traversal below.
 	 */
-	if (trace2_is_enabled() && diff_opts.break_opt == -1 &&
-	    !diff_opts.orderfile) {
-		diff_opts.add_remove = count_follow_additions;
-		diff_opts.change_fn_data = &eligible_additions;
+	if (diff_opts.break_opt == -1 && !diff_opts.orderfile) {
+		/* The selected regular file must survive the unrestricted search. */
+		addremove_data.skip_additions =
+			S_ISREG(choice->two->mode) &&
+			!strcmp(choice->two->path, diff_opts.single_follow);
+		if (trace2_is_enabled())
+			addremove_data.eligible_additions = &eligible_additions;
+		if (addremove_data.skip_additions ||
+		    addremove_data.eligible_additions) {
+			diff_opts.add_remove = follow_addremove;
+			diff_opts.change_fn_data = &addremove_data;
+		}
 	}
 	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
 	errno = saved_errno;

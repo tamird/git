@@ -246,4 +246,87 @@ test_expect_success 'diff --break-rewrites fetches only if necessary, and batche
 	test_line_count = 1 done_lines
 '
 
+test_expect_success 'follow preserves cold inexact-copy fetches with and without break rewrites' '
+	test_create_repo follow-leaf-prefetch &&
+	test_seq -f "line %d" 1 100 >follow-leaf-prefetch/source &&
+	test_seq -f "before %d" 1 100 >follow-leaf-prefetch/changed &&
+	git -C follow-leaf-prefetch add source changed &&
+	test_tick &&
+	git -C follow-leaf-prefetch commit -m base &&
+	cp follow-leaf-prefetch/source follow-leaf-prefetch/destination &&
+	echo edited >>follow-leaf-prefetch/destination &&
+	test_seq -f "after %d" 1 100 >follow-leaf-prefetch/changed &&
+	echo unrelated >follow-leaf-prefetch/noise &&
+	git -C follow-leaf-prefetch add destination changed noise &&
+	test_tick &&
+	git -C follow-leaf-prefetch commit -m copy &&
+	SOURCE_HASH=$(git -C follow-leaf-prefetch rev-parse HEAD:source) &&
+	DEST_HASH=$(git -C follow-leaf-prefetch rev-parse HEAD:destination) &&
+	CHANGED_HASH=$(git -C follow-leaf-prefetch rev-parse HEAD:changed) &&
+	NOISE_HASH=$(git -C follow-leaf-prefetch rev-parse HEAD:noise) &&
+	test_config -C follow-leaf-prefetch uploadpack.allowfilter 1 &&
+	test_config -C follow-leaf-prefetch uploadpack.allowanysha1inwant 1 &&
+	printf "copy\n\nC099\tsource\tdestination\n" >expect-leaf &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	for mode in normal break
+	do
+		if test "$mode" = break
+		then
+			set -- -B &&
+			additions=0
+		else
+			set -- &&
+			additions=1
+		fi &&
+		for tracing in plain traced
+		do
+			client="follow-leaf-$mode-$tracing.git" &&
+			packet="$PWD/follow-leaf-$mode-$tracing.packet" &&
+			actual="follow-leaf-$mode-$tracing.out" &&
+			err="follow-leaf-$mode-$tracing.err" &&
+			event=0 &&
+			if test "$tracing" = traced
+			then
+				event="$PWD/follow-leaf-$mode.event"
+			fi &&
+			git clone --filter=blob:none --bare \
+				"file://$PWD/follow-leaf-prefetch" "$client" &&
+			git -C "$client" rev-list --objects --missing=print HEAD >missing &&
+			test_grep "[?]$SOURCE_HASH" missing &&
+			test_grep "[?]$DEST_HASH" missing &&
+			test_grep "[?]$CHANGED_HASH" missing &&
+			test_grep "[?]$NOISE_HASH" missing &&
+			GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$event" \
+			GIT_TRACE_PACKET="$packet" \
+				git -C "$client" log "$@" --follow --name-status \
+				--format=%s -n1 -- destination >"$actual" 2>"$err" &&
+			test_must_be_empty "$err" &&
+			test_cmp expect-leaf "$actual" &&
+			test_path_is_file "$packet" &&
+			git -C "$client" rev-list --objects --missing=print HEAD >missing &&
+			test_grep ! "[?]$SOURCE_HASH" missing &&
+			test_grep ! "[?]$DEST_HASH" missing &&
+			if test "$mode" = break
+			then
+				test_grep "want $NOISE_HASH" "$packet" &&
+				test_grep ! "[?]$NOISE_HASH" missing
+			else
+				test_grep ! "want $NOISE_HASH" "$packet" &&
+				test_grep "[?]$NOISE_HASH" missing
+			fi &&
+			if test "$tracing" = traced
+			then
+				test_trace2_data diff follow-full-tree/eligible-additions \
+					"$additions" <"$event" &&
+				test_trace2_data diff follow-full-tree/count 1 <"$event"
+			fi ||
+			return 1
+		done &&
+		test_cmp "follow-leaf-$mode-plain.out" "follow-leaf-$mode-traced.out" &&
+		test_cmp "follow-leaf-$mode-plain.err" "follow-leaf-$mode-traced.err" ||
+		return 1
+	done &&
+	test_cmp follow-leaf-normal-plain.out follow-leaf-break-plain.out
+'
+
 test_done
