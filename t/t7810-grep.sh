@@ -5688,4 +5688,189 @@ test_expect_success 'grep of revision in partial clone batches prefetch and hono
 	test_line_count = 0 missing
 '
 
+test_expect_success 'setup literal-prefix tree traversal' '
+	tree_prefix_blob=$(printf "prefix needle\n" | git hash-object -w --stdin) &&
+	tree_prefix_leaf=$({
+		printf "100644 blob %s\tmatch.py\n" "$tree_prefix_blob" &&
+		printf "100644 blob %s\tskip.py\n" "$tree_prefix_blob"
+	} | git mktree) &&
+	tree_prefix_noise=$(printf "100644 blob %s\tmismatch.py\n" \
+		"$tree_prefix_blob" | git mktree) &&
+	tree_prefix_branch=$({
+		printf "040000 tree %s\tspare\n" "$tree_prefix_noise" &&
+		printf "040000 tree %s\ttarget\n" "$tree_prefix_leaf" &&
+		printf "040000 tree %s\ttargetmore\n" "$tree_prefix_leaf"
+	} | git mktree) &&
+	tree_prefix_root=$({
+		printf "040000 tree %s\toutside\n" "$tree_prefix_noise" &&
+		printf "040000 tree %s\twanted\n" "$tree_prefix_branch"
+	} | git mktree) &&
+	cat >expect-tree-prefix-target <<-EOF &&
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	$tree_prefix_root:wanted/target/skip.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-one <<-EOF &&
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-components <<-EOF &&
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	$tree_prefix_root:wanted/target/skip.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/match.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/skip.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-union <<-EOF &&
+	$tree_prefix_root:outside/mismatch.py:prefix needle
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	$tree_prefix_root:wanted/target/skip.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-leading <<-EOF &&
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/match.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-descendants <<-EOF &&
+	$tree_prefix_root:wanted/spare/mismatch.py:prefix needle
+	$tree_prefix_root:wanted/target/match.py:prefix needle
+	$tree_prefix_root:wanted/target/skip.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/match.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/skip.py:prefix needle
+	EOF
+	cat >expect-tree-prefix-excluded <<-EOF &&
+	$tree_prefix_root:outside/mismatch.py:prefix needle
+	$tree_prefix_root:wanted/spare/mismatch.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/match.py:prefix needle
+	$tree_prefix_root:wanted/targetmore/skip.py:prefix needle
+	EOF
+	tree_prefix_missing=$(printf "unwritten tree prefix object\n" |
+		git hash-object --stdin) &&
+	test_must_fail git cat-file -e "$tree_prefix_missing" &&
+	tree_prefix_bad=$(printf bad |
+		git hash-object --literally -w -t tree --stdin)
+'
+
+test_tree_prefix_grep () {
+	tree_prefix_expect=$1 &&
+	shift &&
+	git grep --no-content-index --threads=1 "prefix needle" \
+		"$tree_prefix_root" -- "$@" >actual-tree-prefix 2>err-tree-prefix &&
+	test_cmp "$tree_prefix_expect" actual-tree-prefix &&
+	test_must_be_empty err-tree-prefix
+}
+
+test_expect_success 'tree wildcard prefixes preserve pathspec matches' '
+	for tree_prefix_pattern in \
+		"wanted/target/*.py" \
+		":(glob)wanted/target/*.py" \
+		":(icase)WANTED/TARGET/*.PY" \
+		":(top)wanted/target/*.py"
+	do
+		test_tree_prefix_grep expect-tree-prefix-target \
+			"$tree_prefix_pattern" || return 1
+	done &&
+	test_tree_prefix_grep expect-tree-prefix-one \
+		":(literal)wanted/target/match.py" &&
+	test_tree_prefix_grep expect-tree-prefix-one \
+		"wanted/target/*.py" ":(exclude)wanted/target/skip.py" &&
+	test_tree_prefix_grep expect-tree-prefix-excluded \
+		":(exclude)wanted/target/*.py" &&
+	# do_match() examines these positives in reverse order.
+	test_tree_prefix_grep expect-tree-prefix-union \
+		"outside/*.py" "wanted/target/*.py" &&
+	test_tree_prefix_grep expect-tree-prefix-components \
+		"wanted/tar*/*.py" &&
+	test_tree_prefix_grep expect-tree-prefix-leading "*/match.py" &&
+	test_tree_prefix_grep expect-tree-prefix-descendants "wanted/*.py" &&
+	test_expect_code 1 git grep --no-content-index --threads=1 \
+		"prefix needle" "$tree_prefix_root" -- \
+		":(glob)wanted/*.py" >actual-tree-prefix 2>err-tree-prefix &&
+	test_must_be_empty actual-tree-prefix &&
+	test_must_be_empty err-tree-prefix
+'
+
+test_expect_success BSLASHPSPEC 'tree wildcard prefix permits escaped components' '
+	test_tree_prefix_grep expect-tree-prefix-target "wanted/tar\\get/*.py"
+'
+
+test_expect_success 'tree wildcard prefixes preserve attribute matching' '
+	test_when_finished "rm -f tree-prefix.attributes" &&
+	echo "wanted/target/match.py tree_prefix_selected" >tree-prefix.attributes &&
+	git -c core.attributesFile="$PWD/tree-prefix.attributes" \
+		grep --no-content-index --threads=1 "prefix needle" \
+		"$tree_prefix_root" -- \
+		":(attr:tree_prefix_selected)wanted/target/*.py" \
+		>actual-tree-prefix 2>err-tree-prefix &&
+	test_cmp expect-tree-prefix-one actual-tree-prefix &&
+	test_must_be_empty err-tree-prefix
+'
+
+test_expect_success 'tree wildcard prefixes retain matching missing-tree errors' '
+	tree_prefix_missing_branch=$(printf "040000 tree %s\ttarget\n" \
+		"$tree_prefix_missing" | git mktree --missing) &&
+	tree_prefix_missing_root=$(printf "040000 tree %s\twanted\n" \
+		"$tree_prefix_missing_branch" | git mktree) &&
+	for tree_prefix_pattern in \
+		"wanted/target/*.py" "wanted/tar*/*.py" "*/match.py"
+	do
+		test_expect_code 128 git grep --no-content-index --threads=1 \
+			"prefix needle" "$tree_prefix_missing_root" -- \
+			"$tree_prefix_pattern" >actual-tree-prefix 2>err-tree-prefix &&
+		test_must_be_empty actual-tree-prefix &&
+		test_grep "unable to read tree ($tree_prefix_missing)" \
+			err-tree-prefix || return 1
+	done
+'
+
+test_expect_success 'tree wildcard prefixes retain malformed-tree errors' '
+	tree_prefix_bad_branch=$(printf "040000 tree %s\ttarget\n" \
+		"$tree_prefix_bad" | git mktree) &&
+	tree_prefix_bad_root=$(printf "040000 tree %s\twanted\n" \
+		"$tree_prefix_bad_branch" | git mktree) &&
+	for tree_prefix_bad_input in "$tree_prefix_bad" "$tree_prefix_bad_root"
+	do
+		test_expect_code 128 git grep --no-content-index --threads=1 \
+			"prefix needle" "$tree_prefix_bad_input" -- \
+			"wanted/target/*.py" >actual-tree-prefix 2>err-tree-prefix &&
+		test_must_be_empty actual-tree-prefix &&
+		test_grep "too-short tree object" err-tree-prefix || return 1
+	done
+'
+
+test_expect_success 'tree wildcard prefixes skip provably unrelated missing trees' '
+	tree_prefix_unselected_branch=$({
+		printf "040000 tree %s\tspare\n" "$tree_prefix_missing" &&
+		printf "040000 tree %s\ttarget\n" "$tree_prefix_leaf" &&
+		printf "040000 tree %s\ttargetmore\n" "$tree_prefix_missing"
+	} | git mktree --missing) &&
+	tree_prefix_unselected_root=$({
+		printf "040000 tree %s\toutside\n" "$tree_prefix_missing" &&
+		printf "040000 tree %s\twanted\n" "$tree_prefix_unselected_branch"
+	} | git mktree --missing) &&
+	cat >expect-tree-prefix-unselected <<-EOF &&
+	$tree_prefix_unselected_root:wanted/target/match.py:prefix needle
+	$tree_prefix_unselected_root:wanted/target/skip.py:prefix needle
+	EOF
+	git grep --no-content-index --threads=1 "prefix needle" \
+		"$tree_prefix_unselected_root" -- "wanted/target/*.py" \
+		>actual-tree-prefix 2>err-tree-prefix &&
+	test_cmp expect-tree-prefix-unselected actual-tree-prefix &&
+	test_must_be_empty err-tree-prefix
+'
+
+test_expect_success 'tree wildcard prefixes avoid unrelated child-tree reads' '
+	test_when_finished "rm -f tree-prefix.trace" &&
+	for tree_prefix_pattern in "wanted/target/*.py" ":(glob)wanted/target/*.py"
+	do
+		>tree-prefix.trace &&
+		env GIT_TRACE2_EVENT="$PWD/tree-prefix.trace" \
+			GIT_TRACE2_EVENT_NESTING=1 \
+			git grep --no-content-index --threads=1 "prefix needle" \
+				"$tree_prefix_root" -- "$tree_prefix_pattern" \
+				>actual-tree-prefix 2>err-tree-prefix &&
+		test_cmp expect-tree-prefix-target actual-tree-prefix &&
+		test_must_be_empty err-tree-prefix &&
+		# Only wanted and wanted/target need child-tree reads.
+		test_trace2_data grep content_index_tree_directories 2 \
+			<tree-prefix.trace || return 1
+	done
+'
+
 test_done

@@ -1098,11 +1098,24 @@ static enum interesting do_match(struct index_state *istate,
 					goto interesting;
 
 				/*
-				 * Match all directories. We'll try to
-				 * match files later on.
+				 * Before the wildcard, a directory must still
+				 * agree with the literal prefix.
 				 */
-				if (ps->recursive && S_ISDIR(entry->mode))
+				if (ps->recursive && S_ISDIR(entry->mode)) {
+					if (item->nowildcard_len > baselen) {
+						int dir_matches;
+
+						strbuf_add(base, entry->path, pathlen);
+						strbuf_addch(base, '/');
+						dir_matches = match_wildcard_base(
+							item, base->buf, base->len,
+							&matched);
+						strbuf_setlen(base, baselen);
+						if (!dir_matches)
+							continue;
+					}
 					return entry_interesting;
+				}
 
 				/*
 				 * When matching against submodules with
