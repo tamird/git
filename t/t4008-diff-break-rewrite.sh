@@ -211,7 +211,41 @@ test_expect_success POSIXPERM,SANITY \
 	git -C unreadable update-index --no-fsmonitor-valid rename-new &&
 	echo dirty >>unreadable/rename-new &&
 	chmod -r unreadable/rename-new &&
-	test_must_fail git -C unreadable diff --patch -- rename-new
+	test_must_fail git -C unreadable diff --patch -- rename-new &&
+	printf "A\trename-new\nD\trename-old\n" >expect.unreadable-rename &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git -C unreadable -c core.fsmonitor=false diff --name-status -M \
+			HEAD^ -- rename-old rename-new \
+			>actual.unreadable-rename 2>err.unreadable-rename &&
+	test_cmp expect.unreadable-rename actual.unreadable-rename &&
+	test_must_be_empty err.unreadable-rename &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2_EVENT="$PWD/unreadable-rename.trace" \
+		git -C unreadable -c core.fsmonitor=false diff --name-status -M \
+			HEAD^ -- rename-old rename-new \
+			>actual.unreadable-rename-traced 2>err.unreadable-rename-traced &&
+	test_cmp actual.unreadable-rename actual.unreadable-rename-traced &&
+	test_cmp err.unreadable-rename err.unreadable-rename-traced &&
+	test_trace2_data diff rename/inexact/sources 1 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/destinations 1 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/similarity_calls 1 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/size_rejected 0 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/content_compared 0 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/compared_bytes 0 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/nonregular 0 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/population_failed 1 \
+		<unreadable-rename.trace &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 0 \
+		<unreadable-rename.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"rename/populate\",\"intervals\":4," unreadable-rename.trace &&
+	test_grep ! "spanhash/" unreadable-rename.trace
 '
 
 test_done

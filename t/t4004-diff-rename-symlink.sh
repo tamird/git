@@ -64,7 +64,22 @@ EOF
 '
 
 test_expect_success SYMLINKS 'validate diff output' '
-	compare_diff_patch current expected
+	compare_diff_patch current expected &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_DIFF_OPTS=--unified=0 GIT_TRACE2_EVENT="$PWD/symlink.trace" \
+		git diff-index -C -p $tree >traced 2>traced.err &&
+	test_cmp current traced &&
+	test_must_be_empty traced.err &&
+	test_trace2_data diff rename/inexact/sources 2 <symlink.trace &&
+	test_trace2_data diff rename/inexact/destinations 1 <symlink.trace &&
+	test_trace2_data diff rename/inexact/similarity_calls 2 <symlink.trace &&
+	test_trace2_data diff rename/inexact/size_rejected 0 <symlink.trace &&
+	test_trace2_data diff rename/inexact/content_compared 0 <symlink.trace &&
+	test_trace2_data diff rename/inexact/nonregular 2 <symlink.trace &&
+	test_trace2_data diff rename/inexact/population_failed 0 <symlink.trace &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 0 <symlink.trace &&
+	test_grep ! "rename/populate" symlink.trace &&
+	test_grep ! "spanhash/" symlink.trace
 '
 
 test_done

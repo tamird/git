@@ -79,8 +79,16 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 	cat <<-EOF >expected &&
 	:100644 100644 $origoid $oid1 C1234	COPYING	COPYING.1
 	EOF
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff-index -l4 -C --find-copies-harder $tree \
+			>untraced 2>untraced.err &&
+	test_must_be_empty untraced.err &&
 	GIT_TRACE2_EVENT="$PWD/rename-inexact.trace" \
-		git diff-index -l4 -C --find-copies-harder $tree >current &&
+		git diff-index -l4 -C --find-copies-harder $tree \
+			>current 2>traced.err &&
+	test_cmp untraced current &&
+	test_cmp untraced.err traced.err &&
 	compare_diff_raw current expected &&
 	pair_bytes=$(($(wc -c <COPYING) + $(wc -c <COPYING.1))) &&
 	compared_bytes=$((4 * pair_bytes)) &&
@@ -106,9 +114,106 @@ test_expect_success 'validate output from rename/copy detection (#3)' '
 		<rename-inexact.trace &&
 	test_trace2_data diff rename/inexact/score_bound_rejectable_bytes \
 		0 <rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/nonregular 0 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/population_failed 0 \
+		<rename-inexact.trace &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 1 \
+		<rename-inexact.trace &&
 	test "$(grep -c \
 		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
-		rename-inexact.trace)" = 11
+		rename-inexact.trace)" = 14 &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"rename/populate\",\"intervals\":[1-9][0-9]*," rename-inexact.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/build\",\"intervals\":6," rename-inexact.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/compare\",\"intervals\":4," rename-inexact.trace
+'
+
+test_expect_success 'similarity timers aggregate while exit counts remain per invocation' '
+	index_tree=$(git write-tree) &&
+	printf "%s %s\n" "$tree" "$index_tree" >tree-pair &&
+	cat tree-pair tree-pair >tree-pairs &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff-tree -r -C --find-copies-harder "$tree" "$index_tree" \
+			>single 2>single.err &&
+	test_must_be_empty single.err &&
+	compare_diff_raw single expected &&
+	cat tree-pair single tree-pair single >expect-repeated &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2_EVENT="$PWD/rename-repeated.trace" \
+		git diff-tree --stdin -r -C --find-copies-harder \
+			<tree-pairs >repeated 2>repeated.err &&
+	test_cmp expect-repeated repeated &&
+	test_must_be_empty repeated.err &&
+	test_trace2_data diff rename/inexact/similarity_calls 6 \
+		<rename-repeated.trace >calls &&
+	test_line_count = 2 calls &&
+	test_trace2_data diff rename/inexact/size_rejected 1 \
+		<rename-repeated.trace >size-rejected &&
+	test_line_count = 2 size-rejected &&
+	test_trace2_data diff rename/inexact/content_compared 4 \
+		<rename-repeated.trace >compared &&
+	test_line_count = 2 compared &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 1 \
+		<rename-repeated.trace >floor-skipped &&
+	test_line_count = 2 floor-skipped &&
+	test "$(grep -c \
+		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
+		rename-repeated.trace)" = 28 &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/build\",\"intervals\":12," rename-repeated.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/compare\",\"intervals\":8," rename-repeated.trace
+'
+
+test_expect_success 'disabled and exact-only copies do not enter similarity phases' '
+	printf "A\tCOPYING.1\n" >expect-added &&
+	for mode in disabled exact-only
+	do
+		case "$mode" in
+		disabled) set -- --no-renames ;;
+		exact-only) set -- -C100% --find-copies-harder ;;
+		esac &&
+		GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+			git diff-index --name-status "$@" "$tree" \
+				>untraced-control 2>untraced-control.err &&
+		test_cmp expect-added untraced-control &&
+		test_must_be_empty untraced-control.err &&
+		GIT_TRACE2_EVENT="$PWD/$mode.trace" \
+			git diff-index --name-status "$@" "$tree" \
+				>traced-control 2>traced-control.err &&
+		test_cmp untraced-control traced-control &&
+		test_cmp untraced-control.err traced-control.err &&
+		test_grep ! "rename/inexact/" "$mode.trace" &&
+		test_grep ! "rename/populate" "$mode.trace" &&
+		test_grep ! "spanhash/" "$mode.trace" ||
+		return 1
+	done
+'
+
+test_expect_success 'size rejection populates sizes without hashing or comparing spans' '
+	printf "A\tCOPYING.1\n" >expect-size-rejected &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff-index --name-status -C --find-copies-harder "$tree" \
+			-- rezrov COPYING.1 >untraced-size 2>untraced-size.err &&
+	test_cmp expect-size-rejected untraced-size &&
+	test_must_be_empty untraced-size.err &&
+	GIT_TRACE2_EVENT="$PWD/rename-size.trace" \
+		git diff-index --name-status -C --find-copies-harder "$tree" \
+			-- rezrov COPYING.1 >traced-size 2>traced-size.err &&
+	test_cmp untraced-size traced-size &&
+	test_cmp untraced-size.err traced-size.err &&
+	test_trace2_data diff rename/inexact/similarity_calls 1 \
+		<rename-size.trace &&
+	test_trace2_data diff rename/inexact/size_rejected 1 \
+		<rename-size.trace &&
+	test_trace2_data diff rename/inexact/content_compared 0 \
+		<rename-size.trace &&
+	test_trace2_data diff rename/inexact/nonregular 0 \
+		<rename-size.trace &&
+	test_trace2_data diff rename/inexact/population_failed 0 \
+		<rename-size.trace &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 0 \
+		<rename-size.trace &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"rename/populate\",\"intervals\":[1-9][0-9]*," rename-size.trace &&
+	test_grep ! "spanhash/" rename-size.trace
 '
 
 test_done

@@ -1,5 +1,6 @@
 #include "git-compat-util.h"
 #include "diffcore.h"
+#include "trace2.h"
 
 /*
  * Idea here is very simple.
@@ -173,7 +174,14 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 	struct spanhash_top *count = count_p ? *count_p : NULL;
 
 	if (!count) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+		errno = saved_errno;
 		count = hash_chars(r, one);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+		errno = saved_errno;
 		if (count_p)
 			*count_p = count;
 	}
@@ -199,9 +207,14 @@ int diffcore_count_changes(struct repository *r,
 	struct spanhash *s, *d;
 	struct spanhash_top *src_count, *dst_count;
 	unsigned long sc, la;
+	int saved_errno;
 
 	src_count = get_spanhash(r, src, src_count_p);
 	dst_count = get_spanhash(r, dst, dst_count_p);
+
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_SPANHASH_COMPARE);
+	errno = saved_errno;
 	sc = la = 0;
 
 	s = src_count->data;
@@ -234,6 +247,10 @@ int diffcore_count_changes(struct repository *r,
 		la += d->cnt;
 		d++;
 	}
+
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_COMPARE);
+	errno = saved_errno;
 
 	if (!src_count_p)
 		free(src_count);

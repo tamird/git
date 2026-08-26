@@ -40,6 +40,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "write back to queue",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_DIFF_RENAME_POPULATE] = {
+		.category = "diff",
+		.name = "rename/populate",
+		.want_per_thread_events = 0,
+	},
+	/* Span-hash helpers also serve rewrite breaking, not only renames. */
+	[TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD] = {
+		.category = "diff",
+		.name = "spanhash/build",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_DIFF_SPANHASH_COMPARE] = {
+		.category = "diff",
+		.name = "spanhash/compare",
+		.want_per_thread_events = 0,
+	},
 	/* Rebase and pick are inclusive; their phase timers overlap them. */
 	[TRACE2_TIMER_ID_SEQUENCER_REBASE] = {
 		.category = "sequencer",

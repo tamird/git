@@ -98,6 +98,7 @@ struct inexact_rename_stats {
 	int sources, destinations;
 	int rename_limit, limit_result;
 	uint64_t similarity_calls, size_rejected;
+	uint64_t nonregular, population_failed, candidate_floor_skipped;
 	uint64_t content_compared, compared_bytes;
 	uint64_t score_bound_floor_ready, score_bound_rejectable;
 	uint64_t score_bound_rejectable_bytes;
@@ -111,6 +112,8 @@ struct similarity_score_bound {
 static void trace_inexact_rename(struct repository *repo,
 				const struct inexact_rename_stats *stats)
 {
+	int saved_errno;
+
 	if (!stats)
 		return;
 
@@ -124,6 +127,15 @@ static void trace_inexact_rename(struct repository *repo,
 			  stats->limit_result);
 	trace2_data_intmax("diff", repo, "rename/inexact/similarity_calls",
 			  stats->similarity_calls);
+	saved_errno = errno;
+	trace2_data_intmax("diff", repo, "rename/inexact/nonregular",
+			  stats->nonregular);
+	trace2_data_intmax("diff", repo, "rename/inexact/population_failed",
+			  stats->population_failed);
+	trace2_data_intmax("diff", repo,
+			  "rename/inexact/candidate_floor_skipped",
+			  stats->candidate_floor_skipped);
+	errno = saved_errno;
 	trace2_data_intmax("diff", repo, "rename/inexact/size_rejected",
 			  stats->size_rejected);
 	trace2_data_intmax("diff", repo, "rename/inexact/content_compared",
@@ -174,6 +186,28 @@ static void inexact_prefetch(void *prefetch_options)
 	oid_array_clear(&to_fetch);
 }
 
+static int populate_similarity_filespec(struct repository *r,
+					struct diff_filespec *s,
+					const struct diff_populate_filespec_options *options)
+{
+	int ret, saved_errno;
+
+	/* Do not time the population helper's cached successful returns. */
+	if (!trace2_is_enabled() ||
+	    (!s->populate_failed &&
+	     (s->data || (options->check_size_only && s->size))))
+		return diff_populate_filespec(r, s, options);
+
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_RENAME_POPULATE);
+	errno = saved_errno;
+	ret = diff_populate_filespec(r, s, options);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_RENAME_POPULATE);
+	errno = saved_errno;
+	return ret;
+}
+
 static int estimate_similarity(struct repository *r,
 			       struct diff_filespec *src,
 			       struct diff_filespec *dst,
@@ -210,8 +244,11 @@ static int estimate_similarity(struct repository *r,
 	 * only when they are exact matches --- in other words, no edits
 	 * after renaming.
 	 */
-	if (!S_ISREG(src->mode) || !S_ISREG(dst->mode))
+	if (!S_ISREG(src->mode) || !S_ISREG(dst->mode)) {
+		if (stats)
+			stats->nonregular++;
 		return 0;
+	}
 
 	/*
 	 * Need to check that source and destination sizes are
@@ -224,12 +261,14 @@ static int estimate_similarity(struct repository *r,
 	 */
 	dpf_opt->check_size_only = 1;
 
-	if (!src->cnt_data &&
-	    diff_populate_filespec(r, src, dpf_opt))
+	if ((!src->cnt_data &&
+	     populate_similarity_filespec(r, src, dpf_opt)) ||
+	    (!dst->cnt_data &&
+	     populate_similarity_filespec(r, dst, dpf_opt))) {
+		if (stats)
+			stats->population_failed++;
 		return 0;
-	if (!dst->cnt_data &&
-	    diff_populate_filespec(r, dst, dpf_opt))
-		return 0;
+	}
 
 	max_size = ((src->size > dst->size) ? src->size : dst->size);
 	base_size = ((src->size < dst->size) ? src->size : dst->size);
@@ -253,10 +292,14 @@ static int estimate_similarity(struct repository *r,
 	score_bound.dst_size = dst->size;
 	dpf_opt->check_size_only = 0;
 
-	if (!src->cnt_data && diff_populate_filespec(r, src, dpf_opt))
+	if ((!src->cnt_data &&
+	     populate_similarity_filespec(r, src, dpf_opt)) ||
+	    (!dst->cnt_data &&
+	     populate_similarity_filespec(r, dst, dpf_opt))) {
+		if (stats)
+			stats->population_failed++;
 		return 0;
-	if (!dst->cnt_data && diff_populate_filespec(r, dst, dpf_opt))
-		return 0;
+	}
 
 	compared_src_size = src->size;
 	compared_dst_size = dst->size;
@@ -280,8 +323,11 @@ static int estimate_similarity(struct repository *r,
 		 */
 		diffcore_prepare_count_changes(r, src, dst);
 		if (score_bound.src_size == src->size &&
-		    score_bound.dst_size == dst->size)
+		    score_bound.dst_size == dst->size) {
+			if (stats)
+				stats->candidate_floor_skipped++;
 			return 0;
+		}
 		score_bound.valid = 0;
 	}
 
