@@ -47,6 +47,155 @@ show --stat
 log -1 --stat
 EOF
 
+test_stat_timer () {
+	if test "$3" = 0
+	then
+		test_grep ! "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"$2\"" "$1"
+	else
+		test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"$2\",\"intervals\":$3," "$1"
+	fi
+}
+
+test_expect_success 'stat phase timers preserve output and exit status' '
+	cat expect80 >expect.phase-stat &&
+	printf " 1 file changed, 1 insertion(+)\n" >>expect.phase-stat &&
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	for code in 0 1
+	do
+		if test "$code" = 1
+		then
+			set -- --exit-code
+		else
+			set --
+		fi &&
+		GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+			test_expect_code "$code" git diff "$@" --stat=80 HEAD^ HEAD \
+				>"untraced-stat-$code" 2>"untraced-stat-$code.err" &&
+		test_cmp expect.phase-stat "untraced-stat-$code" &&
+		test_must_be_empty "untraced-stat-$code.err" &&
+		GIT_TRACE2_EVENT="$PWD/stat-$code.trace" \
+			test_expect_code "$code" git diff "$@" --stat=80 HEAD^ HEAD \
+				>"traced-stat-$code" 2>"traced-stat-$code.err" &&
+		test_cmp "untraced-stat-$code" "traced-stat-$code" &&
+		test_cmp "untraced-stat-$code.err" "traced-stat-$code.err" ||
+		return 1
+	done &&
+	for code in 0 1
+	do
+		test_stat_timer "stat-$code.trace" two-tree/queue 1 &&
+		test_stat_timer "stat-$code.trace" stat/build 1 &&
+		test_stat_timer "stat-$code.trace" stat/emit 1 &&
+		test_stat_timer "stat-$code.trace" result-code/reporting 1 ||
+		return 1
+	done
+'
+
+test_expect_success 'stat timers aggregate flushes outside the builtin diff caller' '
+	old_tree=$(git rev-parse HEAD^:) &&
+	new_tree=$(git rev-parse HEAD:) &&
+	printf "%s %s\n" "$old_tree" "$new_tree" >stat-tree-pair &&
+	cat stat-tree-pair stat-tree-pair >stat-tree-pairs &&
+	cat stat-tree-pair expect.phase-stat \
+		stat-tree-pair expect.phase-stat >expect.stat-repeated &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff-tree --stdin -r --stat=80 \
+			<stat-tree-pairs >untraced-stat-repeated 2>untraced-stat-repeated.err &&
+	test_cmp expect.stat-repeated untraced-stat-repeated &&
+	test_must_be_empty untraced-stat-repeated.err &&
+	GIT_TRACE2_EVENT="$PWD/stat-repeated.trace" \
+		git diff-tree --stdin -r --stat=80 \
+			<stat-tree-pairs >traced-stat-repeated 2>traced-stat-repeated.err &&
+	test_cmp untraced-stat-repeated traced-stat-repeated &&
+	test_cmp untraced-stat-repeated.err traced-stat-repeated.err &&
+	test_stat_timer stat-repeated.trace two-tree/queue 0 &&
+	test_stat_timer stat-repeated.trace result-code/reporting 0 &&
+	test_stat_timer stat-repeated.trace stat/build 2 &&
+	test_stat_timer stat-repeated.trace stat/emit 2
+'
+
+test_expect_success 'name-only output and an empty queue do not compute or emit stats' '
+	printf "%s\n" "$name" >expect.stat-names &&
+	>expect.stat-empty &&
+	for mode in names empty
+	do
+		case "$mode" in
+		names) set -- --name-only HEAD^ HEAD ;;
+		empty) set -- --stat HEAD HEAD ;;
+		esac &&
+		GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+			git diff "$@" >"untraced-stat-$mode" 2>"untraced-stat-$mode.err" &&
+		test_cmp "expect.stat-$mode" "untraced-stat-$mode" &&
+		test_must_be_empty "untraced-stat-$mode.err" &&
+		GIT_TRACE2_EVENT="$PWD/stat-$mode.trace" \
+			git diff "$@" >"traced-stat-$mode" 2>"traced-stat-$mode.err" &&
+		test_cmp "untraced-stat-$mode" "traced-stat-$mode" &&
+		test_cmp "untraced-stat-$mode.err" "traced-stat-$mode.err" ||
+		return 1
+	done &&
+	for mode in names empty
+	do
+		test_stat_timer "stat-$mode.trace" stat/build 0 &&
+		test_stat_timer "stat-$mode.trace" stat/emit 0 &&
+		test_stat_timer "stat-$mode.trace" two-tree/queue 1 &&
+		test_stat_timer "stat-$mode.trace" result-code/reporting 1 ||
+		return 1
+	done
+'
+
+test_expect_success 'index comparison does not use the two-tree queue timer' '
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff --cached --stat=80 HEAD^ >untraced-stat-index 2>untraced-stat-index.err &&
+	test_cmp expect.phase-stat untraced-stat-index &&
+	test_must_be_empty untraced-stat-index.err &&
+	GIT_TRACE2_EVENT="$PWD/stat-index.trace" \
+		git diff --cached --stat=80 HEAD^ >traced-stat-index 2>traced-stat-index.err &&
+	test_cmp untraced-stat-index traced-stat-index &&
+	test_cmp untraced-stat-index.err traced-stat-index.err &&
+	test_stat_timer stat-index.trace two-tree/queue 0 &&
+	test_stat_timer stat-index.trace stat/build 1 &&
+	test_stat_timer stat-index.trace stat/emit 1 &&
+	test_stat_timer stat-index.trace result-code/reporting 1
+'
+
+test_expect_success 'result reporting preserves rename-limit warnings after stats' '
+	source_blob=$(git rev-parse HEAD:"$name") &&
+	destination_blob=$(printf "b\n" | git hash-object -w --stdin) &&
+	printf "100644 blob %s\told-a\n100644 blob %s\told-b\n" \
+		"$source_blob" "$source_blob" >stat-old-tree &&
+	printf "100644 blob %s\tnew-a\n100644 blob %s\tnew-b\n" \
+		"$destination_blob" "$destination_blob" >stat-new-tree &&
+	old_tree=$(git mktree <stat-old-tree) &&
+	new_tree=$(git mktree <stat-new-tree) &&
+	cat >expect.stat-limit <<-\EOF &&
+	 new-a | 1 +
+	 new-b | 1 +
+	 old-a | 1 -
+	 old-b | 1 -
+	 4 files changed, 2 insertions(+), 2 deletions(-)
+	EOF
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff -M -l1 --stat "$old_tree" "$new_tree" \
+			>untraced-stat-limit 2>untraced-stat-limit.err &&
+	test_cmp expect.stat-limit untraced-stat-limit &&
+	test_grep "exhaustive rename detection was skipped due to too many files" \
+		untraced-stat-limit.err &&
+	test_grep "diff.renameLimit.*at least 2" untraced-stat-limit.err &&
+	test_line_count = 2 untraced-stat-limit.err &&
+	GIT_TRACE2_EVENT="$PWD/stat-limit.trace" \
+		git diff -M -l1 --stat "$old_tree" "$new_tree" \
+			>traced-stat-limit 2>traced-stat-limit.err &&
+	test_cmp untraced-stat-limit traced-stat-limit &&
+	test_cmp untraced-stat-limit.err traced-stat-limit.err &&
+	test_trace2_data diff rename/inexact/sources 2 <stat-limit.trace &&
+	test_trace2_data diff rename/inexact/destinations 2 <stat-limit.trace &&
+	test_trace2_data diff rename/inexact/limit_result 1 <stat-limit.trace &&
+	test_trace2_data diff rename/inexact/similarity_calls 0 <stat-limit.trace &&
+	test_stat_timer stat-limit.trace two-tree/queue 1 &&
+	test_stat_timer stat-limit.trace stat/build 1 &&
+	test_stat_timer stat-limit.trace stat/emit 1 &&
+	test_stat_timer stat-limit.trace result-code/reporting 1
+'
+
 cat >expect.60 <<-'EOF'
  ...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa | 1 +
 EOF

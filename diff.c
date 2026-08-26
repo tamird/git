@@ -7282,8 +7282,17 @@ void diff_flush(struct diff_options *options)
 	if (output_format & (DIFF_FORMAT_DIFFSTAT|DIFF_FORMAT_SHORTSTAT|DIFF_FORMAT_NUMSTAT) ||
 	    dirstat_by_line) {
 		struct diffstat_t diffstat;
+		int saved_errno = errno;
 
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_BUILD);
+		errno = saved_errno;
 		compute_diffstat(options, &diffstat, q);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_BUILD);
+		errno = saved_errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_EMIT);
+		errno = saved_errno;
 		if (output_format & DIFF_FORMAT_NUMSTAT)
 			show_numstat(&diffstat, options);
 		if (output_format & DIFF_FORMAT_DIFFSTAT)
@@ -7292,6 +7301,9 @@ void diff_flush(struct diff_options *options)
 			show_shortstats(&diffstat, options);
 		if (output_format & DIFF_FORMAT_DIRSTAT && dirstat_by_line)
 			show_dirstat_by_line(&diffstat, options);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_EMIT);
+		errno = saved_errno;
 		free_diffstat_info(&diffstat);
 		separator++;
 	}

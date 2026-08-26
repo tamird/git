@@ -190,6 +190,7 @@ static void builtin_diff_tree(struct rev_info *revs,
 	const struct object_id *(oid[2]);
 	struct object_id mb_oid;
 	int merge_base = 0;
+	int saved_errno;
 
 	while (1 < argc) {
 		const char *arg = argv[1];
@@ -216,7 +217,13 @@ static void builtin_diff_tree(struct rev_info *revs,
 		oid[swap] = &ent0->item->oid;
 		oid[1 - swap] = &ent1->item->oid;
 	}
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_TWO_TREE_QUEUE);
+	errno = saved_errno;
 	diff_tree_oid(oid[0], oid[1], "", &revs->diffopt);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_TWO_TREE_QUEUE);
+	errno = saved_errno;
 	log_tree_diff_flush(revs);
 }
 
@@ -740,7 +747,16 @@ int cmd_diff(int argc,
 		builtin_diff_combined(&rev, argc, argv,
 				      ent.objects, ent.nr,
 				      first_non_parent);
-	result = diff_result_code(&rev);
+	{
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_RESULT_REPORTING);
+		errno = saved_errno;
+		result = diff_result_code(&rev);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_RESULT_REPORTING);
+		errno = saved_errno;
+	}
 	t_dispatch_end = getnanotime();
 	if (1 < rev.diffopt.skip_stat_unmatch && use_optional_locks())
 		refresh_index_quietly(&rev.prune_data,

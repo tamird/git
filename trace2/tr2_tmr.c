@@ -40,6 +40,29 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "write back to queue",
 		.want_per_thread_events = 0,
 	},
+	/* The builtin diff two-tree call includes any follow-rename fallback. */
+	[TRACE2_TIMER_ID_DIFF_TWO_TREE_QUEUE] = {
+		.category = "diff",
+		.name = "two-tree/queue",
+		.want_per_thread_events = 0,
+	},
+	/* diff_flush stat work excludes cleanup and later stdout flushing. */
+	[TRACE2_TIMER_ID_DIFF_STAT_BUILD] = {
+		.category = "diff",
+		.name = "stat/build",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_DIFF_STAT_EMIT] = {
+		.category = "diff",
+		.name = "stat/emit",
+		.want_per_thread_events = 0,
+	},
+	/* The builtin diff result-code call includes stdout flush and warnings. */
+	[TRACE2_TIMER_ID_DIFF_RESULT_REPORTING] = {
+		.category = "diff",
+		.name = "result-code/reporting",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_DIFF_RENAME_POPULATE] = {
 		.category = "diff",
 		.name = "rename/populate",
