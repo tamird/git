@@ -340,6 +340,45 @@ def summarize(samples: list[Sample]) -> dict[Mode, dict[str, object]]:
     return summary
 
 
+def benchmark_startup(git: Git, root: Path, version_line: bytes) -> dict[str, object]:
+    reference = git.run(root, ("version",))
+    if reference.stdout != version_line or reference.stderr:
+        raise AssertionError("plain version must match the build-options identity")
+    samples: list[Sample] = []
+    for round_index, order in enumerate((MODES, tuple(reversed(MODES)), *ORDERS), -2):
+        for position, mode in enumerate(order):
+            measured = git.run(root, ("version",), mode)
+            if measured.stdout != reference.stdout or measured.stderr:
+                raise AssertionError(f"version/{mode}: output parity failed")
+            coverage = None
+            if mode == "event-file":
+                events = [json.loads(line) for line in git.trace.read_text().splitlines()]
+                counts = Counter(event["event"] for event in events)
+                lifecycle = ("version", "start", "exit", "atexit")
+                if (len({event["sid"] for event in events}) != 1
+                        or any(counts[name] != 1 for name in lifecycle)
+                        or [event["event"] for event in events if event["event"] in lifecycle] != list(lifecycle)
+                        or any(event.get("code") != 0 for event in events
+                               if event["event"] in ("exit", "atexit"))
+                        or any(counts[name] for name in (
+                            "child_start", "child_exit", "thread_start", "thread_exit", "error", "signal"))):
+                    raise AssertionError("version must have one successful process and no children or workers")
+                coverage = {"bytes": git.trace.stat().st_size, "events": dict(counts), "processes": 1}
+            git.remaining_seconds()
+            if round_index >= 0:
+                samples.append(Sample(
+                    mode, round_index, position, measured.wall_seconds,
+                    measured.child_user_seconds, measured.child_system_seconds, coverage,
+                ))
+    summary = summarize(samples)
+    print("version-startup", json.dumps(summary, separators=(",", ":")), flush=True)
+    return {"version-startup": {
+        "argv": git.command(("version",)), "fixture_files": 0, "repository_initialized": False,
+        "git_launches": 26, "stdout_sha256": hashlib.sha256(reference.stdout).hexdigest(),
+        "orders": ORDERS, "samples": [asdict(sample) for sample in samples], "summary": summary,
+    }}
+
+
 def benchmark(git: Git, workloads: tuple[Workload] | tuple[Workload, Workload]) -> dict[str, object]:
     samples: dict[str, list[Sample]] = {workload.name: [] for workload in workloads}
     observed_tree_counts: dict[str, int] = {}
@@ -849,10 +888,10 @@ def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
                 "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only",
-                "--follow-only", "--follow-additions-only"))):
+                "--follow-only", "--follow-additions-only", "--startup-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
                          "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
-                         "--status-only, --refs-only, --follow-only or --follow-additions-only")
+                         "--status-only, --refs-only, --follow-only, --follow-additions-only or --startup-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -898,7 +937,24 @@ def main() -> None:
     }
     try:
         report["git_sha256"] = file_hash(git_path)
-        report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
+        build_options = git.run(root, ("version", "--build-options"))
+        report["git_version_build_options"] = build_options.stdout.decode()
+        if len(sys.argv) == 4 and sys.argv[3] == "--startup-only":
+            if build_options.stderr or not build_options.stdout.startswith(b"git version "):
+                raise AssertionError("expected a successful, unambiguous build identity")
+            report["benchmark_sha256"] = file_hash(Path(__file__))
+            report.pop("stream_bytes_per_file")
+            report["limitations"] = [
+                "End-to-end harnessed version startup includes process launch, fixed configuration arguments, pipes and output collection; this is not isolated loader time.",
+                "Compare off-mode across matched A1/B/A2 binaries with identical harness, metadata, flags and sample order; within-leg tracing ratios are not a patch effect.",
+                "Two identity/reference calls, two discarded warmups and six retained samples per mode: 26 launches, no adaptive repeats or performance threshold.",
+                "Empty test directory; no repository, file scan, OG, daemon, cold-cache or natural-workload savings claim.",
+                "Trace reset/parsing and validation are outside timing; file tracing is buffered, not durable fsync. Child CPU excludes parent harness work.",
+            ]
+            report.update(benchmark_startup(git, root, build_options.stdout.splitlines(keepends=True)[0]))
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         if len(sys.argv) == 4 and sys.argv[3] in ("--follow-only", "--follow-additions-only"):
             additions_only = sys.argv[3] == "--follow-additions-only"
             small_sources, large_sources = FOLLOW_SOURCES
