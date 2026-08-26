@@ -5873,4 +5873,228 @@ test_expect_success 'tree wildcard prefixes avoid unrelated child-tree reads' '
 	done
 '
 
+test_expect_success 'setup glob-depth tree traversal' '
+	tree_depth_deep=$(printf "100644 blob %s\tmatch.py\n" \
+		"$tree_prefix_blob" | git mktree) &&
+	tree_depth_leaf=$({
+		printf "040000 tree %s\tdeep\n" "$tree_depth_deep" &&
+		printf "100644 blob %s\tmatch.py\n" "$tree_prefix_blob" &&
+		printf "100644 blob %s\tskip.py\n" "$tree_prefix_blob"
+	} | git mktree) &&
+	tree_depth_branch=$({
+		printf "040000 tree %s\tspare\n" "$tree_prefix_noise" &&
+		printf "040000 tree %s\ttarget\n" "$tree_depth_leaf" &&
+		printf "040000 tree %s\ttargetmore\n" "$tree_depth_leaf"
+	} | git mktree) &&
+	tree_depth_root=$({
+		printf "040000 tree %s\toutside\n" "$tree_prefix_noise" &&
+		printf "040000 tree %s\twanted\n" "$tree_depth_branch"
+	} | git mktree) &&
+	cat >expect-tree-depth <<-EOF &&
+	$tree_depth_root:wanted/target/match.py:prefix needle
+	$tree_depth_root:wanted/targetmore/match.py:prefix needle
+	EOF
+	cat >expect-tree-depth-one <<-EOF &&
+	$tree_depth_root:wanted/target/match.py:prefix needle
+	EOF
+	cat >expect-tree-depth-recursive <<-EOF &&
+	$tree_depth_root:wanted/target/deep/match.py:prefix needle
+	$tree_depth_root:wanted/target/match.py:prefix needle
+	$tree_depth_root:wanted/targetmore/deep/match.py:prefix needle
+	$tree_depth_root:wanted/targetmore/match.py:prefix needle
+	EOF
+	tree_depth_missing_leaf=$({
+		printf "040000 tree %s\tdeep\n" "$tree_prefix_missing" &&
+		printf "100644 blob %s\tmatch.py\n" "$tree_prefix_blob"
+	} | git mktree --missing)
+'
+
+test_expect_success 'tree glob depth preserves bounded pathspec matches' '
+	(
+		tree_prefix_root=$tree_depth_root &&
+		for tree_depth_pattern in \
+			":(glob)wanted/*/match.py" ":(glob,icase)WANTED/*/MATCH.PY"
+		do
+			test_tree_prefix_grep expect-tree-depth \
+				"$tree_depth_pattern" || exit 1
+		done &&
+		test_tree_prefix_grep expect-tree-depth-one \
+			":(glob)wanted/tar[gt]et/match.py" &&
+		test_tree_prefix_grep expect-tree-depth-one \
+			":(glob)wanted/tar[g/]et/match.py" &&
+		test_tree_prefix_grep expect-tree-depth-one \
+			":(literal)wanted/target/match.py" &&
+		test_tree_prefix_grep expect-tree-depth-one \
+			":(glob)wanted/*/match.py" \
+			":(glob,exclude)wanted/targetmore/*"
+	) &&
+	git --glob-pathspecs grep --no-content-index --threads=1 \
+		"prefix needle" "$tree_depth_root" -- "wanted/*/match.py" \
+		>actual-tree-depth 2>err-tree-depth &&
+	test_cmp expect-tree-depth actual-tree-depth &&
+	test_must_be_empty err-tree-depth &&
+	git grep --no-content-index --threads=1 --max-depth=0 \
+		"prefix needle" "$tree_depth_root" -- \
+		":(glob)wanted/*/match.py" >actual-tree-depth 2>err-tree-depth &&
+	test_cmp expect-tree-depth actual-tree-depth &&
+	test_must_be_empty err-tree-depth
+'
+
+test_expect_success 'tree glob depth preserves recursive wildcard matches' '
+	test_when_finished "rm -f tree-depth.trace" &&
+	for tree_depth_pattern in "wanted/*/match.py" ":(glob)wanted/**/match.py"
+	do
+		>tree-depth.trace &&
+		env GIT_TRACE2_EVENT="$PWD/tree-depth.trace" \
+			GIT_TRACE2_EVENT_NESTING=1 \
+			git grep --no-content-index --threads=1 "prefix needle" \
+				"$tree_depth_root" -- "$tree_depth_pattern" \
+				>actual-tree-depth 2>err-tree-depth &&
+		test_cmp expect-tree-depth-recursive actual-tree-depth &&
+		test_must_be_empty err-tree-depth &&
+		test_trace2_data grep content_index_tree_directories 6 \
+			<tree-depth.trace || return 1
+	done &&
+	# The bounded item is checked first, but the other positive matches deep.
+	(
+		tree_prefix_root=$tree_depth_root &&
+		test_tree_prefix_grep expect-tree-depth-recursive \
+			":(glob)**/deep/match.py" ":(glob)wanted/*/match.py"
+	)
+'
+
+test_expect_success BSLASHPSPEC 'tree glob depth permits escaped components' '
+	(
+		tree_prefix_root=$tree_depth_root &&
+		test_tree_prefix_grep expect-tree-depth-one \
+			":(glob)wanted/tar\\get/match.py"
+	)
+'
+
+test_expect_success 'tree glob depth preserves attribute matching' '
+	test_when_finished "rm -f tree-depth.attributes" &&
+	echo "wanted/target/match.py tree_depth_selected" >tree-depth.attributes &&
+	git -c core.attributesFile="$PWD/tree-depth.attributes" \
+		grep --no-content-index --threads=1 "prefix needle" \
+		"$tree_depth_root" -- \
+		":(glob,attr:tree_depth_selected)wanted/*/match.py" \
+		>actual-tree-depth 2>err-tree-depth &&
+	test_cmp expect-tree-depth-one actual-tree-depth &&
+	test_must_be_empty err-tree-depth
+'
+
+test_expect_success 'tree glob depth preserves literal wildcard directory matches' '
+	tree_depth_literal_child=$(printf "100644 blob %s\tchild\n" \
+		"$tree_prefix_blob" | git mktree) &&
+	tree_depth_literal_leaf=$(printf "040000 tree %s\tmatch.py\n" \
+		"$tree_depth_literal_child" | git mktree) &&
+	tree_depth_literal_branch=$(printf "040000 tree %s\t*\n" \
+		"$tree_depth_literal_leaf" | git mktree) &&
+	tree_depth_literal_root=$(printf "040000 tree %s\twanted\n" \
+		"$tree_depth_literal_branch" | git mktree) &&
+	cat >expect-tree-depth-literal <<-EOF &&
+	$tree_depth_literal_root:wanted/*/match.py/child:prefix needle
+	EOF
+	git grep --no-content-index --threads=1 "prefix needle" \
+		"$tree_depth_literal_root" -- ":(glob)wanted/*/match.py" \
+		>actual-tree-depth 2>err-tree-depth &&
+	test_cmp expect-tree-depth-literal actual-tree-depth &&
+	test_must_be_empty err-tree-depth
+'
+
+test_expect_success 'tree glob depth retains matching missing-tree errors' '
+	tree_depth_missing_match=$(printf "040000 tree %s\tmatch.py\n" \
+		"$tree_prefix_missing" | git mktree --missing) &&
+	for tree_depth_job in target "*"
+	do
+		for tree_depth_missing_entry in \
+			"$tree_prefix_missing" "$tree_depth_missing_match"
+		do
+			tree_depth_missing_branch=$(printf "040000 tree %s\t%s\n" \
+				"$tree_depth_missing_entry" "$tree_depth_job" |
+				git mktree --missing) &&
+			tree_depth_missing_root=$(printf "040000 tree %s\twanted\n" \
+				"$tree_depth_missing_branch" | git mktree) &&
+			test_expect_code 128 git grep --no-content-index --threads=1 \
+				"prefix needle" "$tree_depth_missing_root" -- \
+				":(glob)wanted/*/match.py" \
+				>actual-tree-depth 2>err-tree-depth &&
+			test_must_be_empty actual-tree-depth &&
+			test_grep "unable to read tree ($tree_prefix_missing)" \
+				err-tree-depth || return 1
+		done
+	done
+'
+
+test_expect_success 'tree glob depth retains malformed-tree errors' '
+	tree_depth_bad_branch=$(printf "040000 tree %s\ttarget\n" \
+		"$tree_prefix_bad" | git mktree) &&
+	tree_depth_bad_root=$(printf "040000 tree %s\twanted\n" \
+		"$tree_depth_bad_branch" | git mktree) &&
+	for tree_depth_bad_input in "$tree_prefix_bad" "$tree_depth_bad_root"
+	do
+		test_expect_code 128 git grep --no-content-index --threads=1 \
+			"prefix needle" "$tree_depth_bad_input" -- \
+			":(glob)wanted/*/match.py" >actual-tree-depth 2>err-tree-depth &&
+		test_must_be_empty actual-tree-depth &&
+		test_grep "too-short tree object" err-tree-depth || return 1
+	done
+'
+
+test_expect_success 'tree glob depth preserves unbounded missing-tree errors' '
+	for tree_depth_job in target "*"
+	do
+		tree_depth_missing_branch=$(printf "040000 tree %s\t%s\n" \
+			"$tree_depth_missing_leaf" "$tree_depth_job" | git mktree) &&
+		tree_depth_missing_root=$(printf "040000 tree %s\twanted\n" \
+			"$tree_depth_missing_branch" | git mktree) &&
+		for tree_depth_pattern in \
+			"wanted/*/match.py" ":(glob)wanted/**/match.py"
+		do
+			test_expect_code 128 git grep --no-content-index --threads=1 \
+				"prefix needle" "$tree_depth_missing_root" -- \
+				"$tree_depth_pattern" >actual-tree-depth 2>err-tree-depth &&
+			test_must_be_empty actual-tree-depth &&
+			test_grep "unable to read tree ($tree_prefix_missing)" \
+				err-tree-depth || return 1
+		done || return 1
+	done
+'
+
+test_expect_success 'tree glob depth avoids impossible child-tree reads' '
+	test_when_finished "rm -f tree-depth.trace" &&
+	>tree-depth.trace &&
+	env GIT_TRACE2_EVENT="$PWD/tree-depth.trace" \
+		GIT_TRACE2_EVENT_NESTING=1 \
+		git grep --no-content-index --threads=1 "prefix needle" \
+			"$tree_depth_root" -- ":(glob)wanted/*/match.py" \
+			>actual-tree-depth 2>err-tree-depth &&
+	test_cmp expect-tree-depth actual-tree-depth &&
+	test_must_be_empty err-tree-depth &&
+	# Print the actual count even if the following assertion fails.
+	test_trace2_data grep content_index_tree_directories "[0-9][0-9]*" \
+		<tree-depth.trace &&
+	# Read wanted and its three children, but neither deep tree.
+	test_trace2_data grep content_index_tree_directories 4 <tree-depth.trace
+'
+
+# A literal wildcard in the base takes the other directory-fallback branch.
+for tree_depth_job in target "*"
+do
+	test_expect_success "tree glob depth skips impossibly deep missing trees ($tree_depth_job)" '
+		tree_depth_missing_branch=$(printf "040000 tree %s\t%s\n" \
+			"$tree_depth_missing_leaf" "$tree_depth_job" | git mktree) &&
+		tree_depth_missing_root=$(printf "040000 tree %s\twanted\n" \
+			"$tree_depth_missing_branch" | git mktree) &&
+		cat >expect-tree-depth-missing <<-EOF &&
+		$tree_depth_missing_root:wanted/$tree_depth_job/match.py:prefix needle
+		EOF
+		git grep --no-content-index --threads=1 "prefix needle" \
+			"$tree_depth_missing_root" -- ":(glob)wanted/*/match.py" \
+			>actual-tree-depth 2>err-tree-depth &&
+		test_cmp expect-tree-depth-missing actual-tree-depth &&
+		test_must_be_empty err-tree-depth
+	'
+done
+
 test_done

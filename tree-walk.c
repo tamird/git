@@ -1114,6 +1114,15 @@ static enum interesting do_match(struct index_state *istate,
 						if (!dir_matches)
 							continue;
 					}
+					/*
+					 * Without **, descendants need another
+					 * slash in the pattern.
+					 */
+					if ((item->magic & PATHSPEC_GLOB) &&
+					    !strstr(match, "**") &&
+					    count_slashes(base->buf) >=
+						    count_slashes(match))
+						continue;
 					return entry_interesting;
 				}
 
@@ -1184,14 +1193,18 @@ match_wildcards:
 		strbuf_setlen(base, baselen);
 
 		/*
-		 * Match all directories. We'll try to match files
-		 * later on.
+		 * Wildcards may still match files below this directory.
 		 * max_depth is ignored but we may consider support it
 		 * in future, see
 		 * https://lore.kernel.org/git/7vmxo5l2g4.fsf@alter.siamese.dyndns.org/
 		 */
-		if (ps->recursive && S_ISDIR(entry->mode))
+		if (ps->recursive && S_ISDIR(entry->mode)) {
+			if ((item->magic & PATHSPEC_GLOB) &&
+			    !strstr(match, "**") &&
+			    count_slashes(base->buf) >= count_slashes(match))
+				continue;
 			return entry_interesting;
+		}
 		continue;
 interesting:
 		if (item->attr_match_nr) {
