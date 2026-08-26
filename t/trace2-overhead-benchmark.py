@@ -26,7 +26,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from python.runfiles import runfiles
 
@@ -43,6 +43,7 @@ ORDERS = tuple(itertools.permutations(MODES))
 SMALL_FILES = 4000
 TREE_READ_REVISIONS = 256
 REFS_COMMANDS_PER_SAMPLE = 128
+FOLLOW_SOURCES = (4000, 100000)
 STREAM_FILES = 8
 STREAM_BYTES = 8 * 1024 * 1024
 BUDGET_SECONDS = 180
@@ -104,7 +105,7 @@ class Git:
         ), *args]
 
     def run(self, repo: Path, args: tuple[str, ...], mode: Mode = "off",
-            *, expected_returncode: int = 0) -> Measurement:
+            *, expected_returncode: int = 0, input_data: bytes | None = None) -> Measurement:
         env = dict(self.environment)
         env["GIT_TRACE2_EVENT"] = {
             "off": "0", "event-null": os.devnull, "event-file": str(self.trace)
@@ -116,12 +117,13 @@ class Git:
         before = child_cpu()
         start = time.perf_counter()
         with subprocess.Popen(
-            command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
+            command, cwd=repo, env=env,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         ) as process:
             try:
-                stdout, stderr = process.communicate(timeout=min(30, remaining))
+                stdout, stderr = process.communicate(input=input_data, timeout=min(30, remaining))
             except subprocess.TimeoutExpired as error:
                 # This session belongs only to this invocation. Killing just
                 # Git could leave checkout workers running with our pipes open.
@@ -311,8 +313,8 @@ class Sample:
     trace: dict[str, object] | None
 
 
-def summarize(samples: list[Sample]) -> dict[str, object]:
-    summary: dict[str, object] = {}
+def summarize(samples: list[Sample]) -> dict[Mode, dict[str, object]]:
+    summary: dict[Mode, dict[str, object]] = {}
     for mode in MODES:
         selected = [sample for sample in samples if sample.mode == mode]
         values: dict[str, object] = {"samples": len(selected)}
@@ -572,13 +574,219 @@ def benchmark_refs(git: Git, fixture: Fixture) -> dict[str, object]:
     }}
 
 
+FollowKind = Literal["exact", "edited"]
+FOLLOW_KINDS: tuple[FollowKind, ...] = ("exact", "edited")
+
+
+@dataclass(frozen=True)
+class FollowFixture:
+    repo: Path
+    sources: int
+    revisions: dict[str, str]
+    trees: dict[str, str]
+    pack_sha256: str
+    import_sha256: str
+    refs: bytes
+    object_counts: str
+
+
+def make_follow_fixture(git: Git, root: Path, sources: int) -> FollowFixture:
+    repo = root / f"follow-{sources}"
+    repo.mkdir()
+    git.run(repo, ("init", "--bare", "--quiet", "--initial-branch=base", "--template=", "."))
+    # Each 64-byte line is one similarity span. Replacing one of 100 equally
+    # sized lines leaves 99% copied bytes, independently specifying C099.
+    line = b"follow source line".ljust(63, b"s") + b"\n"
+    replacement = b"edited source line".ljust(63, b"e") + b"\n"
+    source = line * 100
+    edited = line * 49 + replacement + line * 50
+    noise = b"unrelated small source\n"
+    stream = bytearray()
+
+    def append_data(content: bytes) -> None:
+        stream.extend(f"data {len(content)}\n".encode())
+        stream.extend(content)
+        stream.extend(b"\n")
+
+    for mark, content in ((1, noise), (2, source), (3, edited)):
+        stream.extend(f"blob\nmark :{mark}\n".encode())
+        append_data(content)
+    identity = b"Trace2 benchmark <benchmark@example.invalid> 946684800 +0000\n"
+    for kind, mark, parent in (("base", 4, None), ("exact", 5, 4), ("edited", 6, 4)):
+        stream.extend(f"commit refs/heads/{kind}\nmark :{mark}\n".encode())
+        stream.extend(b"author " + identity + b"committer " + identity)
+        append_data(f"{kind} copy\n".encode())
+        if parent is not None:
+            stream.extend(f"from :{parent}\n".encode())
+        if kind == "base":
+            for number in range(sources - 1):
+                stream.extend(f"M 100644 :1 sources/{number:08d}\n".encode())
+            stream.extend(b"M 100644 :2 sources/source\n")
+        else:
+            stream.extend(f"M 100644 :{2 if kind == 'exact' else 3} destination\n".encode())
+        stream.extend(b"\n")
+    stream.extend(b"done\n")
+    if len(stream) > 8 * 1024 * 1024:
+        raise AssertionError("follow fixture import exceeded its fixed input bound")
+    imported = git.run(repo, ("fast-import", "--quiet", "--done"), input_data=bytes(stream))
+    if imported.stdout or imported.stderr:
+        raise AssertionError("follow fixture import produced unexpected output")
+    git.run(repo, ("repack", "-a", "-d", "-f", "--window=0", "--depth=0", "--threads=1"))
+    revisions: dict[str, str] = {}
+    trees: dict[str, str] = {}
+    for kind in ("base", *FOLLOW_KINDS):
+        revisions[kind] = git.run(repo, ("rev-parse", f"refs/heads/{kind}")).stdout.decode().strip()
+        trees[kind] = git.run(repo, ("rev-parse", f"{revisions[kind]}^{{tree}}")).stdout.decode().strip()
+    source_trees = {
+        git.run(repo, ("rev-parse", f"{revision}:sources")).stdout
+        for revision in revisions.values()
+    }
+    if len(source_trees) != 1:
+        raise AssertionError("copy commits must preserve the complete source subtree")
+    expected_sources = b"".join(f"sources/{number:08d}\n".encode() for number in range(sources - 1))
+    expected_sources += b"sources/source\n"
+    listing = git.run(repo, ("ls-tree", "-r", "--name-only", revisions["base"]))
+    if listing.stdout != expected_sources or listing.stderr:
+        raise AssertionError("follow fixture source geometry changed")
+    for kind in FOLLOW_KINDS:
+        added = git.run(repo, ("diff-tree", "--no-commit-id", "--name-status", "-r",
+                               revisions["base"], revisions[kind]))
+        if added.stdout != b"A\tdestination\n" or added.stderr:
+            raise AssertionError("each copy commit must add only its destination")
+    counts = git.run(repo, ("count-objects", "-v")).stdout.decode()
+    parsed = dict(value.split(": ", 1) for value in counts.splitlines())
+    if int(parsed["count"]) != 0 or int(parsed["in-pack"]) != 10:
+        raise AssertionError("expected three blobs, four trees and three packed commits")
+    pack, = (repo / "objects/pack").glob("*.pack")
+    refs = git.run(repo, ("show-ref",)).stdout
+    return FollowFixture(repo, sources, revisions, trees, file_hash(pack),
+                         hashlib.sha256(stream).hexdigest(), refs, counts)
+
+
+def follow_trace_coverage(path: Path, fixture: FollowFixture, kind: FollowKind) -> dict[str, object]:
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    counts = Counter(event["event"] for event in events)
+    if (len({event["sid"] for event in events}) != 1
+            or any(counts[name] != 1 for name in ("version", "start", "exit", "atexit"))
+            or any(event.get("code") != 0 for event in events
+                   if event["event"] in ("exit", "atexit"))
+            or counts["child_start"] or counts["thread_start"] or counts["thread_exit"]):
+        raise AssertionError("follow must have one complete successful main process")
+    values: dict[str, int] = {}
+    timers: list[dict[str, object]] = []
+    completed: list[int] = []
+    for event in events:
+        if event.get("category") != "diff":
+            continue
+        key = event.get("key", "")
+        if event["event"] == "data" and (key.startswith("follow-full-tree")
+                                          or key.startswith("rename/inexact/")):
+            if key in values or event.get("thread") != "main":
+                raise AssertionError("follow DATA must occur once on the main thread")
+            values[key] = int(event["value"])
+        if event.get("name") == "follow-full-tree" and event["event"] in ("timer", "th_timer"):
+            if event["event"] != "timer" or event.get("thread") != "main" or event["intervals"] != 1:
+                raise AssertionError("follow must have one completed full-tree interval")
+            timers.append(event)
+        if event.get("name") == "follow-full-tree/completed" and event["event"] == "counter":
+            completed.append(event["count"])
+    if (len(timers) != 1 or completed != [1]
+            or values.get("follow-full-tree/count") != 1
+            or values.get("follow-full-tree/eligible-additions") != 0):
+        raise AssertionError(f"follow full-tree geometry changed: {values}")
+    full_tree_us = values.get("follow-full-tree-us", -1)
+    timer_seconds = float(timers[0]["t_total"])
+    if (full_tree_us < 0 or values.get("follow-full-tree-max-us") != full_tree_us
+            or not full_tree_us <= round(timer_seconds * 1000000) <= full_tree_us + 1):
+        raise AssertionError("native full-tree wall timer disagrees with its DATA summary")
+    inexact = {key: value for key, value in values.items() if key.startswith("rename/inexact/")}
+    expected = {
+        "rename/inexact/sources": fixture.sources,
+        "rename/inexact/destinations": 1,
+        "rename/inexact/rename_limit": 0,
+        "rename/inexact/limit_result": 0,
+        "rename/inexact/similarity_calls": fixture.sources,
+        "rename/inexact/size_rejected": fixture.sources - 1,
+        "rename/inexact/content_compared": 1,
+    }
+    if ((kind == "exact" and inexact)
+            or (kind == "edited" and any(inexact.get(key) != value for key, value in expected.items()))):
+        raise AssertionError(f"unexpected {kind} copy candidate geometry: {inexact}")
+    return {"bytes": path.stat().st_size, "events": dict(counts), "values": values,
+            "full_tree_wall_seconds": timer_seconds}
+
+
+def follow_args(fixture: FollowFixture, kind: FollowKind) -> tuple[str, ...]:
+    return ("-c", "diff.renameLimit=0", "log", "--follow", "--name-status",
+            "--format=%s", "-n1", fixture.revisions[kind], "--", "destination")
+
+
+def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, FollowFixture]) -> dict[str, object]:
+    results: dict[str, object] = {}
+    for kind in FOLLOW_KINDS:
+        conditions = tuple((fixture, mode) for fixture in fixtures for mode in MODES)
+        orders = tuple(
+            tuple(conditions[(column + row) % 6] for column in (0, 1, 5, 2, 4, 3))
+            for row in range(6)
+        )
+        samples: dict[int, list[Sample]] = {fixture.sources: [] for fixture in fixtures}
+        expected = (f"{kind} copy\n\nC{'100' if kind == 'exact' else '099'}\t"
+                    "sources/source\tdestination\n").encode()
+        for round_index, order in enumerate((conditions, tuple(reversed(conditions)), *orders), -2):
+            for position, (fixture, mode) in enumerate(order):
+                measured = git.run(fixture.repo, follow_args(fixture, kind), mode)
+                if measured.stdout != expected or measured.stderr:
+                    raise AssertionError(
+                        f"follow-{fixture.sources}-{kind}/{mode}: expected {expected!r}; "
+                        f"stdout={measured.stdout!r}, stderr={measured.stderr!r}"
+                    )
+                coverage = follow_trace_coverage(git.trace, fixture, kind) if mode == "event-file" else None
+                git.remaining_seconds()
+                if round_index >= 0:
+                    samples[fixture.sources].append(Sample(
+                        mode, round_index, position, measured.wall_seconds,
+                        measured.child_user_seconds, measured.child_system_seconds, coverage,
+                    ))
+        for fixture in fixtures:
+            name = f"follow-{fixture.sources}-{kind}"
+            selected = samples[fixture.sources]
+            summary = summarize(selected)
+            for mode in MODES:
+                cpu = [sample.child_user_seconds + sample.child_system_seconds
+                       for sample in selected if sample.mode == mode
+                       and sample.child_user_seconds is not None and sample.child_system_seconds is not None]
+                if len(cpu) == 6:
+                    summary[mode]["child_cpu_seconds"] = {
+                        "median": statistics.median(cpu), "min": min(cpu), "max": max(cpu),
+                    }
+            native = [cast(float, sample.trace["full_tree_wall_seconds"]) for sample in selected
+                      if sample.mode == "event-file" and sample.trace is not None]
+            results[name] = {
+                "argv": git.command(follow_args(fixture, kind)),
+                "revision": fixture.revisions[kind], "unchanged_sources": fixture.sources,
+                "expected_stdout": expected.decode(), "stdout_sha256": hashlib.sha256(expected).hexdigest(),
+                "orders": [[(item.sources, mode) for item, mode in order] for order in orders],
+                "samples": [asdict(sample) for sample in selected], "summary": summary,
+                "full_tree_wall_seconds": {"median": statistics.median(native),
+                                           "min": min(native), "max": max(native)},
+            }
+            print(name, json.dumps(summary, separators=(",", ":")), flush=True)
+    for fixture in fixtures:
+        if git.run(fixture.repo, ("show-ref",)).stdout != fixture.refs:
+            raise AssertionError("read-only follow changed fixture refs")
+        pack, = (fixture.repo / "objects/pack").glob("*.pack")
+        if file_hash(pack) != fixture.pack_sha256:
+            raise AssertionError("read-only follow changed the fixture pack")
+    return results
+
+
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
-                "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only"))):
+                "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only", "--follow-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
                          "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
-                         "--status-only or --refs-only")
+                         "--status-only, --refs-only or --follow-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -625,6 +833,28 @@ def main() -> None:
     try:
         report["git_sha256"] = file_hash(git_path)
         report["git_version_build_options"] = git.run(root, ("version", "--build-options")).stdout.decode()
+        if len(sys.argv) == 4 and sys.argv[3] == "--follow-only":
+            small_sources, large_sources = FOLLOW_SOURCES
+            fixtures = (make_follow_fixture(git, root, small_sources),
+                        make_follow_fixture(git, root, large_sources))
+            report["follow_geometry"] = [{
+                "unchanged_sources": fixture.sources, "revisions": fixture.revisions,
+                "trees": fixture.trees, "pack_sha256": fixture.pack_sha256,
+                "import_sha256": fixture.import_sha256, "refs_sha256": hashlib.sha256(fixture.refs).hexdigest(),
+                "packed_objects": fixture.object_counts,
+            } for fixture in fixtures]
+            report["benchmark_sha256"] = file_hash(Path(__file__))
+            report["limitations"] = [
+                "Compare fixed A1/B/A2 binaries with identical harness, import, trees, revisions, pack, build flags, modes and sample order; on/off is not a patch effect.",
+                "Each of four size/copy conditions has six samples per tracing mode, with two unretained warmups per mode; no adaptive sizes, repeats or threshold.",
+                "Primary CPU is user+system summed within each sample before summarizing; wall includes startup/output collection, and native full-tree wall scopes only traced commands.",
+                "One destination and many identical small unrelated sources isolate unchanged-pair scaling; edited copies use unlimited rename candidates and are not the production candidate mixture.",
+                "Bare packed fixtures, warm caches, no checkout, daemon, OG, cold-cache, per-child RSS or natural-workload savings claim.",
+            ]
+            report.update(benchmark_follow(git, fixtures))
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         small = make_fixture(
             git, root, streaming=False,
             tree_reads_only=len(sys.argv) == 4 and sys.argv[3] not in ("--status-only", "--refs-only"),

@@ -391,4 +391,217 @@ test_expect_success 'an incomplete full-tree walk does not publish pending addit
 	)
 '
 
+test_expect_success 'follow preserves unchanged sources across exact and edited copies' '
+	test_create_repo follow-shared-filespecs &&
+	(
+		cd follow-shared-filespecs &&
+		test_seq 1 100 >source &&
+		echo before >changed &&
+		echo unrelated >noise &&
+		git add source changed noise &&
+		test_tick &&
+		git commit -m base &&
+
+		cp source middle &&
+		echo after >changed &&
+		git add middle changed &&
+		test_tick &&
+		git commit -m exact-copy &&
+
+		echo rewritten >source &&
+		git add source &&
+		test_tick &&
+		git commit -m rewrite-original &&
+
+		cp middle destination &&
+		echo edited >>destination &&
+		git add destination &&
+		test_tick &&
+		git commit -m edited-copy &&
+
+		cat >expect <<-\EOF &&
+		edited-copy
+
+		C	middle	destination
+		exact-copy
+
+		C100	source	middle
+		base
+
+		A	source
+		EOF
+		for break_opt in "" -B
+		do
+			expected_additions=0 &&
+			if test -z "$break_opt"
+			then
+				expected_additions=2
+			fi &&
+			GIT_TRACE2_EVENT_NESTING=2 \
+			GIT_TRACE2_EVENT="$PWD/follow$break_opt.event" \
+				git log $break_opt --follow --name-status \
+					--format=%s -- destination >actual 2>err &&
+			test_must_be_empty err &&
+			test_grep "^C0[5-9][0-9]	middle	destination$" actual &&
+			sed "s/^C0[5-9][0-9]	middle	destination$/C	middle	destination/" \
+				actual >actual-normalized &&
+			test_cmp expect actual-normalized &&
+			test_region diff "inexact renames" "follow$break_opt.event" &&
+			test_follow_additions_trace "$PWD/follow$break_opt.event" \
+				"$expected_additions" 3 ||
+			return 1
+		done
+	)
+'
+
+test_expect_success 'follow retains a changed-mode source when copies are limited' '
+	test_create_repo follow-changed-mode &&
+	(
+		cd follow-changed-mode &&
+		test_seq 1 100 >source &&
+		echo unrelated >noise &&
+		git add source noise &&
+		test_tick &&
+		git commit -m base &&
+
+		test_chmod +x source &&
+		cp source destination &&
+		echo edited >>destination &&
+		git add destination &&
+		test_tick &&
+		git commit -m mode-copy &&
+		old_source=$(git rev-parse HEAD^:source) &&
+		new_source=$(git rev-parse HEAD:source) &&
+		test "$old_source" = "$new_source" &&
+		git diff-tree -r --raw HEAD^ HEAD -- source >mode-change &&
+		test_grep "^:100644 100755 " mode-change &&
+
+		printf "%s\n\n" mode-copy >expect &&
+		printf "C\tsource\tdestination\n" >>expect &&
+		for break_opt in "" -B
+		do
+			GIT_TRACE2_EVENT_NESTING=2 \
+			GIT_TRACE2_EVENT="$PWD/mode$break_opt.event" \
+				git -c diff.renameLimit=1 log $break_opt --follow \
+					--name-status --format=%s -n1 -- destination \
+					>actual 2>err &&
+			test_must_be_empty err &&
+			test_grep "^C0[5-9][0-9]	source	destination$" actual &&
+			sed "s/^C0[5-9][0-9]	source	destination$/C	source	destination/" \
+				actual >actual-normalized &&
+			test_cmp expect actual-normalized &&
+			test_trace2_data diff rename/inexact/sources 2 \
+				<"mode$break_opt.event" &&
+			test_trace2_data diff rename/inexact/destinations 1 \
+				<"mode$break_opt.event" &&
+			test_trace2_data diff rename/inexact/limit_result 2 \
+				<"mode$break_opt.event" &&
+			test_trace2_data diff rename/inexact/similarity_calls 1 \
+				<"mode$break_opt.event" &&
+			test_follow_additions_trace "$PWD/mode$break_opt.event" 0 1 ||
+			return 1
+		done
+	)
+'
+
+test_expect_success 'follow preserves unchanged gitlinks and submodule ignore settings' '
+	test_create_repo follow-shared-gitlinks &&
+	(
+		cd follow-shared-gitlinks &&
+		test_tick &&
+		git commit --allow-empty -m anchor &&
+		gitlink_oid=$(git rev-parse HEAD) &&
+		echo content >source &&
+		git add source &&
+		git update-index --add --cacheinfo 160000,$gitlink_oid,sub &&
+		test_tick &&
+		git commit -m base &&
+
+		cp source destination &&
+		git add destination &&
+		git update-index --add --cacheinfo 160000,$gitlink_oid,sub-copy &&
+		test_tick &&
+		git commit -m copy &&
+		printf "%s\n\n" copy >expect &&
+		printf "C100\tsource\tdestination\n" >>expect &&
+		for ignore_submodules in none all
+		do
+			for break_opt in "" -B
+			do
+				GIT_TRACE2_EVENT_NESTING=2 \
+				GIT_TRACE2_EVENT="$PWD/regular-$ignore_submodules$break_opt.event" \
+					git -c diff.ignoreSubmodules=$ignore_submodules \
+						log $break_opt --follow --name-status \
+						--format=%s -n1 -- destination \
+						>actual 2>err &&
+				test_cmp expect actual &&
+				test_must_be_empty err &&
+				test_follow_additions_trace \
+					"$PWD/regular-$ignore_submodules$break_opt.event" 0 1 ||
+				return 1
+			done
+		done &&
+
+		printf "%s\n\n" copy >expect &&
+		printf "C100\tsub\tsub-copy\n" >>expect &&
+		for break_opt in "" -B
+		do
+			GIT_TRACE2_EVENT_NESTING=2 \
+			GIT_TRACE2_EVENT="$PWD/gitlink$break_opt.event" \
+				git -c diff.ignoreSubmodules=none log $break_opt \
+					--follow --name-status --format=%s -n1 \
+					-- sub-copy >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			test_trace2_data diff follow-full-tree/count 1 \
+				<"gitlink$break_opt.event" ||
+			return 1
+		done
+	)
+'
+
+test_expect_success SYMLINKS 'follow preserves unchanged symlink copy sources' '
+	test_create_repo follow-shared-symlinks &&
+	(
+		cd follow-shared-symlinks &&
+		ln -s target source &&
+		ln -s before changed &&
+		git add source changed &&
+		test_tick &&
+		git commit -m base &&
+
+		ln -s target destination &&
+		rm changed &&
+		ln -s after changed &&
+		git add destination changed &&
+		test_tick &&
+		git commit -m copy &&
+		cat >expect <<-\EOF &&
+		copy
+
+		C100	source	destination
+		base
+
+		A	source
+		EOF
+		for break_opt in "" -B
+		do
+			expected_additions=0 &&
+			if test -z "$break_opt"
+			then
+				expected_additions=1
+			fi &&
+			GIT_TRACE2_EVENT_NESTING=2 \
+			GIT_TRACE2_EVENT="$PWD/symlink$break_opt.event" \
+				git log $break_opt --follow --name-status \
+					--format=%s -- destination >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			test_follow_additions_trace "$PWD/symlink$break_opt.event" \
+				"$expected_additions" 2 ||
+			return 1
+		done
+	)
+'
+
 test_done

@@ -606,6 +606,29 @@ static inline int diff_might_be_rename(void)
 		!DIFF_FILE_VALID(diff_queued_diff.queue[0]->one);
 }
 
+/*
+ * The follow search uses fresh options with quick unset. Its has_changes
+ * flag is not inspected before diffcore_std() recomputes it.
+ */
+static void follow_change(struct diff_options *opt,
+			  unsigned old_mode, unsigned new_mode,
+			  const struct object_id *old_oid,
+			  const struct object_id *new_oid,
+			  int old_oid_valid, int new_oid_valid,
+			  const char *path,
+			  unsigned old_dirty_submodule,
+			  unsigned new_dirty_submodule)
+{
+	if (old_mode == new_mode && old_oid_valid && new_oid_valid &&
+	    !old_dirty_submodule && !new_dirty_submodule &&
+	    oideq(old_oid, new_oid))
+		diff_same(opt, old_mode, old_oid, path);
+	else
+		diff_change(opt, old_mode, new_mode, old_oid, new_oid,
+			    old_oid_valid, new_oid_valid, path,
+			    old_dirty_submodule, new_dirty_submodule);
+}
+
 static void count_follow_additions(struct diff_options *opt, int addremove,
 				   unsigned mode, const struct object_id *oid,
 				   int oid_valid, const char *path,
@@ -664,6 +687,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_opts.rename_score = opt->rename_score;
 	diff_opts.rename_limit = opt->rename_limit;
 	diff_setup_done(&diff_opts);
+	diff_opts.change = follow_change;
 	saved_errno = errno;
 	/*
 	 * -B can prefetch all queued pairs, and filtering can skip an
