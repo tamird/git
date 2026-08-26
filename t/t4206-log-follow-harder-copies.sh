@@ -10,6 +10,32 @@ test_description='Test --follow should always find copies hard in git log.
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff.sh
 
+test_follow_additions_trace () {
+	follow_additions_trace="$1"
+	follow_additions_expected="$2"
+	follow_additions_completed="$3"
+
+	test_trace2_data diff follow-full-tree/eligible-additions \
+		"$follow_additions_expected" <"$follow_additions_trace" &&
+	test_trace2_data diff follow-full-tree/count \
+		"$follow_additions_completed" <"$follow_additions_trace" &&
+	test "$(grep -c '"key":"follow-full-tree/eligible-additions"' "$follow_additions_trace")" = 1 &&
+	test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"diff\",\"key\":\"follow-full-tree/eligible-additions\",\"value\":\"$follow_additions_expected\"" "$follow_additions_trace" &&
+	test "$(grep -c '"event":"counter".*"category":"diff","name":"follow-full-tree/completed",' "$follow_additions_trace")" = 1 &&
+	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"follow-full-tree/completed\",\"count\":$follow_additions_completed}" "$follow_additions_trace" &&
+	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"follow-full-tree\",\"intervals\":$follow_additions_completed," "$follow_additions_trace" &&
+	test_grep ! '"event":"th_counter".*"category":"diff","name":"follow-full-tree/' "$follow_additions_trace" &&
+	test_grep ! '"key":"follow-full-tree/completed"' "$follow_additions_trace" || return 1
+
+	if test "$follow_additions_expected" = 0
+	then
+		test_grep ! '"event":"counter".*"category":"diff","name":"follow-full-tree/eligible-additions",' "$follow_additions_trace"
+	else
+		test "$(grep -c '"event":"counter".*"category":"diff","name":"follow-full-tree/eligible-additions",' "$follow_additions_trace")" = 1 &&
+		test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"follow-full-tree/eligible-additions\",\"count\":$follow_additions_expected}" "$follow_additions_trace"
+	fi
+}
+
 test_follow_full_tree_trace () {
 	full_tree_trace="$1"
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-pickaxe/tree-paths",' "$full_tree_trace")" = 1 &&
@@ -22,8 +48,9 @@ test_follow_full_tree_trace () {
 	test_trace2_data diff follow-full-tree/count 1 <"$full_tree_trace" &&
 	test_trace2_data diff follow-full-tree-us "[0-9][0-9]*" <"$full_tree_trace" &&
 	test_trace2_data diff follow-full-tree-max-us "[0-9][0-9]*" <"$full_tree_trace" &&
-	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = 3 &&
-	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = 3 &&
+	test_follow_additions_trace "$full_tree_trace" 0 1 &&
+	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = 4 &&
+	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = 4 &&
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-full-tree",' "$full_tree_trace")" = 1 &&
 	test_grep '"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":1,' "$full_tree_trace" &&
 	test_grep ! '"event":"th_timer".*"category":"diff","name":"follow-full-tree"' "$full_tree_trace" &&
@@ -218,6 +245,150 @@ test_expect_success 'log --follow -B does not die or use uninitialized memory' '
 	git commit -m "Rewrite somefile" &&
 
 	git log -B --follow somefile
+'
+
+test_expect_success 'follow counts eligible additions across completed full-tree walks' '
+	test_create_repo follow-eligible-additions &&
+	(
+		cd follow-eligible-additions &&
+		echo content >source &&
+		git add source &&
+		test_tick &&
+		git commit -m source &&
+
+		git mv source middle &&
+		mkdir first-noise &&
+		echo one >first-noise/one &&
+		echo two >first-noise/two &&
+		git add first-noise &&
+		test_tick &&
+		git commit -m first &&
+
+		git mv middle destination &&
+		mkdir second-noise &&
+		echo three >second-noise/three &&
+		echo four >second-noise/four &&
+		echo five >second-noise/five &&
+		git add second-noise &&
+		test_tick &&
+		git commit -m second &&
+
+		cat >expect <<-\EOF &&
+		second
+
+		R100	middle	destination
+		first
+
+		R100	source	middle
+		EOF
+		git log --follow --name-status --format=%s -n2 -- destination \
+			>actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2_EVENT="$PWD/follow.event" \
+			git log --follow --name-status --format=%s -n2 -- destination \
+			>actual-traced 2>err-traced &&
+		test_cmp actual actual-traced &&
+		test_cmp err err-traced &&
+		test_trace2_data diff follow-full-tree/count 2 <follow.event &&
+		test_grep '\''"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":2,'\'' follow.event &&
+		test_trace2_data diff follow-full-tree/eligible-additions 5 <follow.event &&
+		test_follow_additions_trace "$PWD/follow.event" 5 2
+	)
+'
+
+test_expect_success 'follow counts completed walks but excludes additions with -B' '
+	(
+		cd follow-eligible-additions &&
+		git log -B --follow --name-status --format=%s -n2 -- destination \
+			>actual-break 2>err-break &&
+		test_cmp expect actual-break &&
+		test_must_be_empty err-break &&
+		GIT_TRACE2_EVENT_NESTING=2 GIT_TRACE2_EVENT="$PWD/break.event" \
+			git log -B --follow --name-status --format=%s -n2 -- destination \
+			>actual-break-traced 2>err-break-traced &&
+		test_cmp actual-break actual-break-traced &&
+		test_cmp err-break err-break-traced &&
+		test_follow_additions_trace "$PWD/break.event" 0 2
+	)
+'
+
+test_expect_success 'follow counts completed walks but excludes additions with an orderfile' '
+	(
+		cd follow-eligible-additions &&
+		printf "%s\n" destination middle >order &&
+		git -c diff.orderFile=order log --follow --name-status \
+			--format=%s -n2 -- destination >actual-order 2>err-order &&
+		test_cmp expect actual-order &&
+		test_must_be_empty err-order &&
+		GIT_TRACE2_EVENT_NESTING=2 GIT_TRACE2_EVENT="$PWD/order.event" \
+			git -c diff.orderFile=order log --follow --name-status \
+			--format=%s -n2 -- destination \
+			>actual-order-traced 2>err-order-traced &&
+		test_cmp actual-order actual-order-traced &&
+		test_cmp err-order err-order-traced &&
+		test_follow_additions_trace "$PWD/order.event" 0 2
+	)
+'
+
+test_expect_success SYMLINKS 'follow counts added symlinks but not gitlinks or old-side paths' '
+	(
+		cd follow-eligible-additions &&
+		git mv destination final &&
+		ln -s unrelated new-symlink &&
+		git add new-symlink &&
+		gitlink_oid=$(git rev-parse HEAD) &&
+		git update-index --add --cacheinfo 160000,$gitlink_oid,new-submodule &&
+		git update-index --chmod=+x first-noise/one &&
+		echo changed >first-noise/two &&
+		git add first-noise/two &&
+		git rm second-noise/four &&
+		test_tick &&
+		git commit -m types &&
+		printf "%s\n\n" types >expect-types &&
+		printf "R100\tdestination\tfinal\n" >>expect-types &&
+		git log --follow --name-status --format=%s -n1 -- final \
+			>actual-types 2>err-types &&
+		test_cmp expect-types actual-types &&
+		test_must_be_empty err-types &&
+		GIT_TRACE2_EVENT_NESTING=2 GIT_TRACE2_EVENT="$PWD/types.event" \
+			git log --follow --name-status --format=%s -n1 -- final \
+			>actual-types-traced 2>err-types-traced &&
+		test_cmp actual-types actual-types-traced &&
+		test_cmp err-types err-types-traced &&
+		test_follow_additions_trace "$PWD/types.event" 1 1
+	)
+'
+
+test_expect_success 'an incomplete full-tree walk does not publish pending additions' '
+	test_create_repo follow-incomplete-additions &&
+	(
+		cd follow-incomplete-additions &&
+		echo content >source &&
+		git add source &&
+		git ls-tree "$(git write-tree)" >tree-input &&
+		printf "040000 tree %s\tzzz\n" "$ZERO_OID" >>tree-input &&
+		broken_tree=$(git mktree --missing <tree-input) &&
+		test_tick &&
+		broken_commit=$(echo broken | git commit-tree "$broken_tree") &&
+		git mv source destination &&
+		echo unrelated >aaa &&
+		git add aaa &&
+		test_tick &&
+		commit=$(echo copy | git commit-tree "$(git write-tree)" -p "$broken_commit") &&
+		git update-ref HEAD "$commit" &&
+		test_expect_code 128 git log --follow --name-status \
+			--format=%s -n1 -- destination >actual-incomplete 2>err-incomplete &&
+		test_grep "unable to read tree ($ZERO_OID)" err-incomplete &&
+		GIT_TRACE2_EVENT_NESTING=2 GIT_TRACE2_EVENT="$PWD/incomplete.event" \
+			test_expect_code 128 git log --follow --name-status \
+			--format=%s -n1 -- destination \
+			>actual-incomplete-traced 2>err-incomplete-traced &&
+		test_cmp actual-incomplete actual-incomplete-traced &&
+		test_cmp err-incomplete err-incomplete-traced &&
+		test_grep ! follow-full-tree incomplete.event
+	)
 '
 
 test_done

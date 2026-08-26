@@ -628,6 +628,10 @@ enum trace2_counter_id {
 	/* Items selected for parallel checkout, not successful writes. */
 	TRACE2_COUNTER_ID_PCHECKOUT_PARALLEL_ITEMS,
 
+	/* Full-tree follow traversals and their eligible unrelated additions. */
+	TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_COMPLETED,
+	TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_ELIGIBLE_ADDITIONS,
+
 	/* Add additional counter definitions before here. */
 	TRACE2_NUMBER_OF_COUNTERS
 };

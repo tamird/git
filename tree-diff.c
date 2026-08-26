@@ -606,6 +606,23 @@ static inline int diff_might_be_rename(void)
 		!DIFF_FILE_VALID(diff_queued_diff.queue[0]->one);
 }
 
+static void count_follow_additions(struct diff_options *opt, int addremove,
+				   unsigned mode, const struct object_id *oid,
+				   int oid_valid, const char *path,
+				   unsigned dirty_submodule)
+{
+	uint64_t *eligible_additions = opt->change_fn_data;
+	int saved_errno = errno;
+
+	if (addremove == '+' && !S_ISGITLINK(mode) &&
+	    strcmp(opt->single_follow, path))
+		(*eligible_additions)++;
+
+	errno = saved_errno;
+	diff_addremove(opt, addremove, mode, oid, oid_valid, path,
+		       dirty_submodule);
+}
+
 static void try_to_follow_renames(const struct object_id *old_oid,
 				  const struct object_id *new_oid,
 				  struct strbuf *base, struct diff_options *opt)
@@ -613,6 +630,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	struct diff_options diff_opts;
 	struct diff_queue_struct *q = &diff_queued_diff;
 	struct diff_filepair *choice;
+	uint64_t eligible_additions = 0;
 	int i, saved_errno;
 
 	/*
@@ -647,11 +665,24 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_opts.rename_limit = opt->rename_limit;
 	diff_setup_done(&diff_opts);
 	saved_errno = errno;
+	/*
+	 * -B can prefetch all queued pairs, and filtering can skip an
+	 * orderfile read if it empties the queue. Exclude both cases from the
+	 * candidate count, but still record every completed traversal below.
+	 */
+	if (trace2_is_enabled() && diff_opts.break_opt == -1 &&
+	    !diff_opts.orderfile) {
+		diff_opts.add_remove = count_follow_additions;
+		diff_opts.change_fn_data = &eligible_additions;
+	}
 	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
 	errno = saved_errno;
 	ll_diff_tree_oid(old_oid, new_oid, base, &diff_opts);
 	saved_errno = errno;
 	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_ELIGIBLE_ADDITIONS,
+			   eligible_additions);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_COMPLETED, 1);
 	errno = saved_errno;
 	diffcore_std(&diff_opts);
 	clear_pathspec(&diff_opts.pathspec);
