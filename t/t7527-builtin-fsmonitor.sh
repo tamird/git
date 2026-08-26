@@ -125,6 +125,14 @@ have_t2_data_event () {
 	grep -e '"event":"data".*"category":"'"$c"'".*"key":"'"$k"'"'
 }
 
+test_diff_reuse_outcome_trace () {
+	diff_reuse_trace="$1"
+
+	test "$(grep -c '"key":"refresh/reuse"' "$diff_reuse_trace")" = 1 &&
+	test "$(grep -c '"key":"refresh/reuse-outcome"' "$diff_reuse_trace")" = 1 &&
+	test_grep '"event":"data".*"thread":"main".*"nesting":1,"category":"index","key":"refresh/reuse-outcome",' "$diff_reuse_trace"
+}
+
 # This test stops the listener directly and does not require filesystem events.
 test_expect_success 'explicit daemon start and stop with a waiting query' '
 	test_when_finished "stop_daemon_delete_repo test_explicit" &&
@@ -464,7 +472,16 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 				.git/diff-refresh.trace |
 			sed -n "s/.*\"event\":\"\\([^\"]*\\)\".*/\\1/p" |
 			uniq >.git/diff-refresh-after &&
-			test_cmp .git/diff-refresh-before .git/diff-refresh-after
+			test_cmp .git/diff-refresh-before .git/diff-refresh-after &&
+			if test "$split" = true
+			then
+				test_trace2_data index refresh/reuse-outcome 3 \
+					<.git/diff-refresh.trace
+			else
+				test_trace2_data index refresh/reuse-outcome 1 \
+					<.git/diff-refresh.trace
+			fi &&
+			test_diff_reuse_outcome_trace .git/diff-refresh.trace
 		) || return 1
 	done
 '
@@ -492,6 +509,7 @@ test_expect_success 'git diff rereads an index after a worktree change' '
 		test_must_be_empty .git/diff-refresh-before &&
 		test-tool chmtime +10 clean &&
 		echo modified >>trigger &&
+		GIT_TRACE2_EVENT_NESTING=2 \
 		GIT_TRACE2_EVENT="$PWD/.git/diff-refresh.trace" \
 			git diff >.git/diff-refresh-actual &&
 		test_must_be_empty .git/diff-refresh-actual &&
@@ -499,7 +517,10 @@ test_expect_success 'git diff rereads an index after a worktree change' '
 			<.git/diff-refresh.trace &&
 		printf " M clean\n M trigger\n" >.git/diff-refresh-expect &&
 		git status --porcelain >.git/diff-refresh-after &&
-		test_cmp .git/diff-refresh-expect .git/diff-refresh-after
+		test_cmp .git/diff-refresh-expect .git/diff-refresh-after &&
+		test_trace2_data index refresh/reuse-outcome 8 \
+			<.git/diff-refresh.trace &&
+		test_diff_reuse_outcome_trace .git/diff-refresh.trace
 	)
 '
 

@@ -255,6 +255,22 @@ static void update_index_if_able(struct lock_file *lock_file)
 			   (getnanotime() - start) / 1000);
 }
 
+/*
+ * Report the first failed guard; later guards are not evaluated.
+ * Keep these private Trace2 outcome values stable.
+ */
+enum diff_index_reuse_outcome {
+	DIFF_INDEX_REUSE_REUSED = 1,
+	DIFF_INDEX_REUSE_SCOPE_DISALLOWED = 2,
+	DIFF_INDEX_REUSE_SPLIT_INDEX = 3,
+	DIFF_INDEX_REUSE_MISSING_TOKEN = 4,
+	DIFF_INDEX_REUSE_NON_IPC = 5,
+	DIFF_INDEX_REUSE_INDEX_UNVERIFIED = 6,
+	DIFF_INDEX_REUSE_QUERY_FAILED = 7,
+	DIFF_INDEX_REUSE_REPLY_LENGTH_MISMATCH = 8,
+	DIFF_INDEX_REUSE_REPLY_CONTENT_MISMATCH = 9,
+};
+
 static void refresh_index_quietly(const struct pathspec *pathspec,
 				 int allow_index_reuse)
 {
@@ -262,8 +278,9 @@ static void refresh_index_quietly(const struct pathspec *pathspec,
 	struct strbuf answer = STRBUF_INIT;
 	struct index_state *istate = the_repository->index;
 	const char *token;
+	enum diff_index_reuse_outcome reuse_outcome;
 	int reuse_index = 0;
-	int fd;
+	int fd, saved_errno;
 
 	fd = repo_hold_locked_index(the_repository, &lock_file, 0);
 	if (fd < 0)
@@ -271,16 +288,33 @@ static void refresh_index_quietly(const struct pathspec *pathspec,
 
 	/* A synchronized, unchanged token proves the first snapshot is current. */
 	token = istate->fsmonitor_last_update;
-	if (allow_index_reuse && !istate->split_index && token &&
-	    fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_IPC &&
-	    repo_verify_index(the_repository) &&
-	    !fsmonitor_ipc__send_query(token, &answer) &&
-	    answer.len == strlen(token) + 1 &&
-	    !memcmp(answer.buf, token, answer.len))
+	if (!allow_index_reuse)
+		reuse_outcome = DIFF_INDEX_REUSE_SCOPE_DISALLOWED;
+	else if (istate->split_index)
+		reuse_outcome = DIFF_INDEX_REUSE_SPLIT_INDEX;
+	else if (!token)
+		reuse_outcome = DIFF_INDEX_REUSE_MISSING_TOKEN;
+	else if (fsm_settings__get_mode(the_repository) != FSMONITOR_MODE_IPC)
+		reuse_outcome = DIFF_INDEX_REUSE_NON_IPC;
+	else if (!repo_verify_index(the_repository))
+		reuse_outcome = DIFF_INDEX_REUSE_INDEX_UNVERIFIED;
+	else if (fsmonitor_ipc__send_query(token, &answer))
+		reuse_outcome = DIFF_INDEX_REUSE_QUERY_FAILED;
+	else if (answer.len != strlen(token) + 1)
+		reuse_outcome = DIFF_INDEX_REUSE_REPLY_LENGTH_MISMATCH;
+	else if (memcmp(answer.buf, token, answer.len))
+		reuse_outcome = DIFF_INDEX_REUSE_REPLY_CONTENT_MISMATCH;
+	else {
 		reuse_index = 1;
+		reuse_outcome = DIFF_INDEX_REUSE_REUSED;
+	}
 
 	trace2_data_intmax("index", the_repository,
 			   "refresh/reuse", reuse_index);
+	saved_errno = errno;
+	trace2_data_intmax("index", the_repository,
+			   "refresh/reuse-outcome", reuse_outcome);
+	errno = saved_errno;
 	strbuf_release(&answer);
 	if (!reuse_index) {
 		discard_index(istate);
