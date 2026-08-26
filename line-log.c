@@ -18,6 +18,58 @@
 #include "strvec.h"
 #include "bloom.h"
 #include "tree-walk.h"
+#include "trace2.h"
+
+enum line_log_outcome {
+	LINE_LOG_NO_RANGE,
+	LINE_LOG_BLOOM_SKIP,
+	LINE_LOG_ORDINARY,
+	LINE_LOG_MERGE,
+	LINE_LOG_OUTCOME_NR
+};
+
+/*
+ * Main-thread process totals, not unique commits or elapsed-time coverage.
+ * Outcomes count completed range-processing calls. Bloom queries count calls
+ * with an available filter, not individual path keys. Line comparisons count
+ * successful collect_diff() returns. Nested work can complete in a call that
+ * subsequently dies; these are not a partition of the outcome counts.
+ */
+static struct {
+	uint64_t outcomes[LINE_LOG_OUTCOME_NR];
+	uint64_t changed;
+	uint64_t bloom_queries;
+	uint64_t bloom_unavailable;
+	uint64_t tree_comparisons;
+	uint64_t line_comparisons;
+} line_log_stats;
+static int line_log_stats_enabled;
+
+static void trace2_line_log_statistics(void)
+{
+	static const char * const outcome_keys[] = {
+		"calls/no-range",
+		"calls/bloom-skip",
+		"calls/ordinary",
+		"calls/merge"
+	};
+	int saved_errno = errno;
+
+	for (size_t i = 0; i < ARRAY_SIZE(outcome_keys); i++)
+		trace2_data_intmax("line-log", NULL, outcome_keys[i],
+				   line_log_stats.outcomes[i]);
+	trace2_data_intmax("line-log", NULL, "calls/changed",
+			   line_log_stats.changed);
+	trace2_data_intmax("line-log", NULL, "bloom/queries",
+			   line_log_stats.bloom_queries);
+	trace2_data_intmax("line-log", NULL, "bloom/unavailable",
+			   line_log_stats.bloom_unavailable);
+	trace2_data_intmax("line-log", NULL, "diff/tree-comparisons",
+			   line_log_stats.tree_comparisons);
+	trace2_data_intmax("line-log", NULL, "diff/line-comparisons",
+			   line_log_stats.line_comparisons);
+	errno = saved_errno;
+}
 
 static void range_set_grow(struct range_set *rs, size_t extra)
 {
@@ -786,6 +838,13 @@ void line_log_init(struct rev_info *rev, const char *prefix, struct string_list 
 	parse_pathspec_from_ranges(&rev->diffopt.pathspec, range);
 
 	free_line_log_data(range);
+	if (trace2_is_enabled() && !line_log_stats_enabled) {
+		int saved_errno = errno;
+
+		if (!atexit(trace2_line_log_statistics))
+			line_log_stats_enabled = 1;
+		errno = saved_errno;
+	}
 }
 
 static void move_diff_queue(struct diff_queue_struct *dst,
@@ -856,6 +915,8 @@ static void queue_diffs(struct line_log_data *range,
 	}
 	diff_queue_clear(&diff_queued_diff);
 	diff_tree_oid(parent_tree_oid, tree_oid, "", opt);
+	if (line_log_stats_enabled)
+		line_log_stats.tree_comparisons++;
 	if (opt->detect_rename && diff_might_be_rename()) {
 		struct diff_options rename_opts;
 
@@ -875,6 +936,8 @@ static void queue_diffs(struct line_log_data *range,
 		/* must look at the full tree diff to detect renames */
 		diff_queue_clear(&diff_queued_diff);
 		diff_tree_oid(parent_tree_oid, tree_oid, "", &rename_opts);
+		if (line_log_stats_enabled)
+			line_log_stats.tree_comparisons++;
 
 		filter_diffs_for_paths(range, 1);
 		diffcore_std(&rename_opts);
@@ -929,6 +992,8 @@ static int process_diff_filepair(struct rev_info *rev,
 	diff_ranges_init(&diff);
 	if (collect_diff(&file_parent, &file_target, &diff))
 		die("unable to generate diff for %s", pair->one->path);
+	if (line_log_stats_enabled)
+		line_log_stats.line_comparisons++;
 
 	/* NEEDSWORK should apply some heuristics to prevent mismatches */
 	free(rg->path);
@@ -1029,8 +1094,11 @@ static int bloom_filter_check(struct rev_info *rev,
 		return 1;
 
 	if (!rev->bloom_filter_settings ||
-	    !get_bloom_filter(rev->repo, commit, &filter))
+	    !get_bloom_filter(rev->repo, commit, &filter)) {
+		if (line_log_stats_enabled)
+			line_log_stats.bloom_unavailable++;
 		return 1;
+	}
 
 	if (!range)
 		return 0;
@@ -1047,6 +1115,8 @@ static int bloom_filter_check(struct rev_info *rev,
 		range = range->next;
 	}
 
+	if (line_log_stats_enabled)
+		line_log_stats.bloom_queries++;
 	return result;
 }
 
@@ -1138,21 +1208,30 @@ out:
 int line_log_process_ranges_arbitrary_commit(struct rev_info *rev, struct commit *commit)
 {
 	struct line_log_data *range = lookup_line_range(rev, commit);
+	enum line_log_outcome outcome = LINE_LOG_NO_RANGE;
 	int changed = 0;
 
 	if (range) {
 		if (commit->parents && !bloom_filter_check(rev, commit, range)) {
 			add_line_range(rev, commit->parents->item, range);
 			clear_commit_line_range(rev, commit);
-		} else if (commit->parents && commit->parents->next)
+			outcome = LINE_LOG_BLOOM_SKIP;
+		} else if (commit->parents && commit->parents->next) {
 			changed = process_ranges_merge_commit(rev, commit, range);
-		else
+			outcome = LINE_LOG_MERGE;
+		} else {
 			changed = process_ranges_ordinary_commit(rev, commit, range);
+			outcome = LINE_LOG_ORDINARY;
+		}
 	}
 
 	if (!changed)
 		commit->object.flags |= TREESAME;
 
+	if (line_log_stats_enabled) {
+		line_log_stats.outcomes[outcome]++;
+		line_log_stats.changed += !!changed;
+	}
 	return changed;
 }
 

@@ -801,4 +801,111 @@ test_expect_success 'get_commit_action() does not mutate a not-yet-walked commit
 	)
 '
 
+line_log_trace () {
+	line_log_trace_file=$1 &&
+	shift &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+	GIT_TRACE2_EVENT="$PWD/$line_log_trace_file" git "$@"
+}
+
+test_line_log_stats () {
+	line_log_trace_file=$1 &&
+	shift &&
+	test "$#" = 9 || return 1
+
+	for line_log_key in calls/no-range calls/bloom-skip calls/ordinary \
+		calls/merge calls/changed bloom/queries bloom/unavailable \
+		diff/tree-comparisons diff/line-comparisons
+	do
+		echo "$line_log_key $1" &&
+		shift || return 1
+	done >expect.stats &&
+	sed -n '/"event":"data",/s/.*"category":"line-log","key":"\([^"]*\)","value":"\([0-9][0-9]*\)".*/\1 \2/p' \
+		"$line_log_trace_file" >actual.stats &&
+	test_cmp expect.stats actual.stats
+}
+
+test_expect_success 'line-log reports completed work at default trace depth' '
+	test_when_finished "rm -f line-log-*.trace" &&
+	(
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		git -c commitGraph.changedPathsVersion=1 commit-graph write \
+			--reachable --changed-paths &&
+		cat >expect <<-EOF &&
+		$head_oid $prev_oid Modify func2() in file.c
+		$root_oid  Add func1() and func2() in file.c
+		EOF
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git -c core.commitGraph=false log --no-renames \
+			--format="%h %p %s" --no-patch -L:func2:file.c \
+			parent-oids >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		for setting in core.commitGraph=false commitGraph.readChangedPaths=false
+		do
+			line_log_trace "line-log-$setting.trace" \
+				-c core.commitGraph=true -c "$setting" log --no-renames \
+				--format="%h %p %s" --no-patch -L:func2:file.c \
+				parent-oids >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err || exit 1
+		done &&
+		cat >expect <<-EOF &&
+		$head_oid $root_oid Modify func2() in file.c
+		$root_oid  Add func1() and func2() in file.c
+		EOF
+		line_log_trace line-log-parents.trace -c core.commitGraph=false \
+			log --no-renames --parents --format="%h %p %s" \
+			--no-patch -L:func2:file.c parent-oids >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		echo "add file" >expect &&
+		line_log_trace line-log-bloom.trace -c core.commitGraph=true \
+			-c commitGraph.readChangedPaths=true \
+			-c commitGraph.changedPathsVersion=1 log -M \
+			--format=%s --no-patch -L1,1:file pickaxe-rename \
+			>actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		echo "Add file-1 and file-2" >expect &&
+		line_log_trace line-log-two-files.trace -c core.commitGraph=false \
+			log --no-renames --format=%s --no-patch \
+			-L1:file-1 -L1:file-2 moves-start >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		echo "$head_oid $prev_oid Modify func2() in file.c" >expect &&
+		line_log_trace line-log-one.trace -c core.commitGraph=false \
+			log --no-renames -n 1 --format="%h %p %s" --no-patch \
+			-L:func2:file.c parent-oids >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		line_log_trace line-log-plain.trace log -n 1 \
+			--format="%h %p %s" parent-oids >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		line_log_trace line-log-zero.trace -c core.commitGraph=true \
+			log --no-renames -n 0 --no-patch -L:func2:file.c \
+			parent-oids >actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+
+		# All existing output and status oracles precede new data checks.
+		test_grep "\"category\":\"line-log\",\"key\":\"calls/no-range\"" \
+			line-log-core.commitGraph=false.trace &&
+		test_line_log_stats line-log-core.commitGraph=false.trace \
+			0 0 5 0 2 0 4 5 3 &&
+		test_line_log_stats line-log-commitGraph.readChangedPaths=false.trace \
+			0 0 5 0 2 0 4 5 3 &&
+		test_line_log_stats line-log-parents.trace 0 0 5 0 2 0 4 5 3 &&
+		# The existing empty "diverge" commit guarantees a Bloom negative.
+		# The unchanged merge follows one parent, leaving the side range-less.
+		test_line_log_stats line-log-bloom.trace 1 1 2 1 1 3 0 6 3 &&
+		# Two changed filepairs still count as one changed range-processing call.
+		test_line_log_stats line-log-two-files.trace 0 0 1 0 1 0 0 1 2 &&
+		test_line_log_stats line-log-one.trace 0 0 1 0 1 0 1 1 1 &&
+		test_line_log_stats line-log-zero.trace 0 0 0 0 0 0 0 0 0 &&
+		test_grep ! "\"category\":\"line-log\"" line-log-plain.trace
+	)
+'
+
 test_done
