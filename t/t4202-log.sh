@@ -226,6 +226,118 @@ test_expect_success 'log traces the terminating get_revision call' '
 	done
 '
 
+test_expect_success 'log traces pruning across all get_revision calls' '
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	for mode in limited mixed empty unpruned filtered
+	do
+		case "$mode" in
+		limited)
+			set -- -2 -- one ichi &&
+			printf "%s\n" third second >expect &&
+			returned=2 shown=2 null_count=0 pathspecs=2
+			;;
+		mixed)
+			set -- -- ichi absent &&
+			echo third >expect &&
+			returned=1 shown=1 null_count=2 pathspecs=2
+			;;
+		empty)
+			set -- -- absent-one absent-two &&
+			>expect &&
+			returned=0 shown=0 null_count=6 pathspecs=2
+			;;
+		unpruned)
+			set -- &&
+			printf "%s\n" sixth fifth fourth third second initial >expect &&
+			returned=6 shown=6 null_count=0 pathspecs=0
+			;;
+		filtered)
+			set -- --diff-filter=A -- one ichi &&
+			printf "%s\n" third initial >expect &&
+			returned=3 shown=2 null_count=0 pathspecs=2
+			;;
+		esac &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+			git -c core.commitGraph=false log --no-renames --format=%s \
+				"$@" >untraced 2>err &&
+		test_cmp expect untraced &&
+		test_must_be_empty err &&
+		trace="$PWD/log-prune-$mode.trace" &&
+		GIT_TRACE2_EVENT="$trace" \
+			git -c core.commitGraph=false log --no-renames --format=%s \
+				"$@" >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		test_trace2_data log count/returned "$returned" <"$trace" &&
+		test_trace2_data log count/shown "$shown" <"$trace" &&
+		test_trace2_data log count/pathspecs "$pathspecs" <"$trace" &&
+		test_trace2_data log mode/follow 0 <"$trace" &&
+		if test "$pathspecs" = 0
+		then
+			test_grep ! "\"category\":\"bloom\",\"key\":\"active\"," "$trace"
+		else
+			test_trace2_data bloom active 0 <"$trace"
+		fi &&
+		test_trace2_data log get-revision-null-us "[0-9][0-9]*" <"$trace" &&
+		test_trace2_data log get-revision-null-prune-diff-count \
+			"$null_count" <"$trace" &&
+		if test "$null_count" = 0
+		then
+			test_trace2_data log get-revision-null-prune-diff-us 0 <"$trace"
+		fi &&
+		grep "\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision\"," \
+			"$trace" >log-prune.timer &&
+		test_line_count = 1 log-prune.timer &&
+		test_grep "\"intervals\":$((returned + 1))," log-prune.timer || return 1
+	done &&
+	# Check all existing behavior before requiring the new aggregate fields.
+	for mode in limited mixed empty unpruned filtered
+	do
+		case "$mode" in
+		limited) count=5 ;;
+		mixed|empty|filtered) count=6 ;;
+		unpruned) count=0 ;;
+		esac &&
+		trace="$PWD/log-prune-$mode.trace" &&
+		key=get-revision-prune-diff-count &&
+		test_trace2_data log "$key" "$count" <"$trace" &&
+		grep "\"category\":\"log\",\"key\":\"$key\"," "$trace" >log-prune.data &&
+		test_line_count = 1 log-prune.data &&
+		test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+			log-prune.data &&
+		key=get-revision-prune-diff-us &&
+		if grep "\"category\":\"log\",\"key\":\"$key\"," \
+			"$trace" >log-prune.data
+		then
+			test_line_count = 1 log-prune.data &&
+			test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+				log-prune.data &&
+			test_trace2_data log "$key" "[0-9][0-9]*" <log-prune.data &&
+			total_us=$(sed -n "s/.*\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				log-prune.data) &&
+			test_trace2_data log get-revision-null-prune-diff-us \
+				"[0-9][0-9]*" <"$trace" &&
+			null_us=$(sed -n "s/.*\"key\":\"get-revision-null-prune-diff-us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				"$trace") &&
+			history_us=$(sed -n "s/.*\"key\":\"history-us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				"$trace") &&
+			test "$total_us" -ge "$null_us" &&
+			test "$total_us" -le "$history_us" &&
+			if test "$mode" = empty
+			then
+				test "$total_us" = "$null_us"
+			fi &&
+			echo "$mode pruning: total=$total_us null=$null_us history=$history_us us"
+		else
+			echo "$mode pruning: timing unavailable"
+		fi &&
+		if test "$mode" = unpruned
+		then
+			test_trace2_data log "$key" 0 <"$trace"
+		fi || return 1
+	done
+'
+
 test_expect_success 'git log --follow' '
 
 	test_when_finished "rm -f log-follow.trace" &&
