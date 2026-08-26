@@ -416,6 +416,22 @@ test_content_index_ipc_backend () {
 	}' "$1"
 }
 
+test_content_index_cold_no_filter () {
+	awk '
+	BEGIN {
+		key = "\"category\":\"grep-index\",\"key\":\"ipc_query/cold_no_filter\""
+		prefix = key ",\"value\":"
+	}
+	index($0, key) {
+		if (!index($0, "\"event\":\"data_json\"") || !index($0, prefix))
+			print "invalid cold no-filter record"
+		else
+			print substr($0, index($0, prefix) + length(prefix),
+				     length($0) - index($0, prefix) - length(prefix))
+	}' "$1" >cold-no-filter.actual &&
+	test_cmp "$2" cold-no-filter.actual
+}
+
 test_content_index_ipc_wait_backend () {
 	test_grep '"category":"grep","key":"content_index_ipc_backend"' "$1" &&
 	awk '
@@ -583,6 +599,107 @@ test_expect_success 'content index query wire versions' '
 			GIT_TRACE2_PERF=0 \
 			test-tool grep-index-ipc query-protocol captured
 	fi
+'
+
+test_expect_success FSMONITOR_DAEMON 'cold no-filter reasons preserve query replies' '
+	test_when_finished "rm -f cold-no-filter*.trace" &&
+	test_path_is_missing .git/objects/info/grep-index/chain &&
+	test_path_is_missing .git/objects/info/grep-index/chain-transposed &&
+	content_oid=$(git rev-parse HEAD:present) &&
+	short_oid=$(git rev-parse HEAD:short) &&
+	tree_oid=$(git rev-parse HEAD^{tree}) &&
+	missing_oid=$(printf "unwritten cold no-filter fixture 7818\n" |
+		git hash-object --stdin) &&
+	content_object=.git/objects/$(test_oid_to_path "$content_oid") &&
+	cp "$content_object" "$content_object.cold-no-filter-save" &&
+	test_when_finished "test ! -e \"$content_object.cold-no-filter-save\" ||
+		mv \"$content_object.cold-no-filter-save\" \"$content_object\"" &&
+	chmod u+w "$content_object" &&
+	printf garbage >>"$content_object" &&
+	echo blob >expect-type &&
+	git cat-file -t "$content_oid" >actual-type 2>err-type &&
+	test_cmp expect-type actual-type &&
+	test_must_be_empty err-type &&
+	echo 15 >expect-size &&
+	git cat-file -s "$content_oid" >actual-size 2>err-size &&
+	test_cmp expect-size actual-size &&
+	test_must_be_empty err-size &&
+	git cat-file blob "$content_oid" >actual-content 2>err-content &&
+	test_cmp present actual-content &&
+	test_must_be_empty err-content &&
+	printf "error: garbage at end of loose object '\''%s'\''\n" \
+		"$content_oid" >expect-error &&
+	printf "requests: 2\nunknown per request: 4\n" >expect &&
+	for version in 0 1 2
+	do
+		for tracing in off on
+		do
+			trace_file="$PWD/cold-no-filter-$version-$tracing.trace" &&
+			trace_target=0 &&
+			if test "$tracing" = on
+			then
+				trace_target=$trace_file
+			fi &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT="$trace_target" \
+			GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT_NESTING=2 \
+				test-tool grep-index-ipc query-no-filter "$version" \
+				"$(test_oid zero)" "$missing_oid" "$tree_oid" \
+				"$content_oid" >actual 2>err &&
+			test_cmp expect actual &&
+			test_cmp expect-error err &&
+			if test "$tracing" = off
+			then
+				test_path_is_missing "$trace_file"
+			fi || return 1
+		done
+	done &&
+	mv "$content_object.cold-no-filter-save" "$content_object" &&
+	printf "requests: 2\nunknown per request: 2\n" >expect &&
+	for version in 0 1 2
+	do
+		for tracing in off on
+		do
+			trace_file="$PWD/cold-no-filter-budget-$version-$tracing.trace" &&
+			trace_target=0 &&
+			if test "$tracing" = on
+			then
+				trace_target=$trace_file
+			fi &&
+			GIT_TEST_GREP_INDEX_MEMORY_MAX_BYTES=1 \
+			GIT_TRACE2=0 GIT_TRACE2_EVENT="$trace_target" \
+			GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT_NESTING=2 \
+				test-tool grep-index-ipc query-no-filter "$version" \
+				"$short_oid" "$content_oid" >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			if test "$tracing" = off
+			then
+				test_path_is_missing "$trace_file"
+			fi || return 1
+		done
+	done &&
+	# All existing byte, classification and stderr oracles precede new data.
+	cat >cold-no-filter.expect <<-\EOF &&
+	{"metadata":2,"ineligible":1,"budget":0,"content":1}
+	{"metadata":0,"ineligible":0,"budget":0,"content":0}
+	EOF
+	cat >cold-no-filter-budget.expect <<-\EOF &&
+	{"metadata":0,"ineligible":0,"budget":2,"content":0}
+	{"metadata":0,"ineligible":0,"budget":0,"content":0}
+	EOF
+	>cold-no-filter-empty.expect &&
+	for version in 1 2
+	do
+		test_content_index_cold_no_filter \
+			cold-no-filter-$version-on.trace cold-no-filter.expect &&
+		test_content_index_cold_no_filter \
+			cold-no-filter-budget-$version-on.trace \
+			cold-no-filter-budget.expect || return 1
+	done &&
+	test_content_index_cold_no_filter cold-no-filter-0-on.trace \
+		cold-no-filter-empty.expect &&
+	test_content_index_cold_no_filter cold-no-filter-budget-0-on.trace \
+		cold-no-filter-empty.expect
 '
 
 test_expect_success FSMONITOR_DAEMON,!WINDOWS 'daemon serves a long gitdir without socketDir' '
@@ -5109,7 +5226,12 @@ test_expect_success FSMONITOR_DAEMON 'generic content-index query waits for a sh
 		test_cmp expect actual &&
 		test_path_is_missing .git/objects/info/grep-index/chain &&
 		test_path_is_missing .git/objects/info/grep-index/chain-transposed &&
-		test_content_index_ipc_wait_backend wait.trace
+		test_content_index_ipc_wait_backend wait.trace &&
+		printf "%s\n" \
+			"{\"metadata\":0,\"ineligible\":0,\"budget\":0,\"content\":0}" \
+			"{\"metadata\":0,\"ineligible\":0,\"budget\":0,\"content\":0}" \
+			>cold-no-filter.expect &&
+		test_content_index_cold_no_filter wait.trace cold-no-filter.expect
 	)
 '
 

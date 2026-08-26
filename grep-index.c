@@ -3305,6 +3305,7 @@ int grep_index_memory_maybe_contains_with_outcome(
 
 	if (outcome) {
 		outcome->origin = GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD;
+		outcome->no_filter = GREP_INDEX_MEMORY_NO_FILTER_NONE;
 		outcome->waited = 0;
 	}
 	if (!index || !query)
@@ -3407,6 +3408,17 @@ int grep_index_memory_maybe_contains_with_outcome(
 			    filter_size, content, size);
 	}
 	free(content);
+
+	if (outcome && !filter) {
+		if (cache_saturated)
+			outcome->no_filter = GREP_INDEX_MEMORY_NO_FILTER_BUDGET;
+		else if (reserved)
+			outcome->no_filter = GREP_INDEX_MEMORY_NO_FILTER_CONTENT;
+		else if (result)
+			outcome->no_filter = GREP_INDEX_MEMORY_NO_FILTER_METADATA;
+		else
+			outcome->no_filter = GREP_INDEX_MEMORY_NO_FILTER_INELIGIBLE;
+	}
 
 	pthread_mutex_lock(&index->mutex);
 	if (filter) {

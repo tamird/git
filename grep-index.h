@@ -111,8 +111,17 @@ enum grep_index_memory_query_origin {
 	GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD,
 };
 
+enum grep_index_memory_no_filter_reason {
+	GREP_INDEX_MEMORY_NO_FILTER_NONE,
+	GREP_INDEX_MEMORY_NO_FILTER_METADATA,
+	GREP_INDEX_MEMORY_NO_FILTER_INELIGIBLE,
+	GREP_INDEX_MEMORY_NO_FILTER_BUDGET,
+	GREP_INDEX_MEMORY_NO_FILTER_CONTENT,
+};
+
 struct grep_index_memory_query_outcome {
 	enum grep_index_memory_query_origin origin;
+	enum grep_index_memory_no_filter_reason no_filter;
 	unsigned int waited : 1;
 };
 
@@ -123,7 +132,14 @@ struct grep_index_memory_query_outcome {
  * COLD_ATTEMPT means this call claimed a build, even if that build fails.
  * UNAVAILABLE_PREBUILD means none of those routes was taken.
  * waited records one observation of an existing BUILDING entry, including
- * a wait that ends in FAILED or SATURATED.  outcome may be NULL.
+ * a wait that ends in FAILED or SATURATED.
+ *
+ * no_filter reports only a failed COLD_ATTEMPT: METADATA means the first
+ * object-info read failed; INELIGIBLE means a non-blob or oversized blob;
+ * BUDGET means its filter reservation failed; CONTENT means the reserved
+ * content read failed or returned no content.  NONE includes a successful
+ * build and every non-cold route, including reuse of FAILED or SATURATED.
+ * outcome may be NULL.
  */
 int grep_index_memory_maybe_contains_with_outcome(
 	struct grep_index_memory *index,

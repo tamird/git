@@ -1340,6 +1340,31 @@ static uint64_t grep_index_ipc_trace_clock(void)
 	return now;
 }
 
+/*
+ * Server-local counts for one diagnostic request, not wire reply fields.
+ * Zeroes do not imply that no cold builds were attempted or succeeded.
+ */
+static void grep_index_ipc_trace_cold_no_filter(
+	struct repository *repo, const uint32_t *counts)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+	int saved_errno = errno;
+
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "metadata",
+			counts[GREP_INDEX_MEMORY_NO_FILTER_METADATA]);
+	jw_object_intmax(&jw, "ineligible",
+			counts[GREP_INDEX_MEMORY_NO_FILTER_INELIGIBLE]);
+	jw_object_intmax(&jw, "budget",
+			counts[GREP_INDEX_MEMORY_NO_FILTER_BUDGET]);
+	jw_object_intmax(&jw, "content",
+			counts[GREP_INDEX_MEMORY_NO_FILTER_CONTENT]);
+	jw_end(&jw);
+	trace2_data_json("grep-index", repo, "ipc_query/cold_no_filter", &jw);
+	jw_release(&jw);
+	errno = saved_errno;
+}
+
 static int grep_index_ipc_handle_request(
 	void *data, const char *request, size_t request_len,
 	ipc_server_reply_cb *reply, struct ipc_server_reply_data *reply_data)
@@ -1349,13 +1374,14 @@ static int grep_index_ipc_handle_request(
 	struct grep_index_query *query = NULL;
 	struct grep_index_prepared *prepared = NULL;
 	struct grep_index_ipc_query_stats stats = { 0 };
+	uint32_t cold_no_filter[GREP_INDEX_MEMORY_NO_FILTER_CONTENT + 1] = { 0 };
 	struct strbuf response = STRBUF_INIT;
 	const unsigned char *raw = (const unsigned char *)request;
 	const unsigned char *oid_data;
 	uint32_t signature, version, format_id, query_len, nr;
 	size_t rawsz = server->repo.hash_algo->rawsz;
 	size_t prepared_min_oids;
-	int diagnostic, use_prepared, timed;
+	int diagnostic, use_prepared, timed, trace_cold_no_filter;
 	uint64_t request_begin = 0, reply_begin = 0, reply_end = 0;
 	int result = 0;
 
@@ -1431,6 +1457,7 @@ static int grep_index_ipc_handle_request(
 		request + GREP_INDEX_IPC_REQUEST_HEADER_SIZE, query_len);
 	if (!query)
 		return 0;
+	trace_cold_no_filter = diagnostic && trace2_is_enabled();
 	oid_data = raw + GREP_INDEX_IPC_REQUEST_HEADER_SIZE + query_len;
 
 	grep_index_ipc_refresh_generation(server);
@@ -1483,6 +1510,8 @@ static int grep_index_ipc_handle_request(
 				break;
 			case GREP_INDEX_MEMORY_QUERY_COLD_ATTEMPT:
 				stats.cold_attempt++;
+				if (trace_cold_no_filter && outcome.no_filter)
+					cold_no_filter[outcome.no_filter]++;
 				break;
 			case GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD:
 				stats.unavailable_prebuild++;
@@ -1507,6 +1536,8 @@ static int grep_index_ipc_handle_request(
 	}
 	trace2_data_intmax("grep-index", &server->repo,
 			   "ipc_query/prepared", !!prepared);
+	if (trace_cold_no_filter)
+		grep_index_ipc_trace_cold_no_filter(&server->repo, cold_no_filter);
 	if (timed)
 		reply_begin = grep_index_ipc_trace_clock();
 	result = reply(reply_data, response.buf, response.len);

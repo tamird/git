@@ -452,6 +452,101 @@ static int query_protocol_send(const char *path, const struct strbuf *request,
 	return result;
 }
 
+static int test_query_no_filter(int version, int nr, const char **hex)
+{
+	struct grep_index_ipc_server *server = NULL;
+	struct strbuf request = STRBUF_INIT;
+	struct strbuf response = STRBUF_INIT;
+	struct strbuf expected = STRBUF_INIT;
+	const char *failure = "cold no-filter response changed";
+	char *path = NULL, *worker_path = NULL;
+	int result = -1;
+
+	setup_git_directory(the_repository);
+	query_protocol_put_u32(&request, version ?
+			       QUERY_DIAGNOSTIC_REQUEST : QUERY_LEGACY_REQUEST);
+	query_protocol_put_u32(&request, version ? version : 1);
+	query_protocol_put_u32(&request, the_repository->hash_algo->format_id);
+	query_protocol_put_u32(&request, sizeof(query_protocol_wire));
+	query_protocol_put_u32(&request, nr);
+	strbuf_add(&request, query_protocol_wire, sizeof(query_protocol_wire));
+	for (int i = 0; i < nr; i++) {
+		struct object_id oid;
+
+		if (strlen(hex[i]) != the_repository->hash_algo->hexsz ||
+		    get_oid_hex_algop(hex[i], &oid, the_repository->hash_algo)) {
+			failure = "invalid no-filter object ID";
+			goto cleanup;
+		}
+		strbuf_add(&request, oid.hash, the_repository->hash_algo->rawsz);
+	}
+	path = grep_index_ipc_path(the_repository);
+	worker_path = grep_index_ipc_worker_path(the_repository);
+	if (query_protocol_check_path(path) ||
+	    query_protocol_check_path(worker_path) ||
+	    grep_index_ipc_server_init(&server, repo_get_git_dir(the_repository),
+				      path, worker_path, 1))
+		goto cleanup;
+	grep_index_ipc_server_start(server);
+	for (int pass = 0; pass < 2; pass++) {
+		size_t reply_size;
+
+		strbuf_reset(&expected);
+		query_protocol_put_u32(&expected, version ?
+				       QUERY_DIAGNOSTIC_RESPONSE :
+				       QUERY_LEGACY_RESPONSE);
+		query_protocol_put_u32(&expected, version ? version : 1);
+		query_protocol_put_u32(&expected, nr);
+		if (version) {
+			query_protocol_put_u32(&expected, 0); /* persistent */
+			query_protocol_put_u32(&expected, 0); /* ready_reused */
+			query_protocol_put_u32(&expected, pass ? 0 : nr);
+			query_protocol_put_u32(&expected, pass ? nr : 0);
+			query_protocol_put_u32(&expected, 0); /* waited */
+		}
+		strbuf_addchars(&expected, GREP_INDEX_IPC_UNKNOWN, nr);
+		reply_size = expected.len + (version == 2 ? 24 : 0);
+		strbuf_reset(&response);
+		if (query_protocol_send(path, &request, &response) ||
+		    response.len != reply_size ||
+		    memcmp(response.buf, expected.buf, expected.len))
+			goto stop;
+		if (version == 2) {
+			const char *footer = response.buf + expected.len;
+			uint64_t pre_reply = get_be64(footer);
+			uint64_t reply_write = get_be64(footer + 8);
+			uint64_t cleanup = get_be64(footer + 16);
+
+			if (pre_reply == UINT64_MAX || reply_write == UINT64_MAX ||
+			    cleanup == UINT64_MAX) {
+				if (pre_reply != UINT64_MAX ||
+				    reply_write != UINT64_MAX ||
+				    cleanup != UINT64_MAX)
+					goto stop;
+			} else if (reply_write >= UINT64_MAX - pre_reply ||
+				   cleanup >= UINT64_MAX - pre_reply - reply_write) {
+				goto stop;
+			}
+		}
+	}
+	result = 0;
+
+stop:
+	grep_index_ipc_server_stop(server);
+	grep_index_ipc_server_await(server);
+	grep_index_ipc_server_free(server);
+cleanup:
+	free(worker_path);
+	free(path);
+	strbuf_release(&expected);
+	strbuf_release(&response);
+	strbuf_release(&request);
+	if (result)
+		return error("%s", failure);
+	printf("requests: 2\nunknown per request: %d\n", nr);
+	return 0;
+}
+
 static int query_protocol_server(const char *path,
 				 const struct strbuf *request)
 {
@@ -1050,10 +1145,16 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 	uint64_t lease_id;
 	int target;
 	int requested;
+#ifdef SUPPORTS_SIMPLE_IPC
+	int version;
+#endif
 
 	if (argc == 2 && !strcmp(argv[1], "query-wire"))
 		return test_query_wire();
 #ifdef SUPPORTS_SIMPLE_IPC
+	if (argc >= 4 && !strcmp(argv[1], "query-no-filter") &&
+	    !strtol_i(argv[2], 10, &version) && version >= 0 && version <= 2)
+		return test_query_no_filter(version, argc - 3, argv + 3);
 	if (argc == 3 && !strcmp(argv[1], "query-wait"))
 		return test_query_wait(argv[2]);
 	if (argc == 3 && !strcmp(argv[1], "query-protocol") &&
@@ -1067,6 +1168,7 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 		die("usage: test-tool grep-index-ipc query-wire\n"
 		    "   or: test-tool grep-index-ipc query-protocol <traced|untraced|captured>\n"
 		    "   or: test-tool grep-index-ipc query-wait <object-id>\n"
+		    "   or: test-tool grep-index-ipc query-no-filter <0|1|2> <object-id>...\n"
 		    "   or: test-tool grep-index-ipc <workers> "
 		    "<start> <acquired> <release>");
 
