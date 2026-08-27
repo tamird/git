@@ -377,6 +377,11 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 	}
 
 	if (cfg->decoration_style || rev->simplify_by_decoration) {
+		int saved_errno = errno;
+
+		/* Excludes later deferred decoration materialization. */
+		trace2_region_enter("log", "decorations/setup", the_repository);
+		errno = saved_errno;
 		set_default_decoration_filter(&decoration_filter);
 
 		if (cfg->decoration_style)
@@ -395,6 +400,10 @@ static void cmd_log_init_finish(int argc, const char **argv, const char *prefix,
 						   !rev->reflog_info && !rev->diff))))) ||
 					      (rev->no_walk && rev->pending.nr == 1 &&
 					       rev->pending.objects[0].item->type == OBJ_COMMIT)));
+
+		saved_errno = errno;
+		trace2_region_leave("log", "decorations/setup", the_repository);
+		errno = saved_errno;
 	}
 
 	if (rev->line_level_traverse)

@@ -169,6 +169,81 @@ test_expect_success 'diff-filter=C' '
 
 '
 
+check_log_decoration_setup () {
+	decoration_mode=$1 &&
+	decoration_status=0 &&
+	case "$decoration_mode" in
+	log) set -- log -1 --format=%H%n%P%n%D HEAD ;;
+	show) set -- show --no-patch --format=%D HEAD ;;
+	reflog) set -- reflog -1 --format=%D ;;
+	simplify) set -- log --simplify-by-decoration --no-decorate --format=%H ;;
+	undecorated) set -- log -1 --no-decorate --format=%H ;;
+	invalid) decoration_status=128; set -- log --decorate=invalid ;;
+	esac &&
+	test_when_finished "rm -rf log-decoration-trace" &&
+	test_create_repo log-decoration-trace &&
+	(
+		cd log-decoration-trace &&
+		test_commit --no-tag base file one &&
+		test_commit --no-tag tip file two &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+			test_expect_code "$decoration_status" git "$@" >expect 2>expect.err &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$PWD/decorations.trace" \
+			test_expect_code "$decoration_status" git "$@" >actual 2>err &&
+		test_cmp expect actual &&
+		test_cmp expect.err err &&
+		case "$decoration_mode" in
+		undecorated|invalid)
+			test_region ! log decorations/setup decorations.trace &&
+			test_grep ! '"key":"decorations/object-lookups"' decorations.trace
+			;;
+		*)
+			grep '"category":"log","key":"decorations/object-lookups",' \
+				decorations.trace >decorations.data &&
+			test_line_count = 1 decorations.data &&
+			test_trace2_data log decorations/object-lookups "[0-9][0-9]*" \
+				<decorations.data &&
+			test_region log decorations/setup decorations.trace &&
+			grep '"category":"log","label":"decorations/setup"' \
+				decorations.trace >decorations.region &&
+			test_line_count = 2 decorations.region &&
+			grep '"thread":"main".*"nesting":1,' decorations.region \
+				>decorations.depth &&
+			test_line_count = 2 decorations.depth &&
+			test_grep '"thread":"main".*"nesting":2,' decorations.data &&
+			sed -n 's/.*"t_rel":\([0-9][0-9]*\.[0-9][0-9]*\),.*/\1/p' \
+				decorations.region >decorations.elapsed &&
+			test_line_count = 1 decorations.elapsed &&
+			if test "$decoration_mode" = log ||
+			   test "$decoration_mode" = simplify
+			then
+				sed -n 's/.*"category":"log","key":"setup-us","value":"\([0-9][0-9]*\)".*/\1/p' \
+					decorations.trace >setup.us &&
+				test_line_count = 1 setup.us &&
+				awk 'NR == FNR { elapsed = $1 * 1000000; next }
+				     { if (elapsed > $1 + 2) exit 1 }' \
+					decorations.elapsed setup.us
+			fi
+			;;
+		esac
+	)
+}
+
+for decoration_mode in log show reflog simplify
+do
+	test_expect_success "Trace2 measures $decoration_mode decoration setup" '
+		check_log_decoration_setup "$decoration_mode"
+	'
+done
+
+for decoration_mode in undecorated invalid
+do
+	test_expect_success "Trace2 omits $decoration_mode decoration setup" '
+		check_log_decoration_setup "$decoration_mode"
+	'
+done
+
 check_completed_log_phase () {
 	phase_category=$1 &&
 	phase_key=$2 &&
