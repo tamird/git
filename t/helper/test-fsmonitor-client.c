@@ -8,6 +8,7 @@
 #include "test-tool.h"
 #include "parse-options.h"
 #include "fsmonitor-ipc.h"
+#include "fsmonitor-ll.h"
 #include "read-cache-ll.h"
 #include "repository.h"
 #include "setup.h"
@@ -179,6 +180,82 @@ static int do_hammer(const char *token, int nr_threads, int nr_requests)
 	return sum_errors > 0;
 }
 
+static int test_trivial_response(void)
+{
+	static const struct {
+		const char *requested;
+		const char *response;
+		const char *reason;
+		unsigned int invalid_token_mask;
+	} cases[] = {
+		{ NULL, "",
+		  "initial-token", 0 },
+		{ "builtin:fake", "",
+		  "initial-token", 0 },
+		{ NULL, "builtin:g:1",
+		  "initial-token", 0 },
+		{ "builtin:fake", "builtin:g:1",
+		  "initial-token", 0 },
+		{ "", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "",
+		  "invalid-token", 2 },
+		{ "", "",
+		  "invalid-token", 3 },
+		{ "bad", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "bad",
+		  "invalid-token", 2 },
+		{ "builtin:", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "builtin:",
+		  "invalid-token", 2 },
+		{ "builtin:g", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "builtin:g",
+		  "invalid-token", 2 },
+		{ "builtin::1", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "builtin::1",
+		  "invalid-token", 2 },
+		{ "builtin:g:", "builtin:g:1",
+		  "invalid-token", 1 },
+		{ "builtin:g:1", "builtin:g:",
+		  "invalid-token", 2 },
+		{ "bad", "builtin:g:",
+		  "invalid-token", 3 },
+		{ "builtin:g:1", "builtin:fake",
+		  "invalid-token", 2 },
+		{ "builtin:g:1", "builtin:g:2",
+		  "same-token-generation", 0 },
+		{ "builtin:g:x", "builtin:g:y",
+		  "same-token-generation", 0 },
+		{ "builtin:g:x:y", "builtin:g:z:w",
+		  "same-token-generation", 0 },
+		{ "builtin:g:1", "builtin:h:1",
+		  "token-generation-changed", 0 },
+		{ "builtin:g:1", "builtin:gg:1",
+		  "token-generation-changed", 0 },
+		{ "builtin:gg:1", "builtin:g:1",
+		  "token-generation-changed", 0 },
+		{ "builtin:fake:1", "builtin:fake:2",
+		  "same-token-generation", 0 },
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct fsmonitor_trivial_result result =
+			fsmonitor_classify_trivial_response(
+				cases[i].requested, cases[i].response);
+
+		if (!result.reason || strcmp(result.reason, cases[i].reason) ||
+		    result.invalid_token_mask != cases[i].invalid_token_mask)
+			die("trivial response classification failed at case %"PRIuMAX,
+			    (uintmax_t)i);
+	}
+
+	return 0;
+}
+
 int cmd__fsmonitor_client(int argc, const char **argv)
 {
 	const char *subcmd;
@@ -187,6 +264,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	int nr_requests = 1;
 
 	const char * const fsmonitor_client_usage[] = {
+		"test-tool fsmonitor-client test-trivial-response",
 		"test-tool fsmonitor-client query [<token>]",
 		"test-tool fsmonitor-client flush",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
@@ -209,6 +287,9 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		usage_with_options(fsmonitor_client_usage, options);
 
 	subcmd = argv[0];
+
+	if (!strcmp(subcmd, "test-trivial-response"))
+		return test_trivial_response();
 
 	setup_git_directory(the_repository);
 

@@ -45,6 +45,19 @@ void tweak_fsmonitor(struct index_state *istate);
 void refresh_fsmonitor(struct index_state *istate);
 
 /*
+ * Classify a trivial IPC reply without exposing either token. response must
+ * be non-NULL. Mask values 1 and 2 identify invalid requested and response
+ * shapes; 3 means both. The mask is zero for initial tokens and valid pairs.
+ */
+struct fsmonitor_trivial_result {
+	const char *reason;
+	unsigned int invalid_token_mask;
+};
+
+struct fsmonitor_trivial_result fsmonitor_classify_trivial_response(
+	const char *requested, const char *response);
+
+/*
  * Does the received result contain the "trivial" response?
  */
 int fsmonitor_is_trivial_response(const struct strbuf *query_result);

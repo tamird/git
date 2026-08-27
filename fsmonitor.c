@@ -798,6 +798,39 @@ static void fsmonitor_refresh_callback(
  */
 static int fsmonitor_force_update_threshold = 100;
 
+struct fsmonitor_trivial_result fsmonitor_classify_trivial_response(
+	const char *requested, const char *response)
+{
+	struct fsmonitor_trivial_result result = { "initial-token", 0 };
+	const char *requested_id = NULL, *response_id = NULL;
+	const char *requested_seq = NULL, *response_seq = NULL;
+	int requested_valid, response_valid;
+
+	if (!requested || !strcmp(requested, "builtin:fake"))
+		return result;
+
+	requested_valid = skip_prefix(requested, "builtin:", &requested_id) &&
+		(requested_seq = strchr(requested_id, ':')) &&
+		requested_seq != requested_id && requested_seq[1];
+	response_valid = skip_prefix(response, "builtin:", &response_id) &&
+		(response_seq = strchr(response_id, ':')) &&
+		response_seq != response_id && response_seq[1];
+	result.invalid_token_mask = (requested_valid ? 0 : 1) |
+		(response_valid ? 0 : 2);
+
+	if (result.invalid_token_mask) {
+		result.reason = "invalid-token";
+	} else if (requested_seq - requested_id != response_seq - response_id ||
+		   memcmp(requested_id, response_id,
+			  requested_seq - requested_id)) {
+		result.reason = "token-generation-changed";
+	} else {
+		result.reason = "same-token-generation";
+	}
+
+	return result;
+}
+
 void refresh_fsmonitor(struct index_state *istate)
 {
 	static int warn_once = 0;
@@ -859,33 +892,21 @@ void refresh_fsmonitor(struct index_state *istate)
 			bol = last_update_token.len + 1;
 			is_trivial = query_result.buf[bol] == '/';
 			if (is_trivial) {
-				const char *requested = istate->fsmonitor_last_update;
-				const char *requested_id, *response_id;
-				const char *requested_seq, *response_seq;
-				const char *trivial_reason;
-
-				if (!requested || !strcmp(requested, "builtin:fake")) {
-					trivial_reason = "initial-token";
-				} else if (!skip_prefix(requested, "builtin:", &requested_id) ||
-					   !skip_prefix(last_update_token.buf, "builtin:", &response_id) ||
-					   !(requested_seq = strchr(requested_id, ':')) ||
-					   requested_seq == requested_id || !requested_seq[1] ||
-					   !(response_seq = strchr(response_id, ':')) ||
-					   response_seq == response_id || !response_seq[1]) {
-					trivial_reason = "invalid-token";
-				} else if (requested_seq - requested_id !=
-					   response_seq - response_id ||
-					   memcmp(requested_id, response_id,
-						  requested_seq - requested_id)) {
-					trivial_reason = "token-generation-changed";
-				} else {
-					trivial_reason = "same-token-generation";
-				}
+				struct fsmonitor_trivial_result result =
+					fsmonitor_classify_trivial_response(
+						istate->fsmonitor_last_update,
+						last_update_token.buf);
+				int saved_errno;
 
 				trace2_data_intmax("fsm_client", NULL,
 						   "query/trivial-response", 1);
 				trace2_data_string("fsm_client", NULL,
-						   "query/trivial-reason", trivial_reason);
+						   "query/trivial-reason", result.reason);
+				saved_errno = errno;
+				trace2_data_intmax("fsm_client", NULL,
+						   "query/invalid-token-mask",
+						   result.invalid_token_mask);
+				errno = saved_errno;
 			}
 		} else {
 			/*

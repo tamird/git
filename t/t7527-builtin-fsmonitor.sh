@@ -200,6 +200,10 @@ test_expect_success MACOS 'root metadata does not publish a worktree path' '
 	test_cmp expect_root_metadata actual_root_metadata
 '
 
+test_expect_success 'classify trivial response token shapes' '
+	test-tool fsmonitor-client test-trivial-response
+'
+
 if ! test_have_prereq FSMONITOR_WORKS
 then
 	skip_all="filesystem does not deliver fsmonitor events (container/overlayfs?)"
@@ -590,7 +594,13 @@ test_expect_success 'update-index implicitly starts daemon' '
 
 	# Confirm that the trace2 log contains a record of the
 	# daemon starting.
-	test_subcommand git fsmonitor--daemon start <.git/trace_implicit_1
+	test_subcommand git fsmonitor--daemon start <.git/trace_implicit_1 &&
+	test_trace2_data fsm_client query/trivial-response 1 \
+		<.git/trace_implicit_1 &&
+	test_trace2_data fsm_client query/trivial-reason invalid-token \
+		<.git/trace_implicit_1 &&
+	test_trace2_data fsm_client query/invalid-token-mask 1 \
+		<.git/trace_implicit_1
 '
 
 test_expect_success 'status implicitly starts daemon' '
@@ -2139,6 +2149,8 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-first.trace &&
 		test_trace2_data fsm_client query/trivial-reason \
 			token-generation-changed <../untracked-restart-first.trace &&
+		test_trace2_data fsm_client query/invalid-token-mask 0 \
+			<../untracked-restart-first.trace &&
 		test_trace2_data status untracked-cache/restore miss \
 			<../untracked-restart-first.trace &&
 		test_trace2_data index preload/sum_lstat 2 \
@@ -2570,6 +2582,8 @@ test_expect_success 'daemon restart revalidates hidden skipped subtrees' '
 		have_t2_data_event fsmonitor apply_count \
 			<../untracked-skipped.second-uno.trace &&
 		! have_t2_data_event fsm_client query/trivial-response \
+			<../untracked-skipped.second-uno.trace &&
+		! have_t2_data_event fsm_client query/invalid-token-mask \
 			<../untracked-skipped.second-uno.trace &&
 		test_trace2_data index refresh/sum_lstat 0 \
 			<../untracked-skipped.second-uno.trace &&
