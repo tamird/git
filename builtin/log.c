@@ -421,6 +421,7 @@ struct log_trace2_state {
 	struct revision_prune_diff_stats get_revision_null_prune_diff;
 	uint64_t returned;
 	uint64_t shown;
+	int is_cmd_log;
 	int pending;
 	int pathspecs;
 	int pickaxe;
@@ -443,8 +444,19 @@ static int cmd_log_walk_no_free(struct rev_info *rev,
 		trace->prepare_begin = getnanotime();
 	if (prepare_revision_walk(rev))
 		die(_("revision walk setup failed"));
-	if (trace)
+	if (trace) {
 		trace->prepare_end = getnanotime();
+		/* Keep completed phases if history or output later fails. */
+		if (trace->is_cmd_log) {
+			int saved_errno = errno;
+
+			trace2_data_intmax("log", the_repository, "setup-us",
+				(trace->prepare_begin - trace->begin) / 1000);
+			trace2_data_intmax("log", the_repository, "prepare-us",
+				(trace->prepare_end - trace->prepare_begin) / 1000);
+			errno = saved_errno;
+		}
+	}
 
 	/*
 	 * For --check and --exit-code, the exit code is based on CHECK_FAILED
@@ -994,7 +1006,7 @@ int cmd_log(int argc,
 	struct log_config cfg;
 	struct rev_info rev;
 	struct setup_revision_opt opt;
-	struct log_trace2_state state = { 0 };
+	struct log_trace2_state state = { .is_cmd_log = 1 };
 	struct log_trace2_state *trace = NULL;
 	uint64_t walk_end = 0;
 	int ret;
@@ -1052,10 +1064,6 @@ int cmd_log(int argc,
 		else
 			history_ns = 0;
 
-		trace2_data_intmax("log", the_repository, "setup-us",
-				   (trace->prepare_begin - trace->begin) / 1000);
-		trace2_data_intmax("log", the_repository, "prepare-us",
-				   (trace->prepare_end - trace->prepare_begin) / 1000);
 		trace2_data_intmax("log", the_repository, "history-us",
 				   history_ns / 1000);
 		if (total_prune_diff->counts_valid)

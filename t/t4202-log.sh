@@ -169,6 +169,94 @@ test_expect_success 'diff-filter=C' '
 
 '
 
+check_completed_log_phase () {
+	phase_category=$1 &&
+	phase_key=$2 &&
+	phase_trace=$3 &&
+	grep "\"category\":\"$phase_category\",\"key\":\"$phase_key\"," \
+		"$phase_trace" >phase.data &&
+	test_line_count = 1 phase.data &&
+	test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+		phase.data &&
+	test_trace2_data "$phase_category" "$phase_key" "[0-9][0-9]*" \
+		<phase.data
+}
+
+for phase in setup prepare
+do
+	test_expect_success "failed log retains completed $phase timing" '
+		test_when_finished "rm -rf log-completed-phase" &&
+		test_create_repo log-completed-phase &&
+		(
+			cd log-completed-phase &&
+			test_commit --no-tag base file one &&
+			test_commit --no-tag tip file two &&
+			write_script fail-diff <<-\EOF &&
+			echo "external diff fixture reached" >&2
+			exit 2
+			EOF
+			sane_unset GIT_TRACE2_EVENT_NESTING &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				test_expect_code 128 git -c diff.external=./fail-diff \
+				log --no-renames --ext-diff -p -1 >expect 2>expect.err &&
+			GIT_TRACE2_EVENT="$PWD/failed.trace" \
+				test_expect_code 128 git -c diff.external=./fail-diff \
+				log --no-renames --ext-diff -p -1 >actual 2>err &&
+			test_cmp expect actual &&
+			test_cmp expect.err err &&
+			test_grep "^external diff fixture reached$" err &&
+			test_grep "external diff died" err &&
+			for incomplete in history execution
+			do
+				test_grep ! "\"category\":\"log\",\"key\":\"$incomplete-us\"," \
+					failed.trace || exit 1
+			done &&
+			check_completed_log_phase log "$phase-us" failed.trace
+		)
+	'
+done
+
+test_expect_success 'completed log phases retain their command categories' '
+	test_when_finished "rm -rf log-phase-categories" &&
+	test_create_repo log-phase-categories &&
+	(
+		cd log-phase-categories &&
+		test_commit --no-tag tip &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		for mode in log log-reflogs reflog show
+		do
+			case "$mode" in
+			log) set -- log -1 --format=%s ;;
+			log-reflogs) set -- log -g -1 --format=%s ;;
+			reflog) set -- reflog -1 --format=%s ;;
+			show) set -- show --no-patch --format=%s ;;
+			esac &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				git "$@" >expect 2>expect.err &&
+			GIT_TRACE2_EVENT="$PWD/$mode.trace" \
+				git "$@" >actual 2>err &&
+			test_cmp expect actual &&
+			test_cmp expect.err err &&
+			for category in log reflog
+			do
+				for phase in setup prepare
+				do
+					case "$mode:$category" in
+					log:log|log-reflogs:log|reflog:reflog)
+						check_completed_log_phase "$category" "$phase-us" \
+							"$mode.trace"
+						;;
+					*)
+						test_grep ! "\"category\":\"$category\",\"key\":\"$phase-us\"," \
+							"$mode.trace"
+						;;
+					esac || exit 1
+				done || exit 1
+			done || exit 1
+		done
+	)
+'
+
 test_expect_success 'log traces the terminating get_revision call' '
 	sane_unset GIT_TRACE2_EVENT_NESTING &&
 	GIT_TRACE2_EVENT="$PWD/log-null-returned.trace" \
