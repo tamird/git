@@ -12,12 +12,15 @@
 
 #include "test-tool.h"
 #include "commit.h"
+#include "date.h"
 #include "diff.h"
 #include "line-log.h"
 #include "object-name.h"
+#include "reflog-walk.h"
 #include "repository.h"
 #include "revision.h"
 #include "setup.h"
+#include "strbuf.h"
 #include "string-list.h"
 
 static void print_commit(struct commit *commit)
@@ -126,6 +129,55 @@ static int check_frontier(int argc, const char **argv)
 	return 0;
 }
 
+/* Exercise cursor additions that the command-line revision setup cannot make. */
+static int walk_reflogs(int argc, const char **argv)
+{
+	struct reflog_walk_info *walk;
+	struct commit *first = NULL;
+	struct object_id first_oid;
+	struct strbuf line = STRBUF_INIT;
+	int i;
+
+	init_reflog_walk(&walk);
+	for (i = 0; i < argc; i++) {
+		const char *name;
+		struct commit *commit;
+		struct object_id oid;
+
+		if (skip_prefix(argv[i], "add:", &name)) {
+			if (repo_get_oid(the_repository, name, &oid))
+				die("bad reflog ref: %s", name);
+			commit = lookup_commit_reference(the_repository, &oid);
+			if (!commit || add_reflog_for_walk(walk, commit, name))
+				die("cannot add reflog: %s", name);
+			continue;
+		}
+		if (strcmp(argv[i], "next"))
+			die("expected add:<ref> or next, got: %s", argv[i]);
+		commit = next_reflog_entry(walk);
+		if (!commit) {
+			puts("end");
+			continue;
+		}
+		if (!first) {
+			first = commit;
+			oidcpy(&first_oid, &commit->object.oid);
+		}
+		strbuf_reset(&line);
+		get_reflog_selector(&line, walk, DATE_MODE(NORMAL), 0, 0);
+		strbuf_addch(&line, ' ');
+		get_reflog_message(&line, walk);
+		puts(line.buf);
+	}
+
+	reflog_walk_info_release(walk);
+	if (first && (!first->object.parsed ||
+		      !oideq(&first_oid, &first->object.oid)))
+		die("reflog walk invalidated a borrowed commit");
+	strbuf_release(&line);
+	return 0;
+}
+
 int cmd__revision_walking(int argc, const char **argv)
 {
 	if (argc < 2)
@@ -145,6 +197,8 @@ int cmd__revision_walking(int argc, const char **argv)
 	}
 	if (!strcmp(argv[1], "check-frontier"))
 		return check_frontier(argc - 1, argv + 1);
+	if (!strcmp(argv[1], "reflog-walk"))
+		return walk_reflogs(argc - 2, argv + 2);
 
 	if (!strcmp(argv[1], "line-log-peek")) {
 		if (argc != 5)

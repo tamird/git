@@ -135,4 +135,110 @@ test_expect_success 'rev-list -g complains when there are no reflogs' '
 	test_must_fail git rev-list -g
 '
 
+update_reflog () {
+	GIT_COMMITTER_DATE="$((1234567800 + $1)) +0000" \
+		git update-ref --create-reflog -m "$2" "refs/heads/$3" "$4"
+}
+
+test_expect_success 'reflog dates need not decrease during a walk' '
+	update_reflog 20 A20 nonmonotonic-a one &&
+	update_reflog 10 A10 nonmonotonic-a two &&
+	update_reflog 30 A30 nonmonotonic-a one &&
+	update_reflog 15 B15 nonmonotonic-b two &&
+	cat >expect <<-\EOF &&
+	nonmonotonic-a@{0} A30
+	nonmonotonic-b@{0} B15
+	nonmonotonic-a@{1} A10
+	nonmonotonic-a@{2} A20
+	EOF
+	do_walk nonmonotonic-a nonmonotonic-b >actual &&
+	test_cmp expect actual &&
+	sed "/ A10$/d" expect >expect.since &&
+	do_walk --since=1234567812 nonmonotonic-a nonmonotonic-b >actual &&
+	test_cmp expect.since actual
+'
+
+test_expect_success 'repeated reflog date ties follow argument order' '
+	update_reflog 20 A20-old ties-a one &&
+	update_reflog 20 A20-new ties-a two &&
+	update_reflog 30 A30 ties-a one &&
+	update_reflog 20 B20 ties-b two &&
+	cat >expect <<-\EOF &&
+	ties-a@{0} A30
+	ties-a@{1} A20-new
+	ties-a@{2} A20-old
+	ties-b@{0} B20
+	EOF
+	do_walk ties-a ties-b >actual &&
+	test_cmp expect actual &&
+	sed -n "1p;4p" expect >expect.reverse &&
+	sed -n "2,3p" expect >>expect.reverse &&
+	do_walk ties-b ties-a >actual &&
+	test_cmp expect.reverse actual
+'
+
+test_expect_success 'reflog aliases retain separate cursors' '
+	cat >expect <<-\EOF &&
+	ties-a@{0} A30
+	ties-a@{1} A20-new
+	ties-a@{2} A20-old
+	ties-a@{1} A20-new
+	ties-a@{2} A20-old
+	EOF
+	do_walk ties-a refs/heads/ties-a@{1} >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'reflogs can be added during and after a walk' '
+	update_reflog 40 C40 dynamic-c two &&
+	cat >expect <<-\EOF &&
+	refs/heads/nonmonotonic-a@{0} A30
+	refs/heads/nonmonotonic-b@{0} B15
+	refs/heads/nonmonotonic-a@{1} A10
+	refs/heads/nonmonotonic-a@{2} A20
+	end
+	end
+	refs/heads/dynamic-c@{0} C40
+	end
+	EOF
+	test-tool revision-walking reflog-walk \
+		add:refs/heads/nonmonotonic-a next \
+		add:refs/heads/nonmonotonic-b next next next next next \
+		add:refs/heads/dynamic-c next next >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'max-count does not read the next reflog object early' '
+	test_create_repo corrupt-reflog &&
+	(
+		cd corrupt-reflog &&
+		test_commit bad &&
+		test_commit good &&
+		bad=$(git rev-parse bad) &&
+		good=$(git rev-parse good) &&
+		git update-ref --create-reflog -m bad refs/heads/one-result "$bad" &&
+		git update-ref -m good refs/heads/one-result "$good" &&
+		git update-ref --create-reflog -m bad refs/heads/zero-results "$bad" &&
+		git update-ref -m good refs/heads/zero-results "$good" &&
+		git reflog delete zero-results@{0} &&
+		bad_object=.git/objects/$(test_oid_to_path "$bad") &&
+		chmod u+w "$bad_object" &&
+		cp .git/objects/$(test_oid_to_path "$good") "$bad_object" &&
+		echo "error: hash mismatch $bad" >expect.err &&
+		echo "one-result@{0} good" >expect &&
+		do_walk --max-count=1 one-result >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		do_walk --max-count=2 one-result >actual 2>err &&
+		test_cmp expect actual &&
+		test_cmp expect.err err &&
+		do_walk --max-count=0 zero-results >actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+		do_walk --max-count=1 zero-results >actual 2>err &&
+		test_must_be_empty actual &&
+		test_cmp expect.err err
+	)
+'
+
 test_done

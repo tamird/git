@@ -7,6 +7,7 @@
 #include "repository.h"
 #include "revision.h"
 #include "string-list.h"
+#include "prio-queue.h"
 #include "reflog-walk.h"
 
 struct complete_reflogs {
@@ -114,6 +115,8 @@ static int get_reflog_recno_by_time(struct complete_reflogs *array,
 
 struct commit_reflog {
 	int recno;
+	size_t log_index;
+	struct commit *commit;
 	enum selector_type {
 		SELECTOR_NONE,
 		SELECTOR_INDEX,
@@ -125,14 +128,19 @@ struct commit_reflog {
 struct reflog_walk_info {
 	struct commit_reflog **logs;
 	size_t nr, alloc;
+	struct prio_queue queue;
+	size_t next_log;
 	struct string_list complete_reflogs;
 	struct commit_reflog *last_commit_reflog;
 };
+
+static int compare_reflogs(const void *one, const void *two, void *cb_data);
 
 void init_reflog_walk(struct reflog_walk_info **info)
 {
 	CALLOC_ARRAY(*info, 1);
 	(*info)->complete_reflogs.strdup_strings = 1;
+	(*info)->queue.compare = compare_reflogs;
 }
 
 void reflog_walk_info_release(struct reflog_walk_info *info)
@@ -142,6 +150,7 @@ void reflog_walk_info_release(struct reflog_walk_info *info)
 	if (!info)
 		return;
 
+	clear_prio_queue(&info->queue);
 	for (i = 0; i < info->nr; i++)
 		free(info->logs[i]);
 	string_list_clear_func(&info->complete_reflogs,
@@ -227,6 +236,7 @@ int add_reflog_for_walk(struct reflog_walk_info *info,
 		commit_reflog->recno = reflogs->nr - recno - 1;
 	commit_reflog->selector = selector;
 	commit_reflog->reflogs = reflogs;
+	commit_reflog->log_index = info->nr;
 
 	ALLOC_GROW(info->logs, info->nr + 1, info->alloc);
 	info->logs[info->nr++] = commit_reflog;
@@ -351,35 +361,53 @@ static struct commit *next_reflog_commit(struct commit_reflog *log)
 	return NULL;
 }
 
-static timestamp_t log_timestamp(struct commit_reflog *log)
+static timestamp_t log_timestamp(const struct commit_reflog *log)
 {
 	return log->reflogs->items[log->recno].timestamp;
 }
 
+static int compare_reflogs(const void *one, const void *two,
+			   void *cb_data UNUSED)
+{
+	const struct commit_reflog *a = one;
+	const struct commit_reflog *b = two;
+	timestamp_t a_timestamp = log_timestamp(a);
+	timestamp_t b_timestamp = log_timestamp(b);
+
+	if (a_timestamp != b_timestamp)
+		return a_timestamp > b_timestamp ? -1 : 1;
+	return (a->log_index > b->log_index) -
+	       (a->log_index < b->log_index);
+}
+
+static void queue_next_reflog_entry(struct reflog_walk_info *walk,
+				    struct commit_reflog *log)
+{
+	log->commit = next_reflog_commit(log);
+	if (log->commit)
+		prio_queue_put(&walk->queue, log);
+}
+
 struct commit *next_reflog_entry(struct reflog_walk_info *walk)
 {
-	struct commit_reflog *best = NULL;
-	struct commit *best_commit = NULL;
-	size_t i;
+	struct commit_reflog *best;
 
-	for (i = 0; i < walk->nr; i++) {
-		struct commit_reflog *log = walk->logs[i];
-		struct commit *commit = next_reflog_commit(log);
+	/*
+	 * The previous result is no longer in the queue. Read its next entry
+	 * only when another result is requested, after its selector was used.
+	 */
+	if (walk->last_commit_reflog)
+		queue_next_reflog_entry(walk, walk->last_commit_reflog);
 
-		if (!commit)
-			continue;
+	/* Reflogs added after a walk starts are admitted on the next call. */
+	for (; walk->next_log < walk->nr; walk->next_log++)
+		queue_next_reflog_entry(walk, walk->logs[walk->next_log]);
 
-		if (!best || log_timestamp(log) > log_timestamp(best)) {
-			best = log;
-			best_commit = commit;
-		}
-	}
+	best = prio_queue_get(&walk->queue);
+	if (!best)
+		return NULL;
 
-	if (best) {
-		best->recno--;
-		walk->last_commit_reflog = best;
-		return best_commit;
-	}
-
-	return NULL;
+	best->recno--;
+	walk->last_commit_reflog = best;
+	return best->commit;
 }

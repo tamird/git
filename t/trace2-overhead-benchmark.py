@@ -884,14 +884,172 @@ def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, ...], *,
     return results
 
 
+@dataclass(frozen=True)
+class ReflogFixture:
+    repo: Path
+    refs: tuple[str, ...]
+    objects: tuple[str, ...]
+    # Oldest to newest, as stored by each reflog.
+    entries: tuple[tuple[tuple[int, str], ...], ...]
+    manifest: dict[str, object]
+
+    def expected(self, *, since: int = 0, limit: int | None = None) -> bytes:
+        ordered = sorted([
+            (timestamp, ordinal, len(entries) - index - 1, message)
+            for ordinal, entries in enumerate(self.entries)
+            for index, (timestamp, message) in enumerate(entries)
+            if timestamp >= since
+        ], key=lambda item: (-item[0], item[1], item[2]))
+        if limit is not None:
+            ordered = ordered[:limit]
+        return "".join(f"{self.refs[ordinal]}@{{{index}}} {message}\n"
+                       for _, ordinal, index, message in ordered).encode()
+
+
+def reflog_manifest(git: Git, repo: Path, refs: tuple[str, ...],
+                    objects: tuple[str, ...]) -> dict[str, object]:
+    return {
+        "refs": git.run(repo, ("show-ref",)).stdout.decode(),
+        "head": (repo / "HEAD").read_text(),
+        "repository_config": (repo / "config").read_text(),
+        "command_config": CONFIG,
+        "environment": {key: value for key, value in git.environment.items()
+                        if key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_", "GIT_CONFIG_"))
+                        or key in ("GIT_ATTR_NOSYSTEM", "LC_ALL")},
+        "objects": {oid: file_hash(repo / "objects" / oid[:2] / oid[2:]) for oid in objects},
+        "reflogs": {ref: (repo / "logs" / ref).read_text() for ref in refs},
+    }
+
+
+def make_reflog_fixture(git: Git, root: Path, logs: int, *, recent: bool = False) -> ReflogFixture:
+    repo = root / f"reflog-{logs}{'-since' if recent else ''}"
+    repo.mkdir()
+    git.run(repo, ("init", "--bare", "--quiet", "--initial-branch=main", "--template=",
+                   "--object-format=sha1", "--ref-format=files", "."))
+    tree = git.run(repo, ("hash-object", "-w", "-t", "tree", "--stdin"), input_data=b"").stdout.strip()
+    commits = tuple(git.run(repo, ("commit-tree", tree.decode()), input_data=message).stdout.strip().decode()
+                    for message in (b"one\n", b"two\n"))
+    refs = tuple(f"refs/heads/reflog-{index:03d}" for index in range(logs))
+    entries: list[list[tuple[int, str]]] = [[] for _ in refs]
+    for index in range(64 + int(recent)):
+        selected = refs[:6] if index == 64 else refs
+        timestamp = 946684800 + (1000 if index == 64 else index)
+        message = f"entry-{index:03d}"
+        dated = Git(git.path, git.trace, {
+            **git.environment, "GIT_COMMITTER_DATE": f"{timestamp} +0000",
+        }, git.deadline)
+        commands = "".join(f"update {ref} {commits[index % 2]}\n" for ref in selected)
+        dated.run(repo, ("update-ref", "--create-reflog", "-m", message, "--stdin"),
+                  input_data=commands.encode())
+        for ordinal in range(len(selected)):
+            entries[ordinal].append((timestamp, message))
+    objects = (tree.decode(), *commits)
+    manifest = reflog_manifest(git, repo, refs, objects)
+    for ref, expected_entries in zip(refs, entries):
+        lines = (repo / "logs" / ref).read_text().splitlines()
+        if len(lines) != len(expected_entries):
+            raise AssertionError(f"wrong reflog length: {ref}")
+        for index, (line, (timestamp, message)) in enumerate(zip(lines, expected_entries)):
+            previous = commits[(index - 1) % 2] if index else "0" * 40
+            expected = (f"{previous} {commits[index % 2]} Trace2 benchmark "
+                        f"<benchmark@example.invalid> {timestamp} +0000\t{message}")
+            if line != expected:
+                raise AssertionError(f"unexpected reflog entry: {ref}@{{{index}}}")
+    return ReflogFixture(repo, refs, objects, tuple(tuple(log) for log in entries), manifest)
+
+
+def reflog_trace_coverage(path: Path, expected_count: int) -> dict[str, int]:
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    counts = Counter(event["event"] for event in events)
+    if (len({event["sid"] for event in events}) != 1
+            or any(counts[name] != 1 for name in ("version", "start", "exit", "atexit"))
+            or any(event["code"] != 0 for event in events if event["event"] in ("exit", "atexit"))):
+        raise AssertionError("expected one successful, complete reflog command trace")
+    values = {event["key"]: int(event["value"]) for event in events
+              if event["event"] == "data" and event.get("category") == "reflog"}
+    required = ("setup-us", "prepare-us", "history-us", "output-us", "finalize-us", "execution-us")
+    if (any(values.get(key, -1) < 0 for key in required)
+            or values.get("count/returned") != expected_count
+            or values.get("count/shown") != expected_count):
+        raise AssertionError(f"unexpected reflog DATA: {values}")
+    return values
+
+
+def benchmark_reflogs(git: Git, root: Path) -> dict[str, object]:
+    small = make_reflog_fixture(git, root, 1)
+    many = make_reflog_fixture(git, root, 128)
+    recent = make_reflog_fixture(git, root, 128, recent=True)
+    cutoff = 946685300
+    conditions = (
+        ("one-log-full", small, (), small.expected()),
+        ("many-logs-full", many, (), many.expected()),
+        ("many-logs-since", recent, (f"--since={cutoff}", "--max-count=15"),
+         recent.expected(since=cutoff)),
+        ("many-logs-max1", many, ("--max-count=1",), many.expected(limit=1)),
+        ("many-logs-max0", many, ("--max-count=0",), many.expected(limit=0)),
+    )
+    results: dict[str, object] = {}
+    for name, fixture, options, expected in conditions:
+        args = ("reflog", "show", "--format=%gD %gs", *options, *fixture.refs, "--")
+        samples: list[dict[str, object]] = []
+        for sample in range(-1, 5):
+            measured = git.run(fixture.repo, args, "event-file")
+            if measured.stdout != expected or measured.stderr:
+                raise AssertionError(f"{name}: unexpected stdout or stderr: {measured.stderr!r}")
+            native = reflog_trace_coverage(git.trace, len(expected.splitlines()))
+            git.remaining_seconds()
+            if sample >= 0:
+                cpu = (measured.child_user_seconds + measured.child_system_seconds
+                       if measured.child_user_seconds is not None and measured.child_system_seconds is not None
+                       else None)
+                samples.append({
+                    "sample": sample, "mode": "event-file", "wall_seconds": measured.wall_seconds,
+                    "child_user_seconds": measured.child_user_seconds,
+                    "child_system_seconds": measured.child_system_seconds, "child_cpu_seconds": cpu,
+                    "history_seconds": native["history-us"] / 1000000,
+                    "execution_seconds": native["execution-us"] / 1000000, "native": native,
+                })
+        summary: dict[str, object] = {}
+        for field in ("wall_seconds", "child_cpu_seconds", "history_seconds", "execution_seconds"):
+            values = [cast(float, sample[field]) for sample in samples if sample[field] is not None]
+            if values:
+                summary[field] = {"median": statistics.median(values), "min": min(values), "max": max(values)}
+        results[name] = {
+            "argv": git.command(args), "fixture": fixture.repo.name,
+            "stdout_sha256": hashlib.sha256(expected).hexdigest(), "stdout_bytes": len(expected),
+            "output_entries": len(expected.splitlines()), "stderr": "", "returncode": 0,
+            "samples": samples, "summary": summary,
+        }
+        print(name, json.dumps(summary, separators=(",", ":")), flush=True)
+    # A separate --all integration check has an explicit HEAD/ref/log manifest;
+    # it is not used to infer log counts from revision pending-object counts.
+    all_refs = git.run(recent.repo, ("reflog", "show", "--all", f"--since={cutoff}",
+                                    "--max-count=15", "--format=%gD %gs"))
+    if all_refs.stdout != recent.expected(since=cutoff) or all_refs.stderr:
+        raise AssertionError("--all disagrees with the explicit reflog cursor manifest")
+    fixtures: dict[str, object] = {}
+    for fixture in (small, many, recent):
+        after = reflog_manifest(git, fixture.repo, fixture.refs, fixture.objects)
+        if after != fixture.manifest:
+            raise AssertionError("read-only reflog command changed its fixture")
+        fixtures[fixture.repo.name] = {
+            "manifest": fixture.manifest,
+            "manifest_sha256": hashlib.sha256(json.dumps(fixture.manifest, sort_keys=True).encode()).hexdigest(),
+            "logs": len(fixture.refs), "entries": sum(map(len, fixture.entries)),
+        }
+    return {"reflog_fixtures": fixtures, "reflog_cases": results,
+            "case_order": [name for name, _, _, _ in conditions],
+            "all_refs_stdout_sha256": hashlib.sha256(all_refs.stdout).hexdigest()}
+
+
 def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
                 "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only",
-                "--follow-only", "--follow-additions-only", "--startup-only"))):
+                "--follow-only", "--follow-additions-only", "--startup-only", "--reflog-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
                          "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
-                         "--status-only, --refs-only, --follow-only, --follow-additions-only or --startup-only")
+                         "--status-only, --refs-only, --follow-only, --follow-additions-only, --startup-only or --reflog-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -939,6 +1097,23 @@ def main() -> None:
         report["git_sha256"] = file_hash(git_path)
         build_options = git.run(root, ("version", "--build-options"))
         report["git_version_build_options"] = build_options.stdout.decode()
+        if len(sys.argv) == 4 and sys.argv[3] == "--reflog-only":
+            report["benchmark_sha256"] = file_hash(Path(__file__))
+            report.pop("stream_bytes_per_file")
+            report["trace_settings"] = {"brief": 1, "nesting": 2, "modes": ("event-file",)}
+            report["warmups_per_mode"] = 1
+            report["retained_samples_per_case"] = 5
+            report["limitations"] = [
+                "Compare baseline/candidate binaries only with identical harness, configuration, fixture manifests, outputs, mode and order; no deployed-binary identity claim.",
+                "One discarded warmup and five sequential retained samples per case, in the reported fixed order; event-file tracing only, no adaptive repeats or timing assertion.",
+                "Two deterministic loose commits are reused across reflogs to isolate cursor selection and parsed-object lookup; this is not a cold-object or natural-workload measurement.",
+                "Native history/execution DATA are existing elapsed scopes, not CPU or isolated object-read timers. Primary CPU sums child user+system within each sample before summarizing.",
+                "Fixture preparation, trace parsing and hashing are outside Git timing. Warm caches, buffered tracing, no OG wrapper, daemon, production replay or historical-cause claim.",
+            ]
+            report.update(benchmark_reflogs(git, root))
+            git.remaining_seconds()
+            report["status"] = "complete"
+            return
         if len(sys.argv) == 4 and sys.argv[3] == "--startup-only":
             if build_options.stderr or not build_options.stdout.startswith(b"git version "):
                 raise AssertionError("expected a successful, unambiguous build identity")
