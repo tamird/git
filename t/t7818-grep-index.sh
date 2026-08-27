@@ -573,6 +573,101 @@ test_expect_success 'setup' '
 	git commit -m initial
 '
 
+test_expect_success PTHREADS 'worker object lock trace excludes producer attribute reads' '
+	test_when_finished "rm -f object-lock-*.trace object-lock.data" &&
+	ordinary_oid=$(git rev-parse :ordinary) &&
+	present_oid=$(git rev-parse :present) &&
+	test_path_is_file ".git/objects/$(test_oid_to_path "$ordinary_oid")" &&
+	test_path_is_file ".git/objects/$(test_oid_to_path "$present_oid")" &&
+	attributes_oid=$(printf "ordinary -diff\npresent diff\n" |
+		git hash-object -w --stdin) &&
+	lock_tree=$({
+		printf "100644 blob %s\t.gitattributes\n" "$attributes_oid" &&
+		printf "100644 blob %s\tordinary\n" "$ordinary_oid" &&
+		printf "100644 blob %s\tpresent\n" "$present_oid"
+	} | git mktree) &&
+	lock_commit=$(git commit-tree -m object-lock "$lock_tree") &&
+	printf "Binary file %s:ordinary matches\n%s:present:present needle\n" \
+		"$lock_commit" "$lock_commit" >expect &&
+	for backend in loose packed
+	do
+		if test "$backend" = packed
+		then
+			lock_pack=$(printf "%s\n" "$ordinary_oid" "$present_oid" |
+				git pack-objects --window=0 --depth=0 \
+					.git/objects/pack/pack) &&
+			test_when_finished "rm -f .git/objects/pack/pack-$lock_pack.pack \
+				.git/objects/pack/pack-$lock_pack.idx \
+				.git/objects/pack/pack-$lock_pack.rev" || return 1
+		fi &&
+		for threads in 1 2
+		do
+			trace="$PWD/object-lock-$backend-$threads.trace" &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				git --attr-source="$lock_tree" grep --no-content-index \
+					--threads="$threads" -F \
+					-e "ordinary contents" -e "present needle" \
+					"$lock_commit" -- ordinary present >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			env GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+				GIT_TRACE2_EVENT="$trace" GIT_TRACE2_EVENT_NESTING=1 \
+				git --attr-source="$lock_tree" grep --no-content-index \
+					--threads="$threads" -F \
+					-e "ordinary contents" -e "present needle" \
+					"$lock_commit" -- ordinary present >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			test_grep_timer "$trace" source/object-read 2 &&
+			if test "$threads" = 1
+			then
+				test_grep_timer "$trace" worker/object-lock-acquire 0 &&
+				test_grep ! "\"key\":\"worker/object-lock-acquire" "$trace"
+			else
+				# Each loose read reacquires after header and rest inflation;
+				# each undeltified packed read reacquires after one inflation.
+				case "$backend" in
+				loose) lock_count=6 ;;
+				packed) lock_count=4 ;;
+				esac &&
+				test_grep_workers "$trace" 2 &&
+				test_grep_timer "$trace" worker/object-lock-acquire "$lock_count" &&
+				grep "\"category\":\"grep\",\"key\":\"worker/object-lock-acquire" \
+					"$trace" >object-lock.data &&
+				test_line_count = 2 object-lock.data &&
+				test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1," \
+					object-lock.data)" = 2 &&
+				test_trace2_data grep worker/object-lock-acquire/count \
+					"$lock_count" <object-lock.data &&
+				test_trace2_data grep worker/object-lock-acquire-us \
+					"[0-9][0-9]*" <object-lock.data &&
+				acquire_us=$(sed -n \
+					"s/.*\"key\":\"worker\\/object-lock-acquire-us\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" \
+					object-lock.data) &&
+				acquire_total=$(sed -n \
+					"s/.*\"name\":\"worker\\/object-lock-acquire\".*\"t_total\":\\([0-9][0-9]*[.][0-9][0-9]*\\),.*/\\1/p" \
+					"$trace") &&
+				read_total=$(sed -n \
+					"s/.*\"name\":\"source\\/object-read\".*\"t_total\":\\([0-9][0-9]*[.][0-9][0-9]*\\),.*/\\1/p" \
+					"$trace") &&
+				test -n "$acquire_us" &&
+				test -n "$acquire_total" &&
+				test -n "$read_total" &&
+				awk -v elapsed="$acquire_us" -v acquired="$acquire_total" \
+					-v total="$read_total" "
+					BEGIN {
+						acquired *= 1000000
+						total *= 1000000
+						if (elapsed > acquired + 1 || elapsed < acquired - 1 ||
+							elapsed > total + 1)
+							exit 1
+					}
+				"
+			fi || return 1
+		done || return 1
+	done
+'
+
 test_expect_success 'content index query wire versions' '
 	test-tool grep-index-ipc query-wire &&
 	if test_have_prereq FSMONITOR_DAEMON

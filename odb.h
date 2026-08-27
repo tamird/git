@@ -553,10 +553,13 @@ void enable_obj_read_lock(void);
 void disable_obj_read_lock(void);
 
 /*
- * Optional diagnostics for one producer thread. Prepare once, before any
+ * Optional diagnostics for one producer and its readers. Prepare once, before
  * reader workers start; only that producer may begin/end child-read scopes
  * or take the final snapshot. Acquisition calls, including recursive calls
  * and inflation reacquisitions, are timed, not mutex hold time or pure wait.
+ * Other readers report a separate Trace2 stopwatch aggregate. It excludes
+ * all producer reads, including attribute reads, but includes worker calls
+ * outside source reads (for example, textconv).
  */
 struct obj_read_lock_trace_stats {
 	uint64_t acquire_count, acquire_ns;

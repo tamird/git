@@ -325,6 +325,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "source/object-read",
 		.want_per_thread_events = 0,
 	},
+	/* Acquisition calls, not pure wait or hold time; worker sums can overlap. */
+	[TRACE2_TIMER_ID_GREP_WORKER_OBJECT_LOCK] = {
+		.category = "grep",
+		.name = "worker/object-lock-acquire",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_GREP_PRODUCER_LOCK] = {
 		.category = "grep",
 		.name = "dispatch/producer-lock",
@@ -532,6 +538,18 @@ void tr2_emit_final_timers(tr2_tgt_evt_timer_t *fn_apply)
 		 * not timer events. Like the timer, it includes only completed
 		 * intervals and uses the existing stopwatch clock/arithmetic.
 		 */
+		if (tid == TRACE2_TIMER_ID_GREP_WORKER_OBJECT_LOCK &&
+		    timer->interval_count <= INTMAX_MAX) {
+			int saved_errno = errno;
+
+			trace2_data_intmax("grep", NULL,
+					   "worker/object-lock-acquire/count",
+					   timer->interval_count);
+			trace2_data_intmax("grep", NULL,
+					   "worker/object-lock-acquire-us",
+					   timer->total_ns / 1000);
+			errno = saved_errno;
+		}
 		if (tid == TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE &&
 		    timer->interval_count <= INTMAX_MAX) {
 			int saved_errno = errno;

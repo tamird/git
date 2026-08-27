@@ -603,7 +603,16 @@ void obj_read_lock_with_trace(void)
 	 * Other readers never touch the depth or counters, even while the
 	 * producer releases the recursive mutex for inflation.
 	 */
-	if (!owner || !obj_read_lock_trace.active_depth ||
+	if (!owner) {
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_WORKER_OBJECT_LOCK);
+		errno = saved_errno;
+		pthread_mutex_lock(&obj_read_mutex);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKER_OBJECT_LOCK);
+		errno = saved_errno;
+		return;
+	}
+	if (!obj_read_lock_trace.active_depth ||
 	    !obj_read_lock_trace.stats.valid) {
 		pthread_mutex_lock(&obj_read_mutex);
 		return;
