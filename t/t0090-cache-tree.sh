@@ -55,6 +55,39 @@ test_no_cache_tree () {
 	cmp_cache_tree expect
 }
 
+test_cache_tree_object_check_time () {
+	object_check_trace="$1"
+	object_check_count="$2"
+	test_trace2_data cache_tree validate/object-check-us-total \
+		"[0-9][0-9]*" <"$object_check_trace" || return 1
+	object_check_us=$(sed -n \
+		"s/.*\"key\":\"validate\\/object-check-us-total\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" \
+		"$object_check_trace" | tail -n 1) || return 1
+	test_grep ! "\"event\":\"th_timer\".*\"name\":\"validate/object-check\"" \
+		"$object_check_trace" || return 1
+	if test "$object_check_count" = 0
+	then
+		test "$object_check_us" = 0 &&
+		test_grep ! "\"event\":\"timer\".*\"name\":\"validate/object-check\"" \
+			"$object_check_trace"
+	else
+		test "$(grep -c "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"validate/object-check\"" \
+			"$object_check_trace")" = 1 &&
+		test_grep "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"validate/object-check\",\"intervals\":$object_check_count," \
+			"$object_check_trace" &&
+		object_check_total=$(sed -n \
+			"s/.*\"name\":\"validate\\/object-check\".*\"t_total\":\\([0-9][0-9]*[.][0-9][0-9]*\\),.*/\\1/p" \
+			"$object_check_trace") &&
+		test -n "$object_check_total" &&
+		awk -v elapsed="$object_check_us" -v total="$object_check_total" '
+		BEGIN {
+			total *= 1000000
+			if (elapsed > total + 1 || elapsed < total - 1)
+				exit 1
+		}'
+	fi
+}
+
 test_expect_success 'initial commit has cache-tree' '
 	test_commit foo &&
 	test_cache_tree
@@ -396,7 +429,7 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	# write-tree with a valid cache-tree should skip cache_tree_update
 	GIT_TRACE2_PERF="$(pwd)/trace.output" \
 	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-validate.trace" \
-	GIT_TRACE2_EVENT_NESTING=2 git write-tree >actual &&
+	GIT_TRACE2_EVENT_NESTING=1 git write-tree >actual &&
 	test_cmp expect actual &&
 	test_grep ! region_enter.*cache_tree.*update trace.output &&
 	test_trace2_data cache_tree validate/calls-total 1 <.git/cache-tree-validate.trace &&
@@ -404,6 +437,7 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_trace2_data cache_tree validate/skipped-total 0 <.git/cache-tree-validate.trace &&
 	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-validate.trace &&
 	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-validate.trace "$nodes" &&
 
 	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-ignore.trace" \
 	GIT_TRACE2_EVENT_NESTING=2 \
@@ -414,6 +448,7 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_trace2_data cache_tree validate/skipped-total 1 <.git/cache-tree-ignore.trace &&
 	test_trace2_data cache_tree validate/nodes-total 0 <.git/cache-tree-ignore.trace &&
 	test_trace2_data cache_tree validate/object-checks-total 0 <.git/cache-tree-ignore.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-ignore.trace 0 &&
 
 	echo changed >>use-valid.t &&
 	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-stash.trace" \
@@ -425,7 +460,43 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_line_count = 2 actual &&
 	test_trace2_data cache_tree validate/nodes-total "$((nodes + 1))" <.git/cache-tree-stash.trace &&
 	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-stash.trace >actual &&
-	test_line_count = 2 actual
+	test_line_count = 2 actual &&
+	test_cache_tree_object_check_time .git/cache-tree-stash.trace "$nodes" &&
+	# The second validation rejects an invalid node before its ODB lookup.
+	sed -n \
+		"s/.*\"key\":\"validate\\/object-check-us-total\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" \
+		.git/cache-tree-stash.trace >actual &&
+	test_line_count = 2 actual &&
+	uniq actual >expect &&
+	test_line_count = 1 expect
+'
+
+test_expect_success 'cache-tree lookup timing includes a failed validation but not rebuilding' '
+	git write-tree >expect &&
+	tree_oid=$(cat expect) &&
+	tree_object=.git/objects/$(test_oid_to_path "$tree_oid") &&
+	test_path_is_file "$tree_object" &&
+	mv "$tree_object" "$tree_object.save" &&
+	test_when_finished "rm -f \"$tree_object\" &&
+		mv \"$tree_object.save\" \"$tree_object\"" &&
+	test_when_finished "rm -f .git/cache-tree-missing.trace" &&
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-missing.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 \
+		git --no-optional-locks write-tree >actual &&
+	test_cmp expect actual &&
+	git cat-file -e "$tree_oid^{tree}" &&
+	test_region cache_tree update .git/cache-tree-missing.trace &&
+	test_trace2_data cache_tree validate/calls-total 1 \
+		<.git/cache-tree-missing.trace &&
+	test_trace2_data cache_tree validate/valid-total 0 \
+		<.git/cache-tree-missing.trace &&
+	test_trace2_data cache_tree validate/skipped-total 0 \
+		<.git/cache-tree-missing.trace &&
+	test_trace2_data cache_tree validate/nodes-total 1 \
+		<.git/cache-tree-missing.trace &&
+	test_trace2_data cache_tree validate/object-checks-total 1 \
+		<.git/cache-tree-missing.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-missing.trace 1
 '
 
 test_done

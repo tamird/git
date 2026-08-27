@@ -297,22 +297,37 @@ static void discard_unused_subtrees(struct cache_tree *it)
 struct cache_tree_validation_stats {
 	uintmax_t nodes;
 	uintmax_t object_checks;
+	uint64_t object_check_ns;
 };
 
 static int cache_tree_fully_valid_internal(struct cache_tree *it,
 					 struct cache_tree_validation_stats *stats)
 {
-	int i;
+	int i, exists;
 	if (!it)
 		return 0;
 	if (stats)
 		stats->nodes++;
 	if (it->entry_count < 0)
 		return 0;
-	if (stats)
+	if (stats) {
+		int saved_errno = errno;
+
 		stats->object_checks++;
-	if (!odb_has_object(the_repository->objects, &it->oid,
-			    ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
+		trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
+		errno = saved_errno;
+	}
+	exists = odb_has_object(the_repository->objects, &it->oid,
+				ODB_HAS_OBJECT_RECHECK_PACKED |
+					ODB_HAS_OBJECT_FETCH_PROMISOR);
+	if (stats) {
+		int saved_errno = errno;
+
+		stats->object_check_ns +=
+			trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
+		errno = saved_errno;
+	}
+	if (!exists)
 		return 0;
 	for (i = 0; i < it->subtree_nr; i++) {
 		if (!cache_tree_fully_valid_internal(it->down[i]->cache_tree, stats))
@@ -334,7 +349,10 @@ static void trace_cache_tree_validation(const struct cache_tree_validation_stats
 	 * completed validations across index states, matching the validate
 	 * region's cumulative time. Calls include explicit skips; the rest
 	 * are valid or invalid. Object checks count odb_has_object() calls,
-	 * not unique OIDs or backend filesystem probes.
+	 * not unique OIDs or backend filesystem probes. Object-check time covers
+	 * the entire ODB call, including retries and promisor fetches. The rest
+	 * of validate includes decoding, iteration, and diagnostic overhead;
+	 * neither duration is CPU time.
 	 */
 	static struct {
 		uintmax_t calls, valid, skipped;
@@ -347,12 +365,15 @@ static void trace_cache_tree_validation(const struct cache_tree_validation_stats
 	totals.skipped += skipped;
 	totals.work.nodes += stats->nodes;
 	totals.work.object_checks += stats->object_checks;
+	totals.work.object_check_ns += stats->object_check_ns;
 	trace2_data_intmax("cache_tree", NULL, "validate/calls-total", totals.calls);
 	trace2_data_intmax("cache_tree", NULL, "validate/valid-total", totals.valid);
 	trace2_data_intmax("cache_tree", NULL, "validate/skipped-total", totals.skipped);
 	trace2_data_intmax("cache_tree", NULL, "validate/nodes-total", totals.work.nodes);
 	trace2_data_intmax("cache_tree", NULL, "validate/object-checks-total",
 			   totals.work.object_checks);
+	trace2_data_intmax("cache_tree", NULL, "validate/object-check-us-total",
+			   totals.work.object_check_ns / 1000);
 	errno = saved_errno;
 }
 

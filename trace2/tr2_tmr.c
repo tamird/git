@@ -395,6 +395,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK] = {
+		.category = "cache_tree",
+		.name = "validate/object-check",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 

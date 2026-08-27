@@ -579,6 +579,8 @@ enum trace2_timer_id {
 	TRACE2_TIMER_ID_SHOW_SETUP,
 	TRACE2_TIMER_ID_SHOW_DISPATCH,
 
+	TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK,
+
 	/* Add additional timer definitions before here. */
 	TRACE2_NUMBER_OF_TIMERS
 };
