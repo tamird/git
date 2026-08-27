@@ -123,6 +123,9 @@ static void ll_diff_tree_paths(
 static void ll_diff_tree_oid(const struct object_id *old_oid,
 			     const struct object_id *new_oid,
 			     struct strbuf *base, struct diff_options *opt);
+static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
+					  struct tree_desc *desc,
+					  const struct object_id *oid);
 
 /*
  * Compare two tree entries, taking into account only path/S_ISDIR(mode),
@@ -451,7 +454,7 @@ static void ll_diff_tree_paths(
 	 *   diff_tree_oid(parent, commit) )
 	 */
 	for (i = 0; i < nparent; ++i)
-		tptree[i] = fill_tree_descriptor(opt->repo, &tp[i], parents_oid[i]);
+		tptree[i] = fill_tree_descriptor_for_diff(opt, &tp[i], parents_oid[i]);
 	if (nparent == 1 && oid && parents_oid[0] &&
 	    oid->algo == parents_oid[0]->algo &&
 	    oideq(oid, parents_oid[0])) {
@@ -459,7 +462,7 @@ static void ll_diff_tree_paths(
 		t = tp[0];
 		ttree = NULL;
 	} else {
-		ttree = fill_tree_descriptor(opt->repo, &t, oid);
+		ttree = fill_tree_descriptor_for_diff(opt, &t, oid);
 	}
 
 	/* Enable recursion indefinitely */
@@ -627,6 +630,32 @@ static void follow_change(struct diff_options *opt,
 		diff_change(opt, old_mode, new_mode, old_oid, new_oid,
 			    old_oid_valid, new_oid_valid, path,
 			    old_dirty_submodule, new_dirty_submodule);
+}
+
+/*
+ * Only the unrestricted --follow search installs follow_change. In
+ * particular, blame also sets single_follow without entering that search.
+ * Count completed descriptor loads, including object peeling and descriptor
+ * initialization, rather than unique objects or underlying read attempts.
+ */
+static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
+					  struct tree_desc *desc,
+					  const struct object_id *oid)
+{
+	void *buffer;
+	int saved_errno;
+
+	if (opt->change != follow_change || !oid || !trace2_is_enabled())
+		return fill_tree_descriptor(opt->repo, desc, oid);
+
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	errno = saved_errno;
+	buffer = fill_tree_descriptor(opt->repo, desc, oid);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	errno = saved_errno;
+	return buffer;
 }
 
 struct follow_addremove_data {

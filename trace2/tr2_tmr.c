@@ -121,6 +121,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "follow-full-tree",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ] = {
+		.category = "diff",
+		.name = "follow-full-tree/tree-read",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_DIFF_FOLLOW_PICKAXE_DIFFCORE] = {
 		.category = "diff",
 		.name = "follow-pickaxe/diffcore",
@@ -553,6 +558,18 @@ void tr2_emit_final_timers(tr2_tgt_evt_timer_t *fn_apply)
 					   timer->interval_count);
 			trace2_data_intmax("grep", NULL,
 					   "worker/object-lock-acquire-us",
+					   timer->total_ns / 1000);
+			errno = saved_errno;
+		}
+		if (tid == TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ &&
+		    timer->interval_count <= INTMAX_MAX) {
+			int saved_errno = errno;
+
+			trace2_data_intmax("diff", NULL,
+					   "follow-full-tree/tree-read/count",
+					   timer->interval_count);
+			trace2_data_intmax("diff", NULL,
+					   "follow-full-tree/tree-read-us",
 					   timer->total_ns / 1000);
 			errno = saved_errno;
 		}
