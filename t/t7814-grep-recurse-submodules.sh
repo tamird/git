@@ -198,6 +198,22 @@ test_expect_success FSMONITOR_DAEMON \
 			tree_field_count=$((tree_field_count + 2))
 		fi
 	done &&
+	lookup_key=content_index_tree_object_read_packed_lookup &&
+	test_trace2_data grep "${lookup_key}_valid" "[01]" \
+		<recurse-content-index.trace &&
+	tree_field_count=$((tree_field_count + 1)) &&
+	if test_trace2_data grep "${lookup_key}_valid" 1 \
+		<recurse-content-index.trace
+	then
+		for field in midx_search_count midx_search_us \
+			midx_resolve_count midx_resolve_us fallback_count fallback_us \
+			fallback_pack_attempts
+		do
+			test_trace2_data grep "${lookup_key}_$field" "[0-9][0-9]*" \
+				<recurse-content-index.trace || return 1
+		done &&
+		tree_field_count=$((tree_field_count + 7)) || return 1
+	fi &&
 	test "$(grep -c "\"key\":\"content_index_tree_" \
 		recurse-content-index.trace)" = "$tree_field_count" &&
 	for field in objects queried rejected batches bypassed batch_ ipc_
