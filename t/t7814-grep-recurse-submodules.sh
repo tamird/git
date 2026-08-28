@@ -235,12 +235,12 @@ test_expect_success FSMONITOR_DAEMON \
 	if test_trace2_data grep "${base_descent_key}_valid" 1 \
 		<recurse-content-index.trace
 	then
-		for field in count us
+		for field in count us zero_pushed_delta_count zero_pushed_delta_us
 		do
 			test_trace2_data grep "${base_descent_key}_$field" "[0-9][0-9]*" \
 				<recurse-content-index.trace || return 1
 		done &&
-		tree_field_count=$((tree_field_count + 2)) || return 1
+		tree_field_count=$((tree_field_count + 4)) || return 1
 	fi &&
 	test "$(grep -c "\"key\":\"content_index_tree_" \
 		recurse-content-index.trace)" = "$tree_field_count" &&

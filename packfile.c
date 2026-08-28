@@ -1342,9 +1342,10 @@ static int packed_content_time(uint64_t *now)
 #endif
 }
 
-static void packed_base_descent_end(struct odb_read_result *result, uint64_t started)
+static void packed_base_descent_end(struct odb_read_result *result, uint64_t started,
+				    bool zero_pushed_delta)
 {
-	uint64_t finished;
+	uint64_t finished, elapsed;
 
 	if (packed_content_time(&finished) || finished < started ||
 	    result->packed_base_descent_count == (uint64_t)INTMAX_MAX ||
@@ -1352,8 +1353,14 @@ static void packed_base_descent_end(struct odb_read_result *result, uint64_t sta
 		result->packed_base_descent_invalid = 1;
 		return;
 	}
+	elapsed = finished - started;
 	result->packed_base_descent_count++;
-	result->packed_base_descent_ns += finished - started;
+	result->packed_base_descent_ns += elapsed;
+	/* These monotonic subsets cannot overflow before their parent totals. */
+	if (zero_pushed_delta) {
+		result->packed_base_descent_zero_pushed_delta_count++;
+		result->packed_base_descent_zero_pushed_delta_ns += elapsed;
+	}
 }
 
 uint64_t packed_lookup_begin(struct odb_packed_lookup *lookup)
@@ -1721,7 +1728,7 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 		curpos = obj_offset = base_offset;
 	}
 	if (base_descent_active) {
-		packed_base_descent_end(result, base_descent_started);
+		packed_base_descent_end(result, base_descent_started, delta_stack_nr == 0);
 		base_descent_active = 0;
 	}
 
@@ -1848,7 +1855,7 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 out:
 	/* CRC errors leave PHASE 1 without reaching its normal close above. */
 	if (base_descent_active)
-		packed_base_descent_end(result, base_descent_started);
+		packed_base_descent_end(result, base_descent_started, delta_stack_nr == 0);
 	unuse_pack(&w_curs);
 
 	if (delta_stack != small_delta_stack)

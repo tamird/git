@@ -2660,6 +2660,8 @@ struct grep_tree_query_context {
 	uint64_t tree_object_read_packed_inflate_phase_ns;
 	uint64_t tree_object_read_packed_base_descent_count;
 	uint64_t tree_object_read_packed_base_descent_ns;
+	uint64_t tree_object_read_packed_base_descent_zero_pushed_delta_count;
+	uint64_t tree_object_read_packed_base_descent_zero_pushed_delta_ns;
 	uint64_t tree_object_read_packed_entry_location_attempt_count;
 	uint64_t tree_object_read_packed_entry_location_ns;
 	struct odb_packed_lookup tree_object_read_packed_lookup;
@@ -2778,6 +2780,11 @@ static void grep_tree_record_packed_base_descent(struct grep_tree_query_context 
 	query->tree_object_read_packed_base_descent_count +=
 		result->packed_base_descent_count;
 	query->tree_object_read_packed_base_descent_ns += result->packed_base_descent_ns;
+	/* The checked parent sums also bound these monotonic subsets. */
+	query->tree_object_read_packed_base_descent_zero_pushed_delta_count +=
+		result->packed_base_descent_zero_pushed_delta_count;
+	query->tree_object_read_packed_base_descent_zero_pushed_delta_ns +=
+		result->packed_base_descent_zero_pushed_delta_ns;
 	return;
 
 invalid:
@@ -2951,6 +2958,12 @@ static void grep_tree_trace_object_read_sources(
 		trace2_data_intmax("grep", the_repository,
 			"content_index_tree_object_read_packed_base_descent_us",
 			query->tree_object_read_packed_base_descent_ns / 1000);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count",
+			query->tree_object_read_packed_base_descent_zero_pushed_delta_count);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us",
+			query->tree_object_read_packed_base_descent_zero_pushed_delta_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
 		"content_index_tree_object_read_packed_entry_location_valid",

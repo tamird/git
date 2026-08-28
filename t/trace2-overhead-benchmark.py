@@ -244,6 +244,28 @@ def trace_coverage(
         "count/revisions": workload.tree_read_revisions,
     }
     tree_times = ("content_index_tree_walk_us", "content_index_tree_object_read_us")
+    tree_packed_families = {
+        "content_index_tree_object_read_packed_base_descent_valid": (
+            "content_index_tree_object_read_packed_base_descent_count",
+            "content_index_tree_object_read_packed_base_descent_us",
+        ),
+        "content_index_tree_object_read_packed_unpack_valid": (
+            "content_index_tree_object_read_packed_unpack_attempt_count",
+            "content_index_tree_object_read_packed_unpack_us",
+            "content_index_tree_object_read_packed_unpack_inflate_phase_count",
+            "content_index_tree_object_read_packed_unpack_inflate_phase_us",
+        ),
+    }
+    tree_base_subsets = {
+        "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count":
+            "content_index_tree_object_read_packed_base_descent_count",
+        "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us":
+            "content_index_tree_object_read_packed_base_descent_us",
+    }
+    tree_packed_keys = set(tree_packed_families)
+    for keys in tree_packed_families.values():
+        tree_packed_keys.update(keys)
+    tree_packed_keys.update(tree_base_subsets)
     with path.open() as source:
         for line in source:
             event = json.loads(line)
@@ -265,7 +287,7 @@ def trace_coverage(
                     raise AssertionError("tree-only grep must exit with no matches")
                 key = event.get("key")
                 if (event["event"] == "data" and event.get("category") == "grep"
-                        and (key in tree_counts or key in tree_times
+                        and (key in tree_counts or key in tree_times or key in tree_packed_keys
                              or key == "content_index_tree_directories")):
                     if key in tree_values or event.get("thread") != "main":
                         raise AssertionError("tree DATA must occur once on the main thread")
@@ -289,6 +311,22 @@ def trace_coverage(
         if status_values.get("untracked/fill-us", -1) < 0:
             raise AssertionError("status must report nonnegative fill wall time")
     if workload.tree_read_revisions:
+        for valid_key, keys in tree_packed_families.items():
+            if tree_values.get(valid_key) not in (0, 1):
+                raise AssertionError("packed tree-read validity must be zero or one")
+            if tree_values[valid_key] and any(key not in tree_values for key in keys):
+                raise AssertionError("valid packed tree-read DATA must include every phase field")
+            if any(tree_values[key] < 0 for key in keys if key in tree_values):
+                raise AssertionError("packed tree-read DATA must be nonnegative")
+        subset_present = tree_base_subsets.keys() & tree_values.keys()
+        if subset_present and len(subset_present) != len(tree_base_subsets):
+            raise AssertionError("zero-pushed-delta DATA must include both subset fields")
+        if subset_present:
+            if tree_values["content_index_tree_object_read_packed_base_descent_valid"] != 1:
+                raise AssertionError("zero-pushed-delta DATA requires valid base-descent detail")
+            if any(not 0 <= tree_values[subset] <= tree_values[parent]
+                   for subset, parent in tree_base_subsets.items()):
+                raise AssertionError("zero-pushed-delta DATA must be a nonnegative base-descent subset")
         if any(tree_values.get(key) != expected for key, expected in tree_counts.items()):
             raise AssertionError(f"tree traversal count mismatch: {tree_values}")
         directories = tree_values.get("content_index_tree_directories", -1)

@@ -352,6 +352,13 @@ struct odb_read_result {
 	uint64_t packed_base_descent_count, packed_base_descent_ns;
 	int packed_base_descent_invalid;
 	/*
+	 * Subset with zero delta frames pushed at PHASE 1 exit, sharing the
+	 * checked totals and their validity. Errors before a push also qualify;
+	 * this is not a count of non-delta objects or successful reads.
+	 */
+	uint64_t packed_base_descent_zero_pushed_delta_count;
+	uint64_t packed_base_descent_zero_pushed_delta_ns;
+	/*
 	 * Inclusive find_pack_entry calls for this content read, including
 	 * misses before a later source wins. Explicit second-read cache
 	 * refresh precedes this interval; packed-content decoding follows it.
