@@ -75,6 +75,7 @@ struct display_state {
 };
 
 static uint64_t forced_updates_ms = 0;
+static uint64_t forced_updates_check_count;
 static int prefetch = 0;
 static int prune = -1; /* unspecified */
 #define PRUNE_BY_DEFAULT 0 /* do we prune by default? */
@@ -1084,6 +1085,7 @@ static int update_local_ref(struct ref *ref,
 		if (fast_forward < 0)
 			die(NULL);
 		forced_updates_ms += (getnanotime() - t_before) / 1000000;
+		forced_updates_check_count++;
 	} else {
 		fast_forward = 1;
 	}
@@ -2966,5 +2968,13 @@ int cmd_fetch(int argc,
  cleanup:
 	string_list_clear(&list, 0);
 	list_objects_filter_release(&filter_options);
+	if (forced_updates_ms <= INTMAX_MAX &&
+	    forced_updates_check_count <= INTMAX_MAX) {
+		trace2_data_intmax("fetch", the_repository,
+				   "forced_updates/milliseconds", forced_updates_ms);
+		trace2_data_intmax("fetch", the_repository,
+				   "forced_updates/check_count",
+				   forced_updates_check_count);
+	}
 	return result;
 }

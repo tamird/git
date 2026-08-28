@@ -14,6 +14,32 @@ then
 	test_done
 fi
 
+test_forced_update_trace () {
+	local milliseconds="[0-9][0-9]*" &&
+	if test "$2" = 0
+	then
+		milliseconds=0
+	fi &&
+	grep '"event":"data".*"category":"fetch","key":"forced_updates/' \
+		"$1" >"$1.data" &&
+	test_line_count = 2 "$1.data" &&
+	test_grep ! '"sid":"[^"]*/' "$1.data" &&
+	test_trace2_data fetch forced_updates/check_count "$2" <"$1.data" &&
+	test_trace2_data fetch forced_updates/milliseconds "$milliseconds" <"$1.data" &&
+	awk '
+		/"event":"region_leave".*"category":"fetch","label":"consume_refs"/ {
+			last_consume = NR
+		}
+		/"event":"data".*"category":"fetch","key":"forced_updates\// {
+			if (!first_counter)
+				first_counter = NR
+		}
+		END {
+			exit !(last_consume && first_counter && last_consume < first_counter)
+		}
+	' "$1"
+}
+
 test_expect_success setup '
 	echo >file original &&
 	git add file &&
@@ -803,7 +829,8 @@ test_expect_success 'fetch --atomic prunes references' '
 '
 
 test_expect_success 'fetch --atomic aborts with non-fast-forward update' '
-	test_when_finished "rm -rf atomic fetch-non-fast-forward.trace" &&
+	test_when_finished "rm -rf atomic &&
+		rm -f fetch-non-fast-forward.trace fetch-non-fast-forward.trace.data" &&
 
 	git branch atomic-non-ff &&
 	git clone . atomic &&
@@ -813,9 +840,8 @@ test_expect_success 'fetch --atomic aborts with non-fast-forward update' '
 	parent_commit=$(git rev-parse atomic-non-ff~) &&
 	git update-ref refs/heads/atomic-non-ff $parent_commit &&
 
-	test_must_fail env \
+	test_expect_code 1 env \
 		GIT_TRACE2_EVENT="$PWD/fetch-non-fast-forward.trace" \
-		GIT_TRACE2_EVENT_NESTING=2 \
 		git -C atomic fetch --atomic origin \
 			refs/heads/*:refs/remotes/origin/* &&
 	test_trace2_data fetch ref_updates/rejected 1 \
@@ -825,7 +851,8 @@ test_expect_success 'fetch --atomic aborts with non-fast-forward update' '
 	test_must_fail git -C atomic rev-parse refs/remotes/origin/atomic-new-branch &&
 	git -C atomic rev-parse refs/remotes/origin/atomic-non-ff >expected &&
 	test_cmp expected actual &&
-	test_must_be_empty atomic/.git/FETCH_HEAD
+	test_must_be_empty atomic/.git/FETCH_HEAD &&
+	test_forced_update_trace fetch-non-fast-forward.trace 1
 '
 
 test_expect_success 'fetch --atomic executes a single reference transaction only' '
@@ -1267,6 +1294,65 @@ test_expect_success 'fetch into the current branch with --update-head-ok' '
 	git fetch --update-head-ok . side:main
 
 '
+
+for show_forced_updates in true false
+do
+	test_expect_success "fetch reports ancestry checks with fetch.showForcedUpdates=$show_forced_updates" '
+		test_when_finished rm -rf forced-updates &&
+		git init -b main forced-updates &&
+		(
+			cd forced-updates &&
+			test_commit --no-tag base &&
+			test_commit --no-tag tip &&
+			git branch previous HEAD^ &&
+			base=$(git rev-parse previous) &&
+			tip=$(git rev-parse HEAD) &&
+			cat >initial-refs <<-EOF &&
+			update refs/remotes/test/forward $base
+			update refs/remotes/test/rewind $tip
+			EOF
+			printf "%s\n" "$tip" "$base" >expect &&
+			git update-ref --stdin <initial-refs &&
+			GIT_TRACE2_EVENT=0 \
+				git -c fetch.showForcedUpdates=$show_forced_updates \
+				fetch --no-write-fetch-head --no-tags . \
+				main:refs/remotes/test/forward \
+				+previous:refs/remotes/test/rewind >off.out 2>off.err &&
+			git rev-parse refs/remotes/test/forward \
+				refs/remotes/test/rewind >off.refs &&
+			test_cmp expect off.refs &&
+			git update-ref --stdin <initial-refs &&
+			GIT_TRACE2_EVENT="$PWD/update.trace" \
+				git -c fetch.showForcedUpdates=$show_forced_updates \
+				fetch --no-write-fetch-head --no-tags . \
+				main:refs/remotes/test/forward \
+				+previous:refs/remotes/test/rewind >on.out 2>on.err &&
+			git rev-parse refs/remotes/test/forward \
+				refs/remotes/test/rewind >on.refs &&
+			test_cmp off.refs on.refs &&
+			test_cmp off.out on.out &&
+			test_cmp off.err on.err &&
+			test_path_is_missing .git/FETCH_HEAD &&
+			GIT_TRACE2_EVENT="$PWD/up-to-date.trace" \
+				git fetch --show-forced-updates --no-write-fetch-head \
+				--no-tags . main:refs/remotes/test/forward \
+				+previous:refs/remotes/test/rewind >up-to-date.out 2>up-to-date.err &&
+			test_must_be_empty up-to-date.out &&
+			test_must_be_empty up-to-date.err &&
+			git rev-parse refs/remotes/test/forward \
+				refs/remotes/test/rewind >up-to-date.refs &&
+			test_cmp expect up-to-date.refs &&
+			if test "$show_forced_updates" = true
+			then
+				expected_checks=2
+			else
+				expected_checks=0
+			fi &&
+			test_forced_update_trace update.trace "$expected_checks" &&
+			test_forced_update_trace up-to-date.trace 0
+		)
+	'
+done
 
 test_expect_success 'fetch --dry-run does not touch FETCH_HEAD, but still prints what would be written' '
 	rm -f .git/FETCH_HEAD err &&
@@ -1821,8 +1907,10 @@ test_expect_success '--negotiation-tip understands abbreviated SHA-1' '
 '
 
 test_expect_success '--negotiation-tip rejects missing OIDs' '
+	test_when_finished rm -f fetch-fatal.trace &&
 	setup_negotiation_tip server server 0 &&
-	test_must_fail git -C client fetch \
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/fetch-fatal.trace" \
+		git -C client fetch \
 		--negotiation-tip=alpha_1 \
 		--negotiation-tip=$(test_oid zero) \
 		origin alpha_s beta_s 2>err &&
@@ -1830,7 +1918,9 @@ test_expect_success '--negotiation-tip rejects missing OIDs' '
 	fatal: the object $(test_oid zero) does not exist
 EOF
 	grep fatal: err >fatal-actual &&
-	test_cmp fatal-expect fatal-actual
+	test_cmp fatal-expect fatal-actual &&
+	test_grep "\"event\":\"exit\".*\"code\":128" fetch-fatal.trace &&
+	test_grep ! "\"category\":\"fetch\",\"key\":\"forced_updates/" fetch-fatal.trace
 '
 
 test_expect_success '--negotiation-tip ignores missing refs and invalid hashes' '
@@ -2188,11 +2278,13 @@ test_expect_success 'fetch --tags fetches non-conflicting tags' '
 '
 
 test_expect_success "backfill tags when providing a refspec" '
-	test_when_finished rm -rf source target &&
+	test_when_finished "rm -rf source target &&
+		rm -f fetch-backfill.trace fetch-backfill.trace.data" &&
 
 	git init source &&
 	git -C source commit --allow-empty --message common &&
 	git clone file://"$(pwd)"/source target &&
+	git -C target branch branch HEAD &&
 	(
 	    cd source &&
 	    test_commit history &&
@@ -2201,13 +2293,21 @@ test_expect_success "backfill tags when providing a refspec" '
 
 	# The "history" tag is backfilled even though we requested
 	# to only fetch HEAD
-	git -C target fetch origin HEAD:branch &&
+	GIT_TRACE2_EVENT="$PWD/fetch-backfill.trace" \
+		git -C target fetch --show-forced-updates origin HEAD:branch &&
 	git -C target tag -l >actual &&
 	cat >expect <<-\EOF &&
 	fetch-me
 	history
 	EOF
-	test_cmp expect actual
+	test_cmp expect actual &&
+	git -C source rev-parse HEAD >expect &&
+	git -C target rev-parse branch >actual &&
+	test_cmp expect actual &&
+	grep "\"event\":\"region_leave\".*\"category\":\"fetch\",\"label\":\"consume_refs\"" \
+		fetch-backfill.trace >fetch-backfill.trace.data &&
+	test_line_count = 2 fetch-backfill.trace.data &&
+	test_forced_update_trace fetch-backfill.trace 1
 '
 
 test_expect_success REFFILES "FETCH_HEAD is updated even if ref updates fail" '

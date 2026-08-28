@@ -143,6 +143,57 @@ test_expect_success 'git fetch --multiple (bad remote names)' '
 	 test_must_fail git fetch --multiple four)
 '
 
+test_expect_success 'multiple fetches report ancestry checks per session' '
+	test_when_finished rm -rf forced-updates &&
+	git clone one forced-updates &&
+	(
+		cd forced-updates &&
+		git remote add second ../one &&
+		git fetch second &&
+		git for-each-ref --format="%(refname) %(objectname)" refs/remotes >expect &&
+		base=$(git rev-parse origin/main) &&
+		git update-ref refs/remotes/origin/side "$base" &&
+		git update-ref refs/remotes/second/side "$base" &&
+		GIT_TRACE2_EVENT="$PWD/fetch.trace" \
+			git -c fetch.showForcedUpdates=true fetch \
+			--multiple --jobs=2 --no-tags --no-write-fetch-head origin second &&
+		git for-each-ref --format="%(refname) %(objectname)" refs/remotes >actual &&
+		test_cmp expect actual &&
+		sed -n "s#.*\"sid\":\"\([^\"]*\)\".*\"category\":\"fetch\",\"key\":\"forced_updates/\([^\"]*\)\",\"value\":\"\([^\"]*\)\".*#\1 \2 \3#p" \
+			fetch.trace >counters &&
+		test_line_count = 6 counters &&
+		awk '\''
+			{
+				if ($3 !~ /^[0-9]+$/ || ++seen[$1, $2] != 1)
+					bad = 1
+				values[$1, $2] = $3
+				sessions[$1] = 1
+			}
+			END {
+				for (sid in sessions) {
+					if (seen[sid, "milliseconds"] != 1 ||
+					    seen[sid, "check_count"] != 1)
+						bad = 1
+					if (index(sid, "/")) {
+						children++
+						if (values[sid, "check_count"] != 1)
+							bad = 1
+					} else {
+						parents++
+						parent = sid
+						if (values[sid, "check_count"] != 0 ||
+						    values[sid, "milliseconds"] != 0)
+							bad = 1
+					}
+				}
+				for (sid in sessions)
+					if (sid != parent && index(sid, parent "/") != 1)
+						bad = 1
+				exit (bad || parents != 1 || children != 2)
+			}
+		'\'' counters
+	)
+'
 
 test_expect_success 'git fetch --all (skipFetchAll)' '
 	(cd test4 &&
