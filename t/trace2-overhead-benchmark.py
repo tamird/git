@@ -244,6 +244,10 @@ def trace_coverage(
         "count/revisions": workload.tree_read_revisions,
     }
     tree_times = ("content_index_tree_walk_us", "content_index_tree_object_read_us")
+    main_cpu_keys = (
+        "execution_main_thread_cpu_valid",
+        "execution_main_thread_cpu_microseconds",
+    )
     tree_packed_families = {
         "content_index_tree_object_read_packed_base_descent_valid": (
             "content_index_tree_object_read_packed_base_descent_count",
@@ -293,7 +297,7 @@ def trace_coverage(
                 key = event.get("key")
                 if (event["event"] == "data" and event.get("category") == "grep"
                         and (key in tree_counts or key in tree_times or key in tree_packed_keys
-                             or key == "content_index_tree_directories")):
+                             or key in main_cpu_keys or key == "content_index_tree_directories")):
                     if key in tree_values or event.get("thread") != "main":
                         raise AssertionError("tree DATA must occur once on the main thread")
                     tree_values[key] = int(event["value"])
@@ -316,6 +320,15 @@ def trace_coverage(
         if status_values.get("untracked/fill-us", -1) < 0:
             raise AssertionError("status must report nonnegative fill wall time")
     if workload.tree_read_revisions:
+        # CPU is an optional counter, not an additive wall-time phase.
+        cpu_valid_key, cpu_time_key = main_cpu_keys
+        match (tree_values.get(cpu_valid_key), tree_values.get(cpu_time_key)):
+            case (None, None) | (0, None):
+                pass
+            case (1, int(cpu_microseconds)) if cpu_microseconds >= 0:
+                pass
+            case _:
+                raise AssertionError("main-thread CPU DATA requires validity and an optional nonnegative counter")
         for valid_key, keys in tree_packed_families.items():
             if tree_values.get(valid_key) not in (0, 1):
                 raise AssertionError("packed tree-read validity must be zero or one")

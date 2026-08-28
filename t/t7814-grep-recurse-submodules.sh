@@ -250,7 +250,22 @@ test_expect_success FSMONITOR_DAEMON \
 		test_grep ! "\"key\":\"content_index_tree_$field" \
 			recurse-content-index.trace || return 1
 	done &&
-	test_grep ! query_content_index_ipc recurse-content-index.trace
+	test_grep ! query_content_index_ipc recurse-content-index.trace &&
+	cpu_key=execution_main_thread_cpu &&
+	test_trace2_data grep "${cpu_key}_valid" "[01]" \
+		<recurse-content-index.trace &&
+	if test_trace2_data grep "${cpu_key}_valid" 1 <recurse-content-index.trace
+	then
+		cpu_records=2 &&
+		test_trace2_data grep "${cpu_key}_microseconds" "[0-9][0-9]*" \
+			<recurse-content-index.trace
+	else
+		cpu_records=1 &&
+		test_grep ! "\"key\":\"${cpu_key}_microseconds\"" recurse-content-index.trace
+	fi &&
+	test "$(grep -c "\"key\":\"${cpu_key}_" recurse-content-index.trace)" = "$cpu_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${cpu_key}_" \
+		recurse-content-index.trace)" = "$cpu_records"
 '
 
 test_expect_success 'grep result cache uses stable repository identity' '

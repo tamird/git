@@ -152,6 +152,24 @@ test_grep_producer_stats () {
 	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"grep","key":"producer_' "$producer_trace")" = "$producer_records"
 }
 
+test_grep_main_thread_cpu () {
+	cpu_trace="$1"
+	cpu_key=execution_main_thread_cpu
+	test_trace2_data grep "${cpu_key}_valid" "[01]" <"$cpu_trace" || return 1
+	if test_trace2_data grep "${cpu_key}_valid" 1 <"$cpu_trace"
+	then
+		cpu_records=2 &&
+		test_trace2_data grep "${cpu_key}_microseconds" "[0-9][0-9]*" \
+			<"$cpu_trace" || return 1
+	else
+		cpu_records=1 &&
+		test_grep ! "\"key\":\"${cpu_key}_microseconds\"" "$cpu_trace" || return 1
+	fi &&
+	test "$(grep -c "\"key\":\"${cpu_key}_" "$cpu_trace")" = "$cpu_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${cpu_key}_" \
+		"$cpu_trace")" = "$cpu_records"
+}
+
 test_grep_packed_content () {
 	packed_content_trace="$1"
 	packed_content_key=content_index_tree_object_read_packed_content
@@ -5807,6 +5825,48 @@ test_expect_success PTHREADS 'packed unpack capture belongs only to active produ
 					>scope.actual 2>scope.err &&
 			test_cmp scope.expect scope.actual &&
 			test_must_be_empty scope.err || return 1
+		done
+	)
+'
+
+test_expect_success 'main-thread CPU detail preserves grep output with and without workers' '
+	(
+		cpu_blob=$(echo "cpu needle" | git hash-object -w --stdin) &&
+		cpu_leaf=$(printf "100644 blob %s\tfile\n" "$cpu_blob" | git mktree) &&
+		cpu_root=$(printf "040000 tree %s\tdir\n" "$cpu_leaf" | git mktree) &&
+		printf "%s:dir/file:1:cpu needle\n" "$cpu_root" >cpu.expect &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git grep --no-content-index --threads=1 -n -F "cpu needle" \
+				"$cpu_root" -- >cpu.off 2>cpu.off.err &&
+		test_cmp cpu.expect cpu.off &&
+		test_must_be_empty cpu.off.err &&
+		set -- &&
+		for cpu_threads in 1 2
+		do
+			if test "$cpu_threads" = 2
+			then
+				test_have_prereq PTHREADS || continue
+			fi &&
+			GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT_NESTING=1 \
+			GIT_TRACE2_EVENT="$PWD/cpu-$cpu_threads.trace" \
+				git grep --no-content-index --threads=$cpu_threads -n -F \
+					"cpu needle" "$cpu_root" -- >cpu.actual 2>cpu.actual.err &&
+			test_cmp cpu.expect cpu.actual &&
+			test_cmp cpu.off.err cpu.actual.err &&
+			test_trace2_data grep execution-us "[0-9][0-9]*" \
+				<"cpu-$cpu_threads.trace" &&
+			if test "$cpu_threads" = 2
+			then
+				test_grep_workers "cpu-$cpu_threads.trace" 2
+			else
+				test_grep_workers "cpu-$cpu_threads.trace" 0
+			fi &&
+			set -- "$@" "cpu-$cpu_threads.trace" || return 1
+		done &&
+		# Complete both functional controls before requiring the new DATA.
+		for cpu_trace
+		do
+			test_grep_main_thread_cpu "$cpu_trace" || return 1
 		done
 	)
 '

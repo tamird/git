@@ -4276,6 +4276,34 @@ static int pattern_callback(const struct option *opt, const char *arg,
 	return 0;
 }
 
+static int grep_main_thread_cpu_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_THREAD_CPUTIME_ID)
+	struct timespec timestamp;
+	uint64_t seconds, nanoseconds;
+	const uint64_t nanoseconds_per_second = 1000000000;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= nanoseconds_per_second)
+		return -1;
+	seconds = timestamp.tv_sec;
+	nanoseconds = timestamp.tv_nsec;
+	if (unsigned_mult_overflows(seconds, nanoseconds_per_second))
+		return -1;
+	seconds *= nanoseconds_per_second;
+	if (unsigned_add_overflows(seconds, nanoseconds))
+		return -1;
+	*now = seconds + nanoseconds;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
 int cmd_grep(int argc,
 	     const char **argv,
 	     const char *prefix,
@@ -4296,6 +4324,8 @@ int cmd_grep(int argc,
 	int allow_revs;
 	int ret;
 	uint64_t t_begin = getnanotime();
+	uint64_t cpu_begin = 0, cpu_ns = 0;
+	int cpu_enabled = trace2_is_enabled(), cpu_valid = 0;
 	uint64_t t_compile_begin = 0, t_compile_end = 0;
 	uint64_t t_dispatch_end = 0;
 	int phases_ready = 0;
@@ -4434,6 +4464,9 @@ int cmd_grep(int argc,
 			N_("maximum number of results per file")),
 		OPT_END()
 	};
+	/* Keep the main-thread CPU samples inside the existing wall interval. */
+	if (cpu_enabled)
+		cpu_valid = !grep_main_thread_cpu_time(&cpu_begin);
 	grep_prefix = prefix;
 
 	grep_init(&opt, the_repository);
@@ -4771,7 +4804,17 @@ out:
 	content_index_negative_entries = 0;
 	free_repos();
 	if (phases_ready) {
-		uint64_t t_end = getnanotime();
+		uint64_t t_end;
+
+		if (cpu_valid) {
+			uint64_t cpu_end;
+
+			if (grep_main_thread_cpu_time(&cpu_end) || cpu_end < cpu_begin)
+				cpu_valid = 0;
+			else
+				cpu_ns = cpu_end - cpu_begin;
+		}
+		t_end = getnanotime();
 
 		trace2_data_intmax("grep", the_repository, "setup-us",
 				   (t_compile_begin - t_begin) / 1000);
@@ -4783,6 +4826,18 @@ out:
 				   (t_end - t_dispatch_end) / 1000);
 		trace2_data_intmax("grep", the_repository, "execution-us",
 				   (t_end - t_begin) / 1000);
+		if (cpu_enabled) {
+			int saved_errno = errno;
+
+			/* CPU accounting is a counter, not an additive wall-time phase. */
+			trace2_data_intmax("grep", the_repository,
+					   "execution_main_thread_cpu_valid", cpu_valid);
+			if (cpu_valid)
+				trace2_data_intmax("grep", the_repository,
+						   "execution_main_thread_cpu_microseconds",
+						   cpu_ns / 1000);
+			errno = saved_errno;
+		}
 		trace2_data_intmax("grep", the_repository, "mode/no-index",
 				   !use_index);
 		trace2_data_intmax("grep", the_repository, "mode/cached",
