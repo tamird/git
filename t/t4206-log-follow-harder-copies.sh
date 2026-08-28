@@ -10,6 +10,50 @@ test_description='Test --follow should always find copies hard in git log.
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff.sh
 
+test_lazy_prereq ODB_MONOTONIC_CLOCK '
+	test-tool trace2 012monotonic_clock
+'
+
+test_follow_odb_trace () {
+	odb_trace=$1 &&
+	odb_reads=$2 &&
+	odb_loose=$3 &&
+	odb_unpack=$4 &&
+	odb_prefix=follow-full-tree/tree-read/odb &&
+	test_trace2_data diff "$odb_prefix/valid" "[01]" <"$odb_trace" || return 1
+
+	if test_have_prereq ODB_MONOTONIC_CLOCK
+	then
+		odb_fields=12 &&
+		test_trace2_data diff "$odb_prefix/valid" 1 <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/read-count" "$odb_reads" <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/source-inmemory-count" 0 <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/source-loose-count" "$odb_loose" <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/source-packed-copy-count" 0 <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/source-packed-unpack-count" "$odb_unpack" <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/packed-content-count" "$odb_unpack" <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/cache-copy-count" 0 <"$odb_trace" &&
+		test_trace2_data diff "$odb_prefix/cache-copy-us" 0 <"$odb_trace" || return 1
+
+		for odb_key in entry-location-count entry-location-us packed-content-us
+		do
+			test_trace2_data diff "$odb_prefix/$odb_key" "[0-9][0-9]*" <"$odb_trace" || return 1
+		done &&
+		odb_location_count=$(sed -n 's/.*"key":"follow-full-tree\/tree-read\/odb\/entry-location-count","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
+		odb_location_us=$(sed -n 's/.*"key":"follow-full-tree\/tree-read\/odb\/entry-location-us","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
+		odb_content_us=$(sed -n 's/.*"key":"follow-full-tree\/tree-read\/odb\/packed-content-us","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
+		odb_descriptor_us=$(sed -n 's/.*"key":"follow-full-tree\/tree-read-us","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
+		test "$odb_location_count" -ge "$odb_unpack" &&
+		test "$((odb_location_us + odb_content_us))" -le "$odb_descriptor_us" || return 1
+	else
+		odb_fields=1 &&
+		test_trace2_data diff "$odb_prefix/valid" 0 <"$odb_trace" || return 1
+	fi &&
+	test "$(grep -c '"key":"follow-full-tree/tree-read/odb/' "$odb_trace")" = "$odb_fields" &&
+	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree/tree-read/odb/' "$odb_trace")" = "$odb_fields" &&
+	test_grep ! '"event":"th_counter".*"category":"diff","name":"follow-full-tree/tree-read/odb/' "$odb_trace"
+}
+
 test_follow_leaf_result () {
 	follow_leaf_expect=$1 &&
 	follow_leaf_additions=$2 &&
@@ -59,6 +103,10 @@ test_follow_additions_trace () {
 test_follow_full_tree_trace () {
 	full_tree_trace="$1"
 	full_tree_read_count="$2"
+	full_tree_odb_reads=${3:-$2}
+	full_tree_odb_loose=${4:-$2}
+	full_tree_odb_unpack=${5:-0}
+	full_tree_odb_data_count=$(grep -c '"key":"follow-full-tree/tree-read/odb/' "$full_tree_trace")
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-pickaxe/tree-paths",' "$full_tree_trace")" = 1 &&
 	full_tree_intervals=$(sed -n \
 		's/.*"event":"timer".*"category":"diff","name":"follow-pickaxe\/tree-paths","intervals":\([0-9][0-9]*\),.*/\1/p' \
@@ -72,8 +120,8 @@ test_follow_full_tree_trace () {
 	test_trace2_data diff follow-full-tree/tree-read/count "$full_tree_read_count" <"$full_tree_trace" &&
 	test_trace2_data diff follow-full-tree/tree-read-us "[0-9][0-9]*" <"$full_tree_trace" &&
 	test_follow_additions_trace "$full_tree_trace" 0 1 &&
-	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = 6 &&
-	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = 6 &&
+	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count))" &&
+	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count))" &&
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-full-tree",' "$full_tree_trace")" = 1 &&
 	test_grep '"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":1,' "$full_tree_trace" &&
 	test_grep ! '"event":"th_timer".*"category":"diff","name":"follow-full-tree"' "$full_tree_trace" &&
@@ -109,7 +157,9 @@ test_follow_full_tree_trace () {
 	full_tree_read_rounded_us=$(awk -v seconds="$full_tree_read_seconds" \
 		'BEGIN { printf "%.0f\n", seconds * 1000000 }') &&
 	test "$full_tree_read_us" -le "$full_tree_read_rounded_us" &&
-	test "$full_tree_read_rounded_us" -le "$((full_tree_read_us + 1))"
+	test "$full_tree_read_rounded_us" -le "$((full_tree_read_us + 1))" &&
+	test_follow_odb_trace "$full_tree_trace" "$full_tree_odb_reads" \
+		"$full_tree_odb_loose" "$full_tree_odb_unpack"
 }
 
 echo >path0 'Line 1
@@ -195,6 +245,18 @@ test_expect_success 'blame single-follow searches omit full-tree read telemetry'
 		"$TRASH_DIRECTORY/follow-blame.event"
 '
 
+test_expect_success 'log without follow omits full-tree read telemetry' '
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+		git log --name-status --format=%s -n1 -- path1 >expect-log 2>err-log &&
+	GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/no-follow.event" \
+		git log --name-status --format=%s -n1 -- path1 >actual-log 2>err-log-traced &&
+	test_cmp expect-log actual-log &&
+	test_cmp err-log err-log-traced &&
+	test_grep ! follow-full-tree "$TRASH_DIRECTORY/no-follow.event"
+'
+
 test_expect_success 'following a second commit still detects the harder copy' '
 	sane_unset GIT_TRACE2_EVENT_NESTING &&
 	printf "%s\n" "Copy path1 from path0" "Change path0" >expect &&
@@ -262,9 +324,70 @@ test_expect_success 'follow harder copies reads an unchanged subtree once' '
 			git log --follow --name-status --format=%s -n1 \
 				-- destination >actual &&
 		test_cmp expect actual &&
-		test_follow_full_tree_trace "$PWD/follow.event" 3 &&
+		test_follow_full_tree_trace "$PWD/follow.event" 3 3 0 3 &&
 		grep "/$pack_stem[.]pack $shared_offset$" pack-access >shared-access &&
 		test_line_count = 1 shared-access
+	)
+'
+
+test_expect_success 'follow descriptor loads peel replaced tags and commits' '
+	shared_tree=$(git -C follow-shared-subtree rev-parse HEAD:shared) &&
+	test_when_finished "git -C follow-shared-subtree update-ref -d refs/replace/$shared_tree" &&
+	(
+		cd follow-shared-subtree &&
+		git ls-tree HEAD:shared >tree-input &&
+		noise=$(git rev-parse HEAD:shared/aaa) &&
+		printf "100644 blob %s\tzzz\n" "$noise" >>tree-input &&
+		peeled_tree=$(git mktree <tree-input) &&
+		test "$peeled_tree" != "$shared_tree" &&
+		peeled_commit=$(echo peeled | git commit-tree "$peeled_tree") &&
+		git tag -a -m peeled peeled-commit "$peeled_commit" &&
+		peeled_tag=$(git rev-parse peeled-commit) &&
+		git replace -f "$shared_tree" "$peeled_tag" &&
+
+		printf "%s\n\n" copy >expect &&
+		printf "C100\tshared/source\tdestination\n" >>expect &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual-peeled 2>err-peeled &&
+		test_cmp expect actual-peeled &&
+		test_must_be_empty err-peeled &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$PWD/peeled.event" \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual-peeled-traced 2>err-peeled-traced &&
+		test_cmp actual-peeled actual-peeled-traced &&
+		test_cmp err-peeled err-peeled-traced &&
+		# Two roots and one shared subtree, even though the latter peels
+		# through a tag and commit before reading its distinct final tree.
+		test_follow_full_tree_trace "$PWD/peeled.event" 3 5 3 2
+	)
+'
+
+test_expect_success 'a corrupt first entry does not complete a descriptor load' '
+	shared_tree=$(git -C follow-shared-subtree rev-parse HEAD:shared) &&
+	test_when_finished "git -C follow-shared-subtree update-ref -d refs/replace/$shared_tree" &&
+	(
+		cd follow-shared-subtree &&
+		corrupt_tree=$(printf "100644 broken" |
+			git hash-object -t tree --literally -w --stdin) &&
+		git replace "$shared_tree" "$corrupt_tree" &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			test_expect_code 128 git log --follow --name-status \
+				--format=%s -n1 -- destination >actual-corrupt 2>err-corrupt &&
+		test_grep "too-short tree object" err-corrupt &&
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$PWD/corrupt.event" \
+			test_expect_code 128 git log --follow --name-status \
+				--format=%s -n1 -- destination \
+				>actual-corrupt-traced 2>err-corrupt-traced &&
+		test_cmp actual-corrupt actual-corrupt-traced &&
+		test_cmp err-corrupt err-corrupt-traced &&
+		test_trace2_data diff follow-full-tree/tree-read/count 2 <corrupt.event &&
+		test_grep ! -E \
+			'\''"(name|key)":"follow-full-tree(-us|-max-us|/count|/completed|/eligible-additions)?"'\'' \
+			corrupt.event &&
+		test_follow_odb_trace "$PWD/corrupt.event" 2 0 2
 	)
 '
 
@@ -349,7 +472,8 @@ test_expect_success 'follow counts eligible additions across completed full-tree
 		test_grep '\''"event":"timer".*"category":"diff","name":"follow-full-tree/tree-read","intervals":7,'\'' follow.event &&
 		test_grep '\''"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":2,'\'' follow.event &&
 		test_trace2_data diff follow-full-tree/eligible-additions 5 <follow.event &&
-		test_follow_additions_trace "$PWD/follow.event" 5 2
+		test_follow_additions_trace "$PWD/follow.event" 5 2 &&
+		test_follow_odb_trace "$PWD/follow.event" 7 7 0
 	)
 '
 
@@ -495,7 +619,8 @@ test_expect_success 'an incomplete full-tree walk does not publish pending addit
 		test_grep ! -E \
 			'\''"(name|key)":"follow-full-tree(-us|-max-us|/count|/completed|/eligible-additions)?"'\'' \
 			incomplete.event &&
-		test_trace2_data diff follow-full-tree/tree-read/count 2 <incomplete.event
+		test_trace2_data diff follow-full-tree/tree-read/count 2 <incomplete.event &&
+		test_follow_odb_trace "$PWD/incomplete.event" 2 2 0
 	)
 '
 

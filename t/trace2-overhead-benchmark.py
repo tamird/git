@@ -45,6 +45,7 @@ TREE_READ_REVISIONS = 256
 REFS_COMMANDS_PER_SAMPLE = 128
 FOLLOW_SOURCES = (4000, 100000)
 FOLLOW_ADDITIONS = (0, 4096, 65536)
+FOLLOW_READ_SUBTREES = 65536
 FOLLOW_INPUT_LIMIT = 8 * 1024 * 1024
 STREAM_FILES = 8
 STREAM_BYTES = 8 * 1024 * 1024
@@ -631,11 +632,15 @@ class FollowFixture:
     object_counts: str
     additions: int = 0
     tree_input_sha256: dict[str, str] | None = None
+    subtrees: int = 0
 
 
 def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 0,
-                        bulk_trees: bool = False) -> FollowFixture:
-    repo = root / (f"follow-{sources}" + (f"-additions-{additions}" if additions else ""))
+                        bulk_trees: bool = False, subtrees: int = 0) -> FollowFixture:
+    if subtrees and (not bulk_trees or additions or sources != subtrees + 1):
+        raise AssertionError("tree-read fixture needs one source per subtree and one selected source")
+    repo = root / (f"follow-{sources}" + (f"-additions-{additions}" if additions else "")
+                   + (f"-tree-reads-{subtrees}" if subtrees else ""))
     repo.mkdir()
     git.run(repo, ("init", "--bare", "--quiet", "--initial-branch=base", "--template=", "."))
     # Each 64-byte line is one similarity span. Replacing one of 100 equally
@@ -649,30 +654,53 @@ def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 
     tree_input_sha256: dict[str, str] | None = None
     if bulk_trees:
         # fast-import scans existing siblings for each M path. Installing
-        # prebuilt flat trees avoids quadratic setup without changing geometry.
-        def write_setup_object(args: tuple[str, ...], data: bytes) -> str:
+        # prebuilt trees avoids quadratic setup without changing geometry.
+        def write_setup_objects(args: tuple[str, ...], data: bytes, count: int = 1) -> tuple[str, ...]:
             if len(data) > FOLLOW_INPUT_LIMIT:
                 raise AssertionError(f"follow setup input exceeded its fixed bound: {args}")
             written = git.run(repo, args, input_data=data)
-            oid = written.stdout
-            if (written.stderr or len(oid) not in (41, 65) or oid[-1:] != b"\n"
-                    or any(byte not in b"0123456789abcdef" for byte in oid[:-1])):
-                raise AssertionError(f"expected one full object ID from {args}: {written}")
-            return oid[:-1].decode("ascii")
+            oids = written.stdout.splitlines(keepends=True)
+            if (written.stderr or len(oids) != count
+                    or any(len(oid) not in (41, 65) or oid[-1:] != b"\n"
+                           or any(byte not in b"0123456789abcdef" for byte in oid[:-1])
+                           for oid in oids)):
+                raise AssertionError(f"expected {count} full object IDs from {args}: {written}")
+            return tuple(oid[:-1].decode("ascii") for oid in oids)
 
-        noise_oid = write_setup_object(("hash-object", "-w", "--stdin"), noise)
-        source_oid = write_setup_object(("hash-object", "-w", "--stdin"), source)
+        noise_oid, = write_setup_objects(("hash-object", "-w", "--stdin"), noise)
+        source_oid, = write_setup_objects(("hash-object", "-w", "--stdin"), source)
+        tree_input_sha256 = {}
+        if subtrees:
+            # Unique entry names make every unchanged subtree a distinct
+            # object without adding blobs or one subprocess per tree.
+            subtree_input = b"".join(f"100644 blob {noise_oid}\t{number:08d}\n\n".encode()
+                                     for number in range(subtrees))
+            if subtrees != 65536 or len(subtree_input) > FOLLOW_INPUT_LIMIT:
+                raise AssertionError("tree-read setup requires the fixed bounded 65536-tree input")
+            # Four fixed batches avoid putting all loose-object creation in
+            # one 30-second launch. Equal-width records preserve boundaries.
+            batch_bytes = len(subtree_input) // 4
+            subtree_oids: list[str] = []
+            for offset in range(0, len(subtree_input), batch_bytes):
+                subtree_oids.extend(write_setup_objects(
+                    ("mktree", "--batch"), subtree_input[offset:offset + batch_bytes], 16384,
+                ))
+            if len(set(subtree_oids)) != subtrees:
+                raise AssertionError("tree-read fixture requires unique subtree objects")
+            tree_input_sha256["subtrees"] = hashlib.sha256(subtree_input).hexdigest()
+            source_entries = b"".join(f"040000 tree {oid}\t{number:08d}\n".encode()
+                                      for number, oid in enumerate(subtree_oids))
+        else:
+            source_entries = b"".join(f"100644 blob {noise_oid}\t{number:08d}\n".encode()
+                                      for number in range(sources - 1))
         tree_inputs = {
-            "sources": b"".join(f"100644 blob {noise_oid}\t{number:08d}\n".encode()
-                                for number in range(sources - 1))
-                       + f"100644 blob {source_oid}\tsource\n".encode(),
+            "sources": source_entries + f"100644 blob {source_oid}\tsource\n".encode(),
         }
         if additions:
             tree_inputs["added"] = b"".join(f"100644 blob {noise_oid}\t{number:08d}\n".encode()
                                             for number in range(additions))
-        tree_input_sha256 = {}
         for name, data in tree_inputs.items():
-            tree_oids[name] = write_setup_object(("mktree",), data)
+            tree_oids[name], = write_setup_objects(("mktree",), data)
             tree_input_sha256[name] = hashlib.sha256(data).hexdigest()
     stream = bytearray()
 
@@ -724,7 +752,10 @@ def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 
     }
     if len(source_trees) != 1:
         raise AssertionError("copy commits must preserve the complete source subtree")
-    expected_sources = b"".join(f"sources/{number:08d}\n".encode() for number in range(sources - 1))
+    expected_sources = b"".join(
+        (f"sources/{number:08d}/{number:08d}\n" if subtrees else f"sources/{number:08d}\n").encode()
+        for number in range(sources - 1)
+    )
     expected_sources += b"sources/source\n"
     listing = git.run(repo, ("ls-tree", "-r", "--name-only", revisions["base"]))
     if listing.stdout != expected_sources or listing.stderr:
@@ -739,13 +770,14 @@ def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 
     counts = git.run(repo, ("count-objects", "-v")).stdout.decode()
     parsed = dict(value.split(": ", 1) for value in counts.splitlines())
     # Both child commits share the added subtree and reuse the source noise blob.
-    packed_objects = 11 if additions else 10
+    packed_objects = (11 if additions else 10) + subtrees
     if int(parsed["count"]) != 0 or int(parsed["in-pack"]) != packed_objects:
         raise AssertionError(f"expected {packed_objects} packed objects and no loose objects: {counts}")
     pack, = (repo / "objects/pack").glob("*.pack")
     refs = git.run(repo, ("show-ref",)).stdout
     return FollowFixture(repo, sources, revisions, trees, file_hash(pack),
-                         hashlib.sha256(stream).hexdigest(), refs, counts, additions, tree_input_sha256)
+                         hashlib.sha256(stream).hexdigest(), refs, counts, additions, tree_input_sha256,
+                         subtrees)
 
 
 def follow_trace_coverage(path: Path, fixture: FollowFixture, kind: FollowKind) -> dict[str, object]:
@@ -777,6 +809,7 @@ def follow_trace_coverage(path: Path, fixture: FollowFixture, kind: FollowKind) 
             completed.append(event["count"])
     if (len(timers) != 1 or completed != [1]
             or values.get("follow-full-tree/count") != 1
+            or values.get("follow-full-tree/tree-read/count") != 3 + fixture.subtrees + bool(fixture.additions)
             or values.get("follow-full-tree/eligible-additions") != fixture.additions):
         raise AssertionError(f"follow full-tree geometry changed: {values}")
     full_tree_us = values.get("follow-full-tree-us", -1)
@@ -807,11 +840,15 @@ def follow_args(fixture: FollowFixture, kind: FollowKind) -> tuple[str, ...]:
 
 
 def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, ...], *,
-                     additions_only: bool = False) -> dict[str, object]:
+                     additions_only: bool = False, tree_reads_only: bool = False) -> dict[str, object]:
     results: dict[str, object] = {}
-    for kind in FOLLOW_KINDS:
+    kinds: tuple[FollowKind, ...] = ("exact",) if tree_reads_only else FOLLOW_KINDS
+    for kind in kinds:
         conditions = tuple((fixture, mode) for fixture in fixtures for mode in MODES)
-        if additions_only:
+        if tree_reads_only:
+            fixture, = fixtures
+            orders = tuple(tuple((fixture, mode) for mode in order) for order in ORDERS)
+        elif additions_only:
             # Six mode permutations and rotating fixture blocks balance each
             # marginal position, not every carryover pair of nine conditions.
             orders_list = []
@@ -877,7 +914,7 @@ def benchmark_follow(git: Git, fixtures: tuple[FollowFixture, ...], *,
         pack, = (fixture.repo / "objects/pack").glob("*.pack")
         if file_hash(pack) != fixture.pack_sha256:
             raise AssertionError("read-only follow changed the fixture pack")
-        if additions_only:
+        if additions_only or tree_reads_only:
             counts = git.run(fixture.repo, ("count-objects", "-v"))
             if counts.stdout.decode() != fixture.object_counts or counts.stderr:
                 raise AssertionError("read-only follow changed the fixture object counts")
@@ -1046,10 +1083,12 @@ def main() -> None:
     if (len(sys.argv) not in (3, 4) or sys.argv[2] != "opt"
             or (len(sys.argv) == 4 and sys.argv[3] not in (
                 "--tree-reads-only", "--tree-excludes-only", "--status-only", "--refs-only",
-                "--follow-only", "--follow-additions-only", "--startup-only", "--reflog-only"))):
+                "--follow-only", "--follow-additions-only", "--follow-tree-reads-only",
+                "--startup-only", "--reflog-only"))):
         raise SystemExit("run //t:trace2-overhead-benchmark with -c opt --stamp "
                          "and optional --test_arg=--tree-reads-only, --tree-excludes-only, "
-                         "--status-only, --refs-only, --follow-only, --follow-additions-only, --startup-only or --reflog-only")
+                         "--status-only, --refs-only, --follow-only, --follow-additions-only, "
+                         "--follow-tree-reads-only, --startup-only or --reflog-only")
     resolver = runfiles.Create()
     if resolver is None:
         raise RuntimeError("Bazel runfiles are required")
@@ -1130,10 +1169,15 @@ def main() -> None:
             git.remaining_seconds()
             report["status"] = "complete"
             return
-        if len(sys.argv) == 4 and sys.argv[3] in ("--follow-only", "--follow-additions-only"):
+        if len(sys.argv) == 4 and sys.argv[3] in (
+                "--follow-only", "--follow-additions-only", "--follow-tree-reads-only"):
             additions_only = sys.argv[3] == "--follow-additions-only"
+            tree_reads_only = sys.argv[3] == "--follow-tree-reads-only"
             small_sources, large_sources = FOLLOW_SOURCES
-            if additions_only:
+            if tree_reads_only:
+                fixtures = (make_follow_fixture(git, root, FOLLOW_READ_SUBTREES + 1,
+                                               bulk_trees=True, subtrees=FOLLOW_READ_SUBTREES),)
+            elif additions_only:
                 fixtures = tuple(make_follow_fixture(git, root, large_sources, additions=additions,
                                                      bulk_trees=True)
                                  for additions in FOLLOW_ADDITIONS)
@@ -1144,11 +1188,15 @@ def main() -> None:
                 "unchanged_sources": fixture.sources, "revisions": fixture.revisions,
                 **({"additions": fixture.additions, "tree_input_sha256": fixture.tree_input_sha256}
                    if additions_only else {}),
+                **({"unique_unchanged_subtrees": fixture.subtrees,
+                    "completed_descriptor_loads": fixture.subtrees + 3,
+                    "tree_input_sha256": fixture.tree_input_sha256} if tree_reads_only else {}),
                 "trees": fixture.trees, "pack_sha256": fixture.pack_sha256,
                 "import_sha256": fixture.import_sha256, "refs_sha256": hashlib.sha256(fixture.refs).hexdigest(),
                 "packed_objects": fixture.object_counts,
             } for fixture in fixtures]
             report["benchmark_sha256"] = file_hash(Path(__file__))
+            report.pop("stream_bytes_per_file")
             report["limitations"] = [
                 "Compare fixed A1/B/A2 binaries with identical harness, import, trees, revisions, pack, build flags, modes and sample order; on/off is not a patch effect.",
                 ("Each of six additions/copy conditions has six samples per tracing mode, with two unretained warmups per mode; fixture-block and mode positions are balanced, not all carryover pairs; no adaptive sizes, repeats or threshold."
@@ -1160,7 +1208,16 @@ def main() -> None:
                  "One destination and many identical small unrelated sources isolate unchanged-pair scaling; edited copies use unlimited rename candidates and are not the production candidate mixture."),
                 "Bare packed fixtures, warm caches, no checkout, daemon, OG, cold-cache, per-child RSS or natural-workload savings claim.",
             ]
-            report.update(benchmark_follow(git, fixtures, additions_only=additions_only))
+            if tree_reads_only:
+                report["limitations"] = [
+                    "Compare baseline/candidate binaries only with identical harness, fixture manifests, outputs, modes and order; within-binary on/off is not a patch effect.",
+                    "One fixed geometry, two discarded warmups and six retained samples per tracing mode; all six mode permutations, no adaptive repeats, sizes or timing assertion.",
+                    "65536 unique unchanged one-leaf trees plus one selected source yield 65537 sources and 65539 descriptor loads; one exact C100 destination, no inexact comparisons or added noise.",
+                    "Small nondelta packed trees and warm caches isolate repeated descriptor overhead, not natural tree sizes, packed deltas, cold I/O or reusable-tree locality. Source-pair and rename bookkeeping remain in command timing.",
+                    "Primary CPU sums child user+system within each sample; wall includes startup/output collection. Setup, hashing and trace parsing are outside Git timing. No OG wrapper, daemon, production replay or historical-cause claim.",
+                ]
+            report.update(benchmark_follow(git, fixtures, additions_only=additions_only,
+                                           tree_reads_only=tree_reads_only))
             git.remaining_seconds()
             report["status"] = "complete"
             return

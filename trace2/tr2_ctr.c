@@ -63,6 +63,42 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "follow-full-tree/eligible-additions",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/invalid",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/read-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INMEMORY] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-inmemory-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOOSE] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-loose-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_COPY] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-packed-copy-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_UNPACK] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-packed-unpack-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/entry-location-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/entry-location-ns",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_COUNT] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-content-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-content-ns",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_COUNT] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-ns",
+	},
 
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS] = {
 		.category = "cache_tree",
@@ -118,12 +154,34 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	/* Add additional metadata before here. */
 };
 
+/* Only this family promises checked sums and a sticky validity result. */
+static void add_follow_odb_counter(struct tr2_counter_block *block,
+				   enum trace2_counter_id cid, uint64_t value)
+{
+	uint64_t *invalid = &block->counter[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID].value;
+	uint64_t *sum = &block->counter[cid].value;
+
+	if (cid == TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID) {
+		if (value)
+			*invalid = 1;
+	} else if (!*invalid) {
+		if (value > UINT64_MAX - *sum)
+			*invalid = 1;
+		else
+			*sum += value;
+	}
+}
+
 void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
 {
 	struct tr2tls_thread_ctx *ctx = tr2tls_get_self();
 	struct tr2_counter *c = &ctx->counter_block.counter[cid];
 
-	c->value += value;
+	if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID &&
+	    cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS)
+		add_follow_odb_counter(&ctx->counter_block, cid, value);
+	else
+		c->value += value;
 
 	ctx->used_any_counter = 1;
 	if (tr2_counter_metadata[cid].want_per_thread_events)
@@ -147,7 +205,11 @@ void tr2_update_final_counters(void)
 		struct tr2_counter *c_final = &final_counter_block.counter[cid];
 		const struct tr2_counter *c = &ctx->counter_block.counter[cid];
 
-		c_final->value += c->value;
+		if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID &&
+		    cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS)
+			add_follow_odb_counter(&final_counter_block, cid, c->value);
+		else
+			c_final->value += c->value;
 	}
 }
 
@@ -201,6 +263,42 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		trace2_data_intmax("diff", NULL,
 				   "follow-full-tree/eligible-additions",
 				   follow_additions);
+		errno = saved_errno;
+	}
+
+	/* A completed descriptor, not a completed traversal, owns this cohort. */
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS].value ||
+	    final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID].value) {
+		int saved_errno = errno;
+		int valid = !final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID].value;
+
+		for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS;
+		     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++)
+			if (cid != TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS &&
+			    cid != TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS &&
+			    cid != TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS &&
+			    final_counter_block.counter[cid].value > INTMAX_MAX)
+				valid = 0;
+
+		trace2_data_intmax("diff", NULL, "follow-full-tree/tree-read/odb/valid", valid);
+		for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS;
+		     valid && cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++) {
+			const char *name = tr2_counter_metadata[cid].name;
+			uint64_t value = final_counter_block.counter[cid].value;
+
+			/* Round only after checked command-cumulative ns aggregation. */
+			if (cid == TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS) {
+				name = "follow-full-tree/tree-read/odb/entry-location-us";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS) {
+				name = "follow-full-tree/tree-read/odb/packed-content-us";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS) {
+				name = "follow-full-tree/tree-read/odb/cache-copy-us";
+				value /= 1000;
+			}
+			trace2_data_intmax("diff", NULL, name, value);
+		}
 		errno = saved_errno;
 	}
 

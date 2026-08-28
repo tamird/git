@@ -414,4 +414,35 @@ test_expect_success 'alias events redact URL signatures' '
 	test_grep "\"event\":\"alias\".*sig=<REDACTED>" trace.event
 '
 
+test_expect_success PTHREADS 'follow ODB counters merge ns before rounding' '
+	test_when_finished "rm follow-odb.event" &&
+	GIT_TRACE2_EVENT="$PWD/follow-odb.event" \
+		test-tool trace2 202follow_odb_counter merged &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/valid 1 <follow-odb.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/read-count 2 <follow-odb.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/source-loose-count 2 <follow-odb.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/entry-location-count 2 <follow-odb.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/entry-location-us 1 <follow-odb.event &&
+	test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/'\'' follow-odb.event)" = 12 &&
+	test_grep ! '\''"event":"th_counter".*"name":"follow-full-tree/tree-read/odb/'\'' follow-odb.event
+'
+
+for mode in increment-overflow merge-overflow
+do
+	prereq=
+	if test "$mode" = merge-overflow
+	then
+		prereq=PTHREADS
+	fi
+	test_expect_success "$prereq" "follow ODB $mode emits only invalid DATA" '
+		test_when_finished "rm follow-odb.event" &&
+		GIT_TRACE2_EVENT="$PWD/follow-odb.event" \
+			test-tool trace2 202follow_odb_counter "$mode" &&
+		test_trace2_data diff follow-full-tree/tree-read/odb/valid 0 <follow-odb.event &&
+		test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/'\'' follow-odb.event)" = 1 &&
+		test_grep '\''"event":"counter".*"category":"test","name":"test1","count":7}'\'' follow-odb.event &&
+		test_grep ! '\''"event":"counter".*"name":"follow-full-tree/tree-read/odb/packed-content-count"'\'' follow-odb.event
+	'
+done
+
 test_done

@@ -929,11 +929,28 @@ void *odb_read_object(struct object_database *odb,
 	return odb_read_object_with_result(odb, oid, type, size, NULL);
 }
 
-void *odb_read_object_peeled(struct object_database *odb,
-			     const struct object_id *oid,
-			     enum object_type required_type,
-			     size_t *size,
-			     struct object_id *actual_oid_return)
+static void *read_object_with_report(struct object_database *odb,
+				    const struct object_id *oid,
+				    enum object_type *type, size_t *size,
+				    void (*report)(const struct odb_read_result *, void *),
+				    void *report_data)
+{
+	struct odb_read_result result;
+	void *buffer = odb_read_object_with_result(odb, oid, type, size, &result);
+	int saved_errno = errno;
+
+	report(&result, report_data);
+	errno = saved_errno;
+	return buffer;
+}
+
+void *odb_read_object_peeled_with_results(struct object_database *odb,
+					const struct object_id *oid,
+					enum object_type required_type,
+					size_t *size,
+					struct object_id *actual_oid_return,
+					void (*report)(const struct odb_read_result *, void *),
+					void *report_data)
 {
 	enum object_type type;
 	void *buffer;
@@ -945,7 +962,11 @@ void *odb_read_object_peeled(struct object_database *odb,
 		int ref_length = -1;
 		const char *ref_type = NULL;
 
-		buffer = odb_read_object(odb, &actual_oid, &type, &isize);
+		if (report)
+			buffer = read_object_with_report(odb, &actual_oid, &type,
+						 &isize, report, report_data);
+		else
+			buffer = odb_read_object(odb, &actual_oid, &type, &isize);
 		if (!buffer)
 			return NULL;
 		if (type == required_type) {
@@ -976,6 +997,16 @@ void *odb_read_object_peeled(struct object_database *odb,
 		/* Now we have the ID of the referred-to object in
 		 * actual_oid.  Check again. */
 	}
+}
+
+void *odb_read_object_peeled(struct object_database *odb,
+			     const struct object_id *oid,
+			     enum object_type required_type,
+			     size_t *size,
+			     struct object_id *actual_oid_return)
+{
+	return odb_read_object_peeled_with_results(odb, oid, required_type, size,
+						 actual_oid_return, NULL, NULL);
 }
 
 int odb_has_object(struct object_database *odb, const struct object_id *oid,

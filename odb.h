@@ -379,6 +379,19 @@ void *odb_read_object_peeled(struct object_database *odb,
 			     struct object_id *oid_ret);
 
 /*
+ * NULL opts out. Otherwise report each returning read, including failed reads
+ * and intermediate peels; fatal reads do not return. The result is borrowed
+ * only for the duration of the callback.
+ */
+void *odb_read_object_peeled_with_results(struct object_database *odb,
+					const struct object_id *oid,
+					enum object_type required_type,
+					size_t *size,
+					struct object_id *oid_ret,
+					void (*report)(const struct odb_read_result *, void *),
+					void *report_data);
+
+/*
  * Add an object file to the in-memory object store, without writing it
  * to disk.
  *

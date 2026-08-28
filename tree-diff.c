@@ -8,6 +8,7 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "hash.h"
+#include "odb.h"
 #include "trace2.h"
 #include "tree.h"
 #include "tree-walk.h"
@@ -632,6 +633,73 @@ static void follow_change(struct diff_options *opt,
 			    old_dirty_submodule, new_dirty_submodule);
 }
 
+struct follow_odb_read {
+	/* Index zero is sticky invalid; remaining slots mirror native counters. */
+	uint64_t value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS -
+		       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID + 1];
+};
+
+static void follow_odb_add(struct follow_odb_read *read,
+			   enum trace2_counter_id cid, uint64_t value)
+{
+	uint64_t *sum = &read->value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+
+	if (read->value[0])
+		return;
+	if (value > UINT64_MAX - *sum)
+		read->value[0] = 1;
+	else
+		*sum += value;
+}
+
+static void follow_odb_result(const struct odb_read_result *result, void *data)
+{
+	struct follow_odb_read *read = data;
+	enum trace2_counter_id source;
+
+	if (read->value[0])
+		return;
+	if (result->invalid || result->packed_entry_location_invalid ||
+	    result->packed_content_invalid ||
+	    result->packed_cache_copy_attempt_count > result->packed_content_attempt_count ||
+	    result->packed_cache_copy_ns > result->packed_content_ns) {
+		read->value[0] = 1;
+		return;
+	}
+	switch (result->kind) {
+	case ODB_READ_RESULT_INMEMORY:
+		source = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INMEMORY;
+		break;
+	case ODB_READ_RESULT_LOOSE:
+		source = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOOSE;
+		break;
+	case ODB_READ_RESULT_PACKED_CACHE_COPY:
+		source = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_COPY;
+		break;
+	case ODB_READ_RESULT_PACKED_UNPACK:
+		source = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_UNPACK;
+		break;
+	default:
+		read->value[0] = 1;
+		return;
+	}
+	/* Optional MIDX/inflate/base detail has independent validity. */
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS, 1);
+	follow_odb_add(read, source, 1);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT,
+		       result->packed_entry_location_attempt_count);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS,
+		       result->packed_entry_location_ns);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_COUNT,
+		       result->packed_content_attempt_count);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS,
+		       result->packed_content_ns);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_COUNT,
+		       result->packed_cache_copy_attempt_count);
+	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS,
+		       result->packed_cache_copy_ns);
+}
+
 /*
  * Only the unrestricted --follow search installs follow_change. In
  * particular, blame also sets single_follow without entering that search.
@@ -642,6 +710,9 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 					  struct tree_desc *desc,
 					  const struct object_id *oid)
 {
+	struct follow_odb_read read;
+	uint64_t elapsed_ns, location_ns, content_ns;
+	enum trace2_counter_id cid;
 	void *buffer;
 	int saved_errno;
 
@@ -649,11 +720,31 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 		return fill_tree_descriptor(opt->repo, desc, oid);
 
 	saved_errno = errno;
+	memset(&read, 0, sizeof(read));
 	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
 	errno = saved_errno;
-	buffer = fill_tree_descriptor(opt->repo, desc, oid);
+	buffer = fill_tree_descriptor_with_results(opt->repo, desc, oid,
+						   follow_odb_result, &read);
 	saved_errno = errno;
-	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	location_ns = read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS -
+				TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+	content_ns = read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS -
+			       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+	if (location_ns > elapsed_ns || content_ns > elapsed_ns - location_ns)
+		read.value[0] = 1;
+	/*
+	 * Commit only after descriptor initialization and timer stop succeed.
+	 * All peels belong to this completed-load cohort; a fatal read or first
+	 * entry error discards the staged results, just like the existing timer.
+	 */
+	for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID;
+	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++) {
+		uint64_t value = read.value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+
+		if (value)
+			trace2_counter_add(cid, value);
+	}
 	errno = saved_errno;
 	return buffer;
 }

@@ -275,6 +275,23 @@ static int ut_011thread_time(int argc UNUSED, const char **argv UNUSED)
 	return result;
 }
 
+static int ut_012monotonic_clock(int argc UNUSED, const char **argv UNUSED)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec before, after;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &before) ||
+	    clock_gettime(CLOCK_MONOTONIC, &after))
+		return 1;
+	return before.tv_sec < 0 || before.tv_nsec < 0 ||
+		before.tv_nsec >= 1000000000 || after.tv_sec < before.tv_sec ||
+		after.tv_nsec < 0 || after.tv_nsec >= 1000000000 ||
+		(after.tv_sec == before.tv_sec && after.tv_nsec < before.tv_nsec);
+#else
+	return 1;
+#endif
+}
+
 /*
  * Single-threaded timer test.  Create several intervals using the
  * TEST1 timer.  The test script can verify that an aggregate Trace2
@@ -456,6 +473,55 @@ static int ut_201counter(int argc, const char **argv)
 	return 0;
 }
 
+static void follow_odb_counter_sample(uint64_t ns)
+{
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOOSE, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS, ns);
+}
+
+static void *follow_odb_counter_thread(void *data)
+{
+	uint64_t *ns = data;
+
+	trace2_thread_start("follow_odb_counter");
+	follow_odb_counter_sample(*ns);
+	trace2_thread_exit();
+	return NULL;
+}
+
+static int ut_202follow_odb_counter(int argc, const char **argv)
+{
+	pthread_t thread;
+	uint64_t worker_ns;
+
+	if (argc != 1)
+		die("expect merged, increment-overflow or merge-overflow");
+	if (!strcmp(argv[0], "increment-overflow")) {
+		follow_odb_counter_sample(UINT64_MAX);
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS, 1);
+		/* The invalid family freezes, but ordinary counters still work. */
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_COUNT, 1);
+	} else {
+		if (!strcmp(argv[0], "merged")) {
+			follow_odb_counter_sample(800);
+			worker_ns = 800;
+		} else if (!strcmp(argv[0], "merge-overflow")) {
+			follow_odb_counter_sample(UINT64_MAX);
+			worker_ns = 1;
+		} else {
+			die("unknown follow ODB counter mode: %s", argv[0]);
+		}
+		if (pthread_create(&thread, NULL, follow_odb_counter_thread, &worker_ns))
+			die("failed to create thread");
+		if (pthread_join(thread, NULL))
+			die("failed to join thread");
+	}
+	trace2_counter_add(TRACE2_COUNTER_ID_TEST1, 7);
+	return 0;
+}
+
 static int ut_300redact_start(int argc, const char **argv)
 {
 	if (!argc)
@@ -584,12 +650,14 @@ static struct unit_test ut_table[] = {
 	{ ut_009bug_BUG,  "009bug_BUG","" },
 	{ ut_010bug_BUG,  "010bug_BUG","" },
 	{ ut_011thread_time, "011thread_time", "" },
+	{ ut_012monotonic_clock, "012monotonic_clock", "" },
 
 	{ ut_100timer,    "100timer",  "<count> <ms_delay>" },
 	{ ut_101timer,    "101timer",  "<count> <ms_delay> <threads>" },
 
 	{ ut_200counter,  "200counter", "<v1> [<v2> [<v3> [...]]]" },
 	{ ut_201counter,  "201counter", "<v1> <v2> <threads>" },
+	{ ut_202follow_odb_counter, "202follow_odb_counter", "<mode>" },
 
 	{ ut_300redact_start,       "300redact_start",       "<argv...>" },
 	{ ut_301redact_child_start, "301redact_child_start", "<argv...>" },

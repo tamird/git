@@ -83,20 +83,30 @@ int init_tree_desc_gently(struct tree_desc *desc, const struct object_id *oid,
 	return result;
 }
 
-void *fill_tree_descriptor(struct repository *r,
-			   struct tree_desc *desc,
-			   const struct object_id *oid)
+void *fill_tree_descriptor_with_results(struct repository *r,
+					struct tree_desc *desc,
+					const struct object_id *oid,
+					void (*report)(const struct odb_read_result *, void *),
+					void *report_data)
 {
 	size_t size = 0;
 	void *buf = NULL;
 
 	if (oid) {
-		buf = odb_read_object_peeled(r->objects, oid, OBJ_TREE, &size, NULL);
+		buf = odb_read_object_peeled_with_results(r->objects, oid, OBJ_TREE,
+							&size, NULL, report, report_data);
 		if (!buf)
 			die(_("unable to read tree (%s)"), oid_to_hex(oid));
 	}
 	init_tree_desc(desc, oid, buf, size);
 	return buf;
+}
+
+void *fill_tree_descriptor(struct repository *r,
+			   struct tree_desc *desc,
+			   const struct object_id *oid)
+{
+	return fill_tree_descriptor_with_results(r, desc, oid, NULL, NULL);
 }
 
 static void entry_clear(struct name_entry *a)
