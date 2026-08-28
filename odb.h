@@ -352,12 +352,15 @@ struct odb_read_result {
 	uint64_t packed_base_descent_count, packed_base_descent_ns;
 	int packed_base_descent_invalid;
 	/*
-	 * Subset with zero delta frames pushed at PHASE 1 exit, sharing the
-	 * checked totals and their validity. Errors before a push also qualify;
-	 * this is not a count of non-delta objects or successful reads.
+	 * Disjoint subsets for zero or one pushed delta frame at PHASE 1 exit.
+	 * They share the checked totals and their validity. Errors qualify
+	 * by frames already pushed; this is not on-disk delta depth or a count
+	 * of successful reads.
 	 */
 	uint64_t packed_base_descent_zero_pushed_delta_count;
 	uint64_t packed_base_descent_zero_pushed_delta_ns;
+	uint64_t packed_base_descent_one_pushed_delta_count;
+	uint64_t packed_base_descent_one_pushed_delta_ns;
 	/*
 	 * Inclusive find_pack_entry calls for this content read, including
 	 * misses before a later source wins. Explicit second-read cache

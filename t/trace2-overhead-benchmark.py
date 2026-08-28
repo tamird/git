@@ -256,16 +256,21 @@ def trace_coverage(
             "content_index_tree_object_read_packed_unpack_inflate_phase_us",
         ),
     }
-    tree_base_subsets = {
-        "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count":
-            "content_index_tree_object_read_packed_base_descent_count",
-        "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us":
-            "content_index_tree_object_read_packed_base_descent_us",
-    }
+    tree_base_subsets = (
+        (
+            "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count",
+            "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us",
+        ),
+        (
+            "content_index_tree_object_read_packed_base_descent_one_pushed_delta_count",
+            "content_index_tree_object_read_packed_base_descent_one_pushed_delta_us",
+        ),
+    )
     tree_packed_keys = set(tree_packed_families)
     for keys in tree_packed_families.values():
         tree_packed_keys.update(keys)
-    tree_packed_keys.update(tree_base_subsets)
+    for subset in tree_base_subsets:
+        tree_packed_keys.update(subset)
     with path.open() as source:
         for line in source:
             event = json.loads(line)
@@ -318,15 +323,34 @@ def trace_coverage(
                 raise AssertionError("valid packed tree-read DATA must include every phase field")
             if any(tree_values[key] < 0 for key in keys if key in tree_values):
                 raise AssertionError("packed tree-read DATA must be nonnegative")
-        subset_present = tree_base_subsets.keys() & tree_values.keys()
-        if subset_present and len(subset_present) != len(tree_base_subsets):
-            raise AssertionError("zero-pushed-delta DATA must include both subset fields")
-        if subset_present:
+        captured_subsets: list[tuple[int, int]] = []
+        for count_key, time_key in tree_base_subsets:
+            present = (count_key in tree_values, time_key in tree_values)
+            if not any(present):
+                continue
+            if not all(present):
+                raise AssertionError("pushed-delta DATA must include both subset fields")
             if tree_values["content_index_tree_object_read_packed_base_descent_valid"] != 1:
-                raise AssertionError("zero-pushed-delta DATA requires valid base-descent detail")
-            if any(not 0 <= tree_values[subset] <= tree_values[parent]
-                   for subset, parent in tree_base_subsets.items()):
-                raise AssertionError("zero-pushed-delta DATA must be a nonnegative base-descent subset")
+                raise AssertionError("pushed-delta DATA requires valid base-descent detail")
+            count, elapsed_us = tree_values[count_key], tree_values[time_key]
+            parent_count = tree_values["content_index_tree_object_read_packed_base_descent_count"]
+            parent_us = tree_values["content_index_tree_object_read_packed_base_descent_us"]
+            if not 0 <= count <= parent_count or not 0 <= elapsed_us <= parent_us:
+                raise AssertionError("pushed-delta DATA must be a nonnegative base-descent subset")
+            if not count and elapsed_us:
+                raise AssertionError("an empty pushed-delta subset must have zero time")
+            if count == parent_count and elapsed_us != parent_us:
+                raise AssertionError("a complete pushed-delta subset must equal the parent time")
+            captured_subsets.append((count, elapsed_us))
+        if captured_subsets:
+            parent_count = tree_values["content_index_tree_object_read_packed_base_descent_count"]
+            parent_us = tree_values["content_index_tree_object_read_packed_base_descent_us"]
+            subset_count = sum(count for count, _ in captured_subsets)
+            subset_us = sum(elapsed_us for _, elapsed_us in captured_subsets)
+            if subset_count > parent_count or subset_us > parent_us:
+                raise AssertionError("pushed-delta subset sums must fit the base-descent totals")
+            if subset_count == parent_count and parent_us - subset_us > 1:
+                raise AssertionError("complete pushed-delta subsets may lose only one rounding microsecond")
         if any(tree_values.get(key) != expected for key, expected in tree_counts.items()):
             raise AssertionError(f"tree traversal count mismatch: {tree_values}")
         directories = tree_values.get("content_index_tree_directories", -1)

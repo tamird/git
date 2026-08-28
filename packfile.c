@@ -1343,7 +1343,7 @@ static int packed_content_time(uint64_t *now)
 }
 
 static void packed_base_descent_end(struct odb_read_result *result, uint64_t started,
-				    bool zero_pushed_delta)
+				    int delta_stack_nr)
 {
 	uint64_t finished, elapsed;
 
@@ -1357,9 +1357,12 @@ static void packed_base_descent_end(struct odb_read_result *result, uint64_t sta
 	result->packed_base_descent_count++;
 	result->packed_base_descent_ns += elapsed;
 	/* These monotonic subsets cannot overflow before their parent totals. */
-	if (zero_pushed_delta) {
+	if (!delta_stack_nr) {
 		result->packed_base_descent_zero_pushed_delta_count++;
 		result->packed_base_descent_zero_pushed_delta_ns += elapsed;
+	} else if (delta_stack_nr == 1) {
+		result->packed_base_descent_one_pushed_delta_count++;
+		result->packed_base_descent_one_pushed_delta_ns += elapsed;
 	}
 }
 
@@ -1728,7 +1731,7 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 		curpos = obj_offset = base_offset;
 	}
 	if (base_descent_active) {
-		packed_base_descent_end(result, base_descent_started, delta_stack_nr == 0);
+		packed_base_descent_end(result, base_descent_started, delta_stack_nr);
 		base_descent_active = 0;
 	}
 
@@ -1855,7 +1858,7 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 out:
 	/* CRC errors leave PHASE 1 without reaching its normal close above. */
 	if (base_descent_active)
-		packed_base_descent_end(result, base_descent_started, delta_stack_nr == 0);
+		packed_base_descent_end(result, base_descent_started, delta_stack_nr);
 	unuse_pack(&w_curs);
 
 	if (delta_stack != small_delta_stack)

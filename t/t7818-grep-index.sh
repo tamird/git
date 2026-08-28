@@ -238,17 +238,18 @@ test_grep_packed_unpack () {
 }
 
 test_grep_packed_base_descent () {
-	test "$#" = 3 || return 1
+	test "$#" = 4 || return 1
 	base_descent_trace="$1"
 	base_descent_key=content_index_tree_object_read_packed_base_descent
 	base_descent_zero_key=${base_descent_key}_zero_pushed_delta
+	base_descent_one_key=${base_descent_key}_one_pushed_delta
 	test_trace2_data grep "${base_descent_key}_valid" "[01]" \
 		<"$base_descent_trace" || return 1
 	# These normal fixtures expect valid detail when the clock is available.
 	if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
 		<"$base_descent_trace"
 	then
-		base_descent_records=5 &&
+		base_descent_records=7 &&
 		test_trace2_data grep "${base_descent_key}_valid" 1 \
 			<"$base_descent_trace" &&
 		test_trace2_data grep "${base_descent_key}_count" "$2" \
@@ -258,6 +259,10 @@ test_grep_packed_base_descent () {
 		test_trace2_data grep "${base_descent_zero_key}_count" "$3" \
 			<"$base_descent_trace" &&
 		test_trace2_data grep "${base_descent_zero_key}_us" "[0-9][0-9]*" \
+			<"$base_descent_trace" &&
+		test_trace2_data grep "${base_descent_one_key}_count" "$4" \
+			<"$base_descent_trace" &&
+		test_trace2_data grep "${base_descent_one_key}_us" "[0-9][0-9]*" \
 			<"$base_descent_trace" || return 1
 		base_descent_us=$(sed -n \
 			"s/.*\"key\":\"${base_descent_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
@@ -265,14 +270,18 @@ test_grep_packed_base_descent () {
 		base_descent_zero_us=$(sed -n \
 			"s/.*\"key\":\"${base_descent_zero_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
+		base_descent_one_us=$(sed -n \
+			"s/.*\"key\":\"${base_descent_one_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$base_descent_trace") &&
 		base_descent_unpack_us=$(sed -n \
 			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
 		base_descent_inflate_us=$(sed -n \
 			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
-		test "$3" -le "$2" &&
-		test "$base_descent_zero_us" -le "$base_descent_us" &&
+		test "$(($3 + $4))" -le "$2" &&
+		test "$((base_descent_zero_us + base_descent_one_us))" \
+			-le "$base_descent_us" &&
 		test "$base_descent_us" -le "$base_descent_unpack_us" &&
 		test "$((base_descent_us + base_descent_inflate_us))" \
 			-le "$base_descent_unpack_us" || return 1
@@ -283,6 +292,20 @@ test_grep_packed_base_descent () {
 		if test "$3" = "$2"
 		then
 			test "$base_descent_zero_us" = "$base_descent_us" || return 1
+		fi &&
+		if test "$4" = 0
+		then
+			test "$base_descent_one_us" = 0 || return 1
+		fi &&
+		if test "$4" = "$2"
+		then
+			test "$base_descent_one_us" = "$base_descent_us" || return 1
+		fi &&
+		if test "$(($3 + $4))" = "$2"
+		then
+			# Flooring the two disjoint subsets can lose one microsecond.
+			test "$((base_descent_us - base_descent_zero_us - base_descent_one_us))" \
+				-le 1 || return 1
 		fi
 	else
 		base_descent_records=1 &&
@@ -2658,8 +2681,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	# One unpack decodes a base and one delta; cache-copy and empty add none.
 	test_grep_packed_unpack tree-positive.trace 1 2 &&
 	test_grep_packed_unpack tree-no-batch.trace 1 2 &&
-	test_grep_packed_base_descent tree-positive.trace 1 0 &&
-	test_grep_packed_base_descent tree-no-batch.trace 1 0 &&
+	test_grep_packed_base_descent tree-positive.trace 1 0 1 &&
+	test_grep_packed_base_descent tree-no-batch.trace 1 0 1 &&
 	# The second delta ends PHASE 1 at an inner cached base. It still has
 	# a pushed delta frame, just like the initial cold delta read.
 	test_when_finished "rm -f cache-reuse-1.trace cache-reuse-2.trace" &&
@@ -2698,7 +2721,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_grep_packed_content "cache-reuse-$cache_reuse_threads.trace" 4 &&
 		test_grep_packed_entry_location "cache-reuse-$cache_reuse_threads.trace" 4 &&
 		test_grep_packed_unpack "cache-reuse-$cache_reuse_threads.trace" 2 3 &&
-		test_grep_packed_base_descent "cache-reuse-$cache_reuse_threads.trace" 2 0 &&
+		test_grep_packed_base_descent "cache-reuse-$cache_reuse_threads.trace" 2 0 2 &&
 		if test "$cache_reuse_threads" = 2
 		then
 			test_grep_workers "cache-reuse-$cache_reuse_threads.trace" 2
@@ -5672,14 +5695,103 @@ test_expect_success 'packed unpack diagnostics distinguish compressed streams an
 			test_grep_packed_unpack "$kind.trace" \
 				"$unpack_count" "$unpack_count" &&
 			test_grep_packed_base_descent "$kind.trace" \
-				"$unpack_count" "$unpack_count" || return 1
+				"$unpack_count" "$unpack_count" 0 || return 1
 			if test_have_prereq PTHREADS
 			then
 				test_grep_packed_unpack "$kind.threaded.trace" \
 					"$unpack_count" "$unpack_count" &&
 				test_grep_packed_base_descent "$kind.threaded.trace" \
-					"$unpack_count" "$unpack_count" || return 1
+					"$unpack_count" "$unpack_count" 0 || return 1
 			fi || return 1
+		done
+	)
+'
+
+test_expect_success 'packed base descent distinguishes cold depth two from a cached base' '
+	test_create_repo packed-depth &&
+	(
+		cd packed-depth &&
+		depth_blob=$(echo "depth needle" | git hash-object -w --stdin) &&
+		for i in $(test_seq 1 64)
+		do
+			printf "100644 blob %s\tfile%03d\n" "$depth_blob" "$i" || return 1
+		done >tree-entries &&
+		depth_base=$(git mktree <tree-entries) &&
+		printf "100644 blob %s\tone\n" "$depth_blob" >>tree-entries &&
+		depth_one=$(git mktree <tree-entries) &&
+		printf "100644 blob %s\ttwo\n" "$depth_blob" >>tree-entries &&
+		depth_two=$(git mktree <tree-entries) &&
+		# Force D2 -> D1 -> B; do not depend on pack-objects heuristics.
+		# Write D1 first so --fix-thin appends B without duplicating D1.
+		{
+			printf "REF_DELTA %s %s\n" "$depth_one" "$depth_base" &&
+			printf "REF_DELTA %s %s\n" "$depth_two" "$depth_one"
+		} | test-tool pack-deltas --num-objects=2 >thin.pack &&
+		git index-pack --stdin --fix-thin <thin.pack >index-pack-output &&
+		git verify-pack -v .git/objects/pack/*.idx >pack-info &&
+		printf "%s\n" "$depth_base" >expect-base &&
+		awk "\$2 == \"tree\" && NF == 5 { print \$1 }" \
+			pack-info >actual-base &&
+		test_cmp expect-base actual-base &&
+		{
+			printf "%s 1 %s\n" "$depth_one" "$depth_base" &&
+			printf "%s 2 %s\n" "$depth_two" "$depth_one"
+		} >expect-chain &&
+		awk "\$2 == \"tree\" && NF == 7 { print \$1, \$6, \$7 }" \
+			pack-info >actual-chain &&
+		sort expect-chain >expect-chain.sorted &&
+		sort actual-chain >actual-chain.sorted &&
+		test_cmp expect-chain.sorted actual-chain.sorted &&
+		printf "%s\n" "$depth_base" "$depth_one" "$depth_two" |
+			git cat-file --batch-check="%(objectsize)" >tree-sizes &&
+		awk "{ total += \$1 } END { exit !(NR == 3 && total < 1048576) }" \
+			tree-sizes &&
+		git prune-packed &&
+		depth_root=$({
+			printf "040000 tree %s\ta-depth-two\n" "$depth_two" &&
+			printf "040000 tree %s\tb-depth-one\n" "$depth_one" &&
+			printf "040000 tree %s\tc-depth-two\n" "$depth_two" &&
+			printf "040000 tree %s\td-base\n" "$depth_base"
+		} | git mktree) &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git -c core.deltaBaseCacheLimit=1m grep --no-content-index --threads=1 \
+				"depth needle" "$depth_root" -- >expect 2>expect-err &&
+		set -- &&
+		for depth_threads in 1 2
+		do
+			if test "$depth_threads" = 2
+			then
+				test_have_prereq PTHREADS || continue
+			fi &&
+			GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT_NESTING=1 \
+			GIT_TRACE2_EVENT="$PWD/depth-$depth_threads.trace" \
+				git -c core.deltaBaseCacheLimit=1m grep --no-content-index \
+					--threads=$depth_threads "depth needle" "$depth_root" -- \
+					>actual 2>actual-err &&
+			test_cmp expect actual &&
+			test_cmp expect-err actual-err &&
+			test_trace2_data grep content_index_tree_directories 4 \
+				<"depth-$depth_threads.trace" &&
+			test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+				<"depth-$depth_threads.trace" &&
+			test_trace2_data grep content_index_tree_object_read_winner_packed_unpack_count 2 \
+				<"depth-$depth_threads.trace" &&
+			test_trace2_data grep content_index_tree_object_read_winner_packed_cache_copy_count 2 \
+				<"depth-$depth_threads.trace" &&
+			test_grep_packed_content "depth-$depth_threads.trace" 4 &&
+			test_grep_packed_entry_location "depth-$depth_threads.trace" 4 &&
+			# Cold D2 inflates B, D1 and D2; cached D2 inflates only D2.
+			test_grep_packed_unpack "depth-$depth_threads.trace" 2 4 &&
+			if test "$depth_threads" = 2
+			then
+				test_grep_workers "depth-$depth_threads.trace" 2
+			fi &&
+			set -- "$@" "depth-$depth_threads.trace" || return 1
+		done &&
+		# Validate both captures and old counters before requiring new DATA.
+		for depth_trace
+		do
+			test_grep_packed_base_descent "$depth_trace" 2 0 1 || return 1
 		done
 	)
 '
