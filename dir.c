@@ -3872,8 +3872,6 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 			   stored_flags);
 	trace2_data_intmax("untracked_cache", istate->repo, "cache-present",
 			   cache_present);
-	trace2_data_intmax("untracked_cache", istate->repo, "negative-only",
-			   negative_only);
 	if (!untracked)
 		/*
 		 * make sure untracked cache code path is disabled,
@@ -3963,6 +3961,14 @@ done:
 	emit_traversal_statistics(dir, istate->repo, path, len);
 
 	trace2_region_leave("dir", "read_directory", istate->repo);
+	{
+		int saved_errno = errno;
+
+		/* Keep the mode visible at the default event nesting depth. */
+		trace2_data_intmax("untracked_cache", istate->repo, "negative-only",
+				   negative_only);
+		errno = saved_errno;
+	}
 	if (dir->untracked && dir->untracked->gitignore_invalidated) {
 		struct untracked_cache *uc = dir->untracked;
 

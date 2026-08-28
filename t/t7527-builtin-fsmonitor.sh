@@ -2192,10 +2192,37 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-all.trace &&
 		test_trace2_data untracked_cache negative-only 1 \
 			<../untracked-restart-all.trace &&
+		test "$(have_t2_data_event untracked_cache negative-only \
+			<../untracked-restart-all.trace | wc -l)" -eq 1 &&
 		have_t2_data_event status untracked/subtrees-pruned \
 			<../untracked-restart-all.trace &&
 		! test_trace2_data status untracked/subtrees-pruned 0 \
 			<../untracked-restart-all.trace &&
+		(
+			sane_unset GIT_TRACE2_EVENT_NESTING &&
+			GIT_TRACE2_EVENT="$PWD/../untracked-restart-normal-default.trace" \
+				git --no-optional-locks status --porcelain \
+				>../untracked-restart-normal-default.out \
+				2>../untracked-restart-normal-default.err &&
+			test_cmp ../untracked-restart.expect \
+				../untracked-restart-normal-default.out &&
+			test_must_be_empty ../untracked-restart-normal-default.err &&
+			test_trace2_data status untracked/requested-flags 6 \
+				<../untracked-restart-normal-default.trace &&
+			test_trace2_data status untracked/stored-flags 6 \
+				<../untracked-restart-normal-default.trace &&
+			GIT_TRACE2_EVENT="$PWD/../untracked-restart-all-default.trace" \
+				git --no-optional-locks status --porcelain -uall \
+				>../untracked-restart-all-default.out \
+				2>../untracked-restart-all-default.err &&
+			test_cmp ../untracked-restart-all.expect \
+				../untracked-restart-all-default.out &&
+			test_must_be_empty ../untracked-restart-all-default.err &&
+			test_trace2_data status untracked/requested-flags 0 \
+				<../untracked-restart-all-default.trace &&
+			test_trace2_data status untracked/stored-flags 6 \
+				<../untracked-restart-all-default.trace
+		) &&
 		echo changed >>steady/deep/tracked &&
 		git --no-optional-locks -c core.fsmonitor=false \
 			-c core.untrackedCache=false status --porcelain \
@@ -2402,6 +2429,22 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 				<"$restore_prefix.trace" || return 1
 		done
 	)
+'
+
+test_expect_success 'status reports negative-only mode at default trace depth' '
+	for mode in 1 0
+	do
+		case "$mode" in
+		1) mode_trace=untracked-restart-all-default.trace ;;
+		0) mode_trace=untracked-restart-normal-default.trace ;;
+		esac &&
+		test_trace2_data untracked_cache negative-only "$mode" \
+			<"$mode_trace" &&
+		test "$(have_t2_data_event untracked_cache negative-only \
+			<"$mode_trace" | wc -l)" -eq 1 &&
+		test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":2,\"category\":\"untracked_cache\",\"key\":\"negative-only\",\"value\":\"$mode\"" \
+			"$mode_trace" || return 1
+	done
 '
 
 test_expect_success PTHREADS \
