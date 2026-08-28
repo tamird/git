@@ -189,6 +189,54 @@ test_grep_packed_content () {
 		"$packed_content_records"
 }
 
+test_grep_packed_unpack () {
+	packed_unpack_trace="$1"
+	packed_unpack_key=content_index_tree_object_read_packed_unpack
+	test_trace2_data grep "${packed_unpack_key}_valid" "[01]" \
+		<"$packed_unpack_trace" || return 1
+	# These normal fixtures expect valid detail when the clock is available.
+	if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+		<"$packed_unpack_trace"
+	then
+		packed_unpack_records=5 &&
+		test_trace2_data grep "${packed_unpack_key}_valid" 1 \
+			<"$packed_unpack_trace" &&
+		test_trace2_data grep "${packed_unpack_key}_attempt_count" "$2" \
+			<"$packed_unpack_trace" &&
+		test_trace2_data grep "${packed_unpack_key}_inflate_phase_count" "$3" \
+			<"$packed_unpack_trace" || return 1
+		for packed_unpack_field in us inflate_phase_us
+		do
+			test_trace2_data grep "${packed_unpack_key}_$packed_unpack_field" \
+				"[0-9][0-9]*" <"$packed_unpack_trace" || return 1
+		done &&
+		packed_unpack_us=$(sed -n \
+			"s/.*\"key\":\"${packed_unpack_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_unpack_trace") &&
+		packed_inflate_us=$(sed -n \
+			"s/.*\"key\":\"${packed_unpack_key}_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_unpack_trace") &&
+		packed_parent_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$packed_unpack_trace") &&
+		test "$packed_inflate_us" -le "$packed_unpack_us" &&
+		test "$packed_unpack_us" -le "$packed_parent_us" || return 1
+		if test "$2" = 0
+		then
+			test "$packed_unpack_us" = 0 &&
+			test "$packed_inflate_us" = 0 || return 1
+		fi
+	else
+		packed_unpack_records=1 &&
+		test_trace2_data grep "${packed_unpack_key}_valid" 0 \
+			<"$packed_unpack_trace" || return 1
+	fi &&
+	test "$(grep -c "\"key\":\"${packed_unpack_key}_" "$packed_unpack_trace")" = \
+		"$packed_unpack_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${packed_unpack_key}_" "$packed_unpack_trace")" = \
+		"$packed_unpack_records"
+}
+
 test_grep_packed_entry_location () {
 	packed_entry_location_trace="$1"
 	packed_entry_location_key=content_index_tree_object_read_packed_entry_location
@@ -2549,6 +2597,9 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-no-batch.trace &&
 	test_grep_packed_content tree-no-batch.trace 2 &&
 	test_grep_packed_entry_location tree-no-batch.trace 2 &&
+	# One unpack decodes a base and one delta; cache-copy and empty add none.
+	test_grep_packed_unpack tree-positive.trace 1 2 &&
+	test_grep_packed_unpack tree-no-batch.trace 1 2 &&
 	for tree_sample_trace in tree-positive.trace tree-no-batch.trace
 	do
 		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
@@ -5344,6 +5395,7 @@ test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose re
 		printf "%s\n" "$fallback_tree" |
 			git pack-objects --window=0 .git/objects/pack/pack >fallback-pack &&
 		git prune-packed &&
+		printf "%s\n" "$midx_tree" >midx-tree &&
 		root=$({
 			printf "040000 tree %s\ta-midx\n" "$midx_tree" &&
 			printf "040000 tree %s\tb-fallback\n" "$fallback_tree" &&
@@ -5374,6 +5426,15 @@ test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose re
 			test_must_be_empty err &&
 			test_grep_packed_entry_location "$kind.trace" "$reads" &&
 			test_grep_packed_content "$kind.trace" "$content" || return 1
+			if test_have_prereq PTHREADS
+			then
+				GIT_TRACE2_EVENT="$PWD/$kind.threaded.trace" GIT_TRACE2_EVENT_NESTING=1 \
+					git grep --no-content-index --threads=2 -l \
+						"packed lookup needle" "$root" -- "$@" >"$kind.threaded" 2>err &&
+				test_cmp "$kind.expect" "$kind.threaded" &&
+				test_must_be_empty err &&
+				test_grep_workers "$kind.threaded.trace" 2 || return 1
+			fi || return 1
 		done
 	)
 '
@@ -5490,6 +5551,42 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'worker lease growth diagnostics 
 				"$reason" <"$mode.trace" &&
 			test "$(grep -c "\"key\":\"${growth_key}_" "$mode.trace")" = 4 &&
 			test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${growth_key}_" "$mode.trace")" = 4 || return 1
+		done
+	)
+'
+
+test_expect_success 'packed unpack diagnostics distinguish compressed streams and other sources' '
+	(
+		cd packed-lookup &&
+		for kind in midx fallback loose all
+		do
+			case "$kind" in
+			midx|fallback) unpack_count=1 ;;
+			loose) unpack_count=0 ;;
+			all) unpack_count=2 ;;
+			esac &&
+			test_grep_packed_unpack "$kind.trace" \
+				"$unpack_count" "$unpack_count" || return 1
+			if test_have_prereq PTHREADS
+			then
+				test_grep_packed_unpack "$kind.threaded.trace" \
+					"$unpack_count" "$unpack_count" || return 1
+			fi || return 1
+		done
+	)
+'
+
+test_expect_success PTHREADS 'packed unpack capture belongs only to active producer child reads' '
+	(
+		cd packed-lookup &&
+		printf "capture: 0 1 0 0\n" >scope.expect &&
+		for scope_trace in 0 "$PWD/scope.trace"
+		do
+			GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$scope_trace" \
+				test-tool grep-index-ipc packed-unpack-scope "$(cat midx-tree)" \
+					>scope.actual 2>scope.err &&
+			test_cmp scope.expect scope.actual &&
+			test_must_be_empty scope.err || return 1
 		done
 	)
 '

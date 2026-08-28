@@ -581,6 +581,24 @@ void obj_read_lock_trace_snapshot(struct obj_read_lock_trace_stats *stats)
 		stats->valid = 0;
 }
 
+static int obj_read_lock_trace_captures_child(void)
+{
+	int saved_errno = errno;
+	int captures;
+
+#ifndef NO_PTHREADS
+	/* Check immutable ownership before reading mutable producer state. */
+	captures = obj_read_lock_trace_ready &&
+		pthread_equal(pthread_self(), obj_read_lock_trace_owner) &&
+		obj_read_lock_trace.active_depth;
+#else
+	captures = obj_read_lock_trace.prepared &&
+		obj_read_lock_trace.active_depth;
+#endif
+	errno = saved_errno;
+	return captures;
+}
+
 #ifndef NO_PTHREADS
 static uint64_t obj_read_lock_trace_clock(void)
 {
@@ -888,8 +906,11 @@ void *odb_read_object_with_result(struct object_database *odb,
 	unsigned flags = OBJECT_INFO_DIE_IF_CORRUPT | OBJECT_INFO_LOOKUP_REPLACE;
 	void *data;
 
-	if (result)
+	if (result) {
 		memset(result, 0, sizeof(*result));
+		result->packed_inflate_phase_enabled =
+			obj_read_lock_trace_captures_child();
+	}
 	oi.typep = type;
 	oi.sizep = size;
 	oi.contentp = &data;

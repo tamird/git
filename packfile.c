@@ -1230,19 +1230,24 @@ static void detach_delta_base_cache_entry(struct delta_base_cache_entry *ent)
 	free(ent);
 }
 
+static void *unpack_entry_with_result(struct repository *r, struct packed_git *p,
+				      off_t obj_offset, enum object_type *final_type,
+				      size_t *final_size, struct odb_read_result *result);
+
 static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 				   off_t base_offset, size_t *base_size,
 				   enum object_type *type,
-				   enum odb_read_result_kind *result_kind)
+				   struct odb_read_result *result)
 {
 	struct delta_base_cache_entry *ent;
 
 	ent = get_delta_base_cache_entry(p, base_offset);
-	if (result_kind)
-		*result_kind = ent ? ODB_READ_RESULT_PACKED_CACHE_COPY :
+	if (result)
+		result->kind = ent ? ODB_READ_RESULT_PACKED_CACHE_COPY :
 				    ODB_READ_RESULT_PACKED_UNPACK;
 	if (!ent)
-		return unpack_entry(r, p, base_offset, type, base_size);
+		return unpack_entry_with_result(r, p, base_offset, type, base_size,
+			result && result->packed_inflate_phase_enabled ? result : NULL);
 
 	if (type)
 		*type = ent->type;
@@ -1391,8 +1396,7 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 
 		*oi->contentp = cache_or_unpack_entry(p->repo, p, obj_offset,
 						      oi->sizep, &type,
-						      oi->read_resultp ?
-						      &oi->read_resultp->kind : NULL);
+						      oi->read_resultp);
 		if (result && !result->packed_content_invalid) {
 			if (!timed || packed_content_time(&finished) ||
 			    finished < started ||
@@ -1533,11 +1537,13 @@ int packed_object_info(struct odb_source_packed *source,
 static void *unpack_compressed_entry(struct packed_git *p,
 				    struct pack_window **w_curs,
 				    off_t curpos,
-				    size_t size)
+				    size_t size, struct odb_read_result *result)
 {
 	int st;
 	git_zstream stream;
 	unsigned char *buffer, *in;
+	uint64_t started = 0, finished;
+	int timed = 0;
 
 	buffer = xmallocz_gently(size);
 	if (!buffer)
@@ -1546,6 +1552,8 @@ static void *unpack_compressed_entry(struct packed_git *p,
 	stream.next_out = buffer;
 	stream.avail_out = size + 1;
 
+	if (result && !result->packed_inflate_phase_invalid)
+		timed = !packed_content_time(&started);
 	git_inflate_init(&stream);
 	do {
 		in = use_pack(p, w_curs, curpos, &stream.avail_in);
@@ -1564,6 +1572,16 @@ static void *unpack_compressed_entry(struct packed_git *p,
 		curpos += stream.next_in - in;
 	} while (st == Z_OK || st == Z_BUF_ERROR);
 	git_inflate_end(&stream);
+	if (result && !result->packed_inflate_phase_invalid) {
+		if (!timed || packed_content_time(&finished) || finished < started ||
+		    result->packed_inflate_phase_count == (uint64_t)INTMAX_MAX ||
+		    finished - started > UINT64_MAX - result->packed_inflate_phase_ns) {
+			result->packed_inflate_phase_invalid = 1;
+		} else {
+			result->packed_inflate_phase_count++;
+			result->packed_inflate_phase_ns += finished - started;
+		}
+	}
 	if ((st != Z_STREAM_END) || stream.total_out != size) {
 		free(buffer);
 		return NULL;
@@ -1591,8 +1609,9 @@ struct unpack_entry_stack_ent {
 	size_t size;
 };
 
-void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
-		   enum object_type *final_type, size_t *final_size)
+static void *unpack_entry_with_result(struct repository *r, struct packed_git *p,
+				      off_t obj_offset, enum object_type *final_type,
+				      size_t *final_size, struct odb_read_result *result)
 {
 	struct pack_window *w_curs = NULL;
 	off_t curpos = obj_offset;
@@ -1692,7 +1711,7 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 	case OBJ_BLOB:
 	case OBJ_TAG:
 		if (!base_from_cache)
-			data = unpack_compressed_entry(p, &w_curs, curpos, size);
+			data = unpack_compressed_entry(p, &w_curs, curpos, size, result);
 		break;
 	default:
 		data = NULL;
@@ -1754,7 +1773,7 @@ void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
 		if (!base)
 			continue;
 
-		delta_data = unpack_compressed_entry(p, &w_curs, curpos, delta_size);
+		delta_data = unpack_compressed_entry(p, &w_curs, curpos, delta_size, result);
 
 		if (!delta_data) {
 			error("failed to unpack compressed delta "
@@ -1807,6 +1826,12 @@ out:
 		free(delta_stack);
 
 	return data;
+}
+
+void *unpack_entry(struct repository *r, struct packed_git *p, off_t obj_offset,
+		   enum object_type *final_type, size_t *final_size)
+{
+	return unpack_entry_with_result(r, p, obj_offset, final_type, final_size, NULL);
 }
 
 int bsearch_pack(const struct object_id *oid, const struct packed_git *p, uint32_t *result)

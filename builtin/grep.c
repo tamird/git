@@ -2624,6 +2624,7 @@ struct grep_tree_query_context {
 	int tree_object_read_bytes_overflow;
 	int tree_object_read_source_invalid;
 	int tree_object_read_packed_content_invalid;
+	int tree_object_read_packed_unpack_invalid;
 	int tree_object_read_packed_entry_location_invalid;
 	size_t batch_size;
 	size_t batch_max_bytes;
@@ -2652,6 +2653,10 @@ struct grep_tree_query_context {
 	uint64_t tree_object_read_packed_nonzero;
 	uint64_t tree_object_read_packed_content_attempt_count;
 	uint64_t tree_object_read_packed_content_ns;
+	uint64_t tree_object_read_packed_unpack_attempt_count;
+	uint64_t tree_object_read_packed_unpack_ns;
+	uint64_t tree_object_read_packed_inflate_phase_count;
+	uint64_t tree_object_read_packed_inflate_phase_ns;
 	uint64_t tree_object_read_packed_entry_location_attempt_count;
 	uint64_t tree_object_read_packed_entry_location_ns;
 	struct odb_packed_lookup tree_object_read_packed_lookup;
@@ -2700,6 +2705,46 @@ invalid:
 	total->invalid = 1;
 }
 
+static void grep_tree_record_packed_unpack(struct grep_tree_query_context *query,
+					 const struct odb_read_result *result)
+{
+	uint64_t count, ns;
+
+	if (query->tree_object_read_packed_unpack_invalid)
+		return;
+	if (query->tree_object_read_packed_content_invalid ||
+	    result->packed_content_invalid || !result->packed_inflate_phase_enabled ||
+	    result->packed_inflate_phase_invalid ||
+	    result->packed_cache_copy_attempt_count >
+		result->packed_content_attempt_count ||
+	    result->packed_cache_copy_ns > result->packed_content_ns)
+		goto invalid;
+	/* This includes the cache-miss probe; derive it before rounding. */
+	count = result->packed_content_attempt_count -
+		result->packed_cache_copy_attempt_count;
+	ns = result->packed_content_ns - result->packed_cache_copy_ns;
+	if (result->packed_inflate_phase_ns > ns ||
+	    (!count && result->packed_inflate_phase_count) ||
+	    count > (uint64_t)INTMAX_MAX -
+		query->tree_object_read_packed_unpack_attempt_count ||
+	    ns > UINT64_MAX - query->tree_object_read_packed_unpack_ns ||
+	    result->packed_inflate_phase_count > (uint64_t)INTMAX_MAX -
+		query->tree_object_read_packed_inflate_phase_count ||
+	    result->packed_inflate_phase_ns > UINT64_MAX -
+		query->tree_object_read_packed_inflate_phase_ns)
+		goto invalid;
+	query->tree_object_read_packed_unpack_attempt_count += count;
+	query->tree_object_read_packed_unpack_ns += ns;
+	query->tree_object_read_packed_inflate_phase_count +=
+		result->packed_inflate_phase_count;
+	query->tree_object_read_packed_inflate_phase_ns +=
+		result->packed_inflate_phase_ns;
+	return;
+
+invalid:
+	query->tree_object_read_packed_unpack_invalid = 1;
+}
+
 static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 					const struct odb_read_result *result,
 					uint64_t elapsed)
@@ -2743,6 +2788,7 @@ static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 		}
 	}
 	grep_tree_record_packed_lookup(query, result);
+	grep_tree_record_packed_unpack(query, result);
 	if (query->tree_object_read_source_invalid)
 		return;
 	if (result->invalid || kind <= ODB_READ_RESULT_UNKNOWN ||
@@ -2799,6 +2845,8 @@ static void grep_tree_trace_object_read_sources(
 	/* An invalid outer clock can have skipped recording a child entirely. */
 	int packed_content_valid = !query->tree_object_read_invalid &&
 				   !query->tree_object_read_packed_content_invalid;
+	int packed_unpack_valid = packed_content_valid &&
+		!query->tree_object_read_packed_unpack_invalid;
 	int packed_entry_location_valid = !query->tree_object_read_invalid &&
 		!query->tree_object_read_packed_entry_location_invalid;
 	int packed_lookup_valid = packed_entry_location_valid &&
@@ -2834,6 +2882,22 @@ static void grep_tree_trace_object_read_sources(
 		trace2_data_intmax("grep", the_repository,
 			"content_index_tree_object_read_packed_content_us",
 			query->tree_object_read_packed_content_ns / 1000);
+	}
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_packed_unpack_valid", packed_unpack_valid);
+	if (packed_unpack_valid) {
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_unpack_attempt_count",
+			query->tree_object_read_packed_unpack_attempt_count);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_unpack_us",
+			query->tree_object_read_packed_unpack_ns / 1000);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_unpack_inflate_phase_count",
+			query->tree_object_read_packed_inflate_phase_count);
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_unpack_inflate_phase_us",
+			query->tree_object_read_packed_inflate_phase_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
 		"content_index_tree_object_read_packed_entry_location_valid",

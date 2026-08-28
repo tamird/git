@@ -5,6 +5,7 @@
 #include "grep-index-ipc.h"
 #include "hash.h"
 #include "hex.h"
+#include "odb.h"
 #include "pkt-line.h"
 #include "replace-object.h"
 #include "repository.h"
@@ -1267,6 +1268,86 @@ static int test_worker_growth(int fallback, const char *threads,
 }
 #endif
 
+#ifndef NO_PTHREADS
+struct packed_unpack_scope_read {
+	struct object_id oid;
+	enum object_type type;
+	size_t size;
+	void *data;
+	struct odb_read_result result;
+};
+
+static void packed_unpack_scope_read(struct packed_unpack_scope_read *read)
+{
+	read->data = odb_read_object_with_result(the_repository->objects,
+		&read->oid, &read->type, &read->size, &read->result);
+}
+
+static void *packed_unpack_scope_worker(void *data)
+{
+	trace2_thread_start("packed-unpack-control");
+	packed_unpack_scope_read(data);
+	trace2_thread_exit();
+	return NULL;
+}
+
+static int test_packed_unpack_scope(const char *hex)
+{
+	struct packed_unpack_scope_read reads[4] = { 0 };
+	pthread_t thread;
+	int result = 0, err;
+
+	setup_git_directory(the_repository);
+	if (get_oid_hex(hex, &reads[0].oid))
+		return error("invalid packed tree object id");
+	for (int i = 1; i < ARRAY_SIZE(reads); i++)
+		oidcpy(&reads[i].oid, &reads[0].oid);
+	packed_unpack_scope_read(&reads[0]);
+	obj_read_lock_trace_prepare();
+	enable_obj_read_lock();
+	obj_read_lock_trace_child_begin();
+	packed_unpack_scope_read(&reads[1]);
+	/* The owner does not hold the object mutex while joining the reader. */
+	err = pthread_create(&thread, NULL, packed_unpack_scope_worker, &reads[2]);
+	if (!err)
+		pthread_join(thread, NULL);
+	obj_read_lock_trace_child_end();
+	disable_obj_read_lock();
+	if (err) {
+		result = error("could not start packed read control: %s", strerror(err));
+		goto out;
+	}
+	packed_unpack_scope_read(&reads[3]);
+	for (int i = 0; i < ARRAY_SIZE(reads); i++) {
+		struct odb_read_result *r = &reads[i].result;
+		int captured = i == 1;
+
+		if (!reads[i].data || reads[i].type != OBJ_TREE || !reads[i].size ||
+		    reads[i].size != reads[0].size ||
+		    memcmp(reads[i].data, reads[0].data, reads[0].size) ||
+		    r->kind != ODB_READ_RESULT_PACKED_UNPACK ||
+		    (!r->packed_content_invalid && r->packed_content_attempt_count != 1) ||
+		    r->packed_inflate_phase_enabled != captured ||
+		    (!captured && (r->packed_inflate_phase_count ||
+				   r->packed_inflate_phase_ns || r->packed_inflate_phase_invalid)) ||
+		    (captured && !r->packed_content_invalid &&
+		     (r->packed_inflate_phase_invalid || r->packed_inflate_phase_count != 1))) {
+			result = error("unexpected packed read capture in control %d", i);
+			goto out;
+		}
+	}
+	printf("capture: %d %d %d %d\n",
+		reads[0].result.packed_inflate_phase_enabled,
+		reads[1].result.packed_inflate_phase_enabled,
+		reads[2].result.packed_inflate_phase_enabled,
+		reads[3].result.packed_inflate_phase_enabled);
+out:
+	for (int i = 0; i < ARRAY_SIZE(reads); i++)
+		free(reads[i].data);
+	return result;
+}
+#endif
+
 int cmd__grep_index_ipc(int argc, const char **argv)
 {
 	uint64_t lease_id;
@@ -1278,6 +1359,10 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 
 	if (argc == 2 && !strcmp(argv[1], "query-wire"))
 		return test_query_wire();
+#ifndef NO_PTHREADS
+	if (argc == 3 && !strcmp(argv[1], "packed-unpack-scope"))
+		return test_packed_unpack_scope(argv[2]);
+#endif
 #ifdef SUPPORTS_SIMPLE_IPC
 	if (argc == 5 && !strcmp(argv[1], "worker-growth") &&
 	    (!strcmp(argv[2], "confirmed") || !strcmp(argv[2], "fallback")) &&
@@ -1298,6 +1383,7 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 	if (argc != 5 || strtol_i(argv[1], 10, &requested) ||
 	    requested < 1)
 		die("usage: test-tool grep-index-ipc query-wire\n"
+		    "   or: test-tool grep-index-ipc packed-unpack-scope <packed-tree-id>\n"
 		    "   or: test-tool grep-index-ipc worker-growth <confirmed|fallback> <0|2> <trace>\n"
 		    "   or: test-tool grep-index-ipc query-protocol <traced|untraced|captured>\n"
 		    "   or: test-tool grep-index-ipc query-wait <object-id>\n"

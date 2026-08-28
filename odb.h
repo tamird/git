@@ -338,6 +338,13 @@ struct odb_read_result {
 	/* Cache-copy subset of the checked packed-content totals above. */
 	uint64_t packed_cache_copy_attempt_count, packed_cache_copy_ns;
 	/*
+	 * Opt-in producer child-read detail. The inflate phase excludes the
+	 * output allocation, but includes zlib setup/teardown, window feeding
+	 * and lock reacquisition. Recursive recovery reads do not contribute.
+	 */
+	uint64_t packed_inflate_phase_count, packed_inflate_phase_ns;
+	int packed_inflate_phase_enabled, packed_inflate_phase_invalid;
+	/*
 	 * Inclusive find_pack_entry calls for this content read, including
 	 * misses before a later source wins. Explicit second-read cache
 	 * refresh precedes this interval; packed-content decoding follows it.
