@@ -86,6 +86,21 @@ static int do_send_flush(void)
 	return 0;
 }
 
+static int do_save_untracked_cache(const char *token)
+{
+	struct index_state *istate = the_repository->index;
+
+	/* Read the non-split fixture without querying or starting fsmonitor. */
+	if (do_read_index(istate, the_repository->index_file, 1) < 0)
+		die("unable to read index file");
+	if (token) {
+		free(istate->fsmonitor_last_update);
+		istate->fsmonitor_last_update = xstrdup(token);
+	}
+	fsmonitor_ipc__save_untracked_cache(istate);
+	return 0;
+}
+
 struct hammer_thread_data
 {
 	pthread_t pthread_id;
@@ -267,6 +282,8 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client test-trivial-response",
 		"test-tool fsmonitor-client query [<token>]",
 		"test-tool fsmonitor-client flush",
+		"test-tool fsmonitor-client ipc-path",
+		"test-tool fsmonitor-client save-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
 	};
@@ -298,6 +315,14 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 
 	if (!strcmp(subcmd, "flush"))
 		return !!do_send_flush();
+
+	if (!strcmp(subcmd, "ipc-path")) {
+		puts(fsmonitor_ipc__get_path(the_repository));
+		return 0;
+	}
+
+	if (!strcmp(subcmd, "save-untracked-cache"))
+		return do_save_untracked_cache(token);
 
 	if (!strcmp(subcmd, "hammer"))
 		return !!do_hammer(token, nr_threads, nr_requests);

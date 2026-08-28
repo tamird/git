@@ -204,4 +204,90 @@ test_expect_success !MINGW,FSMONITOR_DAEMON 'connection errors report their orig
 	test_cmp expect actual
 '
 
+test_expect_success FSMONITOR_DAEMON 'untracked snapshot save uses the IPC response' '
+	test_config core.fsmonitor false &&
+	test_config core.untrackedCache true &&
+	test_commit save-reply tracked &&
+	GIT_TEST_SPLIT_INDEX=0 git update-index --no-split-index &&
+	GIT_TEST_SPLIT_INDEX=0 git status --porcelain >save-reply-status.out &&
+	git hash-object .git/index >save-reply-index.before &&
+	git config core.fsmonitor true &&
+	save_socket=$(test-tool fsmonitor-client ipc-path) &&
+	test_when_finished "test-tool simple-ipc stop-daemon --name=\"$save_socket\" >/dev/null 2>&1 || :" &&
+	: >save-reply.response &&
+	test-tool simple-ipc start-daemon --name="$save_socket" --threads=1 \
+		--reply-file="$PWD/save-reply.response" &&
+	(
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		for response in miss missing binary empty ok
+		do
+			case "$response" in
+			miss|missing|ok) printf "%s" "$response" ;;
+			binary) printf "miss-save-reply-private-canary\\000" ;;
+			empty) : ;;
+			esac >save-reply.response &&
+			GIT_TRACE2_EVENT="$PWD/save-reply-$response.trace" \
+				test-tool fsmonitor-client save-untracked-cache \
+					--token=builtin:save-reply:1 \
+					>"save-reply-$response.out" \
+					2>"save-reply-$response.err" &&
+			test_must_be_empty "save-reply-$response.out" &&
+			test_must_be_empty "save-reply-$response.err" &&
+			if test "$response" = ok
+			then
+				test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+					<"save-reply-$response.trace" &&
+				test_trace2_data fsmonitor untracked-cache/saved "[1-9][0-9]*" \
+					<"save-reply-$response.trace" &&
+				test_expect_code 1 test_trace2_data fsmonitor \
+					untracked-cache/save-reply ".*" \
+					<"save-reply-$response.trace"
+			else
+				test_trace2_data fsmonitor untracked-cache/save-outcome 6 \
+					<"save-reply-$response.trace" &&
+				test_expect_code 1 test_trace2_data fsmonitor \
+					untracked-cache/saved ".*" \
+					<"save-reply-$response.trace"
+			fi || return 1
+		done &&
+		test-tool simple-ipc stop-daemon --name="$save_socket" &&
+		GIT_TRACE2_EVENT="$PWD/save-reply-disconnected.trace" \
+			test-tool fsmonitor-client save-untracked-cache \
+				--token=builtin:save-reply:1 \
+				>save-reply-disconnected.out \
+				2>save-reply-disconnected.err &&
+		test_must_be_empty save-reply-disconnected.out &&
+		test_must_be_empty save-reply-disconnected.err &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 5 \
+			<save-reply-disconnected.trace &&
+		test_expect_code 1 test_trace2_data fsmonitor \
+			untracked-cache/save-reply ".*" \
+			<save-reply-disconnected.trace &&
+		test_expect_code 1 test_trace2_data fsmonitor \
+			untracked-cache/saved ".*" \
+			<save-reply-disconnected.trace
+	) &&
+	git hash-object .git/index >save-reply-index.after &&
+	test_cmp save-reply-index.before save-reply-index.after
+'
+
+test_expect_success FSMONITOR_DAEMON 'untracked snapshot rejection reports only a fixed reply kind' '
+	for response in miss missing binary empty
+	do
+		case "$response" in
+		miss) reply=1 ;;
+		missing) reply=2 ;;
+		binary|empty) reply=3 ;;
+		esac &&
+		test_trace2_data fsmonitor untracked-cache/save-reply "$reply" \
+			<"save-reply-$response.trace" &&
+		test_trace2_data fsmonitor untracked-cache/save-reply ".*" \
+			<"save-reply-$response.trace" >actual &&
+		test_line_count = 1 actual &&
+		test_grep "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":2," actual &&
+		test_expect_code 1 grep save-reply-private-canary \
+			"save-reply-$response.trace" || return 1
+	done
+'
+
 test_done

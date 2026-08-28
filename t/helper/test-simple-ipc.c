@@ -160,6 +160,7 @@ static int app__sendbytes_command(const char *received, size_t received_len,
  * data is handled properly.
  */
 static int my_app_data = 42;
+static const char *reply_file;
 
 static ipc_server_application_cb test_app_cb;
 
@@ -200,6 +201,17 @@ static int test_app_cb(void *application_data,
 		 * This DOES NOT force an immediate sync shutdown.
 		 */
 		return SIMPLE_IPC_QUIT;
+	}
+
+	if (reply_file) {
+		struct strbuf response = STRBUF_INIT;
+		int ret;
+
+		if (strbuf_read_file(&response, reply_file, 0) < 0)
+			die_errno("could not read reply file '%s'", reply_file);
+		ret = reply_cb(reply_data, response.buf, response.len);
+		strbuf_release(&response);
+		return ret;
 	}
 
 	if (command_len == 4 && !strncmp(command, "ping", 4)) {
@@ -318,6 +330,8 @@ static int daemon__start_server(void)
 	strvec_push(&cp.args, "run-daemon");
 	strvec_pushf(&cp.args, "--name=%s", cl_args.path);
 	strvec_pushf(&cp.args, "--threads=%d", cl_args.nr_threads);
+	if (reply_file)
+		strvec_pushf(&cp.args, "--reply-file=%s", reply_file);
 
 	cp.no_stdin = 1;
 	cp.no_stdout = 1;
@@ -618,6 +632,7 @@ int cmd__simple_ipc(int argc, const char **argv)
 		 */
 		OPT_STRING(0, "byte", &bytevalue, "byte", N_("ballast character")),
 		OPT_STRING(0, "token", &cl_args.token, N_("token"), N_("command token to send to the server")),
+		OPT_STRING(0, "reply-file", &reply_file, N_("path"), N_("reply to requests with the contents of this file")),
 
 		OPT_END()
 	};

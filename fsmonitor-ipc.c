@@ -696,6 +696,13 @@ enum fsmonitor_untracked_cache_save_outcome {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED = 7,
 };
 
+/* Keep these private Trace2 reply values stable. */
+enum fsmonitor_untracked_cache_save_reply {
+	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS = 1,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISSING = 2,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER = 3,
+};
+
 void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 {
 	static const char hex[] = "0123456789abcdef";
@@ -765,6 +772,19 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	}
 	if (answer.len != 2 || memcmp(answer.buf, "ok", 2)) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK;
+		if (trace2_is_enabled()) {
+			int saved_errno = errno;
+			enum fsmonitor_untracked_cache_save_reply reply =
+				FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER;
+
+			if (answer.len == 4 && !memcmp(answer.buf, "miss", 4))
+				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS;
+			else if (answer.len == 7 && !memcmp(answer.buf, "missing", 7))
+				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISSING;
+			trace2_data_intmax("fsmonitor", istate->repo,
+					   "untracked-cache/save-reply", reply);
+			errno = saved_errno;
+		}
 		goto done;
 	}
 	trace2_data_intmax("fsmonitor", istate->repo,
