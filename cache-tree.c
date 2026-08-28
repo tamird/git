@@ -382,13 +382,54 @@ static int must_check_existence(const struct cache_entry *ce)
 	return !(repo_has_promisor_remote(the_repository) && ce_skip_worktree(ce));
 }
 
+struct cache_tree_update_stats {
+	uint64_t nodes, reused, sparse, hash_only;
+	uint64_t object_write_calls, object_write_ns;
+	uint64_t owned_odb_commit_calls, owned_odb_commit_ns;
+};
+
+/*
+ * Accumulate returning update regions across index states and threads.
+ * Writes count completed ODB API attempts, which may only freshen an
+ * existing object. Hash-only nodes use repair or dry-run mode. Commit API calls
+ * belong to this update, not an enclosing ODB transaction. Failed returns
+ * are included; a nonreturning update has no complete summary. Times are
+ * work-time sums, not process wall time.
+ */
+static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
+				    int failed)
+{
+	int saved_errno = errno;
+
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_FAILED, failed);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_NODES,
+			   stats->nodes);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED,
+			   stats->reused);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_SPARSE,
+			   stats->sparse);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY,
+			   stats->hash_only);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS,
+			   stats->object_write_calls);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS,
+			   stats->object_write_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_CALLS,
+			   stats->owned_odb_commit_calls);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS,
+			   stats->owned_odb_commit_ns);
+	errno = saved_errno;
+}
+
 static int update_one(struct cache_tree *it,
 		      struct cache_entry **cache,
 		      int entries,
 		      const char *base,
 		      int baselen,
 		      int *skip_count,
-		      int flags)
+		      int flags,
+		      struct cache_tree_update_stats *stats)
 {
 	struct strbuf buffer;
 	int missing_ok = flags & WRITE_TREE_MISSING_OK;
@@ -399,6 +440,8 @@ static int update_one(struct cache_tree *it,
 
 	assert(!(dryrun && repair));
 
+	if (stats)
+		stats->nodes++;
 	*skip_count = 0;
 
 	/*
@@ -413,6 +456,8 @@ static int update_one(struct cache_tree *it,
 		if (S_ISSPARSEDIR(ce->ce_mode) &&
 		    ce->ce_namelen == baselen &&
 		    !strncmp(ce->name, base, baselen)) {
+			if (stats)
+				stats->sparse++;
 			it->entry_count = 1;
 			oidcpy(&it->oid, &ce->oid);
 			return 1;
@@ -421,8 +466,11 @@ static int update_one(struct cache_tree *it,
 
 	if (0 <= it->entry_count &&
 	    odb_has_object(the_repository->objects, &it->oid,
-			   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))
+			   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR)) {
+		if (stats)
+			stats->reused++;
 		return it->entry_count;
+	}
 
 	/*
 	 * We first scan for subtrees and update them; we start by
@@ -466,7 +514,7 @@ static int update_one(struct cache_tree *it,
 				    path,
 				    baselen + sublen + 1,
 				    &subskip,
-				    flags);
+				    flags, stats);
 		if (subcnt < 0)
 			return subcnt;
 		if (!subcnt)
@@ -573,6 +621,8 @@ static int update_one(struct cache_tree *it,
 #endif
 	}
 
+	if (stats && (repair || dryrun))
+		stats->hash_only++;
 	if (repair) {
 		struct object_id oid;
 		hash_object_file(the_hash_algo, buffer.buf, buffer.len,
@@ -584,10 +634,30 @@ static int update_one(struct cache_tree *it,
 	} else if (dryrun) {
 		hash_object_file(the_hash_algo, buffer.buf, buffer.len,
 				 OBJ_TREE, &it->oid);
-	} else if (odb_write_object_ext(the_repository->objects, buffer.buf, buffer.len, OBJ_TREE,
-					&it->oid, NULL, flags & WRITE_TREE_SILENT ? ODB_WRITE_OBJECT_SILENT : 0)) {
-		strbuf_release(&buffer);
-		return -1;
+	} else {
+		int ret;
+
+		if (stats) {
+			int saved_errno = errno;
+
+			trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE);
+			errno = saved_errno;
+		}
+		ret = odb_write_object_ext(the_repository->objects, buffer.buf, buffer.len,
+					   OBJ_TREE, &it->oid, NULL,
+					   flags & WRITE_TREE_SILENT ? ODB_WRITE_OBJECT_SILENT : 0);
+		if (stats) {
+			int saved_errno = errno;
+
+			stats->object_write_ns +=
+				trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE);
+			stats->object_write_calls++;
+			errno = saved_errno;
+		}
+		if (ret) {
+			strbuf_release(&buffer);
+			return -1;
+		}
 	}
 
 	strbuf_release(&buffer);
@@ -605,6 +675,8 @@ int cache_tree_update(struct index_state *istate, int flags)
 	int inflight = !!the_repository->objects->transaction;
 	struct cache_tree *root;
 	struct odb_transaction *transaction;
+	struct cache_tree_update_stats stats = { 0 };
+	struct cache_tree_update_stats *trace = NULL;
 	int skip, i;
 
 	i = verify_cache(istate, flags);
@@ -621,16 +693,35 @@ int cache_tree_update(struct index_state *istate, int flags)
 	if (!(flags & WRITE_TREE_MISSING_OK) && repo_has_promisor_remote(the_repository))
 		prefetch_cache_entries(istate, must_check_existence);
 
+	if (trace2_is_enabled())
+		trace = &stats;
 	trace_performance_enter();
 	trace2_region_enter("cache_tree", "update", istate->repo);
 	if (!inflight)
 		odb_transaction_begin_or_die(the_repository->objects, &transaction, 0);
 	i = update_one(root, istate->cache, istate->cache_nr,
-		       "", 0, &skip, flags);
-	if (!inflight)
+		       "", 0, &skip, flags, trace);
+	if (!inflight) {
+		if (trace) {
+			int saved_errno = errno;
+
+			trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT);
+			errno = saved_errno;
+		}
 		odb_transaction_commit_and_finalize_or_die(transaction);
+		if (trace) {
+			int saved_errno = errno;
+
+			stats.owned_odb_commit_ns +=
+				trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT);
+			stats.owned_odb_commit_calls++;
+			errno = saved_errno;
+		}
+	}
 	trace2_region_leave("cache_tree", "update", istate->repo);
 	trace_performance_leave("cache_tree_update");
+	if (trace)
+		trace_cache_tree_update(trace, i < 0);
 	if (i < 0)
 		return i;
 	istate->cache_changed |= CACHE_TREE_CHANGED;

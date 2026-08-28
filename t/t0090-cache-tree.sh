@@ -88,6 +88,114 @@ test_cache_tree_object_check_time () {
 	fi
 }
 
+run_cache_tree_update_trace () {
+	update_trace="$1" &&
+	update_output="$2" &&
+	shift 2 &&
+	(
+		sane_unset GIT_TRACE2_EVENT_NESTING &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT="$update_trace" \
+			"$@" >"$update_output" 2>"$update_output.err"
+	)
+}
+
+setup_cache_tree_update_repo () {
+	git init "$1" &&
+	(
+		cd "$1" &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		git config core.fsmonitor false &&
+		git config gc.auto 0 &&
+		mkdir a b &&
+		echo one >a/file &&
+		echo two >b/file &&
+		git add a b &&
+		git commit -m base &&
+		git rev-parse HEAD^{tree} >.git/base.tree
+	)
+}
+
+cache_tree_update_value () {
+	sed -n "s/.*\"key\":\"update\\/$2-total\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" "$1"
+}
+
+test_cache_tree_update_time () {
+	update_trace="$1" &&
+	update_timer="$2" &&
+	update_count="$3" &&
+	test_trace2_data cache_tree "update/$update_timer-us-total" \
+		"[0-9][0-9]*" <"$update_trace" &&
+	update_us=$(cache_tree_update_value "$update_trace" "$update_timer-us") &&
+	test_grep ! "\"event\":\"th_timer\".*\"name\":\"update/$update_timer\"" \
+		"$update_trace" || return 1
+
+	if test "$update_count" = 0
+	then
+		test "$update_us" = 0 &&
+		test_grep ! "\"event\":\"timer\".*\"name\":\"update/$update_timer\"" \
+			"$update_trace"
+	else
+		grep "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"update/$update_timer\"" \
+			"$update_trace" >"$update_trace.timer" &&
+		test_line_count = 1 "$update_trace.timer" &&
+		test_grep "\"intervals\":$update_count," "$update_trace.timer" &&
+		update_total=$(sed -n \
+			"s/.*\"t_total\":\\([0-9][0-9]*[.][0-9][0-9]*\\),.*/\\1/p" \
+			"$update_trace.timer") &&
+		test -n "$update_total" &&
+		awk -v elapsed="$update_us" -v total="$update_total" '
+		BEGIN {
+			total *= 1000000
+			if (elapsed > total + 1 || elapsed < total - 1)
+				exit 1
+		}'
+	fi
+}
+
+test_cache_tree_update_metrics () {
+	update_trace="$1" &&
+	shift &&
+	for update_key in calls failed nodes reused sparse-nodes \
+		hash-only-nodes object-write-calls owned-odb-commit-calls
+	do
+		test_trace2_data cache_tree "update/$update_key-total" "$1" \
+			<"$update_trace" >"$update_trace.data" &&
+		test_line_count = 1 "$update_trace.data" || return 1
+		shift
+	done &&
+	grep '"event":"data".*"category":"cache_tree","key":"update/' \
+		"$update_trace" >"$update_trace.data" &&
+	test_line_count = 10 "$update_trace.data" &&
+	grep '"nesting":1,' "$update_trace.data" >"$update_trace.depth" &&
+	test_line_count = 10 "$update_trace.depth" &&
+	update_writes=$(cache_tree_update_value "$update_trace" object-write-calls) &&
+	update_commits=$(cache_tree_update_value "$update_trace" owned-odb-commit-calls) &&
+	test_cache_tree_update_time "$update_trace" object-write "$update_writes" &&
+	test_cache_tree_update_time "$update_trace" owned-odb-commit "$update_commits"
+}
+
+
+test_cache_tree_update_bound () {
+	update_trace="$1" &&
+	update_calls="$2" &&
+	update_write_us=$(cache_tree_update_value "$update_trace" object-write-us) &&
+	update_commit_us=$(cache_tree_update_value "$update_trace" owned-odb-commit-us) &&
+	# This fixture retains all returning regions, all on the main thread.
+	awk -v work="$((update_write_us + update_commit_us))" -v calls="$update_calls" '
+	/"event":"region_leave"/ && /"thread":"main"/ &&
+	/"category":"cache_tree","label":"update"/ {
+		elapsed = $0
+		sub(/^.*"t_rel":/, "", elapsed)
+		sub(/,.*/, "", elapsed)
+		total += elapsed * 1000000
+		regions++
+	}
+	END {
+		if (regions != calls || work > total + calls + 2)
+			exit 1
+	}' "$update_trace"
+}
+
 test_expect_success 'initial commit has cache-tree' '
 	test_commit foo &&
 	test_cache_tree
@@ -497,6 +605,203 @@ test_expect_success 'cache-tree lookup timing includes a failed validation but n
 	test_trace2_data cache_tree validate/object-checks-total 1 \
 		<.git/cache-tree-missing.trace &&
 	test_cache_tree_object_check_time .git/cache-tree-missing.trace 1
+'
+
+test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
+	test_when_finished "rm -rf update-reuse" &&
+	setup_cache_tree_update_repo update-reuse &&
+	(
+		cd update-reuse &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		echo changed >a/file &&
+		git add a/file &&
+		cp .git/index .git/invalid.index &&
+		run_cache_tree_update_trace 0 .git/expect git write-tree &&
+		cp .git/index .git/expect.index &&
+		cp .git/invalid.index .git/index &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git write-tree &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		git cat-file -e "$(cat .git/actual)^{tree}" &&
+		test_region cache_tree update .git/update.trace &&
+		test_trace2_data cache_tree validate/valid-total 0 <.git/update.trace &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 1 0 0 2 1
+	)
+'
+
+test_expect_success 'valid write-tree skips update diagnostics' '
+	test_when_finished "rm -rf update-valid" &&
+	setup_cache_tree_update_repo update-valid &&
+	(
+		cd update-valid &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git write-tree &&
+		test_cmp .git/base.tree .git/actual &&
+		test_must_be_empty .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_region ! cache_tree update .git/update.trace &&
+		test_grep ! "\"category\":\"cache_tree\",\"key\":\"update/" .git/update.trace &&
+		test_grep ! "\"category\":\"cache_tree\",\"name\":\"update/" .git/update.trace
+	)
+'
+
+test_expect_success 'ignoring cache-tree reports all rebuilt nodes without index writes' '
+	test_when_finished "rm -rf update-ignore" &&
+	setup_cache_tree_update_repo update-ignore &&
+	(
+		cd update-ignore &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace 0 .git/expect git --no-optional-locks \
+			write-tree --ignore-cache-tree &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git --no-optional-locks write-tree --ignore-cache-tree &&
+		test_cmp .git/base.tree .git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_region ! index do_write_index .git/update.trace &&
+		test_trace2_data cache_tree validate/skipped-total 1 <.git/update.trace &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 0 3 1
+	)
+'
+
+test_expect_success 'cache-tree repair reports hash-only work' '
+	test_when_finished "rm -rf update-repair" &&
+	setup_cache_tree_update_repo update-repair &&
+	(
+		cd update-repair &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace 0 .git/expect test-tool cache-tree --empty update &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			test-tool cache-tree --empty update &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1
+	)
+'
+
+test_expect_success 'cache-tree dry-run reports hash-only work' '
+	test_when_finished "rm -rf update-dryrun" &&
+	setup_cache_tree_update_repo update-dryrun &&
+	(
+		cd update-dryrun &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace 0 .git/expect test-tool dump-cache-tree &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			test-tool dump-cache-tree &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1
+	)
+'
+
+test_expect_success 'cache-tree update does not count an enclosing ODB commit' '
+	test_when_finished "rm -rf update-inflight" &&
+	setup_cache_tree_update_repo update-inflight &&
+	(
+		cd update-inflight &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace 0 .git/expect test-tool cache-tree --empty --transaction update &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			test-tool cache-tree --empty --transaction update &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 0
+	)
+'
+
+test_expect_success 'cache-tree update counts sparse-directory shortcuts separately' '
+	test_when_finished "rm -rf update-sparse" &&
+	setup_cache_tree_update_repo update-sparse &&
+	(
+		cd update-sparse &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		git sparse-checkout set --cone --sparse-index a &&
+		git ls-files --sparse >.git/entries &&
+		test_line_count = 2 .git/entries &&
+		test_grep "^b/$" .git/entries &&
+		cp .git/index .git/expect.index &&
+		run_cache_tree_update_trace 0 .git/expect git --no-optional-locks \
+			write-tree --ignore-cache-tree &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git --no-optional-locks write-tree --ignore-cache-tree &&
+		test_cmp .git/base.tree .git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 1 0 2 1
+	)
+'
+
+test_expect_success 'cache-tree update reports returned failures' '
+	test_when_finished "rm -rf update-failure" &&
+	setup_cache_tree_update_repo update-failure &&
+	(
+		cd update-failure &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		echo missing >a/file &&
+		git add a/file &&
+		cp .git/index .git/expect.index &&
+		blob=$(git rev-parse :a/file) &&
+		mv ".git/objects/$(test_oid_to_path "$blob")" .git/missing-blob &&
+		test_expect_code 128 run_cache_tree_update_trace 0 .git/expect \
+			git --no-optional-locks write-tree &&
+		test_expect_code 128 run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git --no-optional-locks write-tree &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		test_region cache_tree update .git/update.trace &&
+		test_cache_tree_update_metrics .git/update.trace 1 1 2 0 0 0 0 1
+	)
+'
+
+test_expect_success 'cache-tree update totals accumulate across returning regions' '
+	test_when_finished "rm -rf update-repeat" &&
+	setup_cache_tree_update_repo update-repeat &&
+	(
+		cd update-repeat &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		echo staged >a/file &&
+		git add a/file &&
+		echo unstaged >b/file &&
+		cp .git/index .git/invalid.index &&
+		test_tick &&
+		run_cache_tree_update_trace 0 .git/expect git stash create &&
+		cp .git/index .git/expect.index &&
+		cp .git/invalid.index .git/index &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/update.trace" GIT_TRACE2_EVENT_NESTING=100 \
+			git stash create >.git/actual 2>.git/actual.err &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/expect.err .git/actual.err &&
+		test_cmp .git/expect.index .git/index &&
+		git cat-file -e "$(cat .git/actual)^{commit}" &&
+		update_calls=$(grep -c "\"event\":\"region_leave\".*\"category\":\"cache_tree\",\"label\":\"update\"" \
+			.git/update.trace) &&
+		test "$update_calls" -ge 2 &&
+		test_cache_tree_update_metrics .git/update.trace "$update_calls" 0 \
+			"[0-9][0-9]*" "[0-9][0-9]*" 0 "[0-9][0-9]*" \
+			"[0-9][0-9]*" "$update_calls" &&
+		update_nodes=$(cache_tree_update_value .git/update.trace nodes) &&
+		update_reused=$(cache_tree_update_value .git/update.trace reused) &&
+		update_hash_only=$(cache_tree_update_value .git/update.trace hash-only-nodes) &&
+		update_writes=$(cache_tree_update_value .git/update.trace object-write-calls) &&
+		test "$update_writes" -gt 0 &&
+		test "$update_nodes" = "$((update_reused + update_hash_only + update_writes))" &&
+		test_cache_tree_update_bound .git/update.trace "$update_calls"
+	)
 '
 
 test_done

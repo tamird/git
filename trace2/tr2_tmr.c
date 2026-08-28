@@ -406,6 +406,17 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE] = {
+		.category = "cache_tree",
+		.name = "update/object-write",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT] = {
+		.category = "cache_tree",
+		.name = "update/owned-odb-commit",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 

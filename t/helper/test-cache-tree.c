@@ -4,6 +4,7 @@
 #include "test-tool.h"
 #include "gettext.h"
 #include "hex.h"
+#include "odb/transaction.h"
 #include "tree.h"
 #include "cache-tree.h"
 #include "parse-options.h"
@@ -23,6 +24,8 @@ int cmd__cache_tree(int argc, const char **argv)
 	struct tree *tree;
 	int empty = 0;
 	int invalidate_qty = 0;
+	int in_transaction = 0;
+	struct odb_transaction *transaction = NULL;
 	int i;
 
 	struct option options[] = {
@@ -31,6 +34,8 @@ int cmd__cache_tree(int argc, const char **argv)
 		OPT_INTEGER_F(0, "invalidate", &invalidate_qty,
 			      N_("number of entries in the cache tree to invalidate (default 0)"),
 			      PARSE_OPT_NONEG),
+		OPT_BOOL(0, "transaction", &in_transaction,
+			 N_("run inside an ODB transaction")),
 		OPT_END()
 	};
 
@@ -62,7 +67,9 @@ int cmd__cache_tree(int argc, const char **argv)
 
 	if (argc != 1)
 		usage_with_options(test_cache_tree_usage, options);
-	else if (!strcmp(argv[0], "prime"))
+	if (in_transaction)
+		odb_transaction_begin_or_die(the_repository->objects, &transaction, 0);
+	if (!strcmp(argv[0], "prime"))
 		prime_cache_tree(the_repository, the_repository->index, tree);
 	else if (!strcmp(argv[0], "update"))
 		cache_tree_update(the_repository->index, WRITE_TREE_SILENT | WRITE_TREE_REPAIR);
@@ -70,5 +77,7 @@ int cmd__cache_tree(int argc, const char **argv)
 	else if (!!strcmp(argv[0], "control"))
 		die(_("Unhandled subcommand '%s'"), argv[0]);
 
+	if (in_transaction && odb_transaction_commit(transaction))
+		return 1;
 	return 0;
 }

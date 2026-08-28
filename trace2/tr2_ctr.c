@@ -64,6 +64,57 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS] = {
+		.category = "cache_tree",
+		.name = "update/calls-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_FAILED] = {
+		.category = "cache_tree",
+		.name = "update/failed-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_NODES] = {
+		.category = "cache_tree",
+		.name = "update/nodes-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED] = {
+		.category = "cache_tree",
+		.name = "update/reused-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_SPARSE] = {
+		.category = "cache_tree",
+		.name = "update/sparse-nodes-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY] = {
+		.category = "cache_tree",
+		.name = "update/hash-only-nodes-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS] = {
+		.category = "cache_tree",
+		.name = "update/object-write-calls-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS] = {
+		.category = "cache_tree",
+		.name = "update/object-write-ns-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_CALLS] = {
+		.category = "cache_tree",
+		.name = "update/owned-odb-commit-calls-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS] = {
+		.category = "cache_tree",
+		.name = "update/owned-odb-commit-ns-total",
+		.want_per_thread_events = 0,
+	},
+
 	/* Add additional metadata before here. */
 };
 
@@ -150,6 +201,33 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		trace2_data_intmax("diff", NULL,
 				   "follow-full-tree/eligible-additions",
 				   follow_additions);
+		errno = saved_errno;
+	}
+
+	/*
+	 * DATA-only consumers need a complete, cumulative update snapshot,
+	 * including zero write/commit counts. Convert elapsed nanoseconds only
+	 * after aggregation. Emit only after at least one update region returns.
+	 */
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS].value) {
+		int saved_errno = errno;
+
+		for (cid = TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS;
+		     cid <= TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS;
+		     cid++) {
+			const char *name = tr2_counter_metadata[cid].name;
+			uint64_t value = final_counter_block.counter[cid].value;
+
+			if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS) {
+				name = "update/object-write-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS) {
+				name = "update/owned-odb-commit-us-total";
+				value /= 1000;
+			}
+			if (value <= INTMAX_MAX)
+				trace2_data_intmax("cache_tree", NULL, name, value);
+		}
 		errno = saved_errno;
 	}
 }
