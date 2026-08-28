@@ -5428,4 +5428,70 @@ test_expect_success 'packed lookup diagnostics distinguish search, resolution an
 	)
 '
 
+test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'worker lease growth fixture distinguishes replies and fallback' '
+	test_create_repo lease-growth &&
+	(
+		cd lease-growth &&
+		if test -n "$grep_index_socket_dir"
+		then
+			git config fsmonitor.socketDir "$grep_index_socket_dir" || return 1
+		fi &&
+		for i in $(test_seq 1 32)
+		do
+			echo "lease growth needle" >file-$i || return 1
+		done &&
+		git add file-* &&
+		git grep --cached --no-content-index --threads=1 \
+			-F "lease growth needle" >expect &&
+		growth_threads=$(test-tool online-cpus) &&
+		for mode in confirmed fallback
+		do
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				test-tool grep-index-ipc worker-growth "$mode" 0 \
+					"$PWD/$mode.trace" >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			test_trace2_data grep worker_lease/granted 0 <"$mode.trace" &&
+			test_trace2_data grep worker_lease/target "$growth_threads" \
+				<"$mode.trace" &&
+			test_grep_workers "$mode.trace" "$growth_threads" &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				test-tool grep-index-ipc worker-growth "$mode" 0 0 \
+					>actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err || return 1
+		done &&
+		GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+			test-tool grep-index-ipc worker-growth confirmed 2 \
+				"$PWD/explicit.trace" >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		test_grep_workers explicit.trace 2 &&
+		test_grep ! "worker_lease/" explicit.trace
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'worker lease growth diagnostics identify the last increase' '
+	(
+		cd lease-growth &&
+		for mode in confirmed fallback
+		do
+			case "$mode" in
+			confirmed) confirmed=1 fallback=0 reason=1 ;;
+			fallback) confirmed=0 fallback=1 reason=2 ;;
+			esac &&
+			growth_key=worker_lease/target_growth &&
+			test_trace2_data grep "${growth_key}_valid" 1 <"$mode.trace" &&
+			test_trace2_data grep "${growth_key}_confirmed_count" \
+				"$confirmed" <"$mode.trace" &&
+			test_trace2_data grep "${growth_key}_fallback_count" \
+				"$fallback" <"$mode.trace" &&
+			test_trace2_data grep "${growth_key}_last_reason" \
+				"$reason" <"$mode.trace" &&
+			test "$(grep -c "\"key\":\"${growth_key}_" "$mode.trace")" = 4 &&
+			test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${growth_key}_" "$mode.trace")" = 4 || return 1
+		done
+	)
+'
+
 test_done

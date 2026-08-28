@@ -222,6 +222,63 @@ static unsigned char *worker_busy;
 static uint64_t worker_lease_id;
 static struct grep_opt *worker_template;
 
+/* Values exposed by worker_lease/target_growth_last_reason. */
+enum grep_worker_growth_reason {
+	GREP_WORKER_GROWTH_NONE = 0,
+	GREP_WORKER_GROWTH_CONFIRMED = 1,
+	GREP_WORKER_GROWTH_FALLBACK = 2,
+};
+
+/* The renewal thread writes these; main reads them only after joining it. */
+static struct {
+	uintmax_t confirmed_count;
+	uintmax_t fallback_count;
+	enum grep_worker_growth_reason last_reason;
+	unsigned int enabled : 1;
+	unsigned int valid : 1;
+} worker_growth_stats;
+
+static void record_worker_target_growth(int err)
+{
+	uintmax_t *count;
+
+	if (!worker_growth_stats.enabled || !worker_growth_stats.valid)
+		return;
+	count = err ? &worker_growth_stats.fallback_count :
+		      &worker_growth_stats.confirmed_count;
+	if (*count == INTMAX_MAX) {
+		worker_growth_stats.valid = 0;
+		return;
+	}
+	(*count)++;
+	/* Unchanged and decreased targets do not replace the last increase. */
+	worker_growth_stats.last_reason = err ? GREP_WORKER_GROWTH_FALLBACK :
+					      GREP_WORKER_GROWTH_CONFIRMED;
+}
+
+static void trace_worker_target_growth(void)
+{
+	int saved_errno = errno;
+
+	if (!worker_growth_stats.enabled)
+		return;
+	trace2_data_intmax("grep", the_repository,
+			  "worker_lease/target_growth_valid",
+			  worker_growth_stats.valid);
+	if (worker_growth_stats.valid) {
+		trace2_data_intmax("grep", the_repository,
+				  "worker_lease/target_growth_confirmed_count",
+				  worker_growth_stats.confirmed_count);
+		trace2_data_intmax("grep", the_repository,
+				  "worker_lease/target_growth_fallback_count",
+				  worker_growth_stats.fallback_count);
+		trace2_data_intmax("grep", the_repository,
+				  "worker_lease/target_growth_last_reason",
+				  worker_growth_stats.last_reason);
+	}
+	errno = saved_errno;
+}
+
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_INDEX_OVERLAY_SAMPLE_SIZE (1U << 12)
 #define GREP_TREE_INDEX_CACHE_MAX_ENTRIES (1U << 20)
@@ -711,6 +768,8 @@ static void *renew_worker_lease(void *data UNUSED)
 			target = worker_thread_count;
 		grep_lock();
 		if (worker_target != target) {
+			if (target > worker_target)
+				record_worker_target_growth(err);
 			worker_target = target;
 			pthread_cond_broadcast(&cond_add);
 			pthread_cond_broadcast(&cond_resize);
@@ -787,7 +846,12 @@ static void start_threads(struct grep_opt *opt)
 		}
 	}
 	if (worker_lease_id) {
-		int err = pthread_create(
+		int err;
+
+		memset(&worker_growth_stats, 0, sizeof(worker_growth_stats));
+		worker_growth_stats.enabled = trace2_is_enabled();
+		worker_growth_stats.valid = 1;
+		err = pthread_create(
 			&worker_lease_thread, NULL, renew_worker_lease, NULL);
 
 		if (err) {
@@ -837,6 +901,7 @@ static int wait_all(void)
 
 	if (worker_lease_thread_started) {
 		pthread_join(worker_lease_thread, NULL);
+		trace_worker_target_growth();
 		worker_lease_thread_started = 0;
 	}
 	for (i = 0; i < worker_thread_count; i++) {

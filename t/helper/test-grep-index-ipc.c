@@ -8,6 +8,7 @@
 #include "pkt-line.h"
 #include "replace-object.h"
 #include "repository.h"
+#include "run-command.h"
 #include "setup.h"
 #include "simple-ipc.h"
 #include "strbuf.h"
@@ -1140,6 +1141,132 @@ cleanup:
 }
 #endif
 
+#ifdef SUPPORTS_SIMPLE_IPC
+struct worker_growth_test {
+	uint64_t lease_id;
+	unsigned int acquires;
+	unsigned int updates;
+	unsigned int unknowns;
+	int fallback;
+	int bad_request;
+};
+
+static int worker_growth_reply(void *data, const char *request,
+			       size_t request_len, ipc_server_reply_cb *reply,
+			       struct ipc_server_reply_data *reply_data)
+{
+	struct worker_growth_test *test = data;
+	unsigned char response[24] = { 0 };
+	uint32_t signature = request_len >= 4 ? get_be32(request) : 0;
+	uint32_t target = 0;
+	size_t response_len = sizeof(response);
+	uint64_t lease_id;
+
+	if ((signature != 0x47495741 && signature != 0x47495752 &&
+	     signature != 0x4749574c) ||
+	    request_len != (signature == 0x4749574c ? 20 : 28) ||
+	    get_be32(request + 4) != 1 ||
+	    !(lease_id = get_be64(request + 8)))
+		goto bad_request;
+	put_be32(response, 0x47495750);
+	put_be32(response + 4, 1);
+	put_be64(response + 8, lease_id);
+	if (signature == 0x47495741) {
+		if (test->lease_id || !get_be32(request + 16) ||
+		    get_be32(request + 20) > get_be32(request + 16) ||
+		    (!test->acquires && get_be32(request + 20)) ||
+		    !get_be32(request + 24))
+			goto bad_request;
+		test->lease_id = lease_id;
+		if (test->acquires++)
+			target = get_be32(request + 16);
+	} else {
+		if (lease_id != test->lease_id)
+			goto bad_request;
+		if (signature == 0x4749574c) {
+			if (!get_be32(request + 16))
+				goto bad_request;
+			put_be32(response, 0x47495758);
+			response_len = 16;
+			test->lease_id = 0;
+		} else {
+			if (!get_be32(request + 16) ||
+			    get_be32(request + 20) > get_be32(request + 16) ||
+			    !get_be32(request + 24))
+				goto bad_request;
+			test->updates++;
+			/* Queued work requires these unchanged renewals first. */
+			if (test->updates >= 3)
+				target = get_be32(request + 16);
+			if (test->fallback && test->updates == 3) {
+				put_be32(response, 0x47495755);
+				response_len = 16;
+				test->lease_id = 0;
+				test->unknowns++;
+			}
+		}
+	}
+	put_be32(response + 16, target);
+	put_be32(response + 20, 1);
+	return reply(reply_data, (const char *)response, response_len);
+
+bad_request:
+	test->bad_request = 1;
+	return reply(reply_data, "", 0);
+}
+
+static int test_worker_growth(int fallback, const char *threads,
+			      const char *trace)
+{
+	struct worker_growth_test test = { .fallback = fallback };
+	struct ipc_server_opts opts = {
+		.nr_threads = 1,
+		.max_request_size = 28,
+		.uds_disallow_chdir = 1,
+	};
+	struct ipc_server_data *server = NULL;
+	struct child_process child = CHILD_PROCESS_INIT;
+	char *path;
+	int result;
+
+	setup_git_directory(the_repository);
+	path = grep_index_ipc_worker_path(the_repository);
+	if (query_protocol_check_path(path) ||
+	    ipc_server_init_async(&server, path, &opts,
+				  worker_growth_reply, &test)) {
+		result = error_errno("could not create worker growth endpoint at %s",
+				     path);
+		free(path);
+		return result;
+	}
+	ipc_server_start_async(server);
+	child.git_cmd = 1;
+	child.no_stdin = 1;
+	strvec_pushl(&child.args, "-c", "core.fsmonitor=true", "grep",
+		     "--cached", "--no-content-index", NULL);
+	strvec_pushf(&child.args, "--threads=%s", threads);
+	strvec_pushl(&child.args, "-F", "lease growth needle", "--", NULL);
+	strvec_pushl(&child.env, "GIT_TRACE2=0", "GIT_TRACE2_PERF=0",
+		     "GIT_TRACE2_EVENT_NESTING=1", NULL);
+	strvec_pushf(&child.env, "GIT_TRACE2_EVENT=%s", trace);
+	result = run_command(&child);
+	ipc_server_stop_async(server);
+	ipc_server_await(server);
+	ipc_server_free(server);
+	free(path);
+	if (result || test.bad_request || test.lease_id)
+		return error("worker growth command or protocol failed");
+	if (!strcmp(threads, "0")) {
+		if (!test.acquires || test.updates < 3 ||
+		    test.unknowns != fallback)
+			return error("worker growth sequence was not exercised");
+	} else if (test.acquires || test.updates || test.unknowns) {
+		return error("explicit threads requested a worker lease");
+	}
+	return 0;
+}
+#endif
+
 int cmd__grep_index_ipc(int argc, const char **argv)
 {
 	uint64_t lease_id;
@@ -1152,6 +1279,11 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 	if (argc == 2 && !strcmp(argv[1], "query-wire"))
 		return test_query_wire();
 #ifdef SUPPORTS_SIMPLE_IPC
+	if (argc == 5 && !strcmp(argv[1], "worker-growth") &&
+	    (!strcmp(argv[2], "confirmed") || !strcmp(argv[2], "fallback")) &&
+	    (!strcmp(argv[3], "0") || !strcmp(argv[3], "2")))
+		return test_worker_growth(!strcmp(argv[2], "fallback"),
+					  argv[3], argv[4]);
 	if (argc >= 4 && !strcmp(argv[1], "query-no-filter") &&
 	    !strtol_i(argv[2], 10, &version) && version >= 0 && version <= 2)
 		return test_query_no_filter(version, argc - 3, argv + 3);
@@ -1166,6 +1298,7 @@ int cmd__grep_index_ipc(int argc, const char **argv)
 	if (argc != 5 || strtol_i(argv[1], 10, &requested) ||
 	    requested < 1)
 		die("usage: test-tool grep-index-ipc query-wire\n"
+		    "   or: test-tool grep-index-ipc worker-growth <confirmed|fallback> <0|2> <trace>\n"
 		    "   or: test-tool grep-index-ipc query-protocol <traced|untraced|captured>\n"
 		    "   or: test-tool grep-index-ipc query-wait <object-id>\n"
 		    "   or: test-tool grep-index-ipc query-no-filter <0|1|2> <object-id>...\n"
