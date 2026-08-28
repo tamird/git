@@ -291,6 +291,12 @@ off_t nth_packed_object_offset(const struct packed_git *, uint32_t n);
  */
 off_t find_pack_entry_one(const struct object_id *oid, struct packed_git *);
 
+/* Checked, errno-preserving timing for caller-owned packed lookup results. */
+uint64_t packed_lookup_begin(struct odb_packed_lookup *lookup);
+/* Returns the end timestamp for an immediately adjacent phase. */
+uint64_t packed_lookup_end(struct odb_packed_lookup *lookup,
+			   enum odb_packed_lookup_phase phase, uint64_t started);
+
 int packfile_fill_entry(struct packed_git *p,
 			const struct object_id *oid,
 			struct pack_entry *e,

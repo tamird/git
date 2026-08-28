@@ -1337,6 +1337,37 @@ static int packed_content_time(uint64_t *now)
 #endif
 }
 
+uint64_t packed_lookup_begin(struct odb_packed_lookup *lookup)
+{
+	uint64_t started;
+
+	if (!lookup || lookup->invalid)
+		return 0;
+	if (packed_content_time(&started)) {
+		lookup->invalid = 1;
+		return 0;
+	}
+	return started;
+}
+
+uint64_t packed_lookup_end(struct odb_packed_lookup *lookup,
+			   enum odb_packed_lookup_phase phase, uint64_t started)
+{
+	uint64_t finished;
+
+	if (!lookup || lookup->invalid)
+		return 0;
+	if (packed_content_time(&finished) || finished < started ||
+	    lookup->count[phase] == (uint64_t)INTMAX_MAX ||
+	    finished - started > UINT64_MAX - lookup->ns[phase]) {
+		lookup->invalid = 1;
+		return 0;
+	}
+	lookup->count[phase]++;
+	lookup->ns[phase] += finished - started;
+	return finished;
+}
+
 int packed_object_info_with_index_pos(struct odb_source_packed *source,
 				      struct packed_git *p, off_t obj_offset,
 				      uint32_t *maybe_index_pos, struct object_info *oi)

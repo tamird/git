@@ -18,27 +18,45 @@ static int find_pack_entry(struct odb_source_packed *store,
 			   const struct object_id *oid,
 			   struct pack_entry *e,
 			   enum object_info_flags flags,
-			   struct packed_git **bad_pack)
+			   struct packed_git **bad_pack,
+			   struct odb_packed_lookup *lookup)
 {
 	struct packfile_list_entry *l;
 	enum midx_fill_result midx_result = MIDX_FILL_MISS;
+	uint64_t started;
+	int found = 0;
 
 	odb_source_prepare(&store->base, 0);
 	if (store->midx) {
-		midx_result = midx_fill_entry(store->midx, oid, e, bad_pack);
+		midx_result = midx_fill_entry_with_lookup(store->midx, oid, e,
+						      bad_pack, lookup);
 		if (midx_result == MIDX_FILL_HIT)
 			return 1;
 	}
 
+	started = lookup ? packed_lookup_begin(lookup) : 0;
 	for (l = store->packs.head; l; l = l->next) {
 		struct packed_git *p = l->pack;
 
-		if (!p->multi_pack_index && packfile_fill_entry(p, oid, e, bad_pack)) {
+		if (p->multi_pack_index)
+			continue;
+		if (lookup && !lookup->invalid) {
+			if (lookup->fallback_pack_attempts == (uint64_t)INTMAX_MAX)
+				lookup->invalid = 1;
+			else
+				lookup->fallback_pack_attempts++;
+		}
+		if (packfile_fill_entry(p, oid, e, bad_pack)) {
 			if (!store->skip_mru_updates)
 				packfile_list_prepend(&store->packs, p);
-			return 1;
+			found = 1;
+			break;
 		}
 	}
+	if (lookup)
+		packed_lookup_end(lookup, ODB_PACKED_LOOKUP_FALLBACK, started);
+	if (found)
+		return 1;
 
 	/*
 	 * Recovery for a concurrent-repack race: a stale MIDX may still name a
@@ -122,7 +140,8 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 
 	if (result && !result->packed_entry_location_invalid)
 		timed = !packed_entry_location_time(&started);
-	found = find_pack_entry(packed, oid, &e, flags, &bad_pack);
+	found = find_pack_entry(packed, oid, &e, flags, &bad_pack,
+				result ? &result->packed_lookup : NULL);
 	if (result && !result->packed_entry_location_invalid) {
 		if (!timed || packed_entry_location_time(&finished) ||
 		    finished < started ||
@@ -175,7 +194,7 @@ static int odb_source_packed_read_object_stream(struct odb_stream **out,
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 	struct pack_entry e;
 
-	if (!find_pack_entry(packed, oid, &e, 0, NULL))
+	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL))
 		return -1;
 
 	return packfile_read_object_stream(out, oid, e.p, e.offset);
@@ -681,7 +700,7 @@ static int odb_source_packed_freshen_object(struct odb_source *source,
 		timesp = &times;
 	}
 
-	if (!find_pack_entry(packed, oid, &e, 0, NULL))
+	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL))
 		return 0;
 	if (e.p->is_cruft)
 		return 0;

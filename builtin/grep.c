@@ -2589,6 +2589,7 @@ struct grep_tree_query_context {
 	uint64_t tree_object_read_packed_content_ns;
 	uint64_t tree_object_read_packed_entry_location_attempt_count;
 	uint64_t tree_object_read_packed_entry_location_ns;
+	struct odb_packed_lookup tree_object_read_packed_lookup;
 	uint64_t batch_prepare_ns;
 	uint64_t batch_ipc_ns;
 	uint64_t batch_seed_ns;
@@ -2599,6 +2600,40 @@ struct grep_tree_query_context {
 	unsigned int ipc_trace_clock_invalid;
 	int ipc_trace_count_overflow;
 };
+
+static void grep_tree_record_packed_lookup(struct grep_tree_query_context *query,
+					   const struct odb_read_result *result)
+{
+	struct odb_packed_lookup *total = &query->tree_object_read_packed_lookup;
+	const struct odb_packed_lookup *lookup = &result->packed_lookup;
+	uint64_t sum_ns = 0;
+	int i;
+
+	if (total->invalid)
+		return;
+	if (query->tree_object_read_packed_entry_location_invalid ||
+	    result->packed_entry_location_invalid || lookup->invalid ||
+	    lookup->fallback_pack_attempts >
+		(uint64_t)INTMAX_MAX - total->fallback_pack_attempts)
+		goto invalid;
+	for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++) {
+		if (lookup->count[i] > result->packed_entry_location_attempt_count ||
+		    lookup->count[i] > (uint64_t)INTMAX_MAX - total->count[i] ||
+		    lookup->ns[i] > UINT64_MAX - total->ns[i] ||
+		    lookup->ns[i] > result->packed_entry_location_ns - sum_ns)
+			goto invalid;
+		sum_ns += lookup->ns[i];
+	}
+	for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++) {
+		total->count[i] += lookup->count[i];
+		total->ns[i] += lookup->ns[i];
+	}
+	total->fallback_pack_attempts += lookup->fallback_pack_attempts;
+	return;
+
+invalid:
+	total->invalid = 1;
+}
 
 static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 					const struct odb_read_result *result,
@@ -2642,6 +2677,7 @@ static void grep_tree_record_object_read(struct grep_tree_query_context *query,
 				result->packed_entry_location_ns;
 		}
 	}
+	grep_tree_record_packed_lookup(query, result);
 	if (query->tree_object_read_source_invalid)
 		return;
 	if (result->invalid || kind <= ODB_READ_RESULT_UNKNOWN ||
@@ -2700,6 +2736,8 @@ static void grep_tree_trace_object_read_sources(
 				   !query->tree_object_read_packed_content_invalid;
 	int packed_entry_location_valid = !query->tree_object_read_invalid &&
 		!query->tree_object_read_packed_entry_location_invalid;
+	int packed_lookup_valid = packed_entry_location_valid &&
+		!query->tree_object_read_packed_lookup.invalid;
 	int saved_errno = errno;
 	char key[96];
 
@@ -2742,6 +2780,27 @@ static void grep_tree_trace_object_read_sources(
 		trace2_data_intmax("grep", the_repository,
 			"content_index_tree_object_read_packed_entry_location_us",
 			query->tree_object_read_packed_entry_location_ns / 1000);
+	}
+	trace2_data_intmax("grep", the_repository,
+		"content_index_tree_object_read_packed_lookup_valid", packed_lookup_valid);
+	if (packed_lookup_valid) {
+		static const char * const phases[ODB_PACKED_LOOKUP_PHASE_NR] = {
+			"midx_search", "midx_resolve", "fallback"
+		};
+		const struct odb_packed_lookup *lookup = &query->tree_object_read_packed_lookup;
+		int i;
+
+		for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++) {
+			xsnprintf(key, sizeof(key),
+				  "content_index_tree_object_read_packed_lookup_%s_count", phases[i]);
+			trace2_data_intmax("grep", the_repository, key, lookup->count[i]);
+			xsnprintf(key, sizeof(key),
+				  "content_index_tree_object_read_packed_lookup_%s_us", phases[i]);
+			trace2_data_intmax("grep", the_repository, key, lookup->ns[i] / 1000);
+		}
+		trace2_data_intmax("grep", the_repository,
+			"content_index_tree_object_read_packed_lookup_fallback_pack_attempts",
+			lookup->fallback_pack_attempts);
 	}
 	trace2_data_intmax("grep", the_repository,
 		"content_index_tree_object_read_source_valid", valid);

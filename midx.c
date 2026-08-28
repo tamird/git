@@ -589,23 +589,32 @@ uint32_t nth_midxed_pack_int_id(struct multi_pack_index *m, uint32_t pos)
 					       (off_t)pos * MIDX_CHUNK_OFFSET_WIDTH);
 }
 
-enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
-				      const struct object_id *oid,
-				      struct pack_entry *e,
-				      struct packed_git **bad_pack)
+enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
+						  const struct object_id *oid,
+						  struct pack_entry *e,
+						  struct packed_git **bad_pack,
+						  struct odb_packed_lookup *lookup)
 {
 	uint32_t pos;
 	uint32_t pack_int_id;
 	struct packed_git *p;
+	uint64_t started = lookup ? packed_lookup_begin(lookup) : 0;
+	int found = bsearch_midx(oid, m, &pos);
+	enum midx_fill_result ret = MIDX_FILL_MISS;
 
-	if (!bsearch_midx(oid, m, &pos))
+	if (lookup)
+		started = packed_lookup_end(lookup, ODB_PACKED_LOOKUP_MIDX_SEARCH,
+					    started);
+	if (!found)
 		return MIDX_FILL_MISS;
 
 	midx_for_object(&m, pos);
 	pack_int_id = nth_midxed_pack_int_id(m, pos);
 
-	if (prepare_midx_pack(m, pack_int_id))
-		return MIDX_FILL_OWNER_UNAVAILABLE;
+	if (prepare_midx_pack(m, pack_int_id)) {
+		ret = MIDX_FILL_OWNER_UNAVAILABLE;
+		goto out;
+	}
 	p = m->packs[pack_int_id - m->num_packs_in_base];
 
 	/*
@@ -615,20 +624,34 @@ enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
 	* answer, as it may have been deleted since the MIDX was
 	* loaded!
 	*/
-	if (!is_pack_valid(p))
-		return MIDX_FILL_OWNER_UNAVAILABLE;
+	if (!is_pack_valid(p)) {
+		ret = MIDX_FILL_OWNER_UNAVAILABLE;
+		goto out;
+	}
 
 	if (oidset_size(&p->bad_objects) &&
 	    oidset_contains(&p->bad_objects, oid)) {
 		if (bad_pack && !*bad_pack)
 			*bad_pack = p;
-		return MIDX_FILL_MISS;
+		goto out;
 	}
 
 	e->offset = nth_midxed_offset(m, pos);
 	e->p = p;
+	ret = MIDX_FILL_HIT;
 
-	return MIDX_FILL_HIT;
+out:
+	if (lookup)
+		packed_lookup_end(lookup, ODB_PACKED_LOOKUP_MIDX_RESOLVE, started);
+	return ret;
+}
+
+enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
+				      const struct object_id *oid,
+				      struct pack_entry *e,
+				      struct packed_git **bad_pack)
+{
+	return midx_fill_entry_with_lookup(m, oid, e, bad_pack, NULL);
 }
 
 /* Match "foo.idx" against either "foo.pack" _or_ "foo.idx". */

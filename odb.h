@@ -303,6 +303,27 @@ enum odb_read_result_kind {
 	ODB_READ_RESULT_NR
 };
 
+enum odb_packed_lookup_phase {
+	ODB_PACKED_LOOKUP_MIDX_SEARCH,
+	ODB_PACKED_LOOKUP_MIDX_RESOLVE,
+	ODB_PACKED_LOOKUP_FALLBACK,
+	ODB_PACKED_LOOKUP_PHASE_NR
+};
+
+/*
+ * Disjoint parts of find_pack_entry for one optional content-read result.
+ * MIDX resolution includes pack preparation, validation, bad-object checking
+ * and offset decoding; it is not open-only time. Fallback includes the whole
+ * non-MIDX loop. Store preparation and other residual work remain in the
+ * enclosing entry-location interval. No clocks run inside search/probe loops.
+ */
+struct odb_packed_lookup {
+	uint64_t count[ODB_PACKED_LOOKUP_PHASE_NR];
+	uint64_t ns[ODB_PACKED_LOOKUP_PHASE_NR];
+	uint64_t fallback_pack_attempts;
+	int invalid;
+};
+
 struct odb_read_result {
 	enum odb_read_result_kind kind;
 	uint64_t inmemory_nonzero, loose_nonzero, packed_nonzero;
@@ -323,6 +344,8 @@ struct odb_read_result {
 	 */
 	uint64_t packed_entry_location_attempt_count, packed_entry_location_ns;
 	int packed_entry_location_invalid;
+	/* Optional detail failures do not invalidate the enclosing measurements. */
+	struct odb_packed_lookup packed_lookup;
 };
 
 void *odb_read_object_with_result(struct object_database *odb,

@@ -132,10 +132,16 @@ enum midx_fill_result {
 	MIDX_FILL_OWNER_UNAVAILABLE,
 };
 
+struct odb_packed_lookup;
 enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
 				      const struct object_id *oid,
 				      struct pack_entry *e,
 				      struct packed_git **bad_pack);
+enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
+						  const struct object_id *oid,
+						  struct pack_entry *e,
+						  struct packed_git **bad_pack,
+						  struct odb_packed_lookup *lookup);
 int midx_contains_pack(struct multi_pack_index *m,
 		       const char *idx_or_pack_name);
 int midx_layer_contains_pack(struct multi_pack_index *m,

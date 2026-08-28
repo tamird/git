@@ -5330,4 +5330,102 @@ test_expect_success FSMONITOR_DAEMON 'generic content-index query waits for a sh
 	)
 '
 
+test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose reads' '
+	test_create_repo packed-lookup &&
+	(
+		cd packed-lookup &&
+		blob=$(echo "packed lookup needle" | git hash-object -w --stdin) &&
+		midx_tree=$(printf "100644 blob %s\tmidx-file\n" "$blob" | git mktree) &&
+		fallback_tree=$(printf "100644 blob %s\tfallback-file\n" "$blob" | git mktree) &&
+		loose_tree=$(printf "100644 blob %s\tloose-file\n" "$blob" | git mktree) &&
+		printf "%s\n" "$midx_tree" |
+			git pack-objects --window=0 .git/objects/pack/pack >midx-pack &&
+		git multi-pack-index write &&
+		printf "%s\n" "$fallback_tree" |
+			git pack-objects --window=0 .git/objects/pack/pack >fallback-pack &&
+		git prune-packed &&
+		root=$({
+			printf "040000 tree %s\ta-midx\n" "$midx_tree" &&
+			printf "040000 tree %s\tb-fallback\n" "$fallback_tree" &&
+			printf "040000 tree %s\tc-loose\n" "$loose_tree"
+		} | git mktree) &&
+		for kind in midx fallback loose all
+		do
+			case "$kind" in
+			midx) set -- a-midx && reads=1 && content=1 ;;
+			fallback) set -- b-fallback && reads=1 && content=1 ;;
+			loose) set -- c-loose && reads=1 && content=0 ;;
+			all) set -- a-midx b-fallback c-loose && reads=3 && content=2 ;;
+			esac &&
+			for directory
+			do
+				printf "%s:%s/%s-file\n" "$root" "$directory" "${directory#*-}" ||
+					return 1
+			done >"$kind.expect" &&
+			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
+				git grep --no-content-index --threads=1 -l \
+				"packed lookup needle" "$root" -- "$@" >"$kind.off" 2>err &&
+			test_cmp "$kind.expect" "$kind.off" &&
+			test_must_be_empty err &&
+			GIT_TRACE2_EVENT="$PWD/$kind.trace" GIT_TRACE2_EVENT_NESTING=1 \
+				git grep --no-content-index --threads=1 -l \
+				"packed lookup needle" "$root" -- "$@" >"$kind.actual" 2>err &&
+			test_cmp "$kind.expect" "$kind.actual" &&
+			test_must_be_empty err &&
+			test_grep_packed_entry_location "$kind.trace" "$reads" &&
+			test_grep_packed_content "$kind.trace" "$content" || return 1
+		done
+	)
+'
+
+test_grep_packed_lookup () {
+	lookup_trace="$1"
+	shift
+	lookup_key=content_index_tree_object_read_packed_lookup
+	test_trace2_data grep "${lookup_key}_valid" "[01]" <"$lookup_trace" || return 1
+	if test_trace2_data grep "${lookup_key}_valid" 1 <"$lookup_trace"
+	then
+		lookup_records=8
+		lookup_total_us=0
+		for phase in midx_search midx_resolve fallback
+		do
+			test_trace2_data grep "${lookup_key}_${phase}_count" "$1" \
+				<"$lookup_trace" || return 1
+			case "$1" in
+			0) lookup_us=0 ;;
+			*) lookup_us="[0-9][0-9]*" ;;
+			esac &&
+			test_trace2_data grep "${lookup_key}_${phase}_us" "$lookup_us" \
+				<"$lookup_trace" || return 1
+			lookup_us=$(sed -n \
+				"s/.*\"key\":\"${lookup_key}_${phase}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				"$lookup_trace") &&
+			lookup_total_us=$((lookup_total_us + lookup_us)) &&
+			shift || return 1
+		done &&
+		test_trace2_data grep "${lookup_key}_fallback_pack_attempts" "$1" \
+			<"$lookup_trace" &&
+		test_trace2_data grep content_index_tree_object_read_packed_entry_location_valid \
+			1 <"$lookup_trace" || return 1
+		lookup_parent_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_packed_entry_location_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$lookup_trace") &&
+		test "$lookup_total_us" -le "$lookup_parent_us" || return 1
+	else
+		lookup_records=1
+	fi &&
+	test "$(grep -c "\"key\":\"${lookup_key}_" "$lookup_trace")" = "$lookup_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${lookup_key}_" "$lookup_trace")" = "$lookup_records"
+}
+
+test_expect_success 'packed lookup diagnostics distinguish search, resolution and fallback' '
+	(
+		cd packed-lookup &&
+		test_grep_packed_lookup midx.trace 1 1 0 0 &&
+		test_grep_packed_lookup fallback.trace 1 0 1 1 &&
+		test_grep_packed_lookup loose.trace 1 0 1 1 &&
+		test_grep_packed_lookup all.trace 3 1 2 2
+	)
+'
+
 test_done
