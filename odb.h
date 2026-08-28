@@ -345,6 +345,13 @@ struct odb_read_result {
 	uint64_t packed_inflate_phase_count, packed_inflate_phase_ns;
 	int packed_inflate_phase_enabled, packed_inflate_phase_invalid;
 	/*
+	 * Same capture gate: one PHASE 1 interval per unpack, including cache
+	 * probes, headers and delta-base descent, not setup or later decoding.
+	 * Its failures do not invalidate the enclosing or inflate measurements.
+	 */
+	uint64_t packed_base_descent_count, packed_base_descent_ns;
+	int packed_base_descent_invalid;
+	/*
 	 * Inclusive find_pack_entry calls for this content read, including
 	 * misses before a later source wins. Explicit second-read cache
 	 * refresh precedes this interval; packed-content decoding follows it.

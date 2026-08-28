@@ -1342,6 +1342,20 @@ static int packed_content_time(uint64_t *now)
 #endif
 }
 
+static void packed_base_descent_end(struct odb_read_result *result, uint64_t started)
+{
+	uint64_t finished;
+
+	if (packed_content_time(&finished) || finished < started ||
+	    result->packed_base_descent_count == (uint64_t)INTMAX_MAX ||
+	    finished - started > UINT64_MAX - result->packed_base_descent_ns) {
+		result->packed_base_descent_invalid = 1;
+		return;
+	}
+	result->packed_base_descent_count++;
+	result->packed_base_descent_ns += finished - started;
+}
+
 uint64_t packed_lookup_begin(struct odb_packed_lookup *lookup)
 {
 	uint64_t started;
@@ -1622,12 +1636,20 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 	struct unpack_entry_stack_ent *delta_stack = small_delta_stack;
 	int delta_stack_nr = 0, delta_stack_alloc = UNPACK_ENTRY_STACK_PREALLOC;
 	int base_from_cache = 0;
+	int base_descent_active = 0;
+	uint64_t base_descent_started = 0;
 
 	prepare_repo_settings(p->repo);
 
 	write_pack_access_log(p, obj_offset);
 
 	/* PHASE 1: drill down to the innermost base object */
+	if (result && !result->packed_base_descent_invalid) {
+		if (packed_content_time(&base_descent_started))
+			result->packed_base_descent_invalid = 1;
+		else
+			base_descent_active = 1;
+	}
 	for (;;) {
 		off_t base_offset;
 		int i;
@@ -1697,6 +1719,10 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 		delta_stack[i].size = size;
 
 		curpos = obj_offset = base_offset;
+	}
+	if (base_descent_active) {
+		packed_base_descent_end(result, base_descent_started);
+		base_descent_active = 0;
 	}
 
 	/* PHASE 2: handle the base */
@@ -1820,6 +1846,9 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 		*final_size = size;
 
 out:
+	/* CRC errors leave PHASE 1 without reaching its normal close above. */
+	if (base_descent_active)
+		packed_base_descent_end(result, base_descent_started);
 	unuse_pack(&w_curs);
 
 	if (delta_stack != small_delta_stack)

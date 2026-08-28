@@ -237,6 +237,49 @@ test_grep_packed_unpack () {
 		"$packed_unpack_records"
 }
 
+test_grep_packed_base_descent () {
+	base_descent_trace="$1"
+	base_descent_key=content_index_tree_object_read_packed_base_descent
+	test_trace2_data grep "${base_descent_key}_valid" "[01]" \
+		<"$base_descent_trace" || return 1
+	# These normal fixtures expect valid detail when the clock is available.
+	if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+		<"$base_descent_trace"
+	then
+		base_descent_records=3 &&
+		test_trace2_data grep "${base_descent_key}_valid" 1 \
+			<"$base_descent_trace" &&
+		test_trace2_data grep "${base_descent_key}_count" "$2" \
+			<"$base_descent_trace" &&
+		test_trace2_data grep "${base_descent_key}_us" "[0-9][0-9]*" \
+			<"$base_descent_trace" || return 1
+		base_descent_us=$(sed -n \
+			"s/.*\"key\":\"${base_descent_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$base_descent_trace") &&
+		base_descent_unpack_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$base_descent_trace") &&
+		base_descent_inflate_us=$(sed -n \
+			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"$base_descent_trace") &&
+		test "$base_descent_us" -le "$base_descent_unpack_us" &&
+		test "$((base_descent_us + base_descent_inflate_us))" \
+			-le "$base_descent_unpack_us" || return 1
+		if test "$2" = 0
+		then
+			test "$base_descent_us" = 0 || return 1
+		fi
+	else
+		base_descent_records=1 &&
+		test_trace2_data grep "${base_descent_key}_valid" 0 \
+			<"$base_descent_trace" || return 1
+	fi &&
+	test "$(grep -c "\"key\":\"${base_descent_key}_" "$base_descent_trace")" = \
+		"$base_descent_records" &&
+	test "$(grep -c "\"event\":\"data\".*\"thread\":\"main\".*\"nesting\":1,\"category\":\"grep\",\"key\":\"${base_descent_key}_" "$base_descent_trace")" = \
+		"$base_descent_records"
+}
+
 test_grep_packed_entry_location () {
 	packed_entry_location_trace="$1"
 	packed_entry_location_key=content_index_tree_object_read_packed_entry_location
@@ -2600,6 +2643,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	# One unpack decodes a base and one delta; cache-copy and empty add none.
 	test_grep_packed_unpack tree-positive.trace 1 2 &&
 	test_grep_packed_unpack tree-no-batch.trace 1 2 &&
+	test_grep_packed_base_descent tree-positive.trace 1 &&
+	test_grep_packed_base_descent tree-no-batch.trace 1 &&
 	for tree_sample_trace in tree-positive.trace tree-no-batch.trace
 	do
 		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
@@ -5566,11 +5611,14 @@ test_expect_success 'packed unpack diagnostics distinguish compressed streams an
 			all) unpack_count=2 ;;
 			esac &&
 			test_grep_packed_unpack "$kind.trace" \
-				"$unpack_count" "$unpack_count" || return 1
+				"$unpack_count" "$unpack_count" &&
+			test_grep_packed_base_descent "$kind.trace" "$unpack_count" || return 1
 			if test_have_prereq PTHREADS
 			then
 				test_grep_packed_unpack "$kind.threaded.trace" \
-					"$unpack_count" "$unpack_count" || return 1
+					"$unpack_count" "$unpack_count" &&
+				test_grep_packed_base_descent "$kind.threaded.trace" \
+					"$unpack_count" || return 1
 			fi || return 1
 		done
 	)

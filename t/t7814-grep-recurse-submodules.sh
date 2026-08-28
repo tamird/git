@@ -228,6 +228,20 @@ test_expect_success FSMONITOR_DAEMON \
 		done &&
 		tree_field_count=$((tree_field_count + 4)) || return 1
 	fi &&
+	base_descent_key=content_index_tree_object_read_packed_base_descent &&
+	test_trace2_data grep "${base_descent_key}_valid" "[01]" \
+		<recurse-content-index.trace &&
+	tree_field_count=$((tree_field_count + 1)) &&
+	if test_trace2_data grep "${base_descent_key}_valid" 1 \
+		<recurse-content-index.trace
+	then
+		for field in count us
+		do
+			test_trace2_data grep "${base_descent_key}_$field" "[0-9][0-9]*" \
+				<recurse-content-index.trace || return 1
+		done &&
+		tree_field_count=$((tree_field_count + 2)) || return 1
+	fi &&
 	test "$(grep -c "\"key\":\"content_index_tree_" \
 		recurse-content-index.trace)" = "$tree_field_count" &&
 	for field in objects queried rejected batches bypassed batch_ ipc_

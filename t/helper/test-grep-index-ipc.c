@@ -1330,8 +1330,15 @@ static int test_packed_unpack_scope(const char *hex)
 		    r->packed_inflate_phase_enabled != captured ||
 		    (!captured && (r->packed_inflate_phase_count ||
 				   r->packed_inflate_phase_ns || r->packed_inflate_phase_invalid)) ||
+		    (!captured && (r->packed_base_descent_count ||
+				   r->packed_base_descent_ns || r->packed_base_descent_invalid)) ||
 		    (captured && !r->packed_content_invalid &&
-		     (r->packed_inflate_phase_invalid || r->packed_inflate_phase_count != 1))) {
+		     (r->packed_inflate_phase_invalid || r->packed_inflate_phase_count != 1)) ||
+		    (captured && !r->packed_content_invalid &&
+		     (r->packed_base_descent_invalid || r->packed_base_descent_count != 1 ||
+		      r->packed_base_descent_ns > r->packed_content_ns ||
+		      r->packed_inflate_phase_ns >
+			      r->packed_content_ns - r->packed_base_descent_ns))) {
 			result = error("unexpected packed read capture in control %d", i);
 			goto out;
 		}
