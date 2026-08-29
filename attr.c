@@ -25,6 +25,7 @@
 #include "odb.h"
 #include "setup.h"
 #include "thread-utils.h"
+#include "tree.h"
 #include "tree-walk.h"
 #include "object-name.h"
 
@@ -427,6 +428,13 @@ fail_return:
  * .gitignore file and info/excludes file as a fallback.
  */
 
+struct attr_tree {
+	struct object_id oid;
+	void *buffer;
+	size_t size;
+	struct tree_desc desc;
+};
+
 struct attr_stack {
 	struct attr_stack *prev;
 	char *origin;
@@ -434,6 +442,7 @@ struct attr_stack {
 	unsigned num_matches;
 	unsigned alloc;
 	struct match_attr **attrs;
+	struct attr_tree tree;
 };
 
 static void attr_stack_free(struct attr_stack *e)
@@ -457,6 +466,7 @@ static void attr_stack_free(struct attr_stack *e)
 		free(a);
 	}
 	free(e->attrs);
+	free(e->tree.buffer);
 	free(e);
 }
 
@@ -678,16 +688,26 @@ static struct attr_stack *read_attr_from_array(const char **list)
  * another thread could potentially be calling into the attribute system.
  */
 static enum git_attr_direction direction;
+static struct object_id direction_tree;
 
 void git_attr_set_direction(enum git_attr_direction new_direction)
 {
-	if (is_bare_repository(the_repository) && new_direction != GIT_ATTR_INDEX)
-		BUG("non-INDEX attr direction in a bare repo");
+	if (is_bare_repository(the_repository) &&
+	    new_direction != GIT_ATTR_INDEX && new_direction != GIT_ATTR_TREE)
+		BUG("non-INDEX, non-TREE attr direction in a bare repo");
 
 	if (new_direction != direction)
 		drop_all_attr_stacks();
 
 	direction = new_direction;
+}
+
+void git_attr_set_tree(const struct object_id *tree_oid)
+{
+	if (direction == GIT_ATTR_TREE && !oideq(&direction_tree, tree_oid))
+		drop_all_attr_stacks();
+	oidcpy(&direction_tree, tree_oid);
+	git_attr_set_direction(GIT_ATTR_TREE);
 }
 
 static struct attr_stack *read_attr_from_file(const char *path, unsigned flags)
@@ -763,29 +783,92 @@ static struct attr_stack *read_attr_from_buf(char *buf, size_t length,
 	return res;
 }
 
-static struct attr_stack *read_attr_from_blob(struct index_state *istate,
-					      const struct object_id *tree_oid,
-					      const char *path, unsigned flags)
+static struct attr_stack *read_attr_from_oid(struct index_state *istate,
+					     const struct object_id *oid,
+					     const char *path, unsigned flags)
 {
-	struct object_id oid;
 	size_t sz;
 	enum object_type type;
 	void *buf;
-	unsigned short mode;
 
-	if (!tree_oid)
-		return NULL;
-
-	if (get_tree_entry(istate->repo, tree_oid, path, &oid, &mode))
-		return NULL;
-
-	buf = odb_read_object(istate->repo->objects, &oid, &type, &sz);
+	buf = odb_read_object(istate->repo->objects, oid, &type, &sz);
 	if (!buf || type != OBJ_BLOB) {
 		free(buf);
 		return NULL;
 	}
 
 	return read_attr_from_buf(buf, sz, path, flags);
+}
+
+static struct attr_stack *read_attr_from_blob(struct index_state *istate,
+					      const struct object_id *tree_oid,
+					      const char *path, unsigned flags)
+{
+	struct object_id oid;
+	unsigned short mode;
+
+	if (!tree_oid || get_tree_entry(istate->repo, tree_oid, path, &oid, &mode))
+		return NULL;
+	return read_attr_from_oid(istate, &oid, path, flags);
+}
+
+/* Keep ordered attribute queries from rescanning a directory from its start. */
+static const struct name_entry *find_attr_tree_entry(struct attr_tree *tree,
+						     const char *name, size_t len,
+						     unsigned int mode)
+{
+	struct tree_desc *desc = &tree->desc;
+
+	if (!desc->size)
+		return NULL;
+	/* Pathspec validation and later walks can revisit earlier entries. */
+	if (base_name_compare(desc->entry.path, tree_entry_len(&desc->entry),
+			      desc->entry.mode, name, len, mode) > 0)
+		init_tree_desc(desc, &tree->oid, tree->buffer, tree->size);
+	while (desc->size) {
+		struct tree_desc next;
+		int cmp = base_name_compare(desc->entry.path,
+					    tree_entry_len(&desc->entry),
+					    desc->entry.mode, name, len, mode);
+
+		if (!cmp)
+			return &desc->entry;
+		if (cmp > 0)
+			break;
+		next = *desc;
+		update_tree_entry(&next);
+		/* Retain the last entry so later misses need not restart. */
+		if (!next.size)
+			break;
+		*desc = next;
+	}
+	return NULL;
+}
+
+static struct attr_stack *read_attr_from_tree(struct index_state *istate,
+					      const struct object_id *tree_oid,
+					      const char *path, unsigned flags)
+{
+	struct attr_tree tree = { .oid = *tree_oid };
+	struct attr_stack *res = NULL;
+	const struct name_entry *entry;
+	struct tree *parsed = lookup_tree(istate->repo, tree_oid);
+
+	if (parsed && !repo_parse_tree_gently(istate->repo, parsed, 1)) {
+		tree.size = parsed->size;
+		/* The stack owns its copy even if another caller frees the tree. */
+		tree.buffer = xmemdupz(parsed->buffer, tree.size);
+		init_tree_desc(&tree.desc, tree_oid, tree.buffer, tree.size);
+		entry = find_attr_tree_entry(&tree, GITATTRIBUTES_FILE,
+					     strlen(GITATTRIBUTES_FILE), S_IFREG);
+		if (entry)
+			res = read_attr_from_oid(istate, &entry->oid, path, flags);
+	}
+	/* Child lookups need the directory cursor even without local attributes. */
+	if (!res)
+		CALLOC_ARRAY(res, 1);
+	res->tree = tree;
+	return res;
 }
 
 static struct attr_stack *read_attr_from_index(struct index_state *istate,
@@ -934,7 +1017,12 @@ static void bootstrap_attr_stack(struct index_state *istate,
 	}
 
 	/* root directory */
-	e = read_attr(istate, tree_oid, GITATTRIBUTES_FILE, flags | READ_ATTR_NOFOLLOW);
+	if (direction == GIT_ATTR_TREE)
+		e = read_attr_from_tree(istate, tree_oid, GITATTRIBUTES_FILE,
+					flags | READ_ATTR_NOFOLLOW);
+	else
+		e = read_attr(istate, tree_oid, GITATTRIBUTES_FILE,
+			      flags | READ_ATTR_NOFOLLOW);
 	push_stack(stack, e, xstrdup(""), 0);
 
 	/* info frame */
@@ -1025,7 +1113,22 @@ static void prepare_attr_stack(struct index_state *istate,
 		strbuf_add(&pathbuf, path + pathbuf.len, (len - pathbuf.len));
 		strbuf_addf(&pathbuf, "/%s", GITATTRIBUTES_FILE);
 
-		next = read_attr(istate, tree_oid, pathbuf.buf, READ_ATTR_NOFOLLOW);
+		if (direction == GIT_ATTR_TREE) {
+			const char *name = pathbuf.buf + (*stack)->originlen;
+			const struct name_entry *entry;
+
+			if (*name == '/')
+				name++;
+			entry = find_attr_tree_entry(&(*stack)->tree, name,
+						     len - (name - pathbuf.buf), S_IFDIR);
+			if (entry)
+				next = read_attr_from_tree(istate, &entry->oid,
+							   pathbuf.buf, READ_ATTR_NOFOLLOW);
+			else
+				CALLOC_ARRAY(next, 1);
+		} else {
+			next = read_attr(istate, tree_oid, pathbuf.buf, READ_ATTR_NOFOLLOW);
+		}
 
 		/* reset the pathbuf to not include "/.gitattributes" */
 		strbuf_setlen(&pathbuf, len);
@@ -1230,16 +1333,17 @@ static int compute_default_attr_source(struct object_id *attr_source)
 	return 1;
 }
 
-static struct object_id *default_attr_source(void)
+static const struct object_id *attr_source(void)
 {
-	static struct object_id attr_source;
-	static int has_attr_source = -1;
+	static struct object_id default_source;
+	static int has_default_source = -1;
 
-	if (has_attr_source < 0)
-		has_attr_source = compute_default_attr_source(&attr_source);
-	if (!has_attr_source)
-		return NULL;
-	return &attr_source;
+	/* Validate an explicit source even when the archive tree overrides it. */
+	if (has_default_source < 0)
+		has_default_source = compute_default_attr_source(&default_source);
+	if (direction == GIT_ATTR_TREE)
+		return &direction_tree;
+	return has_default_source ? &default_source : NULL;
 }
 
 static const char *interned_mode_string(unsigned int mode)
@@ -1267,11 +1371,13 @@ static const char *interned_mode_string(unsigned int mode)
 	BUG("Unsupported mode 0%o", mode);
 }
 
-static const char *builtin_object_mode_attr(struct index_state *istate, const char *path)
+static const char *builtin_object_mode_attr(struct index_state *istate,
+					    const char *path, unsigned int tree_mode)
 {
 	unsigned int mode;
 
-	if (direction == GIT_ATTR_CHECKIN) {
+	switch (direction) {
+	case GIT_ATTR_CHECKIN: {
 		struct object_id oid;
 		struct stat st;
 		if (lstat(path, &st))
@@ -1293,7 +1399,10 @@ static const char *builtin_object_mode_attr(struct index_state *istate, const ch
 				mode = S_IFGITLINK;
 			}
 		}
-	} else {
+		break;
+	}
+	case GIT_ATTR_CHECKOUT:
+	case GIT_ATTR_INDEX: {
 		/*
 		 * For GIT_ATTR_CHECKOUT and GIT_ATTR_INDEX we only check
 		 * for mode in the index.
@@ -1303,31 +1412,50 @@ static const char *builtin_object_mode_attr(struct index_state *istate, const ch
 			mode = istate->cache[pos]->ce_mode;
 		else
 			return ATTR__UNSET;
+		break;
+	}
+	case GIT_ATTR_TREE:
+		mode = tree_mode;
+		if (!mode) {
+			struct object_id oid;
+			unsigned short mode_in_tree;
+
+			if (get_tree_entry(istate->repo, &direction_tree, path,
+					   &oid, &mode_in_tree))
+				return ATTR__UNSET;
+			mode = mode_in_tree;
+		}
+		/* The archive's former index contained no directory entries. */
+		if (S_ISDIR(mode))
+			return ATTR__UNSET;
+		break;
+	default:
+		BUG("invalid attribute direction %d", direction);
 	}
 
 	return interned_mode_string(mode);
 }
 
-
 static const char *compute_builtin_attr(struct index_state *istate,
-					  const char *path,
-					  const struct git_attr *attr) {
+					const char *path,
+					unsigned int tree_mode,
+					const struct git_attr *attr)
+{
 	static const struct git_attr *object_mode_attr;
 
 	if (!object_mode_attr)
 		object_mode_attr = git_attr("builtin_objectmode");
 
 	if (attr == object_mode_attr)
-		return builtin_object_mode_attr(istate, path);
+		return builtin_object_mode_attr(istate, path, tree_mode);
 	return ATTR__UNSET;
 }
 
-void git_check_attr(struct index_state *istate,
-		    const char *path,
-		    struct attr_check *check)
+void git_check_attr_with_mode(struct index_state *istate, const char *path,
+			      unsigned int tree_mode, struct attr_check *check)
 {
 	int i;
-	const struct object_id *tree_oid = default_attr_source();
+	const struct object_id *tree_oid = attr_source();
 
 	collect_some_attrs(istate, tree_oid, path, check);
 
@@ -1335,16 +1463,23 @@ void git_check_attr(struct index_state *istate,
 		unsigned int n = check->items[i].attr->attr_nr;
 		const char *value = check->all_attrs[n].value;
 		if (value == ATTR__UNKNOWN)
-			value = compute_builtin_attr(istate, path, check->all_attrs[n].attr);
+			value = compute_builtin_attr(istate, path, tree_mode,
+						     check->all_attrs[n].attr);
 		check->items[i].value = value;
 	}
+}
+
+void git_check_attr(struct index_state *istate, const char *path,
+		    struct attr_check *check)
+{
+	git_check_attr_with_mode(istate, path, 0, check);
 }
 
 void git_all_attrs(struct index_state *istate,
 		   const char *path, struct attr_check *check)
 {
 	int i;
-	const struct object_id *tree_oid = default_attr_source();
+	const struct object_id *tree_oid = attr_source();
 
 	attr_check_reset(check);
 	collect_some_attrs(istate, tree_oid, path, check);

@@ -120,6 +120,7 @@
 #define ATTR_MAX_FILE_SIZE (100 * 1024 * 1024)
 
 struct index_state;
+struct object_id;
 
 /**
  * An attribute is an opaque object that is identified by its name. Pass the
@@ -212,6 +213,12 @@ const char *git_attr_name(const struct git_attr *);
 void git_check_attr(struct index_state *istate,
 		    const char *path,
 		    struct attr_check *check);
+/*
+ * tree_mode is the path's mode in the pinned tree, or zero if unknown.
+ * Only GIT_ATTR_TREE uses this hint, avoiding another tree lookup.
+ */
+void git_check_attr_with_mode(struct index_state *istate, const char *path,
+			      unsigned int tree_mode, struct attr_check *check);
 
 /*
  * Retrieve all attributes that apply to the specified path.
@@ -223,9 +230,12 @@ void git_all_attrs(struct index_state *istate,
 enum git_attr_direction {
 	GIT_ATTR_CHECKIN,
 	GIT_ATTR_CHECKOUT,
-	GIT_ATTR_INDEX
+	GIT_ATTR_INDEX,
+	GIT_ATTR_TREE
 };
 void git_attr_set_direction(enum git_attr_direction new_direction);
+/* Select GIT_ATTR_TREE with a pinned tree, including in bare repositories. */
+void git_attr_set_tree(const struct object_id *tree_oid);
 
 void attr_start(void);
 

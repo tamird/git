@@ -766,6 +766,7 @@ void clear_pathspec(struct pathspec *pathspec)
 
 int match_pathspec_attrs(struct index_state *istate,
 			 const char *name, int namelen,
+			 unsigned int tree_mode,
 			 const struct pathspec_item *item)
 {
 	int i;
@@ -774,7 +775,7 @@ int match_pathspec_attrs(struct index_state *istate,
 	if (name[namelen])
 		name = to_free = xmemdupz(name, namelen);
 
-	git_check_attr(istate, name, item->attr_check);
+	git_check_attr_with_mode(istate, name, tree_mode, item->attr_check);
 
 	free(to_free);
 

@@ -10,8 +10,11 @@
 #include "git-zlib.h"
 #include "hex.h"
 #include "object-name.h"
+#include "oid-array.h"
+#include "oidset.h"
 #include "path.h"
 #include "pretty.h"
+#include "promisor-remote.h"
 #include "setup.h"
 #include "refs.h"
 #include "odb.h"
@@ -21,7 +24,6 @@
 #include "attr.h"
 #include "archive.h"
 #include "parse-options.h"
-#include "unpack-trees.h"
 #include "quote.h"
 
 static char const * const archive_usage[] = {
@@ -126,7 +128,29 @@ struct archiver_context {
 	struct archiver_args *args;
 	write_archive_entry_fn_t write_entry;
 	struct directory *bottom;
+	struct oidset *missing;
 };
+
+static void add_missing_blob(struct repository *repo, struct oidset *missing,
+			     const struct object_id *oid)
+{
+	if (!odb_has_object(repo->objects, oid, 0))
+		oidset_insert(missing, oid);
+}
+
+static void fetch_missing_blobs(struct repository *repo, struct oidset *missing)
+{
+	struct oid_array to_fetch = OID_ARRAY_INIT;
+	struct oidset_iter iter;
+	const struct object_id *oid;
+
+	oidset_iter_init(missing, &iter);
+	while ((oid = oidset_iter_next(&iter)))
+		oid_array_append(&to_fetch, oid);
+	promisor_remote_get_direct(repo, to_fetch.oid, to_fetch.nr);
+	oid_array_clear(&to_fetch);
+	oidset_clear(missing);
+}
 
 static const struct attr_check *get_archive_attrs(struct index_state *istate,
 						  const char *path)
@@ -201,6 +225,15 @@ static int write_archive_entry(const struct object_id *oid, const char *base,
 		strbuf_add(&new_path, args->base, args->baselen);
 		strbuf_addstr(&new_path, rel);
 		strbuf_swap(&path, &new_path);
+	}
+
+	if (c->missing) {
+		/* The prefetch pass stops here, after the same selection checks. */
+		if (S_ISDIR(mode))
+			return READ_TREE_RECURSIVE;
+		if (!S_ISGITLINK(mode))
+			add_missing_blob(args->repo, c->missing, oid);
+		return 0;
 	}
 
 	if (args->verbose)
@@ -302,6 +335,23 @@ struct extra_file_info {
 	void *content;
 };
 
+static int walk_archive_entries(struct archiver_context *context)
+{
+	struct archiver_args *args = context->args;
+	int err;
+
+	err = read_tree(args->repo, args->tree, &args->pathspec,
+			queue_or_write_archive_entry, context);
+	if (err == READ_TREE_RECURSIVE)
+		err = 0;
+	while (context->bottom) {
+		struct directory *next = context->bottom->up;
+		free(context->bottom);
+		context->bottom = next;
+	}
+	return err;
+}
+
 int write_archive_entries(struct archiver_args *args,
 		write_archive_entry_fn_t write_entry)
 {
@@ -313,6 +363,26 @@ int write_archive_entries(struct archiver_args *args,
 	int i;
 
 	oidcpy(&fake_oid, null_oid(the_hash_algo));
+
+	memset(&context, 0, sizeof(context));
+	context.args = args;
+	context.write_entry = write_entry;
+	if (repo_has_promisor_remote(args->repo)) {
+		struct oidset missing = OIDSET_INIT;
+
+		/*
+		 * Walk the same selected entries without writing them, so missing
+		 * payloads can be fetched in one batch before the output walk.
+		 */
+		context.missing = &missing;
+		err = walk_archive_entries(&context);
+		if (err) {
+			oidset_clear(&missing);
+			return err;
+		}
+		fetch_missing_blobs(args->repo, &missing);
+		context.missing = NULL;
+	}
 
 	if (args->baselen > 0 && args->base[args->baselen - 1] == '/') {
 		size_t len = args->baselen;
@@ -327,21 +397,7 @@ int write_archive_entries(struct archiver_args *args,
 			return err;
 	}
 
-	memset(&context, 0, sizeof(context));
-	context.args = args;
-	context.write_entry = write_entry;
-
-	err = read_tree(args->repo, args->tree,
-			&args->pathspec,
-			queue_or_write_archive_entry,
-			&context);
-	if (err == READ_TREE_RECURSIVE)
-		err = 0;
-	while (context.bottom) {
-		struct directory *next = context.bottom->up;
-		free(context.bottom);
-		context.bottom = next;
-	}
+	err = walk_archive_entries(&context);
 
 	for (i = 0; i < args->extra_files.nr; i++) {
 		struct string_list_item *item = args->extra_files.items + i;
@@ -462,6 +518,73 @@ static int path_exists(struct archiver_args *args, const char *path)
 	return ret != 0;
 }
 
+static void collect_directory_attributes(const struct object_id *tree_oid,
+					 struct archiver_context *context)
+{
+	struct object_id oid;
+	unsigned short mode;
+
+	if (!get_tree_entry(context->args->repo, tree_oid, GITATTRIBUTES_FILE,
+			    &oid, &mode) &&
+	    !S_ISDIR(mode) && !S_ISGITLINK(mode))
+		add_missing_blob(context->args->repo, context->missing, &oid);
+}
+
+static int collect_archive_attributes(const struct object_id *oid,
+				      struct strbuf *base UNUSED,
+				      const char *filename UNUSED,
+				      unsigned mode, void *data)
+{
+	if (!S_ISDIR(mode))
+		return 0;
+	collect_directory_attributes(oid, data);
+	return READ_TREE_RECURSIVE;
+}
+
+static void prefetch_archive_attributes(struct archiver_args *args)
+{
+	struct oidset missing = OIDSET_INIT;
+	struct archiver_context context = { .args = args, .missing = &missing };
+	struct pathspec paths = args->pathspec;
+	int i, nr = 0;
+
+	/*
+	 * Discover attributes using only pathname constraints. The strings and
+	 * attribute checks remain owned by args->pathspec.
+	 *
+	 * Attribute pathspecs are also validated individually, so exclusions
+	 * cannot hide metadata needed by a positive argument. An attribute
+	 * exclusion alone has an implicit match-all positive pathspec.
+	 */
+	DUP_ARRAY(paths.items, args->pathspec.items, args->pathspec.nr);
+	for (i = 0; i < args->pathspec.nr; i++) {
+		struct pathspec_item *item = &args->pathspec.items[i];
+
+		if ((item->magic & (PATHSPEC_ATTR | PATHSPEC_EXCLUDE)) ==
+		    (PATHSPEC_ATTR | PATHSPEC_EXCLUDE)) {
+			nr = 0;
+			paths.magic = 0;
+			break;
+		}
+		if ((args->pathspec.magic & PATHSPEC_ATTR) &&
+		    (item->magic & PATHSPEC_EXCLUDE))
+			continue;
+		paths.items[nr] = *item;
+		paths.items[nr].magic &= ~PATHSPEC_ATTR;
+		paths.items[nr].attr_match_nr = 0;
+		nr++;
+	}
+	paths.nr = nr;
+	paths.magic &= ~PATHSPEC_ATTR;
+
+	collect_directory_attributes(&args->tree->object.oid, &context);
+	if (read_tree(args->repo, args->tree, &paths,
+		      collect_archive_attributes, &context))
+		die(_("unable to read tree (%s)"), oid_to_hex(&args->tree->object.oid));
+	free(paths.items);
+	fetch_missing_blobs(args->repo, &missing);
+}
+
 static void parse_pathspec_arg(const char **pathspec,
 		struct archiver_args *ar_args)
 {
@@ -473,6 +596,8 @@ static void parse_pathspec_arg(const char **pathspec,
 	parse_pathspec(&ar_args->pathspec, 0, PATHSPEC_PREFER_CWD,
 		       ar_args->prefix, pathspec);
 	ar_args->pathspec.recursive = 1;
+	if (!ar_args->worktree_attributes && repo_has_promisor_remote(ar_args->repo))
+		prefetch_archive_attributes(ar_args);
 	if (pathspec) {
 		while (*pathspec) {
 			if (**pathspec && !path_exists(ar_args, *pathspec))
@@ -523,26 +648,8 @@ static void parse_treeish_arg(const char **argv,
 	if (!tree)
 		die(_("not a tree object: %s"), oid_to_hex(&oid));
 
-	/*
-	 * Setup index and instruct attr to read index only
-	 */
-	if (!ar_args->worktree_attributes) {
-		struct unpack_trees_options opts;
-		struct tree_desc t;
-
-		memset(&opts, 0, sizeof(opts));
-		opts.index_only = 1;
-		opts.head_idx = -1;
-		opts.src_index = ar_args->repo->index;
-		opts.dst_index = ar_args->repo->index;
-		opts.fn = oneway_merge;
-		init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
-		if (unpack_trees(1, &t, &opts))
-			die(_("failed to unpack tree object %s"),
-			    oid_to_hex(&tree->object.oid));
-
-		git_attr_set_direction(GIT_ATTR_INDEX);
-	}
+	if (!ar_args->worktree_attributes)
+		git_attr_set_tree(&tree->object.oid);
 
 	ar_args->refname = ref;
 	ar_args->tree = tree;

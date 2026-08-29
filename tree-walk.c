@@ -1204,7 +1204,7 @@ interesting:
 
 			strbuf_add(base, entry->path, pathlen);
 			ret = match_pathspec_attrs(istate, base->buf,
-						   base->len, item);
+						   base->len, entry->mode, item);
 			strbuf_setlen(base, baselen);
 			if (!ret)
 				continue;

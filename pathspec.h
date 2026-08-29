@@ -182,6 +182,7 @@ static inline int matches_skip_worktree(const struct pathspec *pathspec,
 }
 int match_pathspec_attrs(struct index_state *istate,
 			 const char *name, int namelen,
+			 unsigned int tree_mode,
 			 const struct pathspec_item *item);
 
 int match_pathspec(struct index_state *istate,

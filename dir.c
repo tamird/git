@@ -426,9 +426,11 @@ static int match_pathspec_item(struct index_state *istate,
 		return 0;
 
 	if (item->attr_match_nr) {
+		unsigned int tree_mode = flags & DO_MATCH_DIRECTORY ? S_IFDIR : 0;
+
 		if (!istate)
 			BUG("magic PATHSPEC_ATTR requires an index");
-		if (!match_pathspec_attrs(istate, name - prefix, namelen + prefix, item))
+		if (!match_pathspec_attrs(istate, name - prefix, namelen + prefix, tree_mode, item))
 			return 0;
 	}
 
