@@ -50,7 +50,8 @@ static int fetch_fsck_objects = -1;
 static int transfer_fsck_objects = -1;
 static int agent_supported;
 static int server_supports_filtering;
-static int fetch_packfile_uri_jobs = 1;
+static int fetch_packfile_uri_jobs = 4;
+static int fetch_packfile_uri_jobs_configured;
 static struct shallow_lock shallow_lock;
 static const char *alternate_shallow_file;
 static struct strbuf fsck_msg_types = STRBUF_INIT;
@@ -1433,7 +1434,8 @@ static int send_fetch_request(struct fetch_negotiator *negotiator, int fd_out,
 		if (to_send.len) {
 			packet_buf_write(&req_buf, "packfile-uris %s",
 					 to_send.buf);
-			if (fetch_packfile_uri_jobs > 1 &&
+			if (fetch_packfile_uri_jobs_configured &&
+			    fetch_packfile_uri_jobs > 1 &&
 			    server_supports_feature(
 				    "fetch", "no-ref-delta", 0)) {
 				packet_buf_write(&req_buf, "no-ref-delta");
@@ -1686,6 +1688,26 @@ static int index_pack_args_have_keep(struct strvec *index_pack_args)
 	return 0;
 }
 
+static int packfile_uris_have_duplicate_hashes(const struct string_list *uris)
+{
+	struct oidset seen = OIDSET_INIT;
+	int duplicate = 0;
+
+	for (size_t i = 0; i < uris->nr; i++) {
+		struct object_id oid;
+		const char *end;
+
+		if (parse_oid_hex(uris->items[i].string, &oid, &end) || *end != ' ')
+			BUG("invalid packfile URI entry");
+		if (oidset_insert(&seen, &oid)) {
+			duplicate = 1;
+			break;
+		}
+	}
+	oidset_clear(&seen);
+	return duplicate;
+}
+
 static void precreate_packfile_uri_keep(const struct object_id *oid,
 					struct string_list *pack_lockfiles)
 {
@@ -1712,14 +1734,19 @@ struct packfile_uri_task {
 	struct strbuf output;
 	uint64_t bytes;
 	int got_pack;
+	int created_keep;
+	int downloaded;
+	int index_permitted;
+	int index_in_order;
+	size_t uri_nr;
 	struct object_id oid;
 	const char *uri;
 };
 
 static void start_packfile_uri_task(
-	struct packfile_uri_task *task, const char *entry,
+	struct packfile_uri_task *task, const char *entry, size_t uri_nr,
 	struct strvec *index_pack_args, struct string_list *pack_lockfiles,
-	int precreate_keeps, int progress)
+	int precreate_keeps, int progress, int index_in_order)
 {
 	if (parse_oid_hex(entry, &task->oid, &task->uri) ||
 	    *task->uri++ != ' ')
@@ -1731,21 +1758,34 @@ static void start_packfile_uri_task(
 	strbuf_init(&task->output, 0);
 	task->bytes = 0;
 	task->got_pack = 0;
+	task->created_keep = 0;
+	task->downloaded = 0;
+	task->index_permitted = 0;
+	task->index_in_order = index_in_order;
+	task->uri_nr = uri_nr;
 	strvec_push(&task->cmd.args, "http-fetch");
 	if (progress)
 		strvec_push(&task->cmd.args, "--report-progress");
+	if (index_in_order)
+		strvec_push(&task->cmd.args, "--wait-for-index");
 	strvec_pushf(&task->cmd.args, "--packfile=%s",
 		     oid_to_hex(&task->oid));
 	for (size_t i = 0; i < index_pack_args->nr; i++) {
-		if (index_pack_arg_is_keep(index_pack_args->v[i]) ||
-		    !strcmp(index_pack_args->v[i], "-v"))
+		if (!index_in_order &&
+		    (index_pack_arg_is_keep(index_pack_args->v[i]) ||
+		     !strcmp(index_pack_args->v[i], "-v")))
 			continue;
 		strvec_pushf(&task->cmd.args, "--index-pack-arg=%s",
 			     index_pack_args->v[i]);
 	}
 	strvec_push(&task->cmd.args, task->uri);
 	task->cmd.git_cmd = 1;
-	task->cmd.no_stdin = 1;
+	if (index_in_order)
+		task->cmd.in = -1;
+	else
+		task->cmd.no_stdin = 1;
+	/* Do not let later helpers inherit earlier helpers' permit pipes. */
+	task->cmd.close_fd_above_stderr = index_in_order;
 	task->cmd.clean_on_exit = 1;
 	task->cmd.out = -1;
 	task->cmd.err = -1;
@@ -1775,7 +1815,8 @@ static void read_packfile_uri_task(struct packfile_uri_task *task,
 		struct object_id oid;
 
 		*eol = '\0';
-		if (!task->got_pack && skip_prefix(line, "bytes ", &line)) {
+		if (!task->got_pack && !task->downloaded &&
+		    skip_prefix(line, "bytes ", &line)) {
 			char *end;
 			uint64_t bytes;
 
@@ -1787,9 +1828,23 @@ static void read_packfile_uri_task(struct packfile_uri_task *task,
 				die("fetch-pack: invalid download byte count");
 			*total_bytes += bytes - task->bytes;
 			task->bytes = bytes;
+		} else if (task->index_in_order && !task->downloaded &&
+			   !strcmp(line, "downloaded")) {
+			task->downloaded = 1;
 		} else {
-			if (!task->got_pack && !skip_prefix(line, "pack\t", &line))
-				die("fetch-pack: expected pack then TAB at start of http-fetch output");
+			if (task->index_in_order && !task->downloaded)
+				die("fetch-pack: expected download completion before pack output");
+			if (task->index_in_order && !task->index_permitted)
+				die("fetch-pack: pack output before indexing was permitted");
+			if (!task->got_pack) {
+				if (skip_prefix(line, "keep\t", &line)) {
+					if (!task->index_in_order)
+						die("fetch-pack: unexpected URI keep file");
+					task->created_keep = 1;
+				} else if (!skip_prefix(line, "pack\t", &line)) {
+					die("fetch-pack: expected pack or keep then TAB at start of http-fetch output");
+				}
+			}
 			if (parse_oid_hex(line, &oid, &end) || end != eol)
 				die("fetch-pack: invalid hash in http-fetch output");
 			if (task->got_pack)
@@ -1810,7 +1865,8 @@ static void finish_packfile_uri_task(struct packfile_uri_task *task)
 {
 	if (finish_command(&task->cmd))
 		die("fetch-pack: unable to finish http-fetch");
-	if (!task->got_pack || task->output.len)
+	if (!task->got_pack || task->output.len ||
+	    (task->index_in_order && !task->downloaded))
 		die("fetch-pack: incomplete http-fetch output");
 	strbuf_release(&task->output);
 }
@@ -1818,12 +1874,12 @@ static void finish_packfile_uri_task(struct packfile_uri_task *task)
 static void fetch_packfile_uris_parallel(
 	struct string_list *uris, struct strvec *index_pack_args,
 	struct string_list *pack_lockfiles, struct oidset *gitmodules_oids,
-	int show_progress)
+	int show_progress, int index_in_order)
 {
 	size_t task_nr = uris->nr;
 	struct packfile_uri_task *tasks;
 	struct pollfd *pollfds;
-	int precreate_keeps = index_pack_args_have_keep(index_pack_args);
+	int precreate_keeps = !index_in_order && index_pack_args_have_keep(index_pack_args);
 	size_t next = 0, running = 0, completed = 0;
 	uint64_t total_bytes = 0;
 	struct progress *progress = NULL;
@@ -1841,9 +1897,10 @@ static void fetch_packfile_uris_parallel(
 	CALLOC_ARRAY(pollfds, 2 * task_nr);
 
 	for (; next < task_nr; next++)
-		start_packfile_uri_task(&tasks[next],
-					uris->items[next].string, index_pack_args,
-					pack_lockfiles, precreate_keeps, show_progress);
+		start_packfile_uri_task(&tasks[next], uris->items[next].string,
+					next, index_pack_args, pack_lockfiles,
+					precreate_keeps, show_progress,
+					index_in_order);
 	running = next;
 
 	while (running) {
@@ -1891,13 +1948,39 @@ static void fetch_packfile_uris_parallel(
 				continue;
 
 			finish_packfile_uri_task(task);
+			if (index_in_order && task->uri_nr != completed)
+				BUG("packfile URI was indexed out of order");
+			if (task->created_keep)
+				string_list_append_nodup(pack_lockfiles,
+							 xstrfmt("%s/pack/pack-%s.keep",
+								 repo_get_object_directory(the_repository),
+								 oid_to_hex(&task->oid)));
 			completed++;
-			if (next < uris->nr)
-				start_packfile_uri_task(task, uris->items[next++].string,
-						index_pack_args, pack_lockfiles,
-						precreate_keeps, show_progress);
-			else
+			if (next < uris->nr) {
+				start_packfile_uri_task(task, uris->items[next].string,
+							next, index_pack_args,
+							pack_lockfiles, precreate_keeps,
+							show_progress, index_in_order);
+				next++;
+			} else {
 				running--;
+			}
+		}
+		if (index_in_order && completed < uris->nr) {
+			for (size_t i = 0; i < task_nr; i++) {
+				struct packfile_uri_task *task = &tasks[i];
+
+				if (task->uri_nr != completed || !task->downloaded ||
+				    task->index_permitted)
+					continue;
+				if (write_in_full(task->cmd.in, "\n", 1) != 1)
+					die_errno("fetch-pack: unable to permit pack indexing");
+				if (close(task->cmd.in))
+					die_errno("fetch-pack: unable to close pack indexing pipe");
+				task->cmd.in = -1;
+				task->index_permitted = 1;
+				break;
+			}
 		}
 	}
 	if (diagnostic_incomplete)
@@ -1950,7 +2033,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	int received_ready = 0;
 	int no_ref_delta = 0;
 	struct string_list packfile_uris = STRING_LIST_INIT_DUP;
-	int parallel_uri_indexing;
+	int parallel_uri_downloads;
 	struct strvec index_pack_args = STRVEC_INIT;
 	const char *promisor_remote_config;
 
@@ -2113,21 +2196,20 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 		}
 	}
 
-	parallel_uri_indexing = no_ref_delta &&
-		pack_lockfiles &&
-		fetch_packfile_uri_jobs > 1 &&
-		packfile_uris.nr > 1;
-	if (parallel_uri_indexing) {
-		/*
-		 * Bound total indexer threads by the number of URI jobs. The
-		 * URI packs are independent, so each indexer can stay single
-		 * threaded while several indexers run at once.
-		 */
-		strvec_push(&index_pack_args, "--threads=1");
+	parallel_uri_downloads = pack_lockfiles &&
+				 fetch_packfile_uri_jobs > 1 &&
+				 packfile_uris.nr > 1 &&
+				 !packfile_uris_have_duplicate_hashes(&packfile_uris);
+	if (parallel_uri_downloads) {
+		if (no_ref_delta) {
+			/* Independent packs can use concurrent, single-threaded indexers. */
+			strvec_push(&index_pack_args, "--threads=1");
+		}
 		fetch_packfile_uris_parallel(&packfile_uris, &index_pack_args,
-					    pack_lockfiles,
-					    &fsck_options.gitmodules_found,
-					    !args->quiet && !args->no_progress);
+					     pack_lockfiles,
+					     &fsck_options.gitmodules_found,
+					     !args->quiet && !args->no_progress,
+					     !no_ref_delta);
 		goto packfile_uris_done;
 	}
 
@@ -2238,6 +2320,7 @@ static int fetch_pack_config_cb(const char *var, const char *value,
 
 	if (!strcmp(var, "fetch.packfileurijobs")) {
 		fetch_packfile_uri_jobs = git_config_int(var, value, ctx->kvi);
+		fetch_packfile_uri_jobs_configured = 1;
 		return 0;
 	}
 

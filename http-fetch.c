@@ -15,7 +15,9 @@
 #include "trace2.h"
 
 static const char http_fetch_usage[] = "git http-fetch "
-"[-c] [-t] [-a] [-v] [--recover] [-w ref] [--stdin | --packfile=hash | commit-id] url";
+				       "[-c] [-t] [-a] [-v] [--recover] [-w ref] "
+				       "[--stdin | --packfile=hash --index-pack-arg=arg... "
+				       "[--report-progress] [--wait-for-index] | commit-id] url";
 
 static int fetch_using_walker(const char *raw_url, int get_verbosely,
 			      int get_recover, int commits, char **commit_id,
@@ -78,7 +80,8 @@ static void update_packfile_progress(void *data, size_t bytes)
 static void fetch_single_packfile(struct object_id *packfile_hash,
 				  const char *url,
 				  const char **index_pack_args,
-				  int report_progress)
+				  int report_progress,
+				  int wait_for_index)
 {
 	struct http_pack_request *preq;
 	struct packfile_progress progress = { 0 };
@@ -118,6 +121,15 @@ static void fetch_single_packfile(struct object_id *packfile_hash,
 
 	if (report_progress)
 		report_packfile_progress(&progress);
+	if (wait_for_index) {
+		char permit;
+
+		/* Keep the staging file open until our parent permits indexing. */
+		if (puts("downloaded") == EOF || fflush(stdout))
+			die_errno("unable to report packfile download completion");
+		if (read_in_full(0, &permit, 1) != 1 || permit != '\n')
+			die("packfile indexing was not authorized by fetch-pack");
+	}
 
 	if ((ret = finish_http_pack_request(preq)))
 		die("finish_http_pack_request gave result %d", ret);
@@ -137,6 +149,7 @@ int cmd_main(int argc, const char **argv)
 	int get_recover = 0;
 	int packfile = 0;
 	int report_progress = 0;
+	int wait_for_index = 0;
 	int nongit;
 	struct object_id packfile_hash;
 	struct strvec index_pack_args = STRVEC_INIT;
@@ -163,6 +176,8 @@ int cmd_main(int argc, const char **argv)
 			commits_on_stdin = 1;
 		} else if (!strcmp(argv[arg], "--report-progress")) {
 			report_progress = 1;
+		} else if (!strcmp(argv[arg], "--wait-for-index")) {
+			wait_for_index = 1;
 		} else if (skip_prefix(argv[arg], "--packfile=", &p)) {
 			const char *end;
 
@@ -193,13 +208,16 @@ int cmd_main(int argc, const char **argv)
 			die(_("the option '%s' requires '%s'"), "--packfile", "--index-pack-arg");
 
 		fetch_single_packfile(&packfile_hash, argv[arg],
-				      index_pack_args.v, report_progress);
+				      index_pack_args.v, report_progress,
+				      wait_for_index);
 		ret = 0;
 		goto out;
 	}
 
 	if (report_progress)
 		die(_("the option '%s' requires '%s'"), "--report-progress", "--packfile");
+	if (wait_for_index)
+		die(_("the option '%s' requires '%s'"), "--wait-for-index", "--packfile");
 
 	if (index_pack_args.nr)
 		die(_("the option '%s' requires '%s'"), "--index-pack-arg", "--packfile");

@@ -95,13 +95,15 @@ For submodules, this setting can be overridden using the `submodule.fetchJobs`
 config setting.
 
 `fetch.packfileUriJobs`::
-	Specifies the maximum number of packfile URI downloads and indexers
-	to run at once. The default is 1, which preserves advertised URI
-	order.
+	Specifies the maximum number of concurrent packfile URI downloads.
+	The default is 4. A value of 1 fetches and indexes URI packs one
+	at a time.
 +
-Values greater than 1 are used only when the server advertises and the
-client requests the `no-ref-delta` promise. Each URI pack is then checked
-with `index-pack --no-ref-delta` before it is accepted.
+With values greater than 1, URI packs are indexed in advertised order
+after downloading. When this setting is explicitly configured to a value
+greater than 1 and the server advertises the `no-ref-delta` promise, the
+client requests it and may index multiple URI packs concurrently, each
+checked with `index-pack --no-ref-delta`.
 Responses with one URI retain the serial path.
 
 `fetch.writeCommitGraph`::

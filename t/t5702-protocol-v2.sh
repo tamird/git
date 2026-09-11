@@ -1364,6 +1364,156 @@ test_expect_success 'part of packfile response provided as URI' '
 	test_line_count = 6 filelist
 '
 
+test_expect_success 'default URI helpers start before ordered pack indexing' '
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/ordered-uri.trace" \
+	GIT_TRACE_PACKET="$TRASH_DIRECTORY/ordered-uri.packet" \
+	GIT_TEST_SIDEBAND_ALL=1 \
+	git -c protocol.version=2 -c fetch.uriprotocols=http \
+		clone --progress "$HTTPD_URL/smart/http_parent" \
+		http_child-ordered 2>ordered-uri.progress &&
+
+	test_grep ! "no-ref-delta" ordered-uri.packet &&
+	awk '\''
+		/packet:.*< / && /:\/\// {
+			line = $0
+			sub(/^.*< /, "", line)
+			split(line, fields, " ")
+			hash = fields[1]
+			sub(/^\\1/, "", hash)
+			if (hash ~ /^[0-9a-f]+$/ &&
+			    (length(hash) == 40 || length(hash) == 64))
+				print hash
+		}
+	'\'' ordered-uri.packet >ordered-uri.advertised &&
+	test_line_count = 2 ordered-uri.advertised &&
+	{
+		read first_hash &&
+		read second_hash
+	} <ordered-uri.advertised &&
+	test "$first_hash" != "$second_hash" &&
+	test_grep "Fetching packs: 100% (2/2)" ordered-uri.progress &&
+	test_grep ! "^bytes " ordered-uri.progress &&
+	git -C "$HTTPD_DOCUMENT_ROOT_PATH/http_parent" config --get-all \
+		uploadpack.blobpackfileuri >ordered-uri.list &&
+	test_line_count = 2 ordered-uri.list &&
+	git -C http_child-ordered cat-file blob HEAD:my-blob >ordered-uri.blob &&
+	test_cmp "$HTTPD_DOCUMENT_ROOT_PATH/http_parent/my-blob" ordered-uri.blob &&
+	git -C http_child-ordered cat-file blob HEAD:other-blob >ordered-uri.blob &&
+	test_cmp "$HTTPD_DOCUMENT_ROOT_PATH/http_parent/other-blob" ordered-uri.blob &&
+
+	# The first URI indexer must start after both downloads start. Indexers
+	# for packs that may contain cross-pack REF_DELTA bases must not overlap.
+	awk -v first="$first_hash" -v second="$second_hash" '\''
+		/"event":"child_start"/ && /"http-fetch"/ && /"--wait-for-index"/ {
+			downloads++
+			next
+		}
+		/"event":"start"/ && /"http-fetch"/ && /"--packfile=/ {
+			match($0, /"sid":"[^"]+"/)
+			sid = substr($0, RSTART, RLENGTH)
+			if (index($0, "--packfile=" first))
+				worker[sid] = 1
+			else if (index($0, "--packfile=" second))
+				worker[sid] = 2
+			else
+				bad = 1
+			next
+		}
+		/"event":"child_start"/ && /"index-pack"/ {
+			if (!downloads)
+				next
+			match($0, /"sid":"[^"]+"/)
+			sid = substr($0, RSTART, RLENGTH)
+			if (downloads != 2 || active || indexers == 2)
+				bad = 1
+			indexers++
+			ordinal = 0
+			longest = 0
+			for (parent in worker) {
+				prefix = parent
+				sub(/"$/, "/", prefix)
+				if ((sid == parent || index(sid, prefix) == 1) &&
+				    length(parent) > longest) {
+					ordinal = worker[parent]
+					longest = length(parent)
+				}
+			}
+			if (ordinal != indexers)
+				bad = 1
+			active = sid
+			next
+		}
+		/"event":"child_exit"/ && active {
+			match($0, /"sid":"[^"]+"/)
+			if (substr($0, RSTART, RLENGTH) == active) {
+				active = ""
+				indexer_exits++
+			}
+		}
+		END {
+			if (bad || downloads != 2 || indexers != 2 ||
+			    indexer_exits != 2 || active)
+				exit 1
+		}
+	'\'' ordered-uri.trace
+'
+
+test_expect_success 'ordered URI downloads respect quiet and no-progress' '
+	for option in --quiet --no-progress
+	do
+		GIT_TEST_SIDEBAND_ALL=1 \
+		git -c protocol.version=2 -c fetch.uriprotocols=http \
+			-c fetch.packfileUriJobs=2 clone "$option" \
+			"$HTTPD_URL/smart/http_parent" "http_child-ordered-$option" \
+			2>ordered-uri.progress &&
+		test_grep ! -E "Fetching packs|Receiving objects|^bytes " \
+			ordered-uri.progress || return 1
+	done
+'
+
+test_expect_success 'ordered URI downloads preserve worker errors' '
+	read object pack uri <ordered-uri.list &&
+	test_when_finished "mv missing-ordered.pack \"$HTTPD_DOCUMENT_ROOT_PATH/mypack-$pack.pack\"" &&
+	mv "$HTTPD_DOCUMENT_ROOT_PATH/mypack-$pack.pack" missing-ordered.pack &&
+	test_must_fail env GIT_TEST_SIDEBAND_ALL=1 \
+		git -c protocol.version=2 -c fetch.uriprotocols=http \
+			-c fetch.packfileUriJobs=2 \
+			clone "$HTTPD_URL/smart/http_parent" \
+			http_child-missing-ordered 2>ordered-uri.err &&
+	test_grep "failed to get" ordered-uri.err
+'
+
+test_expect_success 'duplicate URI pack hashes retain serial downloads' '
+	P="$HTTPD_DOCUMENT_ROOT_PATH/http_parent" &&
+	git -C "$P" hash-object my-blob >shared-objects &&
+	git -C "$P" hash-object other-blob >>shared-objects &&
+	git -C "$P" pack-objects "$HTTPD_DOCUMENT_ROOT_PATH/mypack" \
+		<shared-objects >shared-packhash &&
+	pack=$(cat shared-packhash) &&
+	git -C "$P" config --unset-all uploadpack.blobpackfileuri &&
+	while read object
+	do
+		git -C "$P" config --add uploadpack.blobpackfileuri \
+			"$object $pack $HTTPD_URL/dumb/mypack-$pack.pack" || return 1
+	done <shared-objects &&
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/shared-uri.trace" \
+	GIT_TRACE_PACKET="$TRASH_DIRECTORY/shared-uri.packet" \
+	GIT_TEST_SIDEBAND_ALL=1 \
+	git -c protocol.version=2 -c fetch.uriprotocols=http \
+		-c fetch.packfileUriJobs=2 \
+		clone "$HTTPD_URL/smart/http_parent" http_child-shared &&
+	grep -F "\\1$pack http" shared-uri.packet >shared-uri.advertised &&
+	test_line_count = 2 shared-uri.advertised &&
+	grep "\"event\":\"child_start\".*\"http-fetch\"" \
+		shared-uri.trace >shared-uri-workers &&
+	test_line_count = 2 shared-uri-workers &&
+	test_grep ! "\"--wait-for-index\"" shared-uri.trace &&
+	git -C http_child-shared cat-file blob HEAD:my-blob >shared-uri.blob &&
+	test_cmp "$P/my-blob" shared-uri.blob &&
+	git -C http_child-shared cat-file blob HEAD:other-blob >shared-uri.blob &&
+	test_cmp "$P/other-blob" shared-uri.blob
+'
+
 test_expect_success 'no-ref-delta URI packs are indexed concurrently' '
 	P="$HTTPD_DOCUMENT_ROOT_PATH/http_parent" &&
 	rm -rf "$P" http_child-no-ref no-ref-* &&
@@ -1405,6 +1555,21 @@ test_expect_success 'no-ref-delta URI packs are indexed concurrently' '
 	done <no-ref-uris &&
 	test_grep "Fetching packs: 100% (3/3), $bytes bytes |.*done" no-ref-progress &&
 	test_grep ! "^bytes " no-ref-progress
+'
+
+test_expect_success 'default URI jobs do not request no-ref-delta' '
+	GIT_TRACE2_EVENT="$TRASH_DIRECTORY/default-uri-jobs.trace" \
+	GIT_TRACE_PACKET="$TRASH_DIRECTORY/default-uri-jobs.packet" \
+	GIT_TEST_SIDEBAND_ALL=1 \
+	git -c protocol.version=2 -c fetch.uriprotocols=http \
+		clone "$HTTPD_URL/smart/http_parent" http_child-default-uri-jobs &&
+	test_grep ! "> no-ref-delta" default-uri-jobs.packet &&
+	grep "\"event\":\"child_start\".*\"http-fetch\".*\"--wait-for-index\"" \
+		default-uri-jobs.trace >default-uri-workers &&
+	test_line_count = 3 default-uri-workers &&
+	git -C http_child-default-uri-jobs cat-file -e HEAD:one &&
+	git -C http_child-default-uri-jobs cat-file -e HEAD:two &&
+	git -C http_child-default-uri-jobs cat-file -e HEAD:three
 '
 
 test_expect_success 'parallel URI progress respects quiet and no-progress' '
@@ -1713,6 +1878,128 @@ test_expect_success 'http:// --negotiate-only with protocol v0' '
 		--negotiation-tip=$(git -C client rev-parse HEAD) \
 		origin 2>err &&
 	test_grep "negotiate-only requires protocol v2" err
+'
+
+# Run with GIT_TEST_URI_BENCHMARK=true and Apache enabled. The CGI server adds
+# a controlled first-byte delay to each of 73 independent URI pack downloads.
+test_lazy_prereq URI_BENCHMARK '
+	test_bool_env GIT_TEST_URI_BENCHMARK false
+'
+
+test_expect_success URI_BENCHMARK 'measure ordered URI fetch with 1 and 4 jobs' '
+	P="$HTTPD_DOCUMENT_ROOT_PATH/uri_bench_parent" &&
+	git init "$P" &&
+	git -C "$P" config uploadpack.allowsidebandall true &&
+	write_script "$HTTPD_ROOT_PATH/uri-bench-pack.sh" <<-\EOF &&
+	pack=${PATH_INFO#/}
+	hash=${pack#mypack-}
+	hash=${hash%.pack}
+	case "$pack" in
+		mypack-*.pack) ;;
+		*) printf "Status: 404 Not Found\r\n\r\n"; exit 0 ;;
+	esac
+	case "$hash" in
+		""|*[!0123456789abcdef]*)
+			printf "Status: 404 Not Found\r\n\r\n"
+			exit 0
+			;;
+	esac
+	file="www/$pack"
+	if ! test -f "$file"
+	then
+		printf "Status: 404 Not Found\r\n\r\n"
+		exit 0
+	fi
+	sleep 0.25
+	printf "Content-Type: application/octet-stream\r\n"
+	printf "Content-Length: %s\r\n\r\n" "$(wc -c <"$file")"
+	cat "$file"
+	EOF
+	i=1 &&
+	while test "$i" -le 73
+	do
+		test-tool genrandom "uri-$i" 1m >"$P/uri-blob-$i" || return 1
+		i=$((i + 1))
+	done &&
+	git -C "$P" add . &&
+	git -C "$P" commit -m "packfile URI benchmark" &&
+	commit=$(git -C "$P" rev-parse HEAD) &&
+	i=1 &&
+	while test "$i" -le 73
+	do
+		object=$(git -C "$P" hash-object "uri-blob-$i") || return 1
+		pack=$(printf "%s\n" "$object" |
+			git -C "$P" pack-objects "$HTTPD_DOCUMENT_ROOT_PATH/mypack") || return 1
+		git -C "$P" config --add uploadpack.blobpackfileuri \
+			"$object $pack $HTTPD_URL/uri_bench_pack/mypack-$pack.pack" || return 1
+		i=$((i + 1))
+	done &&
+	git -C "$P" config --get-all uploadpack.blobpackfileuri >uri-bench-uris &&
+	test_line_count = 73 uri-bench-uris &&
+	i=1 &&
+	for jobs in 1 4 1 4
+	do
+		client="uri-bench-client-$i" &&
+		trace="$TRASH_DIRECTORY/uri-bench-$i.trace" &&
+		packet="$TRASH_DIRECTORY/uri-bench-$i.packet" &&
+		git init "$client" &&
+		if test "$jobs" -eq 1
+		then
+			git -C "$client" config fetch.packfileUriJobs 1 || return 1
+		fi &&
+		GIT_TRACE2_EVENT="$trace" GIT_TRACE_PACKET="$packet" \
+		GIT_TEST_SIDEBAND_ALL=1 git -C "$client" \
+			-c protocol.version=2 -c fetch.uriprotocols=http \
+			fetch "$HTTPD_URL/smart/uri_bench_parent" HEAD &&
+		test_grep ! "no-ref-delta" "$packet" &&
+		git -C "$client" cat-file -e "$commit" &&
+		git -C "$client" fsck --full --no-reflogs &&
+		awk '\''
+			/"event":"child_start"/ && /"http-fetch"/ {
+				match($0, /"sid":"[^"]+"/)
+				sid = substr($0, RSTART, RLENGTH)
+				match($0, /"child_id":[0-9]+/)
+				id = substr($0, RSTART, RLENGTH)
+				workers[sid id] = 1
+				count++
+				active++
+				if (active > peak)
+					peak = active
+			}
+			/"event":"child_exit"/ {
+				match($0, /"sid":"[^"]+"/)
+				sid = substr($0, RSTART, RLENGTH)
+				match($0, /"child_id":[0-9]+/)
+				id = substr($0, RSTART, RLENGTH)
+				if (workers[sid id]) {
+					active--
+					delete workers[sid id]
+				}
+			}
+			/"event":"atexit"/ && /"t_abs":/ {
+				match($0, /"sid":"[^"]+"/)
+				sid = substr($0, RSTART, RLENGTH)
+				if (sid !~ /\//) {
+					match($0, /"t_abs":[0-9.]+/)
+					elapsed = substr($0, RSTART + 8, RLENGTH - 8)
+					roots++
+				}
+			}
+			END {
+				if (count != 73 || active || roots != 1 || elapsed <= 0)
+					exit 1
+				print count, peak, elapsed
+			}
+		'\'' "$trace" >uri-bench-count &&
+		read helpers peak elapsed <uri-bench-count &&
+		test "$peak" -le "$jobs" &&
+		if test "$jobs" -eq 4
+		then
+			test "$peak" -ge 2 || return 1
+		fi &&
+		echo "URI_BENCH run=$i jobs=$jobs seconds=$elapsed helpers=$helpers peak=$peak" &&
+		i=$((i + 1)) || return 1
+	done
 '
 
 # DO NOT add non-httpd-specific tests here, because the last part of this
