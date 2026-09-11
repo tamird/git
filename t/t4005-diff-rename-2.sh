@@ -216,4 +216,27 @@ test_expect_success 'size rejection populates sizes without hashing or comparing
 	test_grep ! "spanhash/" rename-size.trace
 '
 
+test_expect_success 'inexact rename with a rehashed span table' '
+	test_create_repo rehash &&
+	(
+		cd rehash &&
+		test_seq 1 700 >source &&
+		git add source &&
+		git commit -m base &&
+		git mv source destination &&
+		sort -rn destination >reordered &&
+		mv reordered destination &&
+		git add destination &&
+		printf "R100\tsource\tdestination\n" >expect &&
+		git diff --cached --name-status -M >actual &&
+		test_cmp expect actual &&
+		sed "1s/.*/changed/" destination >edited &&
+		mv edited destination &&
+		git add destination &&
+		printf "R099\tsource\tdestination\n" >expect &&
+		git diff --cached --name-status -M >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_done

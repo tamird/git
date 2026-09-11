@@ -112,11 +112,7 @@ static int spanhash_cmp(const void *a_, const void *b_)
 	const struct spanhash *a = a_;
 	const struct spanhash *b = b_;
 
-	/* A count of zero compares at the end.. */
-	if (!a->cnt)
-		return !b->cnt ? 0 : 1;
-	if (!b->cnt)
-		return -1;
+	/* Empty buckets have been removed before sorting. */
 	return a->hashval < b->hashval ? -1 :
 		a->hashval > b->hashval ? 1 : 0;
 }
@@ -126,6 +122,7 @@ static struct spanhash_top *hash_chars(struct repository *r,
 {
 	int i, n;
 	unsigned int accum1, accum2, hashval;
+	size_t buckets, occupied = 0;
 	struct spanhash_top *hash;
 	unsigned char *buf = one->data;
 	unsigned int sz = one->size;
@@ -163,7 +160,19 @@ static struct spanhash_top *hash_chars(struct repository *r,
 		hashval = (accum1 + accum2 * 0x61) % HASHBASE;
 		hash = add_spanhash(hash, hashval, n);
 	}
-	QSORT(hash->data, (size_t)1ul << hash->alloc_log2, spanhash_cmp);
+	/* The similarity comparison reads only the sorted, occupied prefix. */
+	buckets = (size_t)1ul << hash->alloc_log2;
+	for (size_t j = 0; j < buckets; j++) {
+		if (!hash->data[j].cnt)
+			continue;
+		if (j != occupied) {
+			hash->data[occupied] = hash->data[j];
+			hash->data[j].cnt = 0;
+		}
+		occupied++;
+	}
+	hash->data[occupied].cnt = 0;
+	QSORT(hash->data, occupied, spanhash_cmp);
 	return hash;
 }
 
