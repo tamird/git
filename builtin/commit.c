@@ -1689,9 +1689,15 @@ struct repository *repo UNUSED)
 		      REFRESH_QUIET|REFRESH_UNMERGED|progress_flag,
 		      &s.pathspec, NULL, NULL);
 
-	if (optional_locks)
+	if (optional_locks) {
 		fd = repo_hold_locked_index(the_repository, &index_lock, 0);
-	else
+		if (fd < 0) {
+			int saved_errno = errno;
+			trace2_data_intmax("status", the_repository,
+					   "index/optional-lock-errno", saved_errno);
+			errno = saved_errno;
+		}
+	} else
 		fd = -1;
 
 	if (optional_locks && fd < 0 && !cache_untracked_attempted &&

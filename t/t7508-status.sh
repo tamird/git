@@ -1681,6 +1681,22 @@ test_expect_success '--no-optional-locks prevents index update' '
 	! test_is_magic_mtime .git/index
 '
 
+test_expect_success 'status traces optional index lock errors' '
+	test_when_finished "rm -f .git/index.lock acquired.trace disabled.trace unavailable.trace" &&
+	GIT_TRACE2_EVENT="$PWD/acquired.trace" git status --porcelain >output &&
+	test_trace2_data status index/optional-lock acquired <acquired.trace &&
+	test_grep ! '"key":"index/optional-lock-errno"' acquired.trace &&
+	GIT_TRACE2_EVENT="$PWD/disabled.trace" \
+		git --no-optional-locks status --porcelain >output &&
+	test_trace2_data status index/optional-lock disabled <disabled.trace &&
+	test_grep ! '"key":"index/optional-lock-errno"' disabled.trace &&
+	: >.git/index.lock &&
+	GIT_TRACE2_EVENT="$PWD/unavailable.trace" git status --porcelain >output &&
+	test_trace2_data status index/optional-lock unavailable <unavailable.trace &&
+	test_trace2_data status index/optional-lock-errno \
+		"[1-9][0-9]*" <unavailable.trace
+'
+
 test_expect_success 'racy timestamps will be fixed for clean worktree' '
 	echo content >racy-dirty &&
 	echo content >racy-racy &&
