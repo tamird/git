@@ -43,6 +43,7 @@
 #include "object-file.h"
 #include "object-name.h"
 #include "read-cache-ll.h"
+#include "replace-object.h"
 #include "setup.h"
 #include "strmap.h"
 #include "trace2.h"
@@ -4380,6 +4381,7 @@ void fill_filespec(struct diff_filespec *spec, const struct object_id *oid,
 		spec->mode = canon_mode(mode);
 		oidcpy(&spec->oid, oid);
 		spec->oid_valid = oid_valid;
+		spec->oid_data_unreplaced = 0;
 	}
 }
 
@@ -4524,6 +4526,7 @@ retry:
 		s->data = NULL;
 		s->size = 0;
 		s->is_binary = -1;
+		s->oid_data_unreplaced = 0;
 	}
 
 	if (s->data)
@@ -4532,8 +4535,10 @@ retry:
 	if (size_only && 0 < s->size)
 		return 0;
 
-	if (S_ISGITLINK(s->mode))
+	if (S_ISGITLINK(s->mode)) {
+		s->oid_data_unreplaced = 0;
 		return diff_populate_gitlink(s, size_only);
+	}
 
 	if (!s->oid_valid ||
 	    (!worktree_failed &&
@@ -4541,6 +4546,8 @@ retry:
 		struct strbuf buf = STRBUF_INIT;
 		struct stat st;
 		int fd;
+
+		s->oid_data_unreplaced = 0;
 
 		if (lstat(s->path, &st) < 0)
 			goto worktree_error;
@@ -4619,8 +4626,11 @@ retry:
 		return -1;
 	} else {
 		size_t size_st = 0;
+		int saved_errno;
+		struct odb_source_info source_info = { 0 };
 		struct object_info info = {
-			.sizep = &size_st
+			.sizep = &size_st,
+			.source_infop = &source_info,
 		};
 
 		if (!(size_only || check_binary))
@@ -4660,12 +4670,21 @@ object_read:
 			s->size = cast_size_t_to_ulong(size_st);
 		}
 		s->should_free = 1;
+		/* Converted OIDs and in-memory objects can bypass this lookup. */
+		saved_errno = errno;
+		s->oid_data_unreplaced =
+			s->oid.algo == hash_algo_by_ptr(r->hash_algo) &&
+			lookup_replace_object(r, &s->oid) == &s->oid &&
+			source_info.source &&
+			source_info.source != r->objects->inmemory_objects;
+		errno = saved_errno;
 	}
 	return 0;
 }
 
 void diff_free_filespec_blob(struct diff_filespec *s)
 {
+	s->oid_data_unreplaced = 0;
 	if (s->should_free)
 		free(s->data);
 	else if (s->should_munmap)
@@ -5107,6 +5126,7 @@ static int diff_filespec_discard_unowned_empty(struct diff_filespec *spec)
 	spec->data = NULL;
 	spec->size = 0;
 	spec->is_binary = -1;
+	spec->oid_data_unreplaced = 0;
 	return 1;
 }
 

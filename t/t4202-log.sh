@@ -3004,4 +3004,86 @@ test_expect_success 'log --invert-grep --grep --author' '
 	test_cmp expect actual
 '
 
+test_expect_success 'log --follow reuses an object across rename comparisons' '
+	test_create_repo span-follow &&
+	(
+		cd span-follow &&
+		test_seq 1 700 >first &&
+		git add first &&
+		git commit -m first &&
+		git mv first second &&
+		sed "1s/.*/changed/" second >edited &&
+		mv edited second &&
+		git add second &&
+		git commit -m second &&
+		git mv second third &&
+		sed "2s/.*/changed again/" third >edited &&
+		mv edited third &&
+		git add third &&
+		git commit -m third &&
+		printf "third\nsecond\nfirst\n" >expect &&
+		GIT_TRACE2_EVENT="$PWD/span.trace" \
+			git log --format=%s --follow -- third >actual &&
+		test_cmp expect actual &&
+		test_grep -E \
+			"\"category\":\"diff\",\"key\":\"spanhash/cache/hits\",\"value\":\"[1-9][0-9]*\"" \
+			span.trace
+	)
+'
+
+test_expect_success 'spanhash cache respects text attributes and replacements' '
+	test_create_repo span-attributes &&
+	(
+		cd span-attributes &&
+		git config core.autocrlf false &&
+		mkdir text binary &&
+		printf "text/* diff\nbinary/* -diff\n" >.gitattributes &&
+		test_seq -f "a sufficiently long line of text number %09g" 1 100 >lf &&
+		append_cr <lf >cr &&
+		cp cr text/old &&
+		git add .gitattributes text/old &&
+		git commit -m attr-base &&
+		git tag attr-base &&
+		cp lf text/new &&
+		git rm text/old &&
+		git add text/new &&
+		git commit -m attr-text &&
+		git tag attr-text &&
+		GIT_TRACE2_EVENT="$PWD/worktree.trace" \
+			git diff-tree -r -M90% --name-status \
+			attr-base attr-text >worktree &&
+		test_grep -E \
+			"^R[0-9][0-9][0-9][[:space:]]+text/old[[:space:]]+text/new$" worktree &&
+		test_trace2_data diff spanhash/cache/misses 1 <worktree.trace &&
+		cp cr binary/old &&
+		git add binary/old &&
+		git commit -m attr-binary-add &&
+		cp lf binary/new &&
+		git rm binary/old &&
+		git add binary/new &&
+		git commit -m attr-binary-change &&
+		# Force both historical versions through the object database.
+		rm text/new binary/new &&
+		GIT_TRACE2_EVENT="$PWD/attributes.trace" \
+			git log -M90% --name-status --format=%s \
+			attr-base..HEAD >actual &&
+		test_grep -E \
+			"^R[0-9][0-9][0-9][[:space:]]+text/old[[:space:]]+text/new$" actual &&
+		test_grep "^D[[:space:]]binary/old$" actual &&
+		test_grep "^A[[:space:]]binary/new$" actual &&
+		test_trace2_data diff spanhash/cache/hits 0 <attributes.trace &&
+		original=$(git rev-parse attr-base:text/old) &&
+		test_seq -f "completely different line number %09g words" 1 100 >other &&
+		replacement=$(git hash-object -w other) &&
+		git replace "$original" "$replacement" &&
+		GIT_TRACE2_EVENT="$PWD/replaced.trace" \
+			git diff-tree -r -M90% --name-status \
+			attr-base attr-text >replaced &&
+		test_grep "^D[[:space:]]text/old$" replaced &&
+		test_grep "^A[[:space:]]text/new$" replaced &&
+		test_trace2_data diff spanhash/cache/hits 0 <replaced.trace &&
+		test_trace2_data diff spanhash/cache/misses 1 <replaced.trace
+	)
+'
+
 test_done

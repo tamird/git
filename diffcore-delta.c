@@ -1,5 +1,7 @@
 #include "git-compat-util.h"
 #include "diffcore.h"
+#include "list.h"
+#include "repository.h"
 #include "trace2.h"
 
 /*
@@ -45,6 +47,242 @@ struct spanhash_top {
 	int free;
 	struct spanhash data[FLEX_ARRAY];
 };
+
+/* Retained cache memory is limited per repository, including the buckets. */
+#define SPANHASH_CACHE_LIMIT (32u * 1024u * 1024u)
+#define SPANHASH_CACHE_BUCKETS (1u << 13)
+
+struct span_cache_entry {
+	struct span_cache_entry *next;
+	struct list_head lru;
+	struct object_id oid;
+	struct spanhash_top *value;
+	size_t value_bytes;
+	unsigned char is_text;
+};
+
+struct diff_spanhash_cache {
+	struct span_cache_entry **buckets;
+	struct list_head lru;
+	size_t entry_bytes;
+};
+
+static pthread_mutex_t span_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uintmax_t span_cache_hits, span_cache_misses, span_cache_evictions;
+static uintmax_t span_cache_bypassed, span_cache_retained, span_cache_peak;
+static int span_cache_report_registered;
+
+static size_t spanhash_bytes(const struct spanhash_top *value)
+{
+	return st_add(sizeof(*value),
+		      st_mult(sizeof(value->data[0]),
+			      (size_t)1 << value->alloc_log2));
+}
+
+static size_t span_cache_bucket(const struct object_id *oid, int is_text)
+{
+	return (oidhash(oid) ^ (is_text ? 0x9e3779b9u : 0u)) &
+		(SPANHASH_CACHE_BUCKETS - 1);
+}
+
+static struct span_cache_entry *span_cache_find(struct diff_spanhash_cache *cache,
+						const struct object_id *oid,
+						int is_text)
+{
+	struct span_cache_entry *entry;
+
+	for (entry = cache->buckets[span_cache_bucket(oid, is_text)]; entry;
+	     entry = entry->next) {
+		if (entry->is_text == is_text && entry->oid.algo == oid->algo &&
+		    oideq(&entry->oid, oid))
+			return entry;
+	}
+	return NULL;
+}
+
+static size_t span_cache_bytes(const struct diff_spanhash_cache *cache)
+{
+	return st_add(st_add(sizeof(*cache), cache->entry_bytes),
+		      sizeof(cache->buckets[0]) * SPANHASH_CACHE_BUCKETS);
+}
+
+static void span_cache_update_retained(size_t before, size_t after)
+{
+	if (after >= before)
+		span_cache_retained += after - before;
+	else
+		span_cache_retained -= before - after;
+	if (span_cache_retained > span_cache_peak)
+		span_cache_peak = span_cache_retained;
+}
+
+static void span_cache_report(void)
+{
+	int saved_errno = errno;
+
+	/* This callback runs before Trace2's earlier-registered exit callback. */
+	trace2_data_intmax("diff", NULL, "spanhash/cache/hits", span_cache_hits);
+	trace2_data_intmax("diff", NULL, "spanhash/cache/misses", span_cache_misses);
+	trace2_data_intmax("diff", NULL, "spanhash/cache/evictions",
+			   span_cache_evictions);
+	trace2_data_intmax("diff", NULL, "spanhash/cache/bypassed",
+			   span_cache_bypassed);
+	trace2_data_intmax("diff", NULL, "spanhash/cache/peak_bytes",
+			   span_cache_peak);
+	errno = saved_errno;
+}
+
+static struct diff_spanhash_cache *span_cache_init(struct repository *r)
+{
+	struct diff_spanhash_cache *cache = malloc(sizeof(*cache));
+
+	if (!cache)
+		return NULL;
+	cache->buckets = calloc(SPANHASH_CACHE_BUCKETS,
+					sizeof(cache->buckets[0]));
+	if (!cache->buckets) {
+		free(cache);
+		return NULL;
+	}
+
+	INIT_LIST_HEAD(&cache->lru);
+	cache->entry_bytes = 0;
+	r->spanhash_cache = cache;
+	span_cache_update_retained(0, span_cache_bytes(cache));
+	if (!span_cache_report_registered && !atexit(span_cache_report))
+		span_cache_report_registered = 1;
+	return cache;
+}
+
+static void span_cache_clear_locked(struct repository *r)
+{
+	struct diff_spanhash_cache *cache = r->spanhash_cache;
+	size_t before;
+
+	if (!cache)
+		return;
+	before = span_cache_bytes(cache);
+	while (cache->lru.next != &cache->lru) {
+		struct span_cache_entry *entry =
+			list_first_entry(&cache->lru, struct span_cache_entry, lru);
+
+		list_del(&entry->lru);
+		free(entry->value);
+		free(entry);
+	}
+	free(cache->buckets);
+	FREE_AND_NULL(r->spanhash_cache);
+	span_cache_update_retained(before, 0);
+}
+
+static struct spanhash_top *span_cache_lookup(struct repository *r,
+					      const struct object_id *oid,
+					      int is_text)
+{
+	struct diff_spanhash_cache *cache;
+	struct span_cache_entry *entry;
+	struct spanhash_top *copy = NULL;
+
+	pthread_mutex_lock(&span_cache_mutex);
+	cache = r->spanhash_cache;
+	entry = cache ? span_cache_find(cache, oid, is_text) : NULL;
+	if (entry) {
+		copy = malloc(entry->value_bytes);
+		if (copy) {
+			memcpy(copy, entry->value, entry->value_bytes);
+			list_move(&entry->lru, &cache->lru);
+			span_cache_hits++;
+		} else {
+			/* Reclaim optional memory before building the usual table. */
+			span_cache_clear_locked(r);
+			span_cache_bypassed++;
+		}
+	}
+	if (!copy)
+		span_cache_misses++;
+	pthread_mutex_unlock(&span_cache_mutex);
+	return copy;
+}
+
+static void span_cache_insert(struct repository *r,
+			      const struct object_id *oid, int is_text,
+			      const struct spanhash_top *value)
+{
+	struct diff_spanhash_cache *cache;
+	struct span_cache_entry *entry;
+	size_t bucket;
+	size_t bytes = spanhash_bytes(value), before;
+
+	/* A single oversized table is used normally, but not retained. */
+	if (bytes > SPANHASH_CACHE_LIMIT - sizeof(*entry) -
+		    sizeof(*cache) - SPANHASH_CACHE_BUCKETS * sizeof(void *)) {
+		pthread_mutex_lock(&span_cache_mutex);
+		span_cache_bypassed++;
+		pthread_mutex_unlock(&span_cache_mutex);
+		return;
+	}
+	pthread_mutex_lock(&span_cache_mutex);
+	cache = r->spanhash_cache;
+	if (!cache)
+		cache = span_cache_init(r);
+	if (!cache) {
+		span_cache_bypassed++;
+		goto done;
+	}
+	if (span_cache_find(cache, oid, is_text))
+		goto done; /* Another caller filled this key while we built it. */
+	before = span_cache_bytes(cache);
+	/* Leave room before allocating the new value, including its entry. */
+	while (span_cache_bytes(cache) >
+	       SPANHASH_CACHE_LIMIT - sizeof(*entry) - bytes) {
+		struct span_cache_entry *oldest =
+			list_entry(cache->lru.prev, struct span_cache_entry, lru);
+		struct span_cache_entry **slot =
+			&cache->buckets[span_cache_bucket(&oldest->oid,
+							    oldest->is_text)];
+
+		while (*slot && *slot != oldest)
+			slot = &(*slot)->next;
+		assert(*slot == oldest);
+		*slot = oldest->next;
+		list_del(&oldest->lru);
+		cache->entry_bytes -= sizeof(*oldest) + oldest->value_bytes;
+		free(oldest->value);
+		free(oldest);
+		span_cache_evictions++;
+	}
+	entry = malloc(sizeof(*entry));
+	if (!entry) {
+		span_cache_bypassed++;
+		goto updated;
+	}
+	oidcpy(&entry->oid, oid);
+	entry->is_text = is_text;
+	entry->value_bytes = bytes;
+	entry->value = malloc(bytes);
+	if (!entry->value) {
+		free(entry);
+		span_cache_bypassed++;
+		goto updated;
+	}
+	memcpy(entry->value, value, bytes);
+	bucket = span_cache_bucket(oid, is_text);
+	entry->next = cache->buckets[bucket];
+	cache->buckets[bucket] = entry;
+	list_add(&entry->lru, &cache->lru);
+	cache->entry_bytes += sizeof(*entry) + bytes;
+updated:
+	span_cache_update_retained(before, span_cache_bytes(cache));
+done:
+	pthread_mutex_unlock(&span_cache_mutex);
+}
+
+void diffcore_delta_cache_clear(struct repository *r)
+{
+	pthread_mutex_lock(&span_cache_mutex);
+	span_cache_clear_locked(r);
+	pthread_mutex_unlock(&span_cache_mutex);
+}
 
 static struct spanhash_top *spanhash_rehash(struct spanhash_top *orig)
 {
@@ -184,12 +422,23 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 
 	if (!count) {
 		int saved_errno = errno;
+		int is_text = -1;
 
-		trace2_timer_start(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
-		errno = saved_errno;
-		count = hash_chars(r, one);
-		saved_errno = errno;
-		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+		if (one->oid_data_unreplaced) {
+			is_text = !diff_filespec_is_binary(r, one);
+			saved_errno = errno;
+			count = span_cache_lookup(r, &one->oid, is_text);
+		}
+
+		if (!count) {
+			trace2_timer_start(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+			errno = saved_errno;
+			count = hash_chars(r, one);
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+			if (is_text >= 0)
+				span_cache_insert(r, &one->oid, is_text, count);
+		}
 		errno = saved_errno;
 		if (count_p)
 			*count_p = count;
