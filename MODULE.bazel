@@ -24,6 +24,12 @@ single_version_override(
     patch_strip = 1,
 )
 
+single_version_override(
+    module_name = "rules_rs",
+    patches = ["//contrib/bazel:rules-rs-zlib.patch"],
+    patch_strip = 1,
+)
+
 pcre2_jit_repository = use_repo_rule(
     "//contrib/bazel:pcre2_jit.bzl",
     "pcre2_jit_repository",
