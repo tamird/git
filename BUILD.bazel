@@ -788,10 +788,17 @@ cc_library(
     name = "odb",
     hdrs = ["odb.h"],
     deps = [
+        ":oid_array",
         ":oidmap",
         ":oidset",
         ":thread_utils",
     ],
+)
+
+cc_library(
+    name = "oid_array",
+    hdrs = ["oid-array.h"],
+    deps = [":hash"],
 )
 
 cc_library(
