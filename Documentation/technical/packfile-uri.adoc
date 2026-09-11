@@ -25,6 +25,13 @@ Clients should then download and index all the given URIs (in addition to
 downloading and indexing the packfile given in the `packfile` section of the
 response) before performing the connectivity check.
 
+URI packs are normally indexed in advertised order, since a later pack may
+contain a `REF_DELTA` whose base is installed by an earlier response pack.
+If the server advertises `no-ref-delta` and the client requests it, the
+promise covers the inline pack and every URI pack. A client may then index
+URI packs concurrently, while rejecting any pack that contains a
+`REF_DELTA`.
+
 Server design
 -------------
 
@@ -49,6 +56,12 @@ Client design
 
 The client has a config variable `fetch.uriprotocols` that determines which
 protocols the end user is willing to use. By default, this is empty.
+
+HTTP(S) packfile downloads use the HTTP authentication and redirect
+configuration used for other Git HTTP requests. Credentials are looked up
+for the pack URL, including its path when `credential.useHttpPath` is
+enabled, rather than copied from the fetch negotiation. A pack served by
+another host can use credentials configured for that host.
 
 When the client downloads the given URIs, it should store them with "keep"
 files, just like it does with the packfile in the `packfile` section. These

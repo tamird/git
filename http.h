@@ -212,6 +212,8 @@ int http_get_info_packs(const char *base_url,
 const char *http_get_accept_language_header(void);
 
 struct http_pack_request {
+	void (*progress)(void *data, size_t bytes);
+	void *progress_data;
 	char *url;
 
 	/*
@@ -232,6 +234,14 @@ struct http_pack_request *new_http_pack_request(
 	const unsigned char *packed_git_hash, const char *base_url);
 struct http_pack_request *new_direct_http_pack_request(
 	const unsigned char *packed_git_hash, char *url);
+
+/*
+ * Run a direct pack request, retrying HTTP authentication challenges.
+ * Returns HTTP_OK (also for 416), or an HTTP error.
+ * The caller must initialize HTTP credentials from the pack URL, not the Git
+ * remote, before constructing the request.
+ */
+int run_http_pack_request(struct http_pack_request *preq);
 int finish_http_pack_request(struct http_pack_request *preq);
 void release_http_pack_request(struct http_pack_request *preq);
 
