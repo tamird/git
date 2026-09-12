@@ -48,6 +48,9 @@ test_expect_success '--follow finds the pre-merge commit through a subtree merge
 		log-follow-merge.trace &&
 	test_grep \
 		"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"follow-pickaxe/ordinary-tree-read\",\"intervals\":[1-9]" \
+		log-follow-merge.trace &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent/sibling-current-root-read\",\"intervals\":1," \
 		log-follow-merge.trace
 '
 
@@ -79,6 +82,9 @@ test_expect_success '--follow measures equal-root merge parent' '
 		log-follow-equal-root.trace &&
 	test_grep \
 		"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"follow-pickaxe/ordinary-tree-read\",\"intervals\":[1-9][0-9]*," \
+		log-follow-equal-root.trace &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent/sibling-current-root-read\",\"intervals\":2," \
 		log-follow-equal-root.trace
 '
 

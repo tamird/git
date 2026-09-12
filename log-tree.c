@@ -1297,7 +1297,8 @@ void release_follow_pathspec_slab(struct rev_info *opt)
 /* Compute a path to follow in parent, if there is one */
 static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 						struct commit *commit,
-						struct commit *parent)
+						struct commit *parent,
+						int sibling_parent)
 {
 	struct diff_options diff_opts;
 	const struct object_id *parent_tree, *commit_tree;
@@ -1306,6 +1307,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	trace2_timer_start(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
 	parse_commit_or_die(parent);
 	repo_diff_setup(opt->diffopt.repo, &diff_opts);
+	diff_opts.trace_follow_sibling_root_read = sibling_parent;
 	copy_pathspec(&diff_opts.pathspec, &opt->diffopt.pathspec);
 	diff_opts.flags.recursive = 1;
 	diff_opts.flags.follow_renames = 1;
@@ -1504,7 +1506,8 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 			struct commit_list *p;
 			for (p = parents; p; p = p->next) {
 				propagate_follow_pathspec_to_parent(opt, commit,
-								    p->item);
+								    p->item,
+								    p != parents);
 				if (opt->first_parent_only)
 					break;
 			}

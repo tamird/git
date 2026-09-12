@@ -463,7 +463,23 @@ static void ll_diff_tree_paths(
 		t = tp[0];
 		ttree = NULL;
 	} else {
+		int timed_root_read = !depth && nparent == 1 && oid &&
+				      parents_oid[0] &&
+				      oid->algo == parents_oid[0]->algo &&
+				      opt->trace_follow_sibling_root_read && trace2_is_enabled();
+		int saved_errno;
+
+		if (timed_root_read) {
+			saved_errno = errno;
+			trace2_timer_start(TRACE2_TIMER_ID_LOG_FOLLOW_SIBLING_ROOT_READ);
+			errno = saved_errno;
+		}
 		ttree = fill_tree_descriptor_for_diff(opt, &t, oid);
+		if (timed_root_read) {
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_LOG_FOLLOW_SIBLING_ROOT_READ);
+			errno = saved_errno;
+		}
 	}
 
 	/* Enable recursion indefinitely */

@@ -141,6 +141,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "follow-parent",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_LOG_FOLLOW_SIBLING_ROOT_READ] = {
+		.category = "log",
+		.name = "follow-parent/sibling-current-root-read",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_GREP_CONTENT_INDEX_SELECT_OIDS] = {
 		.category = "grep",
 		.name = "content-index/select-oids",

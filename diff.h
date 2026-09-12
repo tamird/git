@@ -367,6 +367,8 @@ struct diff_options {
 
 	/* to support internal diff recursion by --follow hack*/
 	int found_follow;
+	/* Measure the current root tree read on later merge parents. */
+	int trace_follow_sibling_root_read;
 
 	/*
 	 * By default, diffcore_std() resolves the statuses for queued diff file
