@@ -3655,12 +3655,13 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS \
 		GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES" &&
 	test_when_finished "rm -f .git/fsmonitor-ordinary \
+			    .git/index.grep-token \
 			    .git/index.grep-worktree \
 			    .git/index.grep-worktree-generation \
 			    .git/index.grep-worktree-recovery \
 			    .git/index.grep-worktree.save \
 			    exact-lookup.trace \
-			    recovery-lookup.trace &&
+			    recovery-lookup.trace token-*.trace &&
 			    git rm -f --ignore-unmatch ordinary-shift &&
 			    git update-index --no-fsmonitor &&
 			    git checkout -- ordinary" &&
@@ -3693,6 +3694,47 @@ test_expect_success 'content index prunes cached worktree blobs' '
 		<recovery-lookup.trace &&
 	test_cmp .git/index.grep-worktree.save \
 		.git/index.grep-worktree &&
+	rm -f .git/index.grep-token &&
+	env GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/token-missing.trace" \
+		git --no-optional-locks grep "ordinary contents" -- ordinary >actual &&
+	test_cmp expected actual &&
+	test_path_is_missing .git/index.grep-token &&
+	test_region grep load_worktree_cache token-missing.trace &&
+	test_region grep index-identity/token-read token-missing.trace &&
+	test_region grep index-identity/compute token-missing.trace &&
+	test_region ! grep index-identity/token-write token-missing.trace &&
+	test_region grep worktree-cache/compact-load token-missing.trace &&
+	test_trace2_data grep index_identity/token_read_outcome 2 \
+		<token-missing.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 2 \
+		<token-missing.trace &&
+	env GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/token-created.trace" \
+		git grep "ordinary contents" -- ordinary >actual &&
+	test_cmp expected actual &&
+	test_path_is_file .git/index.grep-token &&
+	test_region grep index-identity/token-write token-created.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<token-created.trace &&
+	env GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/token-hit.trace" \
+		git --no-optional-locks grep "ordinary contents" -- ordinary >actual &&
+	test_cmp expected actual &&
+	test_path_is_file .git/index.grep-token &&
+	test_region grep index-identity/token-read token-hit.trace &&
+	test_region ! grep index-identity/compute token-hit.trace &&
+	test_region ! grep index-identity/token-write token-hit.trace &&
+	test_trace2_data grep index_identity/token_read_outcome 0 \
+		<token-hit.trace &&
+	: >.git/index.grep-token &&
+	env GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/token-invalid.trace" \
+		git --no-optional-locks grep "ordinary contents" -- ordinary >actual &&
+	test_cmp expected actual &&
+	test_region grep index-identity/compute token-invalid.trace &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<token-invalid.trace &&
 	echo "worktree-only-needle" >ordinary &&
 	>.git/fsmonitor-ordinary &&
 	oid=$(git rev-parse :ordinary) &&

@@ -8,11 +8,29 @@
 #include "repository.h"
 #include "split-index.h"
 #include "strbuf.h"
+#include "trace2.h"
 #include "wrapper.h"
 
 #define GREP_INDEX_TOKEN_SIGNATURE 0x47574944
 #define GREP_INDEX_TOKEN_VERSION     5
 #define GREP_INDEX_TOKEN_HEADER_SIZE 76
+
+/* Numeric Trace2 outcomes; token reads and writes are best effort. */
+enum grep_index_token_read_outcome {
+	GREP_INDEX_TOKEN_READ_HIT = 0,
+	GREP_INDEX_TOKEN_READ_NO_INDEX_STAT,
+	GREP_INDEX_TOKEN_READ_MISSING,
+	GREP_INDEX_TOKEN_READ_FAILED,
+	GREP_INDEX_TOKEN_READ_INVALID,
+};
+
+enum grep_index_token_write_outcome {
+	GREP_INDEX_TOKEN_WRITE_COMMITTED = 0,
+	GREP_INDEX_TOKEN_WRITE_NO_INDEX_STAT,
+	GREP_INDEX_TOKEN_WRITE_OPTIONAL_LOCKS_DISABLED,
+	GREP_INDEX_TOKEN_WRITE_LOCK_FAILED,
+	GREP_INDEX_TOKEN_WRITE_COMMIT_FAILED,
+};
 
 static void hash_uint32(struct git_hash_ctx *ctx, uint32_t value)
 {
@@ -171,28 +189,42 @@ static void token_path(struct repository *repo, struct strbuf *path)
 	strbuf_addf(path, "%s.grep-token", repo_get_index_file(repo));
 }
 
-static void *map_file(const char *path, size_t *map_size)
+static void *map_file(const char *path, size_t *map_size, int *read_errno)
 {
 	void *map;
 	struct stat st;
 	int fd = git_open(path);
 
-	if (fd < 0)
+	*read_errno = 0;
+	if (fd < 0) {
+		*read_errno = errno;
 		return NULL;
-	if (fstat(fd, &st) || st.st_size < 0) {
+	}
+	if (fstat(fd, &st)) {
+		*read_errno = errno;
+		close(fd);
+		return NULL;
+	}
+	if (st.st_size < 0) {
+		close(fd);
+		return NULL;
+	}
+	if (!st.st_size) {
 		close(fd);
 		return NULL;
 	}
 	*map_size = xsize_t(st.st_size);
 	map = xmmap_gently(NULL, *map_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (map == MAP_FAILED)
+		*read_errno = errno;
 	close(fd);
 	return map == MAP_FAILED ? NULL : map;
 }
 
-static int load_token(struct repository *repo,
-		      struct index_state *istate,
-		      const struct object_id *scope_oid,
-		      struct grep_index_identity *identity)
+static enum grep_index_token_read_outcome load_token(
+	struct repository *repo, struct index_state *istate,
+	const struct object_id *scope_oid,
+	struct grep_index_identity *identity, int *read_errno)
 {
 	const unsigned char *map;
 	const struct stat *st = &istate->index_file_stat;
@@ -200,14 +232,20 @@ static int load_token(struct repository *repo,
 	size_t expected;
 	size_t map_size;
 	size_t rawsz = repo->hash_algo->rawsz;
-	int result = -1;
+	enum grep_index_token_read_outcome result = GREP_INDEX_TOKEN_READ_INVALID;
 
+	*read_errno = 0;
 	if (!istate->index_file_stat_valid)
-		return -1;
+		return GREP_INDEX_TOKEN_READ_NO_INDEX_STAT;
 	token_path(repo, &path);
-	map = map_file(path.buf, &map_size);
-	if (!map)
+	map = map_file(path.buf, &map_size, read_errno);
+	if (!map) {
+		if (*read_errno == ENOENT)
+			result = GREP_INDEX_TOKEN_READ_MISSING;
+		else if (*read_errno)
+			result = GREP_INDEX_TOKEN_READ_FAILED;
 		goto cleanup;
+	}
 	expected = GREP_INDEX_TOKEN_HEADER_SIZE + 5 * rawsz;
 	if (map_size != expected ||
 	    !hashfile_checksum_valid(repo->hash_algo, map, map_size) ||
@@ -234,7 +272,7 @@ static int load_token(struct repository *repo,
 	oidread(&identity->worktree,
 		map + GREP_INDEX_TOKEN_HEADER_SIZE + 3 * rawsz,
 		repo->hash_algo);
-	result = 0;
+	result = GREP_INDEX_TOKEN_READ_HIT;
 
 unmap:
 	munmap((void *)map, map_size);
@@ -243,23 +281,32 @@ cleanup:
 	return result;
 }
 
-static void write_token(struct repository *repo,
-			struct index_state *istate,
-			const struct object_id *scope_oid,
-			const struct grep_index_identity *identity)
+static enum grep_index_token_write_outcome write_token(
+	struct repository *repo, struct index_state *istate,
+	const struct object_id *scope_oid,
+	const struct grep_index_identity *identity, int *error_errno)
 {
 	const struct stat *st = &istate->index_file_stat;
 	struct hashfile *f = NULL;
 	struct lock_file lock = LOCK_INIT;
 	struct strbuf path = STRBUF_INIT;
 	int fd;
+	enum grep_index_token_write_outcome result =
+		GREP_INDEX_TOKEN_WRITE_COMMITTED;
 
-	if (!istate->index_file_stat_valid || !use_optional_locks())
-		return;
+	*error_errno = 0;
+	if (!istate->index_file_stat_valid)
+		return GREP_INDEX_TOKEN_WRITE_NO_INDEX_STAT;
+	if (!use_optional_locks())
+		return GREP_INDEX_TOKEN_WRITE_OPTIONAL_LOCKS_DISABLED;
+	trace2_region_enter("grep", "index-identity/token-write", repo);
 	token_path(repo, &path);
 	fd = hold_lock_file_for_update_mode(&lock, path.buf, 0, 0444);
-	if (fd < 0)
+	if (fd < 0) {
+		*error_errno = errno;
+		result = GREP_INDEX_TOKEN_WRITE_LOCK_FAILED;
 		goto cleanup;
+	}
 	f = hashfd(repo->hash_algo, fd, get_lock_file_path(&lock));
 	hashwrite_be32(f, GREP_INDEX_TOKEN_SIGNATURE);
 	hashwrite_be32(f, GREP_INDEX_TOKEN_VERSION);
@@ -279,13 +326,18 @@ static void write_token(struct repository *repo,
 	hashwrite(f, identity->worktree.hash, repo->hash_algo->rawsz);
 	finalize_hashfile(f, NULL, FSYNC_COMPONENT_NONE, CSUM_HASH_IN_STREAM);
 	f = NULL;
-	commit_lock_file(&lock);
+	if (commit_lock_file(&lock)) {
+		*error_errno = errno;
+		result = GREP_INDEX_TOKEN_WRITE_COMMIT_FAILED;
+	}
 
 cleanup:
 	if (f)
 		free_hashfile(f);
 	rollback_lock_file(&lock);
 	strbuf_release(&path);
+	trace2_region_leave("grep", "index-identity/token-write", repo);
+	return result;
 }
 
 int grep_index_identity_get(struct repository *repo,
@@ -294,6 +346,9 @@ int grep_index_identity_get(struct repository *repo,
 {
 	struct git_hash_ctx ctx;
 	struct object_id scope_oid;
+	enum grep_index_token_read_outcome read_outcome;
+	enum grep_index_token_write_outcome write_outcome;
+	int compute_result, read_errno, write_errno;
 
 	hash_scope(repo, &scope_oid);
 	oidcpy(&identity->worktree_scope, &scope_oid);
@@ -314,10 +369,32 @@ int grep_index_identity_get(struct repository *repo,
 		git_hash_final_oid(&identity->worktree_split_base_identity,
 				   &ctx);
 	}
-	if (!load_token(repo, istate, &scope_oid, identity))
+	trace2_region_enter("grep", "index-identity/token-read", repo);
+	read_outcome = load_token(repo, istate, &scope_oid, identity,
+				  &read_errno);
+	trace2_region_leave("grep", "index-identity/token-read", repo);
+	trace2_data_intmax("grep", repo, "index_identity/token_read_outcome",
+			   read_outcome);
+	if (read_outcome == GREP_INDEX_TOKEN_READ_FAILED && read_errno)
+		trace2_data_intmax("grep", repo,
+				   "index_identity/token_read_errno",
+				   read_errno);
+	if (read_outcome == GREP_INDEX_TOKEN_READ_HIT)
 		return 0;
-	if (compute_identity(repo, istate, identity))
+	trace2_region_enter("grep", "index-identity/compute", repo);
+	compute_result = compute_identity(repo, istate, identity);
+	trace2_region_leave("grep", "index-identity/compute", repo);
+	trace2_data_intmax("grep", repo, "index_identity/compute_failed",
+			   !!compute_result);
+	if (compute_result)
 		return -1;
-	write_token(repo, istate, &scope_oid, identity);
+	write_outcome = write_token(repo, istate, &scope_oid, identity,
+				    &write_errno);
+	trace2_data_intmax("grep", repo, "index_identity/token_write_outcome",
+			   write_outcome);
+	if (write_errno)
+		trace2_data_intmax("grep", repo,
+				   "index_identity/token_write_errno",
+				   write_errno);
 	return 0;
 }

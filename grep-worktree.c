@@ -854,8 +854,10 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 	oidcpy(&cache->split_base_identity,
 	       &identity->worktree_split_base_identity);
 	allocate_cache_bitmaps(cache);
+	trace2_region_enter("grep", "worktree-cache/compact-load", repo);
 	loaded = load_cache(cache, cache->equal, cache->different,
 			    cache->split_base_equal);
+	trace2_region_leave("grep", "worktree-cache/compact-load", repo);
 	if (load_observation_generation(repo, &observation_generation) ||
 	    !oideq(&observation_generation,
 		   &cache->observation_generation) ||
