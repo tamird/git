@@ -196,6 +196,19 @@ test_cache_tree_update_bound () {
 	}' "$update_trace"
 }
 
+test_commit_as_is_timer () {
+	trace_file="$1"
+	timer_name="$2"
+	timer_count="$3"
+	test_grep ! "\"event\":\"th_timer\".*\"category\":\"commit\",\"name\":\"as-is/$timer_name\"" "$trace_file" &&
+	if test "$timer_count" = absent
+	then
+		test_grep ! "\"event\":\"timer\".*\"category\":\"commit\",\"name\":\"as-is/$timer_name\"" "$trace_file"
+	else
+		test_grep "\"event\":\"timer\".*\"category\":\"commit\",\"name\":\"as-is/$timer_name\",\"intervals\":$timer_count," "$trace_file"
+	fi
+}
+
 test_expect_success 'initial commit has cache-tree' '
 	test_commit foo &&
 	test_cache_tree
@@ -522,6 +535,44 @@ test_expect_success 'switching trees does not invalidate shared index' '
 		git -c splitIndex.maxPercentChange=100 commit -m "as-is" &&
 		test-tool dump-split-index .git/index | grep -v ^own >after &&
 		test_cmp before after
+	)
+'
+
+test_expect_success 'as-is commit times cache-tree preparation' '
+	test_when_finished "rm -rf commit-prep" &&
+	git init commit-prep &&
+	(
+		cd commit-prep &&
+		mkdir dir &&
+		echo base >dir/file &&
+		git add dir/file &&
+		git commit -m base &&
+		GIT_TRACE2_EVENT="$PWD/.git/valid.trace" \
+			git commit --allow-empty -m empty &&
+		test_trace2_data commit as-is/cache-tree-checked 1 <.git/valid.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 1 <.git/valid.trace &&
+		test_commit_as_is_timer .git/valid.trace cache-tree-validate 1 &&
+		test_commit_as_is_timer .git/valid.trace cache-tree-update absent &&
+		test_commit_as_is_timer .git/valid.trace write-index 1 &&
+		echo changed >dir/file &&
+		git add dir/file &&
+		GIT_TRACE2_EVENT="$PWD/.git/invalid.trace" git commit -m changed &&
+		test_trace2_data commit as-is/cache-tree-checked 1 <.git/invalid.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 0 <.git/invalid.trace &&
+		test_commit_as_is_timer .git/invalid.trace cache-tree-validate 1 &&
+		test_commit_as_is_timer .git/invalid.trace cache-tree-update 1 &&
+		test_commit_as_is_timer .git/invalid.trace write-index 1 &&
+		test-tool chmtime =-60 dir/file &&
+		GIT_TRACE2_EVENT="$PWD/.git/refresh.trace" \
+			git -c core.fsmonitor=false commit --allow-empty -m refreshed &&
+		test_trace2_data commit as-is/cache-tree-checked 0 <.git/refresh.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 0 <.git/refresh.trace &&
+		test_commit_as_is_timer .git/refresh.trace cache-tree-validate absent &&
+		test_commit_as_is_timer .git/refresh.trace cache-tree-update 1 &&
+		test_commit_as_is_timer .git/refresh.trace write-index 1 &&
+		git rev-parse HEAD^{tree} >expect &&
+		git write-tree >actual &&
+		test_cmp expect actual
 	)
 '
 

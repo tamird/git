@@ -509,7 +509,7 @@ enum trace2_timer_id {
 	 * for permanent analysis code.
 	 */
 	TRACE2_TIMER_ID_TEST1 = 0, /* emits summary event only */
-	TRACE2_TIMER_ID_TEST2,     /* emits summary and thread events */
+	TRACE2_TIMER_ID_TEST2, /* emits summary and thread events */
 	TRACE2_TIMER_ID_DIFF_SETUP,
 	TRACE2_TIMER_ID_DIFF_WRITEBACK,
 	TRACE2_TIMER_ID_DIFF_TWO_TREE_QUEUE,
@@ -588,6 +588,9 @@ enum trace2_timer_id {
 	TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK,
 	TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE,
 	TRACE2_TIMER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT,
+	TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE,
+	TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_UPDATE,
+	TRACE2_TIMER_ID_COMMIT_AS_IS_WRITE_INDEX,
 
 	/* Add additional timer definitions before here. */
 	TRACE2_NUMBER_OF_TIMERS

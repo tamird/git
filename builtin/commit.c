@@ -483,16 +483,37 @@ static const char *prepare_index(const char **argv, const char *prefix,
 	 */
 	if (!only && !pathspec.nr) {
 		struct cache_tree *cache_tree;
+		int cache_tree_valid = 0;
+		int write_result;
 
 		repo_hold_locked_index(the_repository, &index_lock,
 				       LOCK_DIE_ON_ERROR);
 		refresh_cache_or_die(refresh_flags);
 		cache_tree = cache_tree_get(the_repository->index);
-		if (the_repository->index->cache_changed ||
-		    !cache_tree_fully_valid(cache_tree))
+		if (!the_repository->index->cache_changed) {
+			trace2_timer_start(
+				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
+			cache_tree_valid = cache_tree_fully_valid(cache_tree);
+			trace2_timer_stop(
+				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
+		}
+		trace2_data_intmax("commit", the_repository,
+				   "as-is/cache-tree-checked",
+				   !the_repository->index->cache_changed);
+		trace2_data_intmax("commit", the_repository,
+				   "as-is/cache-tree-valid", cache_tree_valid);
+		if (the_repository->index->cache_changed || !cache_tree_valid) {
+			trace2_timer_start(
+				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_UPDATE);
 			cache_tree_update(the_repository->index, WRITE_TREE_SILENT);
-		if (write_locked_index(the_repository->index, &index_lock,
-				       COMMIT_LOCK | SKIP_IF_UNCHANGED))
+			trace2_timer_stop(
+				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_UPDATE);
+		}
+		trace2_timer_start(TRACE2_TIMER_ID_COMMIT_AS_IS_WRITE_INDEX);
+		write_result = write_locked_index(the_repository->index, &index_lock,
+						  COMMIT_LOCK | SKIP_IF_UNCHANGED);
+		trace2_timer_stop(TRACE2_TIMER_ID_COMMIT_AS_IS_WRITE_INDEX);
+		if (write_result)
 			die(_("unable to write new index file"));
 		commit_style = COMMIT_AS_IS;
 		ret = repo_get_index_file(the_repository);
