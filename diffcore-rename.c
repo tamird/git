@@ -191,6 +191,7 @@ static int populate_similarity_filespec(struct repository *r,
 					const struct diff_populate_filespec_options *options)
 {
 	int ret, saved_errno;
+	uint64_t elapsed_ns;
 
 	/* Do not time the population helper's cached successful returns. */
 	if (!trace2_is_enabled() ||
@@ -203,7 +204,16 @@ static int populate_similarity_filespec(struct repository *r,
 	errno = saved_errno;
 	ret = diff_populate_filespec(r, s, options);
 	saved_errno = errno;
-	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_RENAME_POPULATE);
+	elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_RENAME_POPULATE);
+	if (options->check_size_only) {
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT, 1);
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS,
+				   elapsed_ns);
+	} else {
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT, 1);
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS,
+				   elapsed_ns);
+	}
 	errno = saved_errno;
 	return ret;
 }

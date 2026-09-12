@@ -99,6 +99,18 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS] = {
 		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-ns",
 	},
+	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT] = {
+		.category = "diff", .name = "rename/populate/size-only-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS] = {
+		.category = "diff", .name = "rename/populate/size-only-ns",
+	},
+	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT] = {
+		.category = "diff", .name = "rename/populate/full-count",
+	},
+	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS] = {
+		.category = "diff", .name = "rename/populate/full-ns",
+	},
 
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS] = {
 		.category = "cache_tree",

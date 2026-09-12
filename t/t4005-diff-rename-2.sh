@@ -132,7 +132,7 @@ test_expect_success 'similarity timers aggregate while exit counts remain per in
 	index_tree=$(git write-tree) &&
 	printf "%s %s\n" "$tree" "$index_tree" >tree-pair &&
 	cat tree-pair tree-pair >tree-pairs &&
-	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+	GIT_TRACE2_EVENT="$PWD/rename-single.trace" \
 		git diff-tree -r -C --find-copies-harder "$tree" "$index_tree" \
 			>single 2>single.err &&
 	test_must_be_empty single.err &&
@@ -159,6 +159,22 @@ test_expect_success 'similarity timers aggregate while exit counts remain per in
 	test "$(grep -c \
 		"\"event\":\"data\".*\"category\":\"diff\",\"key\":\"rename/inexact/" \
 		rename-repeated.trace)" = 28 &&
+	single_size=$(sed -n "s/.*\"name\":\"rename\/populate\/size-only-count\",\"count\":\([0-9][0-9]*\)}.*/\1/p" rename-single.trace) &&
+	single_full=$(sed -n "s/.*\"name\":\"rename\/populate\/full-count\",\"count\":\([0-9][0-9]*\)}.*/\1/p" rename-single.trace) &&
+	repeated_size=$(sed -n "s/.*\"name\":\"rename\/populate\/size-only-count\",\"count\":\([0-9][0-9]*\)}.*/\1/p" rename-repeated.trace) &&
+	repeated_full=$(sed -n "s/.*\"name\":\"rename\/populate\/full-count\",\"count\":\([0-9][0-9]*\)}.*/\1/p" rename-repeated.trace) &&
+	populate_intervals=$(sed -n "s/.*\"name\":\"rename\/populate\",\"intervals\":\([0-9][0-9]*\),.*/\1/p" rename-repeated.trace) &&
+	test -n "$single_size" &&
+	test -n "$single_full" &&
+	test -n "$repeated_size" &&
+	test -n "$repeated_full" &&
+	test -n "$populate_intervals" &&
+	test "$repeated_size" -eq "$((2 * single_size))" &&
+	test "$repeated_full" -eq "$((2 * single_full))" &&
+	test "$((repeated_size + repeated_full))" -eq "$populate_intervals" &&
+	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/size-only-ns\",\"count\":[1-9][0-9]*}" rename-repeated.trace &&
+	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/full-ns\",\"count\":[1-9][0-9]*}" rename-repeated.trace &&
+	test_grep ! "\"event\":\"th_counter\".*\"name\":\"rename/populate/" rename-repeated.trace &&
 	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/build\",\"intervals\":12," rename-repeated.trace &&
 	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"spanhash/compare\",\"intervals\":8," rename-repeated.trace
 '
@@ -213,6 +229,8 @@ test_expect_success 'size rejection populates sizes without hashing or comparing
 	test_trace2_data diff rename/inexact/candidate_floor_skipped 0 \
 		<rename-size.trace &&
 	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"rename/populate\",\"intervals\":[1-9][0-9]*," rename-size.trace &&
+	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/size-only-count\",\"count\":[1-9][0-9]*}" rename-size.trace &&
+	test_grep ! "\"name\":\"rename/populate/full-" rename-size.trace &&
 	test_grep ! "spanhash/" rename-size.trace
 '
 
