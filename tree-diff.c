@@ -633,6 +633,215 @@ static void follow_change(struct diff_options *opt,
 			    old_dirty_submodule, new_dirty_submodule);
 }
 
+#define FOLLOW_OID_SAMPLE_BUCKETS (1U << 14)
+
+struct follow_oid_sample_entry {
+	struct follow_oid_sample_entry *next;
+	struct object_id oid;
+	uint64_t last_read;
+	uint64_t last_scan;
+};
+
+struct diff_follow_oid_sample {
+	struct follow_oid_sample_entry **buckets;
+	pthread_mutex_t mutex;
+	uint64_t read_ordinal;
+	uint64_t scan_sequence;
+	size_t distinct;
+	int truncated;
+	int invalid;
+};
+
+struct follow_addremove_data {
+	uint64_t *eligible_additions;
+	int skip_additions;
+	struct diff_follow_oid_sample *oid_sample;
+	uint64_t scan_id;
+	/* Index zero is sticky invalid; remaining slots mirror native counters. */
+	uint64_t oid_delta[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED -
+			   TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID + 1];
+	int oid_done;
+};
+
+static pthread_mutex_t follow_oid_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static unsigned int follow_oid_hash(const struct object_id *oid)
+{
+	return oidhash(oid) ^ (oid->algo * 0x9e3779b9U);
+}
+
+void diff_follow_oid_sample_clear(struct repository *repo)
+{
+	struct diff_follow_oid_sample *sample;
+	size_t i;
+
+	pthread_mutex_lock(&follow_oid_init_mutex);
+	sample = repo->follow_oid_sample;
+	repo->follow_oid_sample = NULL;
+	if (sample) {
+		struct follow_oid_sample_entry *entry, *next;
+
+		/* repo_clear() cannot race a tree walk using this repository. */
+		pthread_mutex_lock(&sample->mutex);
+		for (i = 0; i < FOLLOW_OID_SAMPLE_BUCKETS; i++) {
+			for (entry = sample->buckets[i]; entry; entry = next) {
+				next = entry->next;
+				free(entry);
+			}
+		}
+		free(sample->buckets);
+		pthread_mutex_unlock(&sample->mutex);
+		pthread_mutex_destroy(&sample->mutex);
+		free(sample);
+	}
+	pthread_mutex_unlock(&follow_oid_init_mutex);
+}
+
+static void follow_oid_sample_begin(struct repository *repo,
+				    struct follow_addremove_data *data)
+{
+	struct diff_follow_oid_sample *sample;
+
+	if (!trace2_is_enabled())
+		return;
+
+	pthread_mutex_lock(&follow_oid_init_mutex);
+	sample = repo->follow_oid_sample;
+	if (!sample) {
+		sample = calloc(1, sizeof(*sample));
+		if (sample) {
+			sample->buckets = calloc(FOLLOW_OID_SAMPLE_BUCKETS,
+						 sizeof(*sample->buckets));
+			if (!sample->buckets ||
+			    pthread_mutex_init(&sample->mutex, NULL)) {
+				free(sample->buckets);
+				free(sample);
+				sample = NULL;
+			} else {
+				repo->follow_oid_sample = sample;
+			}
+		}
+	}
+	pthread_mutex_unlock(&follow_oid_init_mutex);
+
+	if (!sample) {
+		data->oid_delta[0] = 1;
+		return;
+	}
+	data->oid_sample = sample;
+	pthread_mutex_lock(&sample->mutex);
+	if (sample->scan_sequence == UINT64_MAX || sample->invalid) {
+		sample->invalid = data->oid_delta[0] = 1;
+		data->oid_done = 1;
+	} else {
+		data->scan_id = ++sample->scan_sequence;
+		data->oid_done = sample->truncated;
+	}
+	pthread_mutex_unlock(&sample->mutex);
+}
+
+static void follow_oid_sample_add(struct follow_addremove_data *data,
+				  enum trace2_counter_id cid)
+{
+	uint64_t *value = &data->oid_delta[cid -
+					   TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID];
+
+	if (*value == UINT64_MAX)
+		data->oid_delta[0] = 1;
+	else
+		(*value)++;
+}
+
+static void follow_oid_sample_read(struct follow_addremove_data *data,
+				   const struct object_id *oid)
+{
+	struct diff_follow_oid_sample *sample = data->oid_sample;
+	struct follow_oid_sample_entry *entry = NULL;
+	unsigned int bucket = 0;
+	uint64_t gap;
+	enum trace2_counter_id cid;
+
+	if (!sample || data->oid_done)
+		return;
+
+	pthread_mutex_lock(&sample->mutex);
+	if (sample->truncated || sample->invalid ||
+	    sample->read_ordinal == UINT64_MAX) {
+		if (sample->read_ordinal == UINT64_MAX)
+			sample->invalid = data->oid_delta[0] = 1;
+		data->oid_done = 1;
+		goto done;
+	}
+	if (!(oid->hash[0] & (TRACE2_FOLLOW_OID_SAMPLE_MODULUS - 1))) {
+		bucket = follow_oid_hash(oid) & (FOLLOW_OID_SAMPLE_BUCKETS - 1);
+		for (entry = sample->buckets[bucket]; entry; entry = entry->next)
+			if (entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
+				break;
+		if (!entry && sample->distinct == TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT) {
+			sample->truncated = data->oid_done = 1;
+			follow_oid_sample_add(data,
+					      TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED);
+			goto done;
+		}
+	}
+
+	sample->read_ordinal++;
+	follow_oid_sample_add(data, TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED);
+	if (oid->hash[0] & (TRACE2_FOLLOW_OID_SAMPLE_MODULUS - 1))
+		goto done;
+	follow_oid_sample_add(data, TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SELECTED);
+	if (!entry) {
+		entry = malloc(sizeof(*entry));
+		if (!entry) {
+			sample->invalid = data->oid_delta[0] = 1;
+			data->oid_done = 1;
+			goto done;
+		}
+		oidcpy(&entry->oid, oid);
+		entry->next = sample->buckets[bucket];
+		sample->buckets[bucket] = entry;
+		sample->distinct++;
+		follow_oid_sample_add(data, TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_FIRST);
+	} else {
+		gap = sample->read_ordinal - entry->last_read;
+		cid = entry->last_scan == data->scan_id ?
+			      TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SAME_SCAN :
+			      TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_CROSS_SCAN;
+		follow_oid_sample_add(data, cid);
+		if (gap <= 64)
+			cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_64;
+		else if (gap <= 4096)
+			cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_4096;
+		else if (gap <= 65536)
+			cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_65536;
+		else
+			cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536;
+		follow_oid_sample_add(data, cid);
+	}
+	entry->last_read = sample->read_ordinal;
+	entry->last_scan = data->scan_id;
+done:
+	if (data->oid_delta[0]) {
+		sample->invalid = 1;
+		data->oid_done = 1;
+	}
+	pthread_mutex_unlock(&sample->mutex);
+}
+
+static void follow_oid_sample_commit(struct follow_addremove_data *data)
+{
+	enum trace2_counter_id cid;
+
+	for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID;
+	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED; cid++) {
+		uint64_t value = data->oid_delta[cid -
+						 TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID];
+
+		if (value)
+			trace2_counter_add(cid, value);
+	}
+}
+
 struct follow_odb_read {
 	/* Index zero is sticky invalid; remaining slots mirror native counters. */
 	uint64_t value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS -
@@ -745,14 +954,10 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 		if (value)
 			trace2_counter_add(cid, value);
 	}
+	follow_oid_sample_read(opt->change_fn_data, oid);
 	errno = saved_errno;
 	return buffer;
 }
-
-struct follow_addremove_data {
-	uint64_t *eligible_additions;
-	int skip_additions;
-};
 
 static void follow_addremove(struct diff_options *opt, int addremove,
 			     unsigned mode, const struct object_id *oid,
@@ -820,7 +1025,9 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_opts.rename_limit = opt->rename_limit;
 	diff_setup_done(&diff_opts);
 	diff_opts.change = follow_change;
+	diff_opts.change_fn_data = &addremove_data;
 	saved_errno = errno;
+	follow_oid_sample_begin(opt->repo, &addremove_data);
 	/*
 	 * -B can prefetch all queued pairs, and filtering can skip an
 	 * orderfile read if it empties the queue. Exclude both cases from the
@@ -836,7 +1043,6 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 		if (addremove_data.skip_additions ||
 		    addremove_data.eligible_additions) {
 			diff_opts.add_remove = follow_addremove;
-			diff_opts.change_fn_data = &addremove_data;
 		}
 	}
 	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
@@ -847,6 +1053,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_ELIGIBLE_ADDITIONS,
 			   eligible_additions);
 	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_COMPLETED, 1);
+	follow_oid_sample_commit(&addremove_data);
 	errno = saved_errno;
 	diffcore_std(&diff_opts);
 	clear_pathspec(&diff_opts.pathspec);

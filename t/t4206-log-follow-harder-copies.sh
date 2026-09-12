@@ -107,6 +107,7 @@ test_follow_full_tree_trace () {
 	full_tree_odb_loose=${4:-$2}
 	full_tree_odb_unpack=${5:-0}
 	full_tree_odb_data_count=$(grep -c '"key":"follow-full-tree/tree-read/odb/' "$full_tree_trace")
+	full_tree_oid_sample_count=$(grep -c '"key":"follow-full-tree/tree-read/requested-oid-sample/' "$full_tree_trace")
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-pickaxe/tree-paths",' "$full_tree_trace")" = 1 &&
 	full_tree_intervals=$(sed -n \
 		's/.*"event":"timer".*"category":"diff","name":"follow-pickaxe\/tree-paths","intervals":\([0-9][0-9]*\),.*/\1/p' \
@@ -120,8 +121,9 @@ test_follow_full_tree_trace () {
 	test_trace2_data diff follow-full-tree/tree-read/count "$full_tree_read_count" <"$full_tree_trace" &&
 	test_trace2_data diff follow-full-tree/tree-read-us "[0-9][0-9]*" <"$full_tree_trace" &&
 	test_follow_additions_trace "$full_tree_trace" 0 1 &&
-	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count))" &&
-	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count))" &&
+	test "$full_tree_oid_sample_count" = 14 &&
+	test "$(grep -c '"key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count + full_tree_oid_sample_count))" &&
+	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree' "$full_tree_trace")" = "$((6 + full_tree_odb_data_count + full_tree_oid_sample_count))" &&
 	test "$(grep -c '"event":"timer".*"category":"diff","name":"follow-full-tree",' "$full_tree_trace")" = 1 &&
 	test_grep '"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":1,' "$full_tree_trace" &&
 	test_grep ! '"event":"th_timer".*"category":"diff","name":"follow-full-tree"' "$full_tree_trace" &&
@@ -161,6 +163,82 @@ test_follow_full_tree_trace () {
 	test_follow_odb_trace "$full_tree_trace" "$full_tree_odb_reads" \
 		"$full_tree_odb_loose" "$full_tree_odb_unpack"
 }
+
+trace2_follow_numeric_value () {
+	sed -n "s#.*\"key\":\"$1\",\"value\":\"\([0-9][0-9]*\)\".*#\1#p" "$2"
+}
+
+test_expect_success 'full-tree follow samples requested tree OID reuse' '
+	test_create_repo follow-oid-sample &&
+	(
+		cd follow-oid-sample &&
+		mkdir same-a same-b &&
+		printf "seed\n" >same-a/item06660 &&
+		cp same-a/item06660 same-b/item06660 &&
+		test_seq 1 100 >source &&
+		git add same-a same-b source &&
+		git commit -m base &&
+		first_oid=$(git rev-parse HEAD:same-a) &&
+		test "$first_oid" = "$(git rev-parse HEAD:same-b)" &&
+		case "$first_oid" in
+		00*|40*|80*|c0*) : ;;
+		*) return 1 ;;
+		esac &&
+		cp source middle &&
+		printf "101\n" >>middle &&
+		git add middle &&
+		git commit -m middle &&
+		cp middle final &&
+		git add final &&
+		git commit -m final &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git log --follow --name-status --format=%s -- final >expect &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/oid-sample.trace" \
+			git log --follow --name-status --format=%s -- final >actual &&
+		test_cmp expect actual &&
+		test_grep "^C100[[:space:]]middle[[:space:]]final$" actual &&
+		test_grep "^C[0-9][0-9][0-9][[:space:]]source[[:space:]]middle$" actual &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/valid 1 <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/modulus 64 <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/distinct-cap 65536 <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/truncated 0 <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/same-search-repeats "[1-9][0-9]*" <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats "[1-9][0-9]*" <oid-sample.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/gap-le-64 "[1-9][0-9]*" <oid-sample.trace &&
+		sample=follow-full-tree/tree-read/requested-oid-sample &&
+		covered=$(trace2_follow_numeric_value "$sample/covered-reads" oid-sample.trace) &&
+		selected=$(trace2_follow_numeric_value "$sample/selected-reads" oid-sample.trace) &&
+		first=$(trace2_follow_numeric_value "$sample/first-reads" oid-sample.trace) &&
+		repeated=$(trace2_follow_numeric_value "$sample/repeated-reads" oid-sample.trace) &&
+		same=$(trace2_follow_numeric_value "$sample/same-search-repeats" oid-sample.trace) &&
+		cross=$(trace2_follow_numeric_value "$sample/cross-search-repeats" oid-sample.trace) &&
+		gap64=$(trace2_follow_numeric_value "$sample/gap-le-64" oid-sample.trace) &&
+		gap4096=$(trace2_follow_numeric_value "$sample/gap-le-4096" oid-sample.trace) &&
+		gap65536=$(trace2_follow_numeric_value "$sample/gap-le-65536" oid-sample.trace) &&
+		gap_over=$(trace2_follow_numeric_value "$sample/gap-gt-65536" oid-sample.trace) &&
+		for value in "$covered" "$selected" "$first" "$repeated" "$same" "$cross" \
+			     "$gap64" "$gap4096" "$gap65536" "$gap_over"
+		do
+			test -n "$value" || return 1
+		done &&
+		test "$covered" = "$(trace2_follow_numeric_value follow-full-tree/tree-read/count oid-sample.trace)" &&
+		test "$selected" -gt 0 &&
+		test "$selected" = "$((first + repeated))" &&
+		test "$repeated" = "$((same + cross))" &&
+		test "$repeated" = "$((gap64 + gap4096 + gap65536 + gap_over))" &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git log -n2 --follow --name-status --format=%s -- final >expect-limited &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/oid-sample-limited.trace" \
+			git log -n2 --follow --name-status --format=%s -- final >actual-limited &&
+		test_cmp expect-limited actual-limited &&
+		test_trace2_data diff follow-full-tree/count 2 <oid-sample-limited.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/count 8 <oid-sample-limited.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/same-search-repeats 2 <oid-sample-limited.trace &&
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats "[1-9][0-9]*" <oid-sample-limited.trace
+	)
+'
 
 echo >path0 'Line 1
 Line 2

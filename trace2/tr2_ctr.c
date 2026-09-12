@@ -99,6 +99,39 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS] = {
 		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-ns",
 	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/invalid",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/covered-reads",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SELECTED] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/selected-reads",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_FIRST] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/first-reads",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SAME_SCAN] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/same-search-repeats",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_CROSS_SCAN] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_64] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-64",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_4096] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-4096",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_65536] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-65536",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-gt-65536",
+	},
+	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED] = {
+		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/truncated",
+	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT] = {
 		.category = "diff", .name = "rename/populate/size-only-count",
 	},
@@ -166,14 +199,15 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	/* Add additional metadata before here. */
 };
 
-/* Only this family promises checked sums and a sticky validity result. */
-static void add_follow_odb_counter(struct tr2_counter_block *block,
-				   enum trace2_counter_id cid, uint64_t value)
+/* These families promise checked sums and a sticky validity result. */
+static void add_checked_counter(struct tr2_counter_block *block,
+				enum trace2_counter_id first,
+				enum trace2_counter_id cid, uint64_t value)
 {
-	uint64_t *invalid = &block->counter[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID].value;
+	uint64_t *invalid = &block->counter[first].value;
 	uint64_t *sum = &block->counter[cid].value;
 
-	if (cid == TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID) {
+	if (cid == first) {
 		if (value)
 			*invalid = 1;
 	} else if (!*invalid) {
@@ -191,7 +225,12 @@ void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
 
 	if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID &&
 	    cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS)
-		add_follow_odb_counter(&ctx->counter_block, cid, value);
+		add_checked_counter(&ctx->counter_block,
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID, cid, value);
+	else if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID &&
+		 cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED)
+		add_checked_counter(&ctx->counter_block,
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID, cid, value);
 	else
 		c->value += value;
 
@@ -219,7 +258,14 @@ void tr2_update_final_counters(void)
 
 		if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID &&
 		    cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS)
-			add_follow_odb_counter(&final_counter_block, cid, c->value);
+			add_checked_counter(&final_counter_block,
+				TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID,
+				cid, c->value);
+		else if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID &&
+			 cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED)
+			add_checked_counter(&final_counter_block,
+				TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID,
+				cid, c->value);
 		else
 			c_final->value += c->value;
 	}
@@ -311,6 +357,72 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 			}
 			trace2_data_intmax("diff", NULL, name, value);
 		}
+		errno = saved_errno;
+	}
+
+	if (follow_completed) {
+		uint64_t covered = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED].value;
+		uint64_t selected = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SELECTED].value;
+		uint64_t first = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_FIRST].value;
+		uint64_t same = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SAME_SCAN].value;
+		uint64_t cross = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_CROSS_SCAN].value;
+		uint64_t repeats = 0, remaining;
+		int saved_errno = errno;
+		int valid = !final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID].value;
+
+		for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED;
+		     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536; cid++)
+			if (final_counter_block.counter[cid].value > INTMAX_MAX)
+				valid = 0;
+		if (selected > covered || first > selected)
+			valid = 0;
+		else {
+			repeats = selected - first;
+			if (same > repeats || cross != repeats - same)
+				valid = 0;
+			remaining = repeats;
+			for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_64;
+			     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536;
+			     cid++) {
+				uint64_t count = final_counter_block.counter[cid].value;
+
+				if (count > remaining) {
+					valid = 0;
+					break;
+				}
+				remaining -= count;
+			}
+			if (remaining)
+				valid = 0;
+		}
+		trace2_data_intmax("diff", NULL,
+			"follow-full-tree/tree-read/requested-oid-sample/valid", valid);
+		trace2_data_intmax("diff", NULL,
+			"follow-full-tree/tree-read/requested-oid-sample/modulus",
+			TRACE2_FOLLOW_OID_SAMPLE_MODULUS);
+		trace2_data_intmax("diff", NULL,
+			"follow-full-tree/tree-read/requested-oid-sample/distinct-cap",
+			TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT);
+		trace2_data_intmax("diff", NULL,
+			"follow-full-tree/tree-read/requested-oid-sample/truncated",
+			!!final_counter_block.counter[
+				TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED].value);
+		for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED;
+		     valid && cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536;
+		     cid++)
+			trace2_data_intmax("diff", NULL,
+				tr2_counter_metadata[cid].name,
+				final_counter_block.counter[cid].value);
+		if (valid)
+			trace2_data_intmax("diff", NULL,
+				"follow-full-tree/tree-read/requested-oid-sample/repeated-reads",
+				repeats);
 		errno = saved_errno;
 	}
 

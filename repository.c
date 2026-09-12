@@ -385,6 +385,7 @@ void repo_clear(struct repository *repo)
 	FREE_AND_NULL(repo->ref_storage_payload);
 
 	diffcore_delta_cache_clear(repo);
+	diff_follow_oid_sample_clear(repo);
 	odb_free(repo->objects);
 	repo->objects = NULL;
 

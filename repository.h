@@ -7,6 +7,7 @@
 #include "environment.h"
 
 struct config_set;
+struct diff_follow_oid_sample;
 struct diff_spanhash_cache;
 struct git_hash_algo;
 struct index_state;
@@ -156,6 +157,9 @@ struct repository {
 	/* Span hashes reused by similarity comparisons in this repository. */
 	struct diff_spanhash_cache *spanhash_cache;
 
+	/* Sampled requested tree IDs in Trace2 full-tree --follow searches. */
+	struct diff_follow_oid_sample *follow_oid_sample;
+
 	/*
 	 * Repository's in-memory index.
 	 * 'repo_read_index()' can be used to populate 'index'.
@@ -279,6 +283,7 @@ int repo_submodule_init(struct repository *subrepo,
 			const struct object_id *treeish_name);
 void repo_clear(struct repository *repo);
 void diffcore_delta_cache_clear(struct repository *repo);
+void diff_follow_oid_sample_clear(struct repository *repo);
 
 /*
  * Populates the repository's index from its index_file, an index struct will
