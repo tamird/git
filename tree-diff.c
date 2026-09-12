@@ -925,7 +925,21 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 	void *buffer;
 	int saved_errno;
 
-	if (opt->change != follow_change || !oid || !trace2_is_enabled())
+	if (opt->change != follow_change) {
+		if (!oid || !opt->flags.follow_renames || opt->single_follow ||
+		    !trace2_is_enabled())
+			return fill_tree_descriptor(opt->repo, desc, oid);
+
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		errno = saved_errno;
+		buffer = fill_tree_descriptor(opt->repo, desc, oid);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		errno = saved_errno;
+		return buffer;
+	}
+	if (!oid || !trace2_is_enabled())
 		return fill_tree_descriptor(opt->repo, desc, oid);
 
 	saved_errno = errno;

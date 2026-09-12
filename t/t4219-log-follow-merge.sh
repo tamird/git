@@ -42,7 +42,44 @@ test_expect_success '--follow finds the pre-merge commit through a subtree merge
 		log-follow-merge.trace &&
 	test_grep ! \
 		"\"event\":\"region_[^\"]*\".*\"category\":\"log\",\"label\":\"follow-parent\"" \
+		log-follow-merge.trace &&
+	test_grep ! \
+		"\"event\":\"counter\".*\"category\":\"log\",\"name\":\"follow-parent/same-root-count\"" \
+		log-follow-merge.trace &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"follow-pickaxe/ordinary-tree-read\",\"intervals\":[1-9]" \
 		log-follow-merge.trace
+'
+
+test_expect_success '--follow measures equal-root merge parent' '
+	test_when_finished "rm -f log-follow-equal-root.trace" &&
+	git -C outer checkout -b side &&
+	echo side >outer/side &&
+	git -C outer add side &&
+	git -C outer commit -m "side commit" &&
+	git -C outer checkout master &&
+	git -C outer merge -s ours --no-ff -m "equal-root merge" side &&
+	test "$(git -C outer rev-parse HEAD^{tree})" = \
+		"$(git -C outer rev-parse HEAD^1^{tree})" &&
+	test "$(git -C outer rev-parse HEAD^{tree})" != \
+		"$(git -C outer rev-parse HEAD^2^{tree})" &&
+	echo "inner init" >expect &&
+	git -C outer log --full-history --sparse --follow -1 \
+		--pretty=tformat:%s -- inner/inner.txt >actual &&
+	test_cmp expect actual &&
+	GIT_TRACE2_EVENT="$PWD/log-follow-equal-root.trace" \
+		git -C outer log --full-history --sparse --follow -1 \
+		--pretty=tformat:%s -- inner/inner.txt >actual &&
+	test_cmp expect actual &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent\",\"intervals\":4," \
+		log-follow-equal-root.trace &&
+	test_grep \
+		"\"event\":\"counter\".*\"category\":\"log\",\"name\":\"follow-parent/same-root-count\",\"count\":1" \
+		log-follow-equal-root.trace &&
+	test_grep \
+		"\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"follow-pickaxe/ordinary-tree-read\",\"intervals\":[1-9][0-9]*," \
+		log-follow-equal-root.trace
 '
 
 test_expect_success 'setup merge of two branches that both renamed a file to README' '

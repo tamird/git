@@ -1300,6 +1300,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 						struct commit *parent)
 {
 	struct diff_options diff_opts;
+	const struct object_id *parent_tree, *commit_tree;
 	const char *path;
 
 	trace2_timer_start(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
@@ -1313,9 +1314,17 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	diff_opts.rename_score = opt->diffopt.rename_score;
 	diff_opts.rename_limit = opt->diffopt.rename_limit;
 	diff_setup_done(&diff_opts);
-	diff_tree_oid(get_commit_tree_oid(parent),
-		      get_commit_tree_oid(commit),
-		      "", &diff_opts);
+	parent_tree = get_commit_tree_oid(parent);
+	commit_tree = get_commit_tree_oid(commit);
+	if (trace2_is_enabled() && parent_tree && commit_tree &&
+	    parent_tree->algo == commit_tree->algo &&
+	    oideq(parent_tree, commit_tree)) {
+		int saved_errno = errno;
+
+		trace2_counter_add(TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_SAME_ROOT, 1);
+		errno = saved_errno;
+	}
+	diff_tree_oid(parent_tree, commit_tree, "", &diff_opts);
 
 	path = pathspec_single_path(&diff_opts.pathspec);
 	if (path)
