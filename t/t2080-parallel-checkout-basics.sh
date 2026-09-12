@@ -11,33 +11,33 @@ TEST_NO_CREATE_REPO=1
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-parallel-checkout.sh"
 
-# Set queue_entry_intervals to the single summary timer's interval count.
-test_queue_entry_timer () {
+# Set unpack_intervals to the single summary timer's interval count.
+test_unpack_timer () {
 	test_grep ! \
-		"\"event\":\"th_timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"" \
+		"\"event\":\"th_timer\".*\"category\":\"unpack_trees\",\"name\":\"$2\"" \
 		"$1" &&
 	test_grep ! \
-		"\"event\":\"region_[^\"]*\".*\"category\":\"unpack_trees\",\"label\":\"queue-entries/$2\"" \
+		"\"event\":\"region_[^\"]*\".*\"category\":\"unpack_trees\",\"label\":\"$2\"" \
 		"$1" &&
 	if test "$3" = absent
 	then
-		queue_entry_intervals=0 &&
+		unpack_intervals=0 &&
 		test_grep ! \
-			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"," \
+			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"$2\"," \
 			"$1"
 	else
 		grep \
-			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"queue-entries/$2\"," \
+			"\"event\":\"timer\".*\"category\":\"unpack_trees\",\"name\":\"$2\"," \
 			"$1" >count &&
 		test_line_count = 1 count &&
-		queue_entry_intervals=$(sed -n \
+		unpack_intervals=$(sed -n \
 			"s#.*\"intervals\":\\([0-9][0-9]*\\),.*#\\1#p" count) &&
-		case "$queue_entry_intervals" in
+		case "$unpack_intervals" in
 		""|*[!0-9]*|0*) return 1 ;;
 		esac &&
 		{
 			test "$3" = any ||
-			test "$queue_entry_intervals" = "$3"
+			test "$unpack_intervals" = "$3"
 		}
 	fi
 }
@@ -266,11 +266,16 @@ do
 			done
 		fi &&
 		verify_checkout $repo &&
-		test_queue_entry_timer "$root_trace" prepare-entry 13 &&
-		test_queue_entry_timer "$root_trace" attrs-and-enqueue any &&
-		attrs_and_enqueue=$queue_entry_intervals &&
-		test_queue_entry_timer "$root_trace" write-entry any &&
-		write_entries=$queue_entry_intervals &&
+		test_unpack_timer "$root_trace" queue-entries/prepare-entry 13 &&
+		test_unpack_timer "$root_trace" queue-entries/prepare-entry/check-path 13 &&
+		test_unpack_timer "$root_trace" queue-entries/prepare-entry/create-directories any &&
+		test_unpack_timer "$root_trace" remove-entries/unlink-entry 7 &&
+		test_unpack_timer "$root_trace" remove-entries/index 1 &&
+		test_unpack_timer "$root_trace" remove-entries/final-directory-flush 1 &&
+		test_unpack_timer "$root_trace" queue-entries/attrs-and-enqueue any &&
+		attrs_and_enqueue=$unpack_intervals &&
+		test_unpack_timer "$root_trace" queue-entries/write-entry any &&
+		write_entries=$unpack_intervals &&
 		if test "$mode" = sequential
 		then
 			test_grep ! \
@@ -385,11 +390,15 @@ test_expect_success 'parallel checkout respects --[no]-force' '
 		test_path_is_dir D &&
 		test_grep D/F D/F.t &&
 		test_grep F F.t &&
-		for phase in prepare-entry attrs-and-enqueue write-entry
+		for phase in prepare-entry prepare-entry/check-path \
+			prepare-entry/create-directories attrs-and-enqueue write-entry
 		do
-			test_queue_entry_timer "$root_trace" "$phase" absent ||
+			test_unpack_timer "$root_trace" "queue-entries/$phase" absent ||
 				return 1
-		done
+		done &&
+		test_unpack_timer "$root_trace" remove-entries/unlink-entry absent &&
+		test_unpack_timer "$root_trace" remove-entries/index 1 &&
+		test_unpack_timer "$root_trace" remove-entries/final-directory-flush 1
 	)
 '
 
@@ -605,9 +614,10 @@ test_expect_success 'branch switch reports parallel checkout failures' '
 		test -n "$root_sid" &&
 		root_trace="$PWD/switch-event.log.root" &&
 		grep -F "\"sid\":\"$root_sid\"" switch-event.log >"$root_trace" &&
-		test_queue_entry_timer "$root_trace" prepare-entry 2 &&
-		test_queue_entry_timer "$root_trace" attrs-and-enqueue 2 &&
-		test_queue_entry_timer "$root_trace" write-entry absent &&
+		test_unpack_timer "$root_trace" queue-entries/prepare-entry 2 &&
+		test_unpack_timer "$root_trace" queue-entries/prepare-entry/check-path 2 &&
+		test_unpack_timer "$root_trace" queue-entries/attrs-and-enqueue 2 &&
+		test_unpack_timer "$root_trace" queue-entries/write-entry absent &&
 		test_checkout_worker_sids switch-event.log 2 &&
 		while read worker_sid
 		do

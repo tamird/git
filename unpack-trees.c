@@ -421,6 +421,17 @@ static int must_checkout(const struct cache_entry *ce)
 	return ce->ce_flags & CE_UPDATE;
 }
 
+static void trace_checkout_timer(enum trace2_timer_id tid, int start)
+{
+	int saved_errno = errno;
+
+	if (start)
+		trace2_timer_start(tid);
+	else
+		trace2_timer_stop(tid);
+	errno = saved_errno;
+}
+
 static int check_updates(struct unpack_trees_options *o,
 			 struct index_state *index)
 {
@@ -465,14 +476,26 @@ static int check_updates(struct unpack_trees_options *o,
 
 		if (ce->ce_flags & CE_WT_REMOVE) {
 			display_progress(progress, ++cnt);
-			if (trace_counts)
+			if (trace_counts) {
 				remove_count++;
+				trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_UNLINK_ENTRY, 1);
+			}
 			unlink_entry(ce, o->super_prefix);
+			if (trace_counts)
+				trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_UNLINK_ENTRY, 0);
 		}
 	}
 
+	if (trace_counts)
+		trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_REMOVE_INDEX, 1);
 	remove_marked_cache_entries(index, 0);
+	if (trace_counts)
+		trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_REMOVE_INDEX, 0);
+	if (trace_counts)
+		trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_FINAL_DIR_FLUSH, 1);
 	remove_scheduled_dirs();
+	if (trace_counts)
+		trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_FINAL_DIR_FLUSH, 0);
 	trace2_region_leave("unpack_trees", "remove_entries", index->repo);
 	if (trace_counts)
 		trace2_data_intmax("unpack_trees", index->repo,

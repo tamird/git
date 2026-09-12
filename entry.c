@@ -495,6 +495,22 @@ static void checkout_entry_trace_phase(enum trace2_timer_id *active_phase,
 	errno = saved_errno;
 }
 
+static void checkout_entry_trace_timer(enum trace2_timer_id *active_phase,
+				       enum trace2_timer_id tid, int start)
+{
+	int saved_errno;
+
+	if (!active_phase)
+		return;
+
+	saved_errno = errno;
+	if (start)
+		trace2_timer_start(tid);
+	else
+		trace2_timer_stop(tid);
+	errno = saved_errno;
+}
+
 static int checkout_entry_ca_internal(struct cache_entry *ce,
 				      struct conv_attrs *ca,
 				      const struct checkout *state,
@@ -504,6 +520,7 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 	static struct strbuf path = STRBUF_INIT;
 	struct stat st;
 	struct conv_attrs ca_buf;
+	int path_status;
 
 	if (ce->ce_flags & CE_WT_REMOVE) {
 		if (topath)
@@ -528,7 +545,12 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 	strbuf_add(&path, state->base_dir, state->base_dir_len);
 	strbuf_add(&path, ce->name, ce_namelen(ce));
 
-	if (!check_path(path.buf, path.len, &st, state->base_dir_len)) {
+	checkout_entry_trace_timer(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_CHECK_PATH, 1);
+	path_status = check_path(path.buf, path.len, &st, state->base_dir_len);
+	checkout_entry_trace_timer(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_CHECK_PATH, 0);
+	if (!path_status) {
 		const struct submodule *sub;
 		unsigned changed = ie_match_stat(state->istate, ce, &st,
 						 CE_MATCH_IGNORE_VALID | CE_MATCH_IGNORE_SKIP_WORKTREE);
@@ -597,7 +619,11 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 	} else if (state->not_new)
 		return 0;
 
+	checkout_entry_trace_timer(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_CREATE_DIRECTORIES, 1);
 	create_directories(path.buf, path.len, state);
+	checkout_entry_trace_timer(active_phase,
+				   TRACE2_TIMER_ID_UNPACK_TREES_CREATE_DIRECTORIES, 0);
 
 	checkout_entry_trace_phase(active_phase,
 				   TRACE2_TIMER_ID_UNPACK_TREES_ATTRS_AND_ENQUEUE);

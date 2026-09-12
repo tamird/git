@@ -221,6 +221,18 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "queue-entries/prepare-entry",
 		.want_per_thread_events = 0,
 	},
+	/* These calls are included in prepare-entry. */
+	[TRACE2_TIMER_ID_UNPACK_TREES_CHECK_PATH] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/prepare-entry/check-path",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_CREATE_DIRECTORIES] = {
+		.category = "unpack_trees",
+		/* The helper also checks existing leading directories. */
+		.name = "queue-entries/prepare-entry/create-directories",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_UNPACK_TREES_ATTRS_AND_ENQUEUE] = {
 		.category = "unpack_trees",
 		.name = "queue-entries/attrs-and-enqueue",
@@ -229,6 +241,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 	[TRACE2_TIMER_ID_UNPACK_TREES_WRITE_ENTRY] = {
 		.category = "unpack_trees",
 		.name = "queue-entries/write-entry",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_UNLINK_ENTRY] = {
+		.category = "unpack_trees",
+		/* May remove scheduled directories before the final flush. */
+		.name = "remove-entries/unlink-entry",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_REMOVE_INDEX] = {
+		.category = "unpack_trees",
+		.name = "remove-entries/index",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_FINAL_DIR_FLUSH] = {
+		.category = "unpack_trees",
+		.name = "remove-entries/final-directory-flush",
 		.want_per_thread_events = 0,
 	},
 	/* Checkout item phases defer streaming content to the ODB timers. */
