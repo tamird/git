@@ -6,12 +6,15 @@
 #define USE_THE_REPOSITORY_VARIABLE
 
 #include "test-tool.h"
+#include "dir.h"
 #include "parse-options.h"
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-ll.h"
+#include "hex.h"
 #include "read-cache-ll.h"
 #include "repository.h"
 #include "setup.h"
+#include "strbuf.h"
 #include "thread-utils.h"
 #include "trace2.h"
 
@@ -97,8 +100,83 @@ static int do_save_untracked_cache(const char *token)
 		free(istate->fsmonitor_last_update);
 		istate->fsmonitor_last_update = xstrdup(token);
 	}
-	fsmonitor_ipc__save_untracked_cache(istate);
+	fsmonitor_ipc__save_untracked_cache(
+		istate, FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
 	return 0;
+}
+
+/* Exercise the snapshot writer's depth limit without creating worktree dirs. */
+static int do_save_overdeep_untracked_cache(void)
+{
+	struct index_state *istate = the_repository->index;
+	struct untracked_cache *original;
+	struct untracked_cache synthetic;
+	struct untracked_cache_dir *root = NULL, *parent = NULL, *node, *next;
+	int i;
+
+	if (do_read_index(istate, the_repository->index_file, 1) < 0 ||
+	    !istate->untracked)
+		die("test requires an index with an untracked cache");
+	refresh_fsmonitor(istate);
+	original = istate->untracked;
+	synthetic = *original;
+	for (i = 0; i < 2048; i++) {
+		FLEX_ALLOC_STR(node, name, i ? "child" : "");
+		node->recurse = node->valid = 1;
+		if (parent) {
+			ALLOC_ARRAY(parent->dirs, 1);
+			parent->dirs[0] = node;
+			parent->dirs_nr = parent->dirs_alloc = 1;
+		} else {
+			root = node;
+		}
+		parent = node;
+	}
+	synthetic.root = root;
+	istate->untracked = &synthetic;
+	fsmonitor_ipc__save_untracked_cache(
+		istate, FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
+	istate->untracked = original;
+	for (node = root; node; node = next) {
+		next = node->dirs_nr ? node->dirs[0] : NULL;
+		free(node->dirs);
+		free(node);
+	}
+	return 0;
+}
+
+static int do_poison_untracked_cache(const char *token)
+{
+	struct index_state *istate = the_repository->index;
+	struct strbuf identity = STRBUF_INIT;
+	struct strbuf command = STRBUF_INIT;
+	struct strbuf answer = STRBUF_INIT;
+	int ret = 1;
+
+	if (do_read_index(istate, the_repository->index_file, 1) < 0 ||
+	    is_null_oid(&istate->oid))
+		die("test requires an index with a valid object ID");
+	refresh_fsmonitor(istate);
+	if (!token)
+		token = istate->fsmonitor_last_update;
+	if (!token || fsmonitor_ipc__get_worktree_identity(
+				 repo_get_work_tree(the_repository), &identity))
+		goto done;
+
+	strbuf_addstr(&command, FSMONITOR_IPC_QUERY_PREFIX);
+	strbuf_addbuf(&command, &identity);
+	strbuf_addch(&command, '\n');
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
+		    "put %s %s 00", oid_to_hex(&istate->oid), token);
+	if (fsmonitor_ipc__send_command(command.buf, &answer))
+		goto done;
+	ret = answer.len != 2 || memcmp(answer.buf, "ok", 2);
+
+done:
+	strbuf_release(&answer);
+	strbuf_release(&command);
+	strbuf_release(&identity);
+	return ret;
 }
 
 struct hammer_thread_data
@@ -284,6 +362,8 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client flush",
 		"test-tool fsmonitor-client ipc-path",
 		"test-tool fsmonitor-client save-untracked-cache [--token=<token>]",
+		"test-tool fsmonitor-client save-overdeep-untracked-cache",
+		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
 	};
@@ -323,6 +403,11 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 
 	if (!strcmp(subcmd, "save-untracked-cache"))
 		return do_save_untracked_cache(token);
+	if (!strcmp(subcmd, "save-overdeep-untracked-cache"))
+		return do_save_overdeep_untracked_cache();
+
+	if (!strcmp(subcmd, "poison-untracked-cache"))
+		return do_poison_untracked_cache(token);
 
 	if (!strcmp(subcmd, "hammer"))
 		return !!do_hammer(token, nr_threads, nr_requests);

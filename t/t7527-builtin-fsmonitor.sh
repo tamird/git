@@ -2057,6 +2057,116 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 	)
 '
 
+test_expect_success 'lock-free status repairs a malformed untracked snapshot' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_repair" &&
+	git init test_untracked_snapshot_repair &&
+	(
+		cd test_untracked_snapshot_repair &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		mkdir -p nested/steady &&
+		echo original >nested/steady/untracked &&
+		git status --porcelain >../snapshot-repair.initial &&
+		git fsmonitor--daemon stop &&
+		echo added >nested/added
+	) &&
+	start_daemon -C test_untracked_snapshot_repair &&
+	(
+		cd test_untracked_snapshot_repair &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../snapshot-repair.expect &&
+		git hash-object .git/index >../snapshot-repair.index.before &&
+		test-tool fsmonitor-client poison-untracked-cache &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.first.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.first &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.first &&
+		test_trace2_data status untracked-cache/restore unsupported \
+			<../snapshot-repair.first.trace &&
+		test_trace2_data status untracked-cache/restore-reason \
+			invalid-snapshot <../snapshot-repair.first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../snapshot-repair.first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.second.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.second &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.second &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../snapshot-repair.second.trace &&
+		test_trace2_data status untracked/cache-resync 0 \
+			<../snapshot-repair.second.trace &&
+		test_grep ! "\"category\":\"untracked_cache\".*\"name\":\"revalidate\"" \
+			../snapshot-repair.second.trace &&
+		git hash-object .git/index >../snapshot-repair.index.after &&
+		test_cmp ../snapshot-repair.index.before \
+			../snapshot-repair.index.after &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.bounds.trace" \
+			test-tool fsmonitor-client save-overdeep-untracked-cache &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 9 \
+			<../snapshot-repair.bounds.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-reason \
+			snapshot-bounds-exceeded <../snapshot-repair.bounds.trace &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.after-bounds.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.after-bounds &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.after-bounds &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../snapshot-repair.after-bounds.trace &&
+		git config status.showUntrackedFiles all &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../snapshot-repair.expect &&
+		test-tool fsmonitor-client poison-untracked-cache &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.flags-first.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.flags-first &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.flags-first &&
+		test_trace2_data status untracked-cache/restore-reason \
+			invalid-snapshot <../snapshot-repair.flags-first.trace &&
+		test_trace2_data status untracked/requested-flags 0 \
+			<../snapshot-repair.flags-first.trace &&
+		test_trace2_data status untracked/stored-flags 6 \
+			<../snapshot-repair.flags-first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../snapshot-repair.flags-first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.flags-second.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.flags-second &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.flags-second &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../snapshot-repair.flags-second.trace &&
+		test_trace2_data status untracked/cache-resync 0 \
+			<../snapshot-repair.flags-second.trace &&
+		test_grep ! "\"category\":\"untracked_cache\".*\"name\":\"revalidate\"" \
+			../snapshot-repair.flags-second.trace &&
+		git hash-object .git/index >../snapshot-repair.flags-index.after &&
+		test_cmp ../snapshot-repair.index.before \
+			../snapshot-repair.flags-index.after &&
+		test_must_fail test-tool fsmonitor-client poison-untracked-cache \
+			--token=builtin:stale:0 &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.stale.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.stale &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.stale &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../snapshot-repair.stale.trace &&
+		test-tool fsmonitor-client poison-untracked-cache &&
+		git update-index --assume-unchanged tracked &&
+		git hash-object .git/index >../snapshot-repair.changed-index.before &&
+		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.new-index.trace" \
+			git --no-optional-locks status --porcelain \
+			>../snapshot-repair.new-index &&
+		test_cmp ../snapshot-repair.expect ../snapshot-repair.new-index &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../snapshot-repair.new-index.trace &&
+		git hash-object .git/index >../snapshot-repair.changed-index.after &&
+		test_cmp ../snapshot-repair.changed-index.before \
+			../snapshot-repair.changed-index.after
+	)
+'
+
 test_expect_success 'status reuses untracked snapshot when index lock is unavailable' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_lock" &&
 	git init test_untracked_snapshot_lock &&

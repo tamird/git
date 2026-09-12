@@ -1742,7 +1742,8 @@ struct repository *repo UNUSED)
 				   cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ?
 					   "miss" :
 					   "unsupported");
-		if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED)
+		if (cache_untracked == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED ||
+		    cache_untracked == FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT)
 			trace2_data_string("status", the_repository,
 					   "untracked-cache/restore-reason",
 					   cache_untracked_reason);
@@ -1754,7 +1755,19 @@ struct repository *repo UNUSED)
 	      (the_repository->index->untracked->dir_opened ||
 	       the_repository->index->untracked->gitignore_invalidated ||
 	       the_repository->index->untracked->dir_invalidated))))
-		fsmonitor_ipc__save_untracked_cache(the_repository->index);
+		fsmonitor_ipc__save_untracked_cache(
+			the_repository->index,
+			FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
+	/* A full scan may have rebuilt the cache after incompatible flags. */
+	if (fd < 0 &&
+	    cache_untracked == FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT &&
+	    the_repository->index->untracked &&
+	    the_repository->index->untracked->root &&
+	    the_repository->index->untracked->root->valid &&
+	    !the_repository->index->untracked->fsmonitor_resync)
+		fsmonitor_ipc__save_untracked_cache(
+			the_repository->index,
+			FSMONITOR_UNTRACKED_CACHE_SAVE_REPAIR);
 
 	if (0 <= fd)
 		repo_update_index_if_able(the_repository, &index_lock);

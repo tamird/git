@@ -664,8 +664,12 @@ enum untracked_cache_encoding {
 	UNTRACKED_CACHE_ENCODING_NONE,
 	UNTRACKED_CACHE_ENCODING_LEGACY,
 	UNTRACKED_CACHE_ENCODING_PENDING,
+	UNTRACKED_CACHE_ENCODING_TOO_LARGE,
 };
 enum untracked_cache_encoding write_untracked_extension(
+	struct strbuf *out, struct untracked_cache *untracked);
+/* Apply the resource limits of read_untracked_snapshot() when writing. */
+enum untracked_cache_encoding write_untracked_snapshot(
 	struct strbuf *out, struct untracked_cache *untracked);
 struct untracked_cache *read_pending_untracked_extension(const void *data,
 							 size_t sz);

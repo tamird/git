@@ -15,6 +15,12 @@ enum fsmonitor_untracked_cache_result {
 	FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED,
 	FSMONITOR_UNTRACKED_CACHE_MISS,
 	FSMONITOR_UNTRACKED_CACHE_HIT,
+	FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT,
+};
+
+enum fsmonitor_untracked_cache_save_mode {
+	FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_REPAIR,
 };
 
 /* Hash the canonical worktree root and its stable filesystem identity. */
@@ -70,6 +76,7 @@ int fsmonitor_ipc__send_command(const char *command,
 enum fsmonitor_untracked_cache_result
 fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 				       const char **restore_reason);
-void fsmonitor_ipc__save_untracked_cache(struct index_state *istate);
+void fsmonitor_ipc__save_untracked_cache(
+	struct index_state *istate, enum fsmonitor_untracked_cache_save_mode mode);
 
 #endif /* FSMONITOR_IPC_H */

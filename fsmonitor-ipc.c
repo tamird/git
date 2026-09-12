@@ -61,7 +61,9 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate UNUSED,
 	return FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 }
 
-void fsmonitor_ipc__save_untracked_cache(struct index_state *istate UNUSED)
+void fsmonitor_ipc__save_untracked_cache(
+	struct index_state *istate UNUSED,
+	enum fsmonitor_untracked_cache_save_mode mode UNUSED)
 {
 }
 
@@ -642,6 +644,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	candidate = read_untracked_snapshot(snapshot_data, snapshot_len);
 	if (!candidate) {
 		reason = "invalid-snapshot";
+		result = FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT;
 		goto done;
 	}
 	result = FSMONITOR_UNTRACKED_CACHE_HIT;
@@ -674,7 +677,8 @@ done:
 			   result == FSMONITOR_UNTRACKED_CACHE_HIT ? "hit" :
 			   result == FSMONITOR_UNTRACKED_CACHE_MISS ? "miss" :
 			   "unsupported");
-	if (result == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED) {
+	if (result == FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED ||
+	    result == FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT) {
 		*restore_reason = reason;
 		trace2_data_string("fsmonitor", istate->repo,
 				   "untracked-cache/restore-reason", reason);
@@ -694,6 +698,8 @@ enum fsmonitor_untracked_cache_save_outcome {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR = 5,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK = 6,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED = 7,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_UNREADABLE = 8,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED = 9,
 };
 
 /* Keep these private Trace2 reply values stable. */
@@ -703,7 +709,8 @@ enum fsmonitor_untracked_cache_save_reply {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER = 3,
 };
 
-void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
+void fsmonitor_ipc__save_untracked_cache(
+	struct index_state *istate, enum fsmonitor_untracked_cache_save_mode mode)
 {
 	static const char hex[] = "0123456789abcdef";
 	struct strbuf command = STRBUF_INIT;
@@ -713,6 +720,7 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 	const struct object_id *index_oid;
 	enum fsmonitor_untracked_cache_save_outcome outcome =
 		FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE;
+	enum untracked_cache_encoding encoding;
 	size_t start;
 
 	trace2_region_enter("fsmonitor", "untracked-cache/save", istate->repo);
@@ -728,10 +736,28 @@ void fsmonitor_ipc__save_untracked_cache(struct index_state *istate)
 		goto done;
 	}
 
-	if (write_untracked_extension(&snapshot, istate->untracked) ==
-	    UNTRACKED_CACHE_ENCODING_NONE) {
+	encoding = write_untracked_snapshot(&snapshot, istate->untracked);
+	if (encoding == UNTRACKED_CACHE_ENCODING_TOO_LARGE) {
+		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED;
+		trace2_data_string("fsmonitor", istate->repo,
+				   "untracked-cache/save-reason",
+				   "snapshot-bounds-exceeded");
+		goto done;
+	}
+	if (encoding == UNTRACKED_CACHE_ENCODING_NONE) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_ENCODING_NONE;
 		goto done;
+	}
+	if (mode == FSMONITOR_UNTRACKED_CACHE_SAVE_REPAIR) {
+		struct untracked_cache *candidate =
+			read_untracked_snapshot(snapshot.buf, snapshot.len);
+
+		if (!candidate || !candidate->root) {
+			free_untracked_cache(candidate);
+			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_UNREADABLE;
+			goto done;
+		}
+		free_untracked_cache(candidate);
 	}
 	if (add_tracked_snapshot(istate, &snapshot)) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
