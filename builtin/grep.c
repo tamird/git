@@ -1289,12 +1289,17 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 	return use_oid;
 }
 
+static void trace_grep_selected_oid_ipc_query(
+	struct repository *repo, const struct grep_index_ipc_query_trace *trace,
+	uint64_t begin, uint64_t end, int result);
+
 static int grep_cache_query_content_index_oids(
 	struct repository *repo, const struct pathspec *pathspec,
 	int cached, int literal_selected,
 	int **selected, size_t *selected_nr, size_t *selected_alloc,
 	int *use_selected, size_t *queried_nr)
 {
+	struct grep_index_ipc_query_trace ipc_trace;
 	struct object_id *oids = NULL;
 	size_t *positions = NULL;
 	unsigned char *maybe = NULL;
@@ -1302,9 +1307,17 @@ static int grep_cache_query_content_index_oids(
 	size_t oids_alloc = 0;
 	size_t positions_alloc = 0;
 	size_t limit = literal_selected ? *selected_nr : repo->index->cache_nr;
+	uint64_t ipc_begin = 0, ipc_end;
+	int trace_enabled = trace2_is_enabled();
+	int saved_errno;
 	int query_result;
 	int result = 1;
 
+	if (trace_enabled) {
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_CONTENT_INDEX_SELECT_OIDS);
+		errno = saved_errno;
+	}
 	for (size_t pos = 0; pos < limit; pos++) {
 		size_t i = literal_selected ? (*selected)[pos] : pos;
 		const struct cache_entry *ce = repo->index->cache[i];
@@ -1317,6 +1330,11 @@ static int grep_cache_query_content_index_oids(
 		oidcpy(&oids[nr_oids], &ce->oid);
 		positions[nr_oids++] = i;
 	}
+	if (trace_enabled) {
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_CONTENT_INDEX_SELECT_OIDS);
+		errno = saved_errno;
+	}
 	*queried_nr = nr_oids;
 	if (!nr_oids)
 		goto cleanup;
@@ -1324,11 +1342,24 @@ static int grep_cache_query_content_index_oids(
 	ALLOC_ARRAY(maybe, nr_oids);
 	content_index_ipc_nr = repo->index->cache_nr;
 	CALLOC_ARRAY(content_index_ipc_result, content_index_ipc_nr);
+	if (trace_enabled) {
+		saved_errno = errno;
+		ipc_begin = getnanotime();
+		errno = saved_errno;
+	}
 	trace2_region_enter("grep", "query_content_index_ipc", repo);
 	query_result = grep_index_ipc_query_with_max_parallel_requests(
 		repo, content_index_query, oids, nr_oids, maybe,
-		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS, NULL);
+		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS,
+		trace_enabled ? &ipc_trace : NULL);
 	trace2_region_leave("grep", "query_content_index_ipc", repo);
+	if (trace_enabled) {
+		saved_errno = errno;
+		ipc_end = getnanotime();
+		errno = saved_errno;
+		trace_grep_selected_oid_ipc_query(repo, &ipc_trace,
+						  ipc_begin, ipc_end, query_result);
+	}
 	if (query_result) {
 		FREE_AND_NULL(content_index_ipc_result);
 		content_index_ipc_nr = 0;
@@ -3083,15 +3114,14 @@ static void grep_tree_ipc_interval(struct json_writer *jw, uint64_t epoch,
 	jw_object_intmax(jw, "duration_us", (end - begin) / 1000);
 }
 
-static void trace_grep_tree_ipc_batch(
-	struct repository *repo, struct grep_tree_query_context *query,
-	const struct grep_index_ipc_query_trace *trace,
-	uint64_t begin, uint64_t end, int result)
+static void trace_grep_ipc_batch(
+	struct repository *repo, const struct grep_index_ipc_query_trace *trace,
+	uint64_t begin, uint64_t end, int result, uint64_t epoch,
+	unsigned int batch, unsigned int *clock_invalid, const char *data_key)
 {
 	int saved_errno = errno;
 	struct json_writer jw = JSON_WRITER_INIT;
 	char key[32];
-	uint64_t epoch = query->ipc_trace_epoch_ns;
 	int valid = epoch && grep_tree_ipc_interval_valid(begin, end, epoch, end);
 
 	if (trace->probe_outcome &&
@@ -3105,9 +3135,10 @@ static void trace_grep_tree_ipc_batch(
 						  request->end_ns, begin, end))
 			valid = 0;
 	}
-	query->ipc_trace_clock_invalid += !valid;
+	if (clock_invalid)
+		*clock_invalid += !valid;
 	jw_object_begin(&jw, 0);
-	xsnprintf(key, sizeof(key), "batch_%u", query->ipc_trace_retained++);
+	xsnprintf(key, sizeof(key), "batch_%u", batch);
 	jw_object_inline_begin_object(&jw, key);
 	jw_object_intmax(&jw, "outcome", !!result);
 	jw_object_intmax(&jw, "requests_planned", trace->requests_planned);
@@ -3174,9 +3205,29 @@ static void trace_grep_tree_ipc_batch(
 	}
 	jw_end(&jw);
 	jw_end(&jw);
-	trace2_data_json("grep", repo, "content_index_tree_ipc_intervals", &jw);
+	trace2_data_json("grep", repo, data_key, &jw);
 	jw_release(&jw);
 	errno = saved_errno;
+}
+
+static void trace_grep_tree_ipc_batch(
+	struct repository *repo, struct grep_tree_query_context *query,
+	const struct grep_index_ipc_query_trace *trace,
+	uint64_t begin, uint64_t end, int result)
+{
+	trace_grep_ipc_batch(repo, trace, begin, end, result,
+			     query->ipc_trace_epoch_ns,
+			     query->ipc_trace_retained++,
+			     &query->ipc_trace_clock_invalid,
+			     "content_index_tree_ipc_intervals");
+}
+
+static void trace_grep_selected_oid_ipc_query(
+	struct repository *repo, const struct grep_index_ipc_query_trace *trace,
+	uint64_t begin, uint64_t end, int result)
+{
+	trace_grep_ipc_batch(repo, trace, begin, end, result, begin, 0, NULL,
+			     "content_index_selected_oid_ipc_intervals");
 }
 
 static int flush_grep_tree_batch(struct grep_tree_batch *batch)

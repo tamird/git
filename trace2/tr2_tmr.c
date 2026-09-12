@@ -141,6 +141,21 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "follow-parent",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_GREP_CONTENT_INDEX_SELECT_OIDS] = {
+		.category = "grep",
+		.name = "content-index/select-oids",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_LOAD] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-load",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_CHECKSUM] = {
+		.category = "grep",
+		.name = "worktree-cache/recovery-checksum",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ] = {
 		.category = "diff",
 		.name = "follow-pickaxe/ordinary-tree-read",

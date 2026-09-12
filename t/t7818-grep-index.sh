@@ -3510,6 +3510,18 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 		<overlay-literal.trace &&
 	test_trace2_data grep content_index_literal_path_rejected 1 \
 		<overlay-literal.trace &&
+	test_grep_timer overlay-literal.trace content-index/select-oids 1 &&
+	test_grep \
+		"\"event\":\"data_json\".*\"key\":\"content_index_selected_oid_ipc_intervals\"" \
+		overlay-literal.trace >actual &&
+	test_line_count = 1 actual &&
+	test_grep \
+		"\"batch_0\":{\"outcome\":0,\"requests_planned\":1,\"requests_started\":1,\"clock_invalid\":[01]" \
+		actual &&
+	test_grep "\"probe\":{\"outcome\":1,\"attempts\":1,\"diagnostic_version\":2" actual &&
+	test_grep "\"request_0\":{\"objects\":2,\"outcome\":0" actual &&
+	test_grep "\"query\":{\"unique_objects\":2,\"requests_validated\":1" actual &&
+	test_grep "\"server\":{\"timing_invalid\":[01]" actual &&
 	echo "overlay absent worktree needle 7818" >overlay-worktree &&
 	git status --porcelain >/dev/null &&
 	echo "overlay-worktree:overlay absent worktree needle 7818" >expect &&
@@ -3692,6 +3704,8 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_cmp expected actual &&
 	test_trace2_data grep worktree_blob/recovered_identity 1 \
 		<recovery-lookup.trace &&
+	test_grep_timer recovery-lookup.trace worktree-cache/recovery-load 1 &&
+	test_grep_timer recovery-lookup.trace worktree-cache/recovery-checksum 1 &&
 	test_cmp .git/index.grep-worktree.save \
 		.git/index.grep-worktree &&
 	rm -f .git/index.grep-token &&

@@ -544,6 +544,7 @@ static int load_recovery(struct grep_worktree_cache *cache)
 	size_t entry_rawsz = GREP_WORKTREE_ENTRY_IDENTITY_RAWSZ;
 	size_t rawsz = cache->repo->hash_algo->rawsz;
 	int result = 0;
+	int saved_errno;
 
 	if (cache->recovery_load_attempted)
 		return !!cache->recovery_map;
@@ -551,6 +552,9 @@ static int load_recovery(struct grep_worktree_cache *cache)
 	if (cache->split_index ||
 	    is_null_oid(&cache->recovery_checksum))
 		return 0;
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_LOAD);
+	errno = saved_errno;
 	for (int slot = 0; slot < 2; slot++) {
 		if (cache->recovery_rejected_slots & (1u << slot))
 			continue;
@@ -620,16 +624,26 @@ static int load_recovery(struct grep_worktree_cache *cache)
 	cache->recovery_invalid = 1;
 done:
 	strbuf_release(&path);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_LOAD);
+	errno = saved_errno;
 	return result;
 }
 
 static int recovery_checksum_valid(struct grep_worktree_cache *cache)
 {
 	if (!cache->recovery_checksum_checked) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_CHECKSUM);
+		errno = saved_errno;
 		cache->recovery_checksum_valid =
 			hashfile_checksum_valid(cache->repo->hash_algo,
 						cache->recovery_map,
 						cache->recovery_map_size);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKTREE_RECOVERY_CHECKSUM);
+		errno = saved_errno;
 		cache->recovery_checksum_checked = 1;
 		if (!cache->recovery_checksum_valid) {
 			cache->recovery_rejected_slots |=
