@@ -551,6 +551,9 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 			git commit --allow-empty -m empty &&
 		test_trace2_data commit as-is/cache-tree-checked 1 <.git/valid.trace &&
 		test_trace2_data commit as-is/cache-tree-valid 1 <.git/valid.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/valid.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/object-checks 2 <.git/valid.trace &&
+		test_grep ! "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"validate/object-check\"" .git/valid.trace &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-validate 1 &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-update absent &&
 		test_commit_as_is_timer .git/valid.trace write-index 1 &&
@@ -559,6 +562,8 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		GIT_TRACE2_EVENT="$PWD/.git/invalid.trace" git commit -m changed &&
 		test_trace2_data commit as-is/cache-tree-checked 1 <.git/invalid.trace &&
 		test_trace2_data commit as-is/cache-tree-valid 0 <.git/invalid.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/nodes 1 <.git/invalid.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/object-checks 0 <.git/invalid.trace &&
 		test_commit_as_is_timer .git/invalid.trace cache-tree-validate 1 &&
 		test_commit_as_is_timer .git/invalid.trace cache-tree-update 1 &&
 		test_commit_as_is_timer .git/invalid.trace write-index 1 &&
@@ -567,6 +572,8 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 			git -c core.fsmonitor=false commit --allow-empty -m refreshed &&
 		test_trace2_data commit as-is/cache-tree-checked 0 <.git/refresh.trace &&
 		test_trace2_data commit as-is/cache-tree-valid 0 <.git/refresh.trace &&
+		test_grep ! "\"key\":\"as-is/cache-tree-validate/nodes\"" .git/refresh.trace &&
+		test_grep ! "\"key\":\"as-is/cache-tree-validate/object-checks\"" .git/refresh.trace &&
 		test_commit_as_is_timer .git/refresh.trace cache-tree-validate absent &&
 		test_commit_as_is_timer .git/refresh.trace cache-tree-update 1 &&
 		test_commit_as_is_timer .git/refresh.trace write-index 1 &&

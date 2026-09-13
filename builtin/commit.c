@@ -491,11 +491,31 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		refresh_cache_or_die(refresh_flags);
 		cache_tree = cache_tree_get(the_repository->index);
 		if (!the_repository->index->cache_changed) {
+			int trace_validation = trace2_is_enabled();
+			uintmax_t nodes = 0, object_checks = 0;
+			int saved_errno = errno;
+
 			trace2_timer_start(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
-			cache_tree_valid = cache_tree_fully_valid(cache_tree);
+			errno = saved_errno;
+			if (trace_validation) {
+				cache_tree_valid = cache_tree_fully_valid_with_counts(
+					cache_tree, &nodes, &object_checks);
+			} else {
+				cache_tree_valid = cache_tree_fully_valid(cache_tree);
+			}
+			saved_errno = errno;
 			trace2_timer_stop(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
+			if (trace_validation) {
+				trace2_data_intmax("commit", the_repository,
+						   "as-is/cache-tree-validate/nodes",
+						   nodes);
+				trace2_data_intmax("commit", the_repository,
+						   "as-is/cache-tree-validate/object-checks",
+						   object_checks);
+			}
+			errno = saved_errno;
 		}
 		trace2_data_intmax("commit", the_repository,
 				   "as-is/cache-tree-checked",

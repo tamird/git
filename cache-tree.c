@@ -298,6 +298,7 @@ struct cache_tree_validation_stats {
 	uintmax_t nodes;
 	uintmax_t object_checks;
 	uint64_t object_check_ns;
+	int time_object_checks;
 };
 
 static int cache_tree_fully_valid_internal(struct cache_tree *it,
@@ -310,17 +311,18 @@ static int cache_tree_fully_valid_internal(struct cache_tree *it,
 		stats->nodes++;
 	if (it->entry_count < 0)
 		return 0;
-	if (stats) {
+	if (stats)
+		stats->object_checks++;
+	if (stats && stats->time_object_checks) {
 		int saved_errno = errno;
 
-		stats->object_checks++;
 		trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
 		errno = saved_errno;
 	}
 	exists = odb_has_object(the_repository->objects, &it->oid,
 				ODB_HAS_OBJECT_RECHECK_PACKED |
 					ODB_HAS_OBJECT_FETCH_PROMISOR);
-	if (stats) {
+	if (stats && stats->time_object_checks) {
 		int saved_errno = errno;
 
 		stats->object_check_ns +=
@@ -339,6 +341,17 @@ static int cache_tree_fully_valid_internal(struct cache_tree *it,
 int cache_tree_fully_valid(struct cache_tree *it)
 {
 	return cache_tree_fully_valid_internal(it, NULL);
+}
+
+int cache_tree_fully_valid_with_counts(struct cache_tree *it,
+				       uintmax_t *nodes, uintmax_t *object_checks)
+{
+	struct cache_tree_validation_stats stats = { 0 };
+	int valid = cache_tree_fully_valid_internal(it, &stats);
+
+	*nodes = stats.nodes;
+	*object_checks = stats.object_checks;
+	return valid;
 }
 
 static void trace_cache_tree_validation(const struct cache_tree_validation_stats *stats,
@@ -994,7 +1007,9 @@ struct tree *write_in_core_index_as_tree(struct repository *repo,
 int write_index_as_tree(struct object_id *oid, struct index_state *index_state, const char *index_path, int flags, const char *prefix)
 {
 	int entries, was_valid;
-	struct cache_tree_validation_stats validation = { 0 };
+	struct cache_tree_validation_stats validation = {
+		.time_object_checks = 1,
+	};
 	struct lock_file lock_file = LOCK_INIT;
 	int ret;
 	int write_index = !(flags & WRITE_TREE_NO_INDEX_WRITE);
