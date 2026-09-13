@@ -136,6 +136,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "get-revision",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_LOG_GET_REVISION_PRUNE_TREE_READ] = {
+		.category = "log",
+		.name = "get-revision/prune/tree-read",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_LOG_FOLLOW_PARENT] = {
 		.category = "log",
 		.name = "follow-parent",

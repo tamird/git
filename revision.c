@@ -1210,6 +1210,7 @@ static void diff_tree_for_pruning(struct rev_info *revs,
 {
 	struct revision_prune_diff_stats *stats = revs->prune_diff_stats;
 	uint64_t started = 0, finished;
+	int prior_trace_pruning_tree_read;
 
 	if (!stats) {
 		diff_tree_oid(old_oid, new_oid, "", &revs->pruning);
@@ -1219,7 +1220,10 @@ static void diff_tree_for_pruning(struct rev_info *revs,
 	if (stats->timings_valid && revision_trace_time(&started))
 		stats->timings_valid = 0;
 
+	prior_trace_pruning_tree_read = revs->pruning.trace_pruning_tree_read;
+	revs->pruning.trace_pruning_tree_read = 1;
 	diff_tree_oid(old_oid, new_oid, "", &revs->pruning);
+	revs->pruning.trace_pruning_tree_read = prior_trace_pruning_tree_read;
 
 	if (stats->timings_valid) {
 		if (revision_trace_time(&finished) || finished < started ||

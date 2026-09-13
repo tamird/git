@@ -134,6 +134,58 @@ test_bloom_filters_not_used () {
 	test_cmp log_wo_bloom log_w_bloom
 }
 
+test_expect_success 'pruning descriptor reads are traced with and without Bloom' '
+	sane_unset GIT_TRACE2_EVENT_NESTING &&
+	git -c core.commitGraph=false log --format=%s -- A/file1 >expect-prune &&
+	for mode in without with
+	do
+		case "$mode" in
+		without) graph=false bloom=0 ;;
+		with) graph=true bloom=1 ;;
+		esac &&
+		trace="$PWD/prune-$mode.event" &&
+		GIT_TRACE2_EVENT="$trace" \
+			git -c core.commitGraph=$graph log --format=%s -- A/file1 \
+				>actual-prune &&
+		test_cmp expect-prune actual-prune &&
+		test_trace2_data bloom active "$bloom" <"$trace" &&
+		test_trace2_data log get-revision-prune-diff-count \
+			"[1-9][0-9]*" <"$trace" &&
+		grep "\"event\":\"timer\".*\"category\":\"log\",\"name\":\"get-revision/prune/tree-read\"," \
+			"$trace" >prune-tree.timer &&
+		test_line_count = 1 prune-tree.timer &&
+		test_grep ! "\"event\":\"th_timer\".*\"name\":\"get-revision/prune/tree-read\"" \
+			"$trace" &&
+		intervals=$(sed -n \
+			"s/.*\"intervals\":\\([0-9][0-9]*\\),.*/\\1/p" prune-tree.timer) &&
+		test "$intervals" -gt 0 &&
+		timer_seconds=$(sed -n \
+			"s/.*\"t_total\":\\([0-9][0-9]*\\.[0-9][0-9]*\\),.*/\\1/p" \
+			prune-tree.timer) &&
+		test -n "$timer_seconds" &&
+		prune_us=$(sed -n \
+			"s/.*\"key\":\"get-revision-prune-diff-us\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" \
+			"$trace") &&
+		if test -n "$prune_us"
+		then
+			read_us=$(awk -v seconds="$timer_seconds" \
+				"BEGIN { printf \"%.0f\\n\", seconds * 1000000 }") &&
+			test "$read_us" -le "$((prune_us + 1))" || return 1
+		fi &&
+		case "$mode" in
+		without) without_intervals=$intervals ;;
+		with) with_intervals=$intervals ;;
+		esac || return 1
+	done &&
+	test "$with_intervals" -lt "$without_intervals" &&
+	git log -1 --format=%s >expect-unscoped &&
+	GIT_TRACE2_EVENT="$PWD/prune-unscoped.event" \
+		git log -1 --format=%s >actual-unscoped &&
+	test_cmp expect-unscoped actual-unscoped &&
+	test_grep ! "\"name\":\"get-revision/prune/tree-read\"" \
+		prune-unscoped.event
+'
+
 bloom_stat () {
 	sed -n "s/.*\"$1\":\([0-9]*\).*/\1/p" \
 		"$TRASH_DIRECTORY/trace.perf"

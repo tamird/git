@@ -369,6 +369,8 @@ struct diff_options {
 	int found_follow;
 	/* Measure the current root tree read on later merge parents. */
 	int trace_follow_sibling_root_read;
+	/* Time descriptor reads only during a measured revision pruning diff. */
+	int trace_pruning_tree_read;
 
 	/*
 	 * By default, diffcore_std() resolves the statuses for queued diff file
