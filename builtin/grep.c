@@ -496,7 +496,14 @@ static void grep_result_cache_add(struct grep_opt *opt,
 static int add_work(struct grep_opt *opt, struct grep_source *gs,
 		    size_t worktree_blob_pos)
 {
-	if (opt->binary != GREP_BINARY_TEXT) {
+	/*
+	 * A worktree source with default binary handling needs its diff
+	 * driver only if the worker finds a match to print. Keep -I's
+	 * early rejection and revision-object lookups in path order.
+	 */
+	if (opt->binary != GREP_BINARY_TEXT &&
+	    (opt->binary == GREP_BINARY_NOMATCH || opt->allow_textconv ||
+	     gs->type == GREP_SOURCE_OID)) {
 		uint64_t started = 0;
 		int timed = grep_producer_begin(GREP_PRODUCER_DRIVER_LOOKUP,
 					       &started);

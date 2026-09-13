@@ -2074,6 +2074,7 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	unsigned lno = 1;
 	unsigned last_hit = 0;
 	int binary_match_only = 0;
+	int binary_checked = 0;
 	unsigned count = 0;
 	unsigned dense_lookahead = 0;
 	int try_lookahead = 0;
@@ -2127,8 +2128,11 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	if (!textconv) {
 		switch (opt->binary) {
 		case GREP_BINARY_DEFAULT:
-			if (grep_source_is_binary(gs, opt->repo->index))
-				binary_match_only = 1;
+			if (opt->allow_textconv || gs->type == GREP_SOURCE_OID) {
+				binary_match_only =
+					grep_source_is_binary(gs, opt->repo->index);
+				binary_checked = 1;
+			}
 			break;
 		case GREP_BINARY_NOMATCH:
 			if (grep_source_is_binary(gs, opt->repo->index))
@@ -2215,6 +2219,12 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 			}
 			if (opt->count)
 				goto next_line;
+			if (!textconv && opt->binary == GREP_BINARY_DEFAULT &&
+			    !binary_checked) {
+				binary_match_only =
+					grep_source_is_binary(gs, opt->repo->index);
+				binary_checked = 1;
+			}
 			if (binary_match_only) {
 				opt->output(opt, "Binary file ", 12);
 				output_color(opt, gs->name, strlen(gs->name),

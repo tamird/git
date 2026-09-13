@@ -4065,7 +4065,15 @@ test_expect_success FSMONITOR_DAEMON \
 			"present:present needle" >expected &&
 		test_cmp expected actual &&
 		test_grep_workers candidate-producer.trace 2 &&
-		test_grep_producer_stats candidate-producer.trace 1 2 2
+		test_grep_producer_stats candidate-producer.trace 1 2 0 &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/candidate-producer-I.trace" \
+			git grep --no-content-index --threads=2 -I -F \
+				-e "ordinary contents" -e "present needle" \
+				-- ordinary present >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep producer_driver_lookup_count 2 \
+			<candidate-producer-I.trace
 	fi
 '
 

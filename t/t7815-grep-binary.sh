@@ -128,6 +128,20 @@ test_expect_success 'grep respects not-binary diff attribute' '
 	test_cmp expect actual
 '
 
+test_expect_success PTHREADS 'threaded worktree grep resolves drivers for matches' '
+	test_when_finished "rm -f lazy-driver.trace" &&
+	printf "a -diff\nb diff\nt -diff\n" >.gitattributes &&
+	printf "Binary file a matches\nb:1:binQary\n" >expect &&
+	GIT_TRACE2_EVENT="$PWD/lazy-driver.trace" \
+		git -c core.fsmonitor=false grep --threads=2 \
+			--no-content-index -n -F -e binary -e bin \
+			-- a b t >actual.raw &&
+	nul_to_q <actual.raw >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep producer_driver_lookup_count 0 \
+		<lazy-driver.trace
+'
+
 test_expect_success 'setup textconv filters' '
 	write_script nul_to_q_textconv <<-\EOF &&
 	tr "\000" "Q" <"$1"
