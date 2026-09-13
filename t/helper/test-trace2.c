@@ -575,6 +575,59 @@ static int ut_203follow_lookup_counter(int argc, const char **argv)
 	return 0;
 }
 
+static void rename_populate_counter_sample(uint64_t ns)
+{
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS, ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT, 1);
+	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS, ns);
+}
+
+static void *rename_populate_counter_thread(void *data)
+{
+	uint64_t *ns = data;
+
+	trace2_thread_start("rename_populate_counter");
+	rename_populate_counter_sample(*ns);
+	trace2_thread_exit();
+	return NULL;
+}
+
+static int ut_204rename_populate_counter(int argc, const char **argv)
+{
+	pthread_t thread;
+	uint64_t worker_ns;
+
+	if (argc != 1)
+		die("expect merged, increment-overflow, merge-overflow or odb-invalid");
+	if (!strcmp(argv[0], "increment-overflow")) {
+		rename_populate_counter_sample(800);
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS,
+				   UINT64_MAX);
+	} else if (!strcmp(argv[0], "odb-invalid")) {
+		rename_populate_counter_sample(800);
+		follow_odb_counter_sample(UINT64_MAX);
+		trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS, 1);
+	} else {
+		if (!strcmp(argv[0], "merged")) {
+			rename_populate_counter_sample(800);
+			worker_ns = 800;
+		} else if (!strcmp(argv[0], "merge-overflow")) {
+			rename_populate_counter_sample(UINT64_MAX);
+			worker_ns = 800;
+		} else {
+			die("unknown rename populate counter mode: %s", argv[0]);
+		}
+		if (pthread_create(&thread, NULL, rename_populate_counter_thread,
+				   &worker_ns))
+			die("failed to create thread");
+		if (pthread_join(thread, NULL))
+			die("failed to join thread");
+	}
+	trace2_counter_add(TRACE2_COUNTER_ID_TEST1, 7);
+	return 0;
+}
+
 static int ut_300redact_start(int argc, const char **argv)
 {
 	if (!argc)
@@ -712,6 +765,7 @@ static struct unit_test ut_table[] = {
 	{ ut_201counter,  "201counter", "<v1> <v2> <threads>" },
 	{ ut_202follow_odb_counter, "202follow_odb_counter", "<mode>" },
 	{ ut_203follow_lookup_counter, "203follow_lookup_counter", "<mode>" },
+	{ ut_204rename_populate_counter, "204rename_populate_counter", "<mode>" },
 
 	{ ut_300redact_start,       "300redact_start",       "<argv...>" },
 	{ ut_301redact_child_start, "301redact_child_start", "<argv...>" },

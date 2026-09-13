@@ -492,4 +492,48 @@ test_expect_success 'valid lookup counters survive invalid outer ODB totals' '
 	test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/packed-lookup/'\'' follow-lookup.event)" = 9
 '
 
+test_expect_success PTHREADS 'rename population summary merges ns before rounding' '
+	test_when_finished "rm rename-populate.event" &&
+	GIT_TRACE2_EVENT="$PWD/rename-populate.event" \
+		test-tool trace2 204rename_populate_counter merged &&
+	test_trace2_data diff rename/populate/valid 1 <rename-populate.event &&
+	test_trace2_data diff rename/populate/size-only-count 2 <rename-populate.event &&
+	test_trace2_data diff rename/populate/size-only-us 1 <rename-populate.event &&
+	test_trace2_data diff rename/populate/full-count 2 <rename-populate.event &&
+	test_trace2_data diff rename/populate/full-us 1 <rename-populate.event &&
+	test "$(grep -c '\''"key":"rename/populate/'\'' rename-populate.event)" = 5 &&
+	test_grep ! '\''"event":"th_counter".*"name":"rename/populate/'\'' rename-populate.event
+'
+
+for mode in increment-overflow merge-overflow
+do
+	prereq=
+	if test "$mode" = merge-overflow
+	then
+		prereq=PTHREADS
+	fi
+	test_expect_success "$prereq" "rename population $mode preserves raw counters" '
+		test_when_finished "rm rename-populate.event" &&
+		GIT_TRACE2_EVENT="$PWD/rename-populate.event" \
+			test-tool trace2 204rename_populate_counter "$mode" &&
+		test_trace2_data diff rename/populate/valid 0 <rename-populate.event &&
+		test "$(grep -c '\''"key":"rename/populate/'\'' rename-populate.event)" = 1 &&
+		test_grep '\''"event":"counter".*"name":"rename/populate/size-only-ns","count":799}'\'' rename-populate.event &&
+		test_grep '\''"event":"counter".*"name":"rename/populate/summary-invalid","count":1}'\'' rename-populate.event &&
+		test_grep '\''"event":"counter".*"category":"test","name":"test1","count":7}'\'' rename-populate.event
+	'
+done
+
+test_expect_success 'rename population summary survives invalid follow ODB totals' '
+	test_when_finished "rm rename-populate.event" &&
+	GIT_TRACE2_EVENT="$PWD/rename-populate.event" \
+		test-tool trace2 204rename_populate_counter odb-invalid &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/valid 0 <rename-populate.event &&
+	test_trace2_data diff rename/populate/valid 1 <rename-populate.event &&
+	test_trace2_data diff rename/populate/size-only-count 1 <rename-populate.event &&
+	test_trace2_data diff rename/populate/size-only-us 0 <rename-populate.event &&
+	test_trace2_data diff rename/populate/full-count 1 <rename-populate.event &&
+	test_trace2_data diff rename/populate/full-us 0 <rename-populate.event
+'
+
 test_done

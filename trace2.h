@@ -716,6 +716,8 @@ enum trace2_counter_id {
 	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS,
 	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT,
 	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS,
+	/* Invalidates only the checked DATA snapshot; raw counters still wrap. */
+	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID,
 	TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_SAME_ROOT,
 
 	/* Add additional counter definitions before here. */

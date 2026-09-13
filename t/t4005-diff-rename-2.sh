@@ -172,6 +172,16 @@ test_expect_success 'similarity timers aggregate while exit counts remain per in
 	test "$repeated_size" -eq "$((2 * single_size))" &&
 	test "$repeated_full" -eq "$((2 * single_full))" &&
 	test "$((repeated_size + repeated_full))" -eq "$populate_intervals" &&
+	test_trace2_data diff rename/populate/valid 1 <rename-repeated.trace &&
+	test_trace2_data diff rename/populate/size-only-count "$repeated_size" \
+		<rename-repeated.trace &&
+	test_trace2_data diff rename/populate/full-count "$repeated_full" \
+		<rename-repeated.trace &&
+	test_trace2_data diff rename/populate/size-only-us "[0-9][0-9]*" \
+		<rename-repeated.trace &&
+	test_trace2_data diff rename/populate/full-us "[0-9][0-9]*" \
+		<rename-repeated.trace &&
+	test "$(grep -c '\''"key":"rename/populate/'\'' rename-repeated.trace)" = 5 &&
 	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/size-only-ns\",\"count\":[1-9][0-9]*}" rename-repeated.trace &&
 	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/full-ns\",\"count\":[1-9][0-9]*}" rename-repeated.trace &&
 	test_grep ! "\"event\":\"th_counter\".*\"name\":\"rename/populate/" rename-repeated.trace &&
@@ -231,6 +241,9 @@ test_expect_success 'size rejection populates sizes without hashing or comparing
 	test_grep "\"event\":\"timer\".*\"category\":\"diff\",\"name\":\"rename/populate\",\"intervals\":[1-9][0-9]*," rename-size.trace &&
 	test_grep "\"event\":\"counter\".*\"category\":\"diff\",\"name\":\"rename/populate/size-only-count\",\"count\":[1-9][0-9]*}" rename-size.trace &&
 	test_grep ! "\"name\":\"rename/populate/full-" rename-size.trace &&
+	test_trace2_data diff rename/populate/valid 1 <rename-size.trace &&
+	test_trace2_data diff rename/populate/full-count 0 <rename-size.trace &&
+	test_trace2_data diff rename/populate/full-us 0 <rename-size.trace &&
 	test_grep ! "spanhash/" rename-size.trace
 '
 

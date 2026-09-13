@@ -176,6 +176,9 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS] = {
 		.category = "diff", .name = "rename/populate/full-ns",
 	},
+	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID] = {
+		.category = "diff", .name = "rename/populate/summary-invalid",
+	},
 
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS] = {
 		.category = "cache_tree",
@@ -267,8 +270,15 @@ void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
 		 cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED)
 		add_checked_counter(&ctx->counter_block,
 			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID, cid, value);
-	else
+	else if (cid >= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT &&
+		 cid <= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS) {
+		if (value > UINT64_MAX - c->value)
+			ctx->counter_block.counter[
+				TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID].value = 1;
 		c->value += value;
+	} else {
+		c->value += value;
+	}
 
 	ctx->used_any_counter = 1;
 	if (tr2_counter_metadata[cid].want_per_thread_events)
@@ -307,8 +317,18 @@ void tr2_update_final_counters(void)
 			add_checked_counter(&final_counter_block,
 				TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID,
 				cid, c->value);
-		else
+		else if (cid >= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT &&
+			 cid <= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS) {
+			if (c->value > UINT64_MAX - c_final->value)
+				final_counter_block.counter[
+					TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID].value = 1;
 			c_final->value += c->value;
+		} else if (cid == TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID) {
+			if (c->value)
+				c_final->value = 1;
+		} else {
+			c_final->value += c->value;
+		}
 	}
 }
 
@@ -501,6 +521,37 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 			trace2_data_intmax("diff", NULL,
 				"follow-full-tree/tree-read/requested-oid-sample/repeated-reads",
 				repeats);
+		errno = saved_errno;
+	}
+
+	/* Summarize only completed population calls; a missing kind is zero. */
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT].value ||
+	    final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT].value ||
+	    final_counter_block.counter[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID].value) {
+		uint64_t size_count = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT].value;
+		uint64_t full_count = final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT].value;
+		int saved_errno = errno;
+		int valid = !final_counter_block.counter[
+			TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID].value &&
+			size_count <= INTMAX_MAX && full_count <= INTMAX_MAX;
+
+		trace2_data_intmax("diff", NULL, "rename/populate/valid", valid);
+		if (valid) {
+			trace2_data_intmax("diff", NULL,
+				"rename/populate/size-only-count", size_count);
+			trace2_data_intmax("diff", NULL,
+				"rename/populate/size-only-us",
+				final_counter_block.counter[
+					TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS].value / 1000);
+			trace2_data_intmax("diff", NULL,
+				"rename/populate/full-count", full_count);
+			trace2_data_intmax("diff", NULL,
+				"rename/populate/full-us",
+				final_counter_block.counter[
+					TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS].value / 1000);
+		}
 		errno = saved_errno;
 	}
 
