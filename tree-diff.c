@@ -862,19 +862,76 @@ struct follow_odb_read {
 	/* Index zero is sticky invalid; remaining slots mirror native counters. */
 	uint64_t value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS -
 		       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID + 1];
+	/* Optional packed lookup detail must not invalidate the enclosing read. */
+	uint64_t lookup[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_PACK_ATTEMPTS -
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID + 1];
 };
+
+static void follow_checked_add(uint64_t *values, enum trace2_counter_id first,
+			       enum trace2_counter_id cid, uint64_t value)
+{
+	uint64_t *sum = &values[cid - first];
+
+	if (values[0])
+		return;
+	if (value > UINT64_MAX - *sum)
+		values[0] = 1;
+	else
+		*sum += value;
+}
 
 static void follow_odb_add(struct follow_odb_read *read,
 			   enum trace2_counter_id cid, uint64_t value)
 {
-	uint64_t *sum = &read->value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+	follow_checked_add(read->value, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID,
+			   cid, value);
+}
 
-	if (read->value[0])
+static void follow_lookup_add(struct follow_odb_read *read,
+			      enum trace2_counter_id cid, uint64_t value)
+{
+	follow_checked_add(read->lookup, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID,
+			   cid, value);
+}
+
+static void follow_odb_lookup_result(struct follow_odb_read *read,
+				     const struct odb_read_result *result)
+{
+	const struct odb_packed_lookup *lookup = &result->packed_lookup;
+	uint64_t remaining = result->packed_entry_location_ns;
+	enum odb_packed_lookup_phase phase;
+
+	if (read->lookup[0])
 		return;
-	if (value > UINT64_MAX - *sum)
-		read->value[0] = 1;
-	else
-		*sum += value;
+	if (lookup->invalid || result->packed_entry_location_invalid) {
+		read->lookup[0] = 1;
+		return;
+	}
+	for (phase = 0; phase < ODB_PACKED_LOOKUP_PHASE_NR; phase++) {
+		if (lookup->count[phase] > result->packed_entry_location_attempt_count ||
+		    lookup->ns[phase] > remaining) {
+			read->lookup[0] = 1;
+			return;
+		}
+		remaining -= lookup->ns[phase];
+	}
+
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_LOCATION_COUNT,
+			  result->packed_entry_location_attempt_count);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_SEARCH_COUNT,
+			  lookup->count[ODB_PACKED_LOOKUP_MIDX_SEARCH]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_SEARCH_NS,
+			  lookup->ns[ODB_PACKED_LOOKUP_MIDX_SEARCH]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_RESOLVE_COUNT,
+			  lookup->count[ODB_PACKED_LOOKUP_MIDX_RESOLVE]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_RESOLVE_NS,
+			  lookup->ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_COUNT,
+			  lookup->count[ODB_PACKED_LOOKUP_FALLBACK]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_NS,
+			  lookup->ns[ODB_PACKED_LOOKUP_FALLBACK]);
+	follow_lookup_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_PACK_ATTEMPTS,
+			  lookup->fallback_pack_attempts);
 }
 
 static void follow_odb_result(const struct odb_read_result *result, void *data)
@@ -882,6 +939,7 @@ static void follow_odb_result(const struct odb_read_result *result, void *data)
 	struct follow_odb_read *read = data;
 	enum trace2_counter_id source;
 
+	follow_odb_lookup_result(read, result);
 	if (read->value[0])
 		return;
 	if (result->invalid || result->packed_entry_location_invalid ||
@@ -908,7 +966,7 @@ static void follow_odb_result(const struct odb_read_result *result, void *data)
 		read->value[0] = 1;
 		return;
 	}
-	/* Optional MIDX/inflate/base detail has independent validity. */
+	/* Optional lookup/inflate/base detail has independent validity. */
 	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS, 1);
 	follow_odb_add(read, source, 1);
 	follow_odb_add(read, TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT,
@@ -972,6 +1030,12 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 			       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
 	if (location_ns > elapsed_ns || content_ns > elapsed_ns - location_ns)
 		read.value[0] = 1;
+	if (!read.lookup[0] && !read.value[0] &&
+	    read.lookup[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_LOCATION_COUNT -
+			TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID] !=
+	    read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT -
+		       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID])
+		read.lookup[0] = 1;
 	/*
 	 * Commit only after descriptor initialization and timer stop succeed.
 	 * All peels belong to this completed-load cohort; a fatal read or first
@@ -980,6 +1044,13 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 	for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID;
 	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++) {
 		uint64_t value = read.value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+
+		if (value)
+			trace2_counter_add(cid, value);
+	}
+	for (cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID;
+	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_PACK_ATTEMPTS; cid++) {
+		uint64_t value = read.lookup[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID];
 
 		if (value)
 			trace2_counter_add(cid, value);

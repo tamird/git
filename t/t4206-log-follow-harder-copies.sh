@@ -20,12 +20,15 @@ test_follow_odb_trace () {
 	odb_loose=$3 &&
 	odb_unpack=$4 &&
 	odb_prefix=follow-full-tree/tree-read/odb &&
-	test_trace2_data diff "$odb_prefix/valid" "[01]" <"$odb_trace" || return 1
+	lookup_prefix=$odb_prefix/packed-lookup &&
+	test_trace2_data diff "$odb_prefix/valid" "[01]" <"$odb_trace" &&
+	test_trace2_data diff "$lookup_prefix/valid" "[01]" <"$odb_trace" || return 1
 
 	if test_have_prereq ODB_MONOTONIC_CLOCK
 	then
-		odb_fields=12 &&
+		odb_fields=21 &&
 		test_trace2_data diff "$odb_prefix/valid" 1 <"$odb_trace" &&
+		test_trace2_data diff "$lookup_prefix/valid" 1 <"$odb_trace" &&
 		test_trace2_data diff "$odb_prefix/read-count" "$odb_reads" <"$odb_trace" &&
 		test_trace2_data diff "$odb_prefix/source-inmemory-count" 0 <"$odb_trace" &&
 		test_trace2_data diff "$odb_prefix/source-loose-count" "$odb_loose" <"$odb_trace" &&
@@ -35,6 +38,17 @@ test_follow_odb_trace () {
 		test_trace2_data diff "$odb_prefix/cache-copy-count" 0 <"$odb_trace" &&
 		test_trace2_data diff "$odb_prefix/cache-copy-us" 0 <"$odb_trace" || return 1
 
+		for lookup_key in midx-search-count midx-resolve-count \
+			fallback-count fallback-pack-attempt-count
+		do
+			test_trace2_data diff "$lookup_prefix/$lookup_key" \
+				"[0-9][0-9]*" <"$odb_trace" || return 1
+		done &&
+		for lookup_key in midx-search-us midx-resolve-us fallback-us
+		do
+			test_trace2_data diff "$lookup_prefix/$lookup_key" \
+				"[0-9][0-9]*" <"$odb_trace" || return 1
+		done &&
 		for odb_key in entry-location-count entry-location-us packed-content-us
 		do
 			test_trace2_data diff "$odb_prefix/$odb_key" "[0-9][0-9]*" <"$odb_trace" || return 1
@@ -44,14 +58,35 @@ test_follow_odb_trace () {
 		odb_content_us=$(sed -n 's/.*"key":"follow-full-tree\/tree-read\/odb\/packed-content-us","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
 		odb_descriptor_us=$(sed -n 's/.*"key":"follow-full-tree\/tree-read-us","value":"\([0-9][0-9]*\)".*/\1/p' "$odb_trace") &&
 		test "$odb_location_count" -ge "$odb_unpack" &&
+		test_trace2_data diff "$lookup_prefix/covered-entry-location-count" \
+			"$odb_location_count" <"$odb_trace" &&
 		test "$((odb_location_us + odb_content_us))" -le "$odb_descriptor_us" || return 1
 	else
-		odb_fields=1 &&
-		test_trace2_data diff "$odb_prefix/valid" 0 <"$odb_trace" || return 1
+		odb_fields=2 &&
+		test_trace2_data diff "$odb_prefix/valid" 0 <"$odb_trace" &&
+		test_trace2_data diff "$lookup_prefix/valid" 0 <"$odb_trace" || return 1
 	fi &&
 	test "$(grep -c '"key":"follow-full-tree/tree-read/odb/' "$odb_trace")" = "$odb_fields" &&
 	test "$(grep -c '"event":"data".*"thread":"main".*"nesting":1,"category":"diff","key":"follow-full-tree/tree-read/odb/' "$odb_trace")" = "$odb_fields" &&
 	test_grep ! '"event":"th_counter".*"category":"diff","name":"follow-full-tree/tree-read/odb/' "$odb_trace"
+}
+
+test_follow_lookup_phases_trace () {
+	lookup_trace=$1 &&
+	lookup_prefix=follow-full-tree/tree-read/odb/packed-lookup &&
+	shift &&
+
+	if ! test_have_prereq ODB_MONOTONIC_CLOCK
+	then
+		return 0
+	fi
+	for lookup_key in midx-search-count midx-resolve-count \
+		fallback-count fallback-pack-attempt-count
+	do
+		test_trace2_data diff "$lookup_prefix/$lookup_key" "$1" \
+			<"$lookup_trace" || return 1
+		shift
+	done
 }
 
 test_follow_leaf_result () {
@@ -403,8 +438,27 @@ test_expect_success 'follow harder copies reads an unchanged subtree once' '
 				-- destination >actual &&
 		test_cmp expect actual &&
 		test_follow_full_tree_trace "$PWD/follow.event" 3 3 0 3 &&
+		test_follow_lookup_phases_trace "$PWD/follow.event" 0 0 3 3 &&
 		grep "/$pack_stem[.]pack $shared_offset$" pack-access >shared-access &&
 		test_line_count = 1 shared-access
+	)
+'
+
+test_expect_success 'follow reports MIDX lookup phases without fallback' '
+	(
+		cd follow-shared-subtree &&
+		git multi-pack-index write &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual-midx &&
+		GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
+		GIT_TRACE2_EVENT="$PWD/midx.event" \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual-midx-traced &&
+		test_cmp actual-midx actual-midx-traced &&
+		test_cmp expect actual-midx &&
+		test_follow_full_tree_trace "$PWD/midx.event" 3 3 0 3 &&
+		test_follow_lookup_phases_trace "$PWD/midx.event" 3 3 0 0
 	)
 '
 

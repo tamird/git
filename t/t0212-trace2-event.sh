@@ -445,4 +445,51 @@ do
 	'
 done
 
+test_expect_success PTHREADS 'follow lookup counters merge ns before rounding' '
+	test_when_finished "rm follow-lookup.event" &&
+	GIT_TRACE2_EVENT="$PWD/follow-lookup.event" \
+		test-tool trace2 203follow_lookup_counter merged &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/valid 1 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/read-count 2 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/valid 1 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/covered-entry-location-count 2 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/midx-search-count 2 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/midx-search-us 1 <follow-lookup.event &&
+	test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/packed-lookup/'\'' follow-lookup.event)" = 9 &&
+	test_grep ! '\''"event":"th_counter".*"name":"follow-full-tree/tree-read/odb/packed-lookup/'\'' follow-lookup.event
+'
+
+for mode in increment-overflow merge-overflow
+do
+	prereq=
+	expected_reads=1
+	if test "$mode" = merge-overflow
+	then
+		prereq=PTHREADS
+		expected_reads=2
+	fi
+	test_expect_success "$prereq" "follow lookup $mode preserves outer ODB totals" '
+		test_when_finished "rm follow-lookup.event" &&
+		GIT_TRACE2_EVENT="$PWD/follow-lookup.event" \
+			test-tool trace2 203follow_lookup_counter "$mode" &&
+		test_trace2_data diff follow-full-tree/tree-read/odb/valid 1 <follow-lookup.event &&
+		test_trace2_data diff follow-full-tree/tree-read/odb/read-count "$expected_reads" <follow-lookup.event &&
+		test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/valid 0 <follow-lookup.event &&
+		test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/packed-lookup/'\'' follow-lookup.event)" = 1 &&
+		test_grep '\''"event":"counter".*"category":"test","name":"test1","count":7}'\'' follow-lookup.event
+	'
+done
+
+test_expect_success 'valid lookup counters survive invalid outer ODB totals' '
+	test_when_finished "rm follow-lookup.event" &&
+	GIT_TRACE2_EVENT="$PWD/follow-lookup.event" \
+		test-tool trace2 203follow_lookup_counter outer-invalid &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/valid 0 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/valid 1 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/covered-entry-location-count 1 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/midx-search-count 1 <follow-lookup.event &&
+	test_trace2_data diff follow-full-tree/tree-read/odb/packed-lookup/midx-search-us 0 <follow-lookup.event &&
+	test "$(grep -c '\''"key":"follow-full-tree/tree-read/odb/packed-lookup/'\'' follow-lookup.event)" = 9
+'
+
 test_done
