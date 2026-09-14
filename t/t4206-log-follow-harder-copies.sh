@@ -605,7 +605,8 @@ test_expect_success 'follow counts eligible additions across completed full-tree
 		test_grep '\''"event":"timer".*"category":"diff","name":"follow-full-tree","intervals":2,'\'' follow.event &&
 		test_trace2_data diff follow-full-tree/eligible-additions 5 <follow.event &&
 		test_follow_additions_trace "$PWD/follow.event" 5 2 &&
-		test_follow_odb_trace "$PWD/follow.event" 7 7 0
+		test_trace2_data diff follow-tree-cache/hits 2 <follow.event &&
+		test_follow_odb_trace "$PWD/follow.event" 5 5 0
 	)
 '
 
