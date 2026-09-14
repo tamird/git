@@ -3022,9 +3022,14 @@ test_expect_success 'log --follow reuses an object across rename comparisons' '
 		git add third &&
 		git commit -m third &&
 		printf "third\nsecond\nfirst\n" >expect &&
+		git log --format=%s --follow -- third >untraced &&
+		test_cmp expect untraced &&
 		GIT_TRACE2_EVENT="$PWD/span.trace" \
 			git log --format=%s --follow -- third >actual &&
 		test_cmp expect actual &&
+		test_grep -E \
+			"\"category\":\"diff\",\"key\":\"follow-tree-cache/hits\",\"value\":\"[1-9][0-9]*\"" \
+			span.trace &&
 		test_grep -E \
 			"\"category\":\"diff\",\"key\":\"spanhash/cache/hits\",\"value\":\"[1-9][0-9]*\"" \
 			span.trace

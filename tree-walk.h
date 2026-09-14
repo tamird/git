@@ -111,12 +111,12 @@ int tree_entry_gently(struct tree_desc *, struct name_entry *);
 void *fill_tree_descriptor(struct repository *r,
 			   struct tree_desc *desc,
 			   const struct object_id *oid);
-/* Report each borrowed ODB result; buffer ownership matches the plain helper. */
+/* Report borrowed ODB results and optionally return the full decoded size. */
 void *fill_tree_descriptor_with_results(struct repository *r,
 					struct tree_desc *desc,
 					const struct object_id *oid,
 					void (*report)(const struct odb_read_result *, void *),
-					void *report_data);
+					void *report_data, size_t *size_out);
 
 struct traverse_info;
 typedef int (*traverse_callback_t)(int n, unsigned long mask, unsigned long dirmask, struct name_entry *entry, struct traverse_info *);

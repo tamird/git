@@ -87,7 +87,7 @@ void *fill_tree_descriptor_with_results(struct repository *r,
 					struct tree_desc *desc,
 					const struct object_id *oid,
 					void (*report)(const struct odb_read_result *, void *),
-					void *report_data)
+					void *report_data, size_t *size_out)
 {
 	size_t size = 0;
 	void *buf = NULL;
@@ -99,6 +99,8 @@ void *fill_tree_descriptor_with_results(struct repository *r,
 			die(_("unable to read tree (%s)"), oid_to_hex(oid));
 	}
 	init_tree_desc(desc, oid, buf, size);
+	if (size_out)
+		*size_out = size;
 	return buf;
 }
 
@@ -106,7 +108,7 @@ void *fill_tree_descriptor(struct repository *r,
 			   struct tree_desc *desc,
 			   const struct object_id *oid)
 {
-	return fill_tree_descriptor_with_results(r, desc, oid, NULL, NULL);
+	return fill_tree_descriptor_with_results(r, desc, oid, NULL, NULL, NULL);
 }
 
 static void entry_clear(struct name_entry *a)

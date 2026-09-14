@@ -8,7 +8,9 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "hash.h"
+#include "list.h"
 #include "odb.h"
+#include "replace-object.h"
 #include "trace2.h"
 #include "tree.h"
 #include "tree-walk.h"
@@ -649,6 +651,267 @@ static void follow_change(struct diff_options *opt,
 			    old_dirty_submodule, new_dirty_submodule);
 }
 
+/* The retained limit includes entries and buckets, per repository. */
+#define FOLLOW_TREE_CACHE_LIMIT	  (32u * 1024u * 1024u)
+#define FOLLOW_TREE_CACHE_ENTRIES (1u << 16)
+#define FOLLOW_TREE_CACHE_BUCKETS (1u << 13)
+
+struct follow_tree_cache_entry {
+	struct follow_tree_cache_entry *next;
+	struct list_head lru;
+	struct object_id oid;
+	char *buffer;
+	size_t size;
+};
+
+struct diff_follow_tree_cache {
+	struct follow_tree_cache_entry **buckets;
+	struct list_head lru;
+	size_t entry_bytes, entries;
+	int replace_mode;
+};
+
+static pthread_mutex_t follow_tree_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uintmax_t follow_tree_cache_hits, follow_tree_cache_misses;
+static uintmax_t follow_tree_cache_evictions, follow_tree_cache_bypassed;
+static uintmax_t follow_tree_cache_retained, follow_tree_cache_peak;
+static int follow_tree_cache_report_registered;
+
+static size_t follow_tree_cache_bytes(const struct diff_follow_tree_cache *cache)
+{
+	return sizeof(*cache) +
+	       FOLLOW_TREE_CACHE_BUCKETS * sizeof(cache->buckets[0]) +
+	       cache->entry_bytes;
+}
+
+static void follow_tree_cache_update_retained(size_t before, size_t after)
+{
+	if (after >= before)
+		follow_tree_cache_retained += after - before;
+	else
+		follow_tree_cache_retained -= before - after;
+	if (follow_tree_cache_retained > follow_tree_cache_peak)
+		follow_tree_cache_peak = follow_tree_cache_retained;
+}
+
+static void follow_tree_cache_report(void)
+{
+	int saved_errno = errno;
+
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/hits",
+			   follow_tree_cache_hits);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/misses",
+			   follow_tree_cache_misses);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/evictions",
+			   follow_tree_cache_evictions);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/bypassed",
+			   follow_tree_cache_bypassed);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/peak_bytes",
+			   follow_tree_cache_peak);
+	errno = saved_errno;
+}
+
+static size_t follow_tree_cache_bucket(const struct object_id *oid)
+{
+	return (oidhash(oid) ^ (oid->algo * 0x9e3779b9u)) &
+	       (FOLLOW_TREE_CACHE_BUCKETS - 1);
+}
+
+static int follow_tree_cache_eligible(struct repository *repo,
+				      const struct object_id *oid)
+{
+	/* Converted objects can change when the loose object map reloads. */
+	return oid->algo && repo->hash_algo &&
+	       oid->algo == hash_algo_by_ptr(repo->hash_algo);
+}
+
+static struct follow_tree_cache_entry *follow_tree_cache_find(
+	struct diff_follow_tree_cache *cache, const struct object_id *oid)
+{
+	struct follow_tree_cache_entry *entry;
+
+	for (entry = cache->buckets[follow_tree_cache_bucket(oid)]; entry;
+	     entry = entry->next)
+		if (entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
+			return entry;
+	return NULL;
+}
+
+static void follow_tree_cache_clear_locked(struct repository *repo)
+{
+	struct diff_follow_tree_cache *cache = repo->follow_tree_cache;
+	size_t before;
+
+	if (!cache)
+		return;
+	before = follow_tree_cache_bytes(cache);
+	while (cache->lru.next != &cache->lru) {
+		struct follow_tree_cache_entry *entry =
+			list_first_entry(&cache->lru, struct follow_tree_cache_entry, lru);
+
+		list_del(&entry->lru);
+		free(entry->buffer);
+		free(entry);
+	}
+	free(cache->buckets);
+	FREE_AND_NULL(repo->follow_tree_cache);
+	follow_tree_cache_update_retained(before, 0);
+}
+
+void diff_follow_tree_cache_clear(struct repository *repo)
+{
+	int saved_errno = errno;
+
+	/* repo_clear() cannot race an active tree walk on this repository. */
+	pthread_mutex_lock(&follow_tree_cache_mutex);
+	follow_tree_cache_clear_locked(repo);
+	pthread_mutex_unlock(&follow_tree_cache_mutex);
+	errno = saved_errno;
+}
+
+static void *follow_tree_cache_lookup(struct repository *repo,
+				      const struct object_id *oid,
+				      int replace_mode, size_t *size)
+{
+	struct diff_follow_tree_cache *cache;
+	struct follow_tree_cache_entry *entry;
+	void *copy = NULL;
+	int saved_errno = errno;
+
+	pthread_mutex_lock(&follow_tree_cache_mutex);
+	if (!follow_tree_cache_report_registered && trace2_is_enabled() &&
+	    !atexit(follow_tree_cache_report))
+		follow_tree_cache_report_registered = 1;
+	cache = repo->follow_tree_cache;
+	if (cache && cache->replace_mode != replace_mode) {
+		follow_tree_cache_clear_locked(repo);
+		cache = NULL;
+	}
+	if (!follow_tree_cache_eligible(repo, oid)) {
+		follow_tree_cache_bypassed++;
+		goto miss;
+	}
+	entry = cache ? follow_tree_cache_find(cache, oid) : NULL;
+	if (entry) {
+		copy = malloc(entry->size + 1);
+		if (copy) {
+			memcpy(copy, entry->buffer, entry->size + 1);
+			*size = entry->size;
+			list_move(&entry->lru, &cache->lru);
+			follow_tree_cache_hits++;
+		} else {
+			/* Reclaim optional memory and use the original ODB path. */
+			follow_tree_cache_clear_locked(repo);
+			follow_tree_cache_bypassed++;
+		}
+	}
+miss:
+	if (!copy)
+		follow_tree_cache_misses++;
+	pthread_mutex_unlock(&follow_tree_cache_mutex);
+	errno = saved_errno;
+	return copy;
+}
+
+static void follow_tree_cache_insert(struct repository *repo,
+				     const struct object_id *oid,
+				     int replace_mode, const void *buffer, size_t size)
+{
+	struct diff_follow_tree_cache *cache;
+	struct follow_tree_cache_entry *entry;
+	size_t before, bucket;
+	int saved_errno = errno;
+
+	if (!follow_tree_cache_eligible(repo, oid))
+		return;
+	/* Subtract before adding, including one byte for the trailing NUL. */
+	if (size >= FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) -
+			    sizeof(*cache) - FOLLOW_TREE_CACHE_BUCKETS * sizeof(void *)) {
+		pthread_mutex_lock(&follow_tree_cache_mutex);
+		follow_tree_cache_bypassed++;
+		pthread_mutex_unlock(&follow_tree_cache_mutex);
+		errno = saved_errno;
+		return;
+	}
+	pthread_mutex_lock(&follow_tree_cache_mutex);
+	if (replace_refs_enabled(repo) != replace_mode) {
+		follow_tree_cache_clear_locked(repo);
+		follow_tree_cache_bypassed++;
+		goto done;
+	}
+	cache = repo->follow_tree_cache;
+	if (cache && cache->replace_mode != replace_mode) {
+		follow_tree_cache_clear_locked(repo);
+		cache = NULL;
+	}
+	if (!cache) {
+		cache = calloc(1, sizeof(*cache));
+		if (!cache) {
+			follow_tree_cache_bypassed++;
+			goto done;
+		}
+		cache->buckets = calloc(FOLLOW_TREE_CACHE_BUCKETS,
+					sizeof(cache->buckets[0]));
+		if (!cache->buckets) {
+			free(cache);
+			follow_tree_cache_bypassed++;
+			goto done;
+		}
+		INIT_LIST_HEAD(&cache->lru);
+		cache->replace_mode = replace_mode;
+		repo->follow_tree_cache = cache;
+		follow_tree_cache_update_retained(0, follow_tree_cache_bytes(cache));
+	}
+	if (follow_tree_cache_find(cache, oid))
+		goto done; /* A concurrent walker filled the key. */
+	entry = malloc(sizeof(*entry));
+	if (!entry) {
+		follow_tree_cache_bypassed++;
+		goto done;
+	}
+	before = follow_tree_cache_bytes(cache);
+	while (cache->entries == FOLLOW_TREE_CACHE_ENTRIES ||
+	       follow_tree_cache_bytes(cache) >
+		       FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) - size - 1) {
+		struct follow_tree_cache_entry *oldest =
+			list_entry(cache->lru.prev, struct follow_tree_cache_entry, lru);
+		struct follow_tree_cache_entry **slot =
+			&cache->buckets[follow_tree_cache_bucket(&oldest->oid)];
+
+		while (*slot && *slot != oldest)
+			slot = &(*slot)->next;
+		assert(*slot == oldest);
+		*slot = oldest->next;
+		list_del(&oldest->lru);
+		cache->entry_bytes -= sizeof(*oldest) + oldest->size + 1;
+		cache->entries--;
+		free(oldest->buffer);
+		free(oldest);
+		follow_tree_cache_evictions++;
+	}
+	entry->buffer = malloc(size + 1);
+	if (!entry->buffer) {
+		free(entry);
+		follow_tree_cache_bypassed++;
+		goto updated;
+	}
+	memcpy(entry->buffer, buffer, size);
+	entry->buffer[size] = '\0';
+	entry->size = size;
+	oidcpy(&entry->oid, oid);
+	bucket = follow_tree_cache_bucket(oid);
+	entry->next = cache->buckets[bucket];
+	cache->buckets[bucket] = entry;
+	list_add(&entry->lru, &cache->lru);
+	cache->entry_bytes += sizeof(*entry) + size + 1;
+	cache->entries++;
+updated:
+	follow_tree_cache_update_retained(before, follow_tree_cache_bytes(cache));
+done:
+	pthread_mutex_unlock(&follow_tree_cache_mutex);
+	errno = saved_errno;
+}
+
 #define FOLLOW_OID_SAMPLE_BUCKETS (1U << 14)
 
 struct follow_oid_sample_entry {
@@ -996,8 +1259,9 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 	struct follow_odb_read read;
 	uint64_t elapsed_ns, location_ns, content_ns;
 	enum trace2_counter_id cid;
+	size_t size;
 	void *buffer;
-	int saved_errno;
+	int saved_errno, traced, replace_mode;
 
 	if (opt->change != follow_change) {
 		if (opt->trace_pruning_tree_read && oid && trace2_is_enabled()) {
@@ -1023,16 +1287,36 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 		errno = saved_errno;
 		return buffer;
 	}
-	if (!oid || !trace2_is_enabled())
+	if (!oid)
 		return fill_tree_descriptor(opt->repo, desc, oid);
 
+	traced = trace2_is_enabled();
 	saved_errno = errno;
-	memset(&read, 0, sizeof(read));
-	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	if (traced) {
+		memset(&read, 0, sizeof(read));
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+	}
 	errno = saved_errno;
-	buffer = fill_tree_descriptor_with_results(opt->repo, desc, oid,
-						   follow_odb_result, &read);
+	replace_mode = replace_refs_enabled(opt->repo);
+	buffer = follow_tree_cache_lookup(opt->repo, oid, replace_mode, &size);
+	if (buffer) {
+		/* The caller owns and frees this independent descriptor buffer. */
+		init_tree_desc(desc, oid, buffer, size);
+		saved_errno = errno;
+		if (traced) {
+			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
+			follow_oid_sample_read(opt->change_fn_data, oid);
+		}
+		errno = saved_errno;
+		return buffer;
+	}
+	buffer = fill_tree_descriptor_with_results(
+		opt->repo, desc, oid, traced ? follow_odb_result : NULL,
+		traced ? &read : NULL, &size);
+	follow_tree_cache_insert(opt->repo, oid, replace_mode, buffer, size);
 	saved_errno = errno;
+	if (!traced)
+		return buffer;
 	elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
 	location_ns = read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS -
 				TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
