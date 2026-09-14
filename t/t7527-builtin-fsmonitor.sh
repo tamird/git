@@ -2106,6 +2106,8 @@ test_expect_success 'lock-free status repairs a malformed untracked snapshot' '
 			test-tool fsmonitor-client save-overdeep-untracked-cache &&
 		test_trace2_data fsmonitor untracked-cache/save-outcome 9 \
 			<../snapshot-repair.bounds.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-bound-reason 3 \
+			<../snapshot-repair.bounds.trace &&
 		test_trace2_data fsmonitor untracked-cache/save-reason \
 			snapshot-bounds-exceeded <../snapshot-repair.bounds.trace &&
 		GIT_TRACE2_EVENT="$PWD/../snapshot-repair.after-bounds.trace" \

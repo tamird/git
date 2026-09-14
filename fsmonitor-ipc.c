@@ -721,6 +721,7 @@ void fsmonitor_ipc__save_untracked_cache(
 	enum fsmonitor_untracked_cache_save_outcome outcome =
 		FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE;
 	enum untracked_cache_encoding encoding;
+	enum untracked_snapshot_bound bound;
 	size_t start;
 
 	trace2_region_enter("fsmonitor", "untracked-cache/save", istate->repo);
@@ -736,9 +737,12 @@ void fsmonitor_ipc__save_untracked_cache(
 		goto done;
 	}
 
-	encoding = write_untracked_snapshot(&snapshot, istate->untracked);
+	encoding = write_untracked_snapshot(&snapshot, istate->untracked,
+					    &bound);
 	if (encoding == UNTRACKED_CACHE_ENCODING_TOO_LARGE) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED;
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/save-bound-reason", bound);
 		trace2_data_string("fsmonitor", istate->repo,
 				   "untracked-cache/save-reason",
 				   "snapshot-bounds-exceeded");

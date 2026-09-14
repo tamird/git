@@ -4449,6 +4449,7 @@ struct write_data {
 	int index;	   /* number of written untracked_cache_dir */
 	int bounded_snapshot;
 	size_t remaining_entries;
+	enum untracked_snapshot_bound *bound;
 	struct ewah_bitmap *check_only; /* from untracked_cache_dir */
 	struct ewah_bitmap *valid;	/* from untracked_cache_dir */
 	struct ewah_bitmap *sha1_valid; /* set if exclude_sha1 is not null */
@@ -4480,10 +4481,16 @@ static int write_one_dir(struct untracked_cache_dir *untracked,
 	uint8_t intlen;
 	int i;
 
-	if (wd->bounded_snapshot &&
-	    (wd->index >= UNTRACKED_SNAPSHOT_MAX_DIRS ||
-	     depth >= UNTRACKED_SNAPSHOT_MAX_DEPTH))
-		return -1;
+	if (wd->bounded_snapshot) {
+		if (wd->index >= UNTRACKED_SNAPSHOT_MAX_DIRS) {
+			*wd->bound = UNTRACKED_SNAPSHOT_BOUND_DIRS;
+			return -1;
+		}
+		if (depth >= UNTRACKED_SNAPSHOT_MAX_DEPTH) {
+			*wd->bound = UNTRACKED_SNAPSHOT_BOUND_DEPTH;
+			return -1;
+		}
+	}
 	i = wd->index++;
 
 	/*
@@ -4519,8 +4526,10 @@ static int write_one_dir(struct untracked_cache_dir *untracked,
 			value++;
 	if (wd->bounded_snapshot) {
 		if (untracked->untracked_nr > wd->remaining_entries ||
-		    value > wd->remaining_entries - untracked->untracked_nr)
+		    value > wd->remaining_entries - untracked->untracked_nr) {
+			*wd->bound = UNTRACKED_SNAPSHOT_BOUND_ENTRIES;
 			return -1;
+		}
 		wd->remaining_entries -= untracked->untracked_nr + value;
 	}
 	intlen = encode_varint(value, intbuf);
@@ -4540,7 +4549,8 @@ static int write_one_dir(struct untracked_cache_dir *untracked,
 }
 
 static int write_untracked_body(struct strbuf *out,
-				struct untracked_cache *untracked, int bounded_snapshot)
+				struct untracked_cache *untracked, int bounded_snapshot,
+				enum untracked_snapshot_bound *bound)
 {
 	struct ondisk_untracked_cache *ouc;
 	struct write_data wd;
@@ -4573,6 +4583,7 @@ static int write_untracked_body(struct strbuf *out,
 	wd.index      = 0;
 	wd.bounded_snapshot = bounded_snapshot;
 	wd.remaining_entries = UNTRACKED_SNAPSHOT_MAX_ENTRIES;
+	wd.bound = bound;
 	wd.check_only = ewah_new();
 	wd.valid      = ewah_new();
 	wd.sha1_valid = ewah_new();
@@ -4612,7 +4623,7 @@ done:
 
 static enum untracked_cache_encoding write_untracked_extension_1(
 	struct strbuf *out, struct untracked_cache *untracked,
-	int bounded_snapshot)
+	int bounded_snapshot, enum untracked_snapshot_bound *bound)
 {
 	size_t start = out->len, body_start, body_len;
 
@@ -4623,7 +4634,7 @@ static enum untracked_cache_encoding write_untracked_extension_1(
 	if (untracked->fsmonitor_resync)
 		strbuf_addchars(out, '\0', UNTRACKED_PENDING_HEADER_LEN);
 	body_start = out->len;
-	if (write_untracked_body(out, untracked, bounded_snapshot)) {
+	if (write_untracked_body(out, untracked, bounded_snapshot, bound)) {
 		strbuf_setlen(out, start);
 		return UNTRACKED_CACHE_ENCODING_TOO_LARGE;
 	}
@@ -4650,13 +4661,15 @@ omit:
 enum untracked_cache_encoding write_untracked_extension(
 	struct strbuf *out, struct untracked_cache *untracked)
 {
-	return write_untracked_extension_1(out, untracked, 0);
+	return write_untracked_extension_1(out, untracked, 0, NULL);
 }
 
 enum untracked_cache_encoding write_untracked_snapshot(
-	struct strbuf *out, struct untracked_cache *untracked)
+	struct strbuf *out, struct untracked_cache *untracked,
+	enum untracked_snapshot_bound *bound)
 {
-	return write_untracked_extension_1(out, untracked, 1);
+	*bound = UNTRACKED_SNAPSHOT_BOUND_NONE;
+	return write_untracked_extension_1(out, untracked, 1, bound);
 }
 
 static void free_untracked(struct untracked_cache_dir *ucd)

@@ -666,11 +666,19 @@ enum untracked_cache_encoding {
 	UNTRACKED_CACHE_ENCODING_PENDING,
 	UNTRACKED_CACHE_ENCODING_TOO_LARGE,
 };
+/* Stable Trace2 values for a bounded untracked-cache snapshot. */
+enum untracked_snapshot_bound {
+	UNTRACKED_SNAPSHOT_BOUND_NONE = 0,
+	UNTRACKED_SNAPSHOT_BOUND_DIRS = 1,
+	UNTRACKED_SNAPSHOT_BOUND_ENTRIES = 2,
+	UNTRACKED_SNAPSHOT_BOUND_DEPTH = 3,
+};
 enum untracked_cache_encoding write_untracked_extension(
 	struct strbuf *out, struct untracked_cache *untracked);
 /* Apply the resource limits of read_untracked_snapshot() when writing. */
 enum untracked_cache_encoding write_untracked_snapshot(
-	struct strbuf *out, struct untracked_cache *untracked);
+	struct strbuf *out, struct untracked_cache *untracked,
+	enum untracked_snapshot_bound *bound);
 struct untracked_cache *read_pending_untracked_extension(const void *data,
 							 size_t sz);
 struct untracked_cache *read_untracked_snapshot(const void *data, size_t sz);
