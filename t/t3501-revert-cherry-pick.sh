@@ -256,4 +256,45 @@ test_expect_success 'cherry-pick is unaware of --reference (for now)' '
 	test_grep "^usage: git cherry-pick" actual
 '
 
+test_expect_success 'nonempty sequencer picks defer cache-tree validation until commit' '
+	test_create_repo cache-tree-pick &&
+	(
+		cd cache-tree-pick &&
+		empty_check_counter="\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/calls-total\"" &&
+		test_commit base base-file base &&
+		git switch -c topic &&
+		mkdir nested &&
+		test_commit change nested/changed-file change &&
+		git switch -c target base &&
+		GIT_TRACE2_EVENT="$PWD/pick.trace" git cherry-pick topic &&
+		test_trace2_data cache_tree validate/calls-total 1 <pick.trace &&
+		test_trace2_data cache_tree validate/nodes-total 2 <pick.trace &&
+		test_grep ! "$empty_check_counter" pick.trace &&
+		test_cmp_rev topic^{tree} HEAD^{tree} &&
+
+		git reset --hard base &&
+		GIT_TRACE2_EVENT="$PWD/no-commit.trace" git cherry-pick --no-commit topic &&
+		test_grep "$empty_check_counter,\"count\":1" no-commit.trace &&
+		test_cmp_rev topic^{tree} "$(git write-tree)" &&
+
+		git reset --hard base &&
+		GIT_EDITOR=: GIT_TRACE2_EVENT="$PWD/edit.trace" git cherry-pick --edit topic &&
+		test_grep "$empty_check_counter,\"count\":1" edit.trace &&
+
+		git reset --hard base &&
+		git commit --allow-empty -m empty &&
+		git branch empty-pick &&
+		git reset --hard base &&
+		GIT_TRACE2_EVENT="$PWD/empty.trace" git cherry-pick --allow-empty empty-pick &&
+		test_grep "$empty_check_counter,\"count\":1" empty.trace &&
+		test_cmp_rev base^{tree} HEAD^{tree} &&
+
+		git reset --hard topic &&
+		GIT_TRACE2_EVENT="$PWD/revert.trace" git revert --no-edit topic &&
+		test_trace2_data cache_tree validate/calls-total 1 <revert.trace &&
+		test_grep ! "$empty_check_counter" revert.trace &&
+		test_cmp_rev base^{tree} HEAD^{tree}
+	)
+'
+
 test_done

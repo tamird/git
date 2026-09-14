@@ -853,12 +853,14 @@ static struct object_id *get_cache_tree_oid(struct index_state *istate)
 	return &cache_tree->oid;
 }
 
-static int is_index_unchanged(struct repository *r)
+static int is_index_unchanged(struct repository *r,
+			      int defer_cache_tree_validation)
 {
 	struct object_id head_oid, *cache_tree_oid;
 	const struct object_id *head_tree_oid;
 	struct commit *head_commit;
 	struct index_state *istate = r->index;
+	struct cache_tree *cache_tree;
 	const char *head_name;
 
 	if (!refs_resolve_ref_unsafe(get_main_ref_store(the_repository), "HEAD", RESOLVE_REF_READING, &head_oid, NULL)) {
@@ -887,6 +889,21 @@ static int is_index_unchanged(struct repository *r)
 			return -1;
 
 		head_tree_oid = get_commit_tree_oid(head_commit);
+	}
+
+	if (defer_cache_tree_validation) {
+		cache_tree = cache_tree_get(istate);
+		/*
+		 * cache_tree_update() reuses a present root. For a differing root,
+		 * defer descendant checks (and any promisor fetches) until
+		 * try_to_commit() validates the tree before committing.
+		 */
+		if (cache_tree && cache_tree->entry_count >= 0 &&
+		    !oideq(&cache_tree->oid, head_tree_oid) &&
+		    odb_has_object(r->objects, &cache_tree->oid,
+				   ODB_HAS_OBJECT_RECHECK_PACKED |
+					   ODB_HAS_OBJECT_FETCH_PROMISOR))
+			return 0;
 	}
 
 	if (!(cache_tree_oid = get_cache_tree_oid(istate)))
@@ -1823,7 +1840,8 @@ static int is_original_commit_empty(struct commit *commit)
  */
 static int allow_empty(struct repository *r,
 		       struct replay_opts *opts,
-		       struct commit *commit)
+		       struct commit *commit,
+		       int defer_cache_tree_validation)
 {
 	int index_unchanged, originally_empty;
 
@@ -1835,7 +1853,7 @@ static int allow_empty(struct repository *r,
 	 * drop_redundant_commits determine whether the commit should be kept or
 	 * dropped. If neither is specified, halt.
 	 */
-	index_unchanged = is_index_unchanged(r);
+	index_unchanged = is_index_unchanged(r, defer_cache_tree_validation);
 	if (index_unchanged < 0)
 		return index_unchanged;
 	if (!index_unchanged)
@@ -2560,7 +2578,8 @@ static enum pick_result do_pick_commit(struct repository *r,
 	}
 
 	trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CHECK);
-	allow = allow_empty(r, opts, commit);
+	allow = allow_empty(r, opts, commit,
+			    !opts->no_commit && !(flags & (EDIT_MSG | VERIFY_MSG)));
 	trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CHECK);
 	if (allow < 0) {
 		res = allow;
