@@ -4172,7 +4172,7 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 {
 	mmfile_t mf1, mf2;
 	struct diffstat_file *data;
-	int may_differ;
+	int may_differ, is_binary, saved_errno;
 	int complete_rewrite = 0;
 
 	if (!DIFF_PAIR_UNMERGED(p)) {
@@ -4194,23 +4194,50 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 	may_differ = !(one->oid_valid && two->oid_valid &&
 			oideq(&one->oid, &two->oid));
 
-	if (diff_filespec_is_binary(o->repo, one) ||
-	    diff_filespec_is_binary(o->repo, two)) {
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_BINARY_CHECK);
+	errno = saved_errno;
+	is_binary = diff_filespec_is_binary(o->repo, one) ||
+		    diff_filespec_is_binary(o->repo, two);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_BINARY_CHECK);
+	errno = saved_errno;
+
+	if (is_binary) {
 		data->is_binary = 1;
 		if (!may_differ) {
 			data->added = 0;
 			data->deleted = 0;
 		} else {
+			saved_errno = errno;
+			trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+			errno = saved_errno;
 			data->added = diff_filespec_size(o->repo, two);
 			data->deleted = diff_filespec_size(o->repo, one);
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+			errno = saved_errno;
 		}
 	}
 
 	else if (complete_rewrite) {
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
 		diff_populate_filespec(o->repo, one, NULL);
 		diff_populate_filespec(o->repo, two, NULL);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
+
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_COUNT_LINES);
+		errno = saved_errno;
 		data->deleted = count_lines(one->data, one->size);
 		data->added = count_lines(two->data, two->size);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_COUNT_LINES);
+		errno = saved_errno;
 	}
 
 	else if (DIFF_FILE_VALID(one) != DIFF_FILE_VALID(two) &&
@@ -4218,15 +4245,28 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		 !o->ignore_regex_nr) {
 		struct diff_filespec *valid =
 			DIFF_FILE_VALID(one) ? one : two;
-		int lines;
+		int lines, failed;
 
-		if (fill_mmfile(o->repo, &mf1, one) < 0 ||
-		    fill_mmfile(o->repo, &mf2, two) < 0)
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
+		failed = fill_mmfile(o->repo, &mf1, one) < 0 ||
+			 fill_mmfile(o->repo, &mf2, two) < 0;
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
+		if (failed)
 			die("unable to read files to diff");
 		if (mf1.size > MAX_XDIFF_SIZE || mf2.size > MAX_XDIFF_SIZE)
 			die("unable to generate diffstat for %s", one->path);
 
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_COUNT_LINES);
+		errno = saved_errno;
 		lines = count_lines(valid->data, valid->size);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_COUNT_LINES);
+		errno = saved_errno;
 		if (valid == one)
 			data->deleted = lines;
 		else
@@ -4237,9 +4277,17 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		/* Crazy xdl interfaces.. */
 		xpparam_t xpp;
 		xdemitconf_t xecfg;
+		int failed, ret;
 
-		if (fill_mmfile(o->repo, &mf1, one) < 0 ||
-		    fill_mmfile(o->repo, &mf2, two) < 0)
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
+		failed = fill_mmfile(o->repo, &mf1, one) < 0 ||
+			 fill_mmfile(o->repo, &mf2, two) < 0;
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE);
+		errno = saved_errno;
+		if (failed)
 			die("unable to read files to diff");
 
 		memset(&xpp, 0, sizeof(xpp));
@@ -4252,8 +4300,15 @@ static void builtin_diffstat(const char *name_a, const char *name_b,
 		xecfg.ctxlen = o->context;
 		xecfg.interhunkctxlen = o->interhunkcontext;
 		xecfg.flags = XDL_EMIT_NO_HUNK_HDR;
-		if (xdi_diff_outf(&mf1, &mf2, NULL,
-				  diffstat_consume, diffstat, &xpp, &xecfg))
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_STAT_XDIFF);
+		errno = saved_errno;
+		ret = xdi_diff_outf(&mf1, &mf2, NULL,
+				    diffstat_consume, diffstat, &xpp, &xecfg);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_STAT_XDIFF);
+		errno = saved_errno;
+		if (ret)
 			die("unable to generate diffstat for %s", one->path);
 
 		if (DIFF_FILE_VALID(one) && DIFF_FILE_VALID(two)) {

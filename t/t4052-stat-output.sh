@@ -84,6 +84,10 @@ test_expect_success 'stat phase timers preserve output and exit status' '
 	do
 		test_stat_timer "stat-$code.trace" two-tree/queue 1 &&
 		test_stat_timer "stat-$code.trace" stat/build 1 &&
+		test_stat_timer "stat-$code.trace" stat/binary-check 1 &&
+		test_stat_timer "stat-$code.trace" stat/content-populate 1 &&
+		test_stat_timer "stat-$code.trace" stat/count-lines 0 &&
+		test_stat_timer "stat-$code.trace" stat/xdiff 1 &&
 		test_stat_timer "stat-$code.trace" stat/emit 1 &&
 		test_stat_timer "stat-$code.trace" result-code/reporting 1 ||
 		return 1
@@ -110,6 +114,8 @@ test_expect_success 'stat timers aggregate flushes outside the builtin diff call
 	test_stat_timer stat-repeated.trace two-tree/queue 0 &&
 	test_stat_timer stat-repeated.trace result-code/reporting 0 &&
 	test_stat_timer stat-repeated.trace stat/build 2 &&
+	test_stat_timer stat-repeated.trace stat/binary-check 2 &&
+	test_stat_timer stat-repeated.trace stat/xdiff 2 &&
 	test_stat_timer stat-repeated.trace stat/emit 2
 '
 
@@ -135,6 +141,10 @@ test_expect_success 'name-only output and an empty queue do not compute or emit 
 	for mode in names empty
 	do
 		test_stat_timer "stat-$mode.trace" stat/build 0 &&
+		test_stat_timer "stat-$mode.trace" stat/binary-check 0 &&
+		test_stat_timer "stat-$mode.trace" stat/content-populate 0 &&
+		test_stat_timer "stat-$mode.trace" stat/count-lines 0 &&
+		test_stat_timer "stat-$mode.trace" stat/xdiff 0 &&
 		test_stat_timer "stat-$mode.trace" stat/emit 0 &&
 		test_stat_timer "stat-$mode.trace" two-tree/queue 1 &&
 		test_stat_timer "stat-$mode.trace" result-code/reporting 1 ||
@@ -192,6 +202,10 @@ test_expect_success 'result reporting preserves rename-limit warnings after stat
 	test_trace2_data diff rename/inexact/similarity_calls 0 <stat-limit.trace &&
 	test_stat_timer stat-limit.trace two-tree/queue 1 &&
 	test_stat_timer stat-limit.trace stat/build 1 &&
+	test_stat_timer stat-limit.trace stat/binary-check 4 &&
+	test_stat_timer stat-limit.trace stat/content-populate 4 &&
+	test_stat_timer stat-limit.trace stat/count-lines 4 &&
+	test_stat_timer stat-limit.trace stat/xdiff 0 &&
 	test_stat_timer stat-limit.trace stat/emit 1 &&
 	test_stat_timer stat-limit.trace result-code/reporting 1
 '

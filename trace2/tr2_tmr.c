@@ -52,6 +52,22 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "stat/build",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_DIFF_STAT_BINARY_CHECK] = {
+		.category = "diff",
+		.name = "stat/binary-check",
+	},
+	[TRACE2_TIMER_ID_DIFF_STAT_CONTENT_POPULATE] = {
+		.category = "diff",
+		.name = "stat/content-populate",
+	},
+	[TRACE2_TIMER_ID_DIFF_STAT_COUNT_LINES] = {
+		.category = "diff",
+		.name = "stat/count-lines",
+	},
+	[TRACE2_TIMER_ID_DIFF_STAT_XDIFF] = {
+		.category = "diff",
+		.name = "stat/xdiff",
+	},
 	[TRACE2_TIMER_ID_DIFF_STAT_EMIT] = {
 		.category = "diff",
 		.name = "stat/emit",
