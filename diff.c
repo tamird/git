@@ -3690,6 +3690,15 @@ static void emit_binary_diff(struct diff_options *o,
 	emit_binary_diff_body(o, two, one);
 }
 
+int diff_filespec_binary_driver(struct repository *r,
+				struct diff_filespec *one)
+{
+	if (one->is_binary != -1)
+		return one->is_binary;
+	diff_filespec_load_driver(one, r->index);
+	return one->driver->binary;
+}
+
 int diff_filespec_is_binary(struct repository *r,
 			    struct diff_filespec *one)
 {
@@ -4438,6 +4447,7 @@ void fill_filespec(struct diff_filespec *spec, const struct object_id *oid,
 		spec->oid_valid = oid_valid;
 		spec->zero_size_known = 0;
 		spec->oid_data_unreplaced = 0;
+		spec->oid_size_unreplaced = 0;
 	}
 }
 
@@ -4550,6 +4560,19 @@ static int diff_populate_gitlink(struct diff_filespec *s, int size_only)
 	return 0;
 }
 
+int diff_filespec_can_reuse_spanhash(struct repository *r,
+				     struct diff_filespec *s)
+{
+	int ret, saved_errno = errno;
+
+	ret = S_ISREG(s->mode) && s->oid_size_unreplaced &&
+	      !s->populate_failed && !s->data &&
+	      lookup_replace_object(r, &s->oid) == &s->oid &&
+	      !reuse_worktree_file(r->index, s->path, &s->oid, 0);
+	errno = saved_errno;
+	return ret;
+}
+
 /*
  * While doing rename detection and pickaxe operation, we may need to
  * grab the data for the blob (or file) for our own in-core comparison.
@@ -4584,16 +4607,23 @@ retry:
 		s->zero_size_known = 0;
 		s->is_binary = -1;
 		s->oid_data_unreplaced = 0;
+		s->oid_size_unreplaced = 0;
 	}
 
-	if (s->data)
+	if (s->data) {
+		s->oid_size_unreplaced = 0;
 		return 0;
+	}
 
-	if (size_only && (0 < s->size || s->zero_size_known))
+	if (size_only && (0 < s->size || s->zero_size_known)) {
+		/* An earlier size read cannot prove the object is still present. */
+		s->oid_size_unreplaced = 0;
 		return 0;
+	}
 
 	if (S_ISGITLINK(s->mode)) {
 		s->oid_data_unreplaced = 0;
+		s->oid_size_unreplaced = 0;
 		return diff_populate_gitlink(s, size_only);
 	}
 
@@ -4605,6 +4635,7 @@ retry:
 		int fd;
 
 		s->oid_data_unreplaced = 0;
+		s->oid_size_unreplaced = 0;
 
 		if (lstat(s->path, &st) < 0)
 			goto worktree_error;
@@ -4712,8 +4743,16 @@ object_read:
 		s->size = cast_size_t_to_ulong(size_st);
 		s->zero_size_known = size_only && !s->size;
 		if (size_only || check_binary) {
-			if (size_only)
+			if (size_only) {
+				saved_errno = errno;
+				s->oid_size_unreplaced =
+					s->oid.algo == hash_algo_by_ptr(r->hash_algo) &&
+					lookup_replace_object(r, &s->oid) == &s->oid &&
+					source_info.source &&
+					source_info.source != r->objects->inmemory_objects;
+				errno = saved_errno;
 				return 0;
+			}
 			if (s->size > repo_settings_get_big_file_threshold(the_repository) &&
 			    s->is_binary == -1) {
 				s->is_binary = 1;
@@ -4735,6 +4774,7 @@ object_read:
 			lookup_replace_object(r, &s->oid) == &s->oid &&
 			source_info.source &&
 			source_info.source != r->objects->inmemory_objects;
+		s->oid_size_unreplaced = s->oid_data_unreplaced;
 		errno = saved_errno;
 	}
 	return 0;
@@ -4743,6 +4783,7 @@ object_read:
 void diff_free_filespec_blob(struct diff_filespec *s)
 {
 	s->oid_data_unreplaced = 0;
+	s->oid_size_unreplaced = 0;
 	if (s->should_free)
 		free(s->data);
 	else if (s->should_munmap)
@@ -5185,6 +5226,7 @@ static int diff_filespec_discard_unowned_empty(struct diff_filespec *spec)
 	spec->size = 0;
 	spec->is_binary = -1;
 	spec->oid_data_unreplaced = 0;
+	spec->oid_size_unreplaced = 0;
 	return 1;
 }
 

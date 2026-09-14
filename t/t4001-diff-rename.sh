@@ -309,4 +309,38 @@ test_expect_success 'last line matters too' '
 	test_cmp expected actual.munged
 '
 
+test_expect_success 'cached spans respect binary attributes on repeated blobs' '
+	mkdir cache-old cache-new &&
+	printf "alpha\\0bravo\\r\\nalpha\\0bravo\\r\\nalpha\\0bravo\\r\\n" >cache-old/auto &&
+	cp cache-old/auto cache-old/forced &&
+	cp cache-old/auto cache-old/forced2 &&
+	cat >.gitattributes <<-EOF &&
+	cache-old/forced diff
+	cache-old/forced2 diff
+	cache-new/forced diff
+	cache-new/forced2 diff
+	EOF
+	git add .gitattributes cache-old &&
+	git commit -m "span hash source" &&
+	tr -d "\\015" <cache-old/auto >cache-new/auto &&
+	cp cache-new/auto cache-new/forced &&
+	cp cache-new/auto cache-new/forced2 &&
+	git rm -r cache-old &&
+	git add cache-new &&
+	git commit -m "span hash destination" &&
+	GIT_TRACE2_EVENT="$PWD/cache-span.trace" \
+		git diff-tree -r -M --name-status HEAD^ HEAD -- "cache-*" >actual &&
+	test_trace2_data_singular diff rename/populate/size-only-count 6 <cache-span.trace &&
+	test_trace2_data_singular diff rename/populate/full-count 5 <cache-span.trace &&
+	cat >expected <<-EOF &&
+	A	cache-new/auto
+	D	cache-old/auto
+	R092	cache-old/forced	cache-new/forced
+	R092	cache-old/forced2	cache-new/forced2
+	EOF
+	sort actual >actual.sorted &&
+	sort expected >expected.sorted &&
+	test_cmp expected.sorted actual.sorted
+'
+
 test_done

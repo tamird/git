@@ -68,6 +68,7 @@ struct diff_filespec {
 	unsigned populate_failed : 1; /* failed worktree sentinel */
 	unsigned zero_size_known:1; /* successful size-only ODB read */
 	unsigned oid_data_unreplaced : 1; /* data came from an unreplaced ODB blob */
+	unsigned oid_size_unreplaced:1; /* size came from an unreplaced ODB blob */
 	unsigned dirty_submodule : 2;  /* For submodules: its work tree is dirty */
 #define DIRTY_SUBMODULE_UNTRACKED 1
 #define DIRTY_SUBMODULE_MODIFIED  2
@@ -102,6 +103,8 @@ struct diff_populate_filespec_options {
 };
 int diff_populate_filespec(struct repository *, struct diff_filespec *,
 			   const struct diff_populate_filespec_options *);
+int diff_filespec_can_reuse_spanhash(struct repository *, struct diff_filespec *);
+int diff_filespec_binary_driver(struct repository *, struct diff_filespec *);
 void diff_free_filespec_data(struct diff_filespec *);
 void diff_free_filespec_blob(struct diff_filespec *);
 int diff_filespec_is_binary(struct repository *, struct diff_filespec *);
@@ -243,6 +246,8 @@ void diff_debug_queue(const char *, struct diff_queue_struct *);
 void diffcore_prepare_count_changes(struct repository *r,
 				    struct diff_filespec *src,
 				    struct diff_filespec *dst);
+void diffcore_reuse_cached_spanhash(struct repository *r,
+				    struct diff_filespec *filespec);
 int diffcore_count_changes(struct repository *r,
 			   struct diff_filespec *src,
 			   struct diff_filespec *dst,

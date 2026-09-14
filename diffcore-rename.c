@@ -300,11 +300,14 @@ static int estimate_similarity(struct repository *r,
 	score_bound.src_size = src->size;
 	score_bound.dst_size = dst->size;
 	dpf_opt->check_size_only = 0;
-
-	if ((!src->cnt_data &&
-	     populate_similarity_filespec(r, src, dpf_opt)) ||
-	    (!dst->cnt_data &&
-	     populate_similarity_filespec(r, dst, dpf_opt))) {
+	diffcore_reuse_cached_spanhash(r, src);
+	if (!src->cnt_data && populate_similarity_filespec(r, src, dpf_opt)) {
+		if (stats)
+			stats->population_failed++;
+		return 0;
+	}
+	diffcore_reuse_cached_spanhash(r, dst);
+	if (!dst->cnt_data && populate_similarity_filespec(r, dst, dpf_opt)) {
 		if (stats)
 			stats->population_failed++;
 		return 0;

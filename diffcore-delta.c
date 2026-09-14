@@ -3,6 +3,7 @@
 #include "list.h"
 #include "repository.h"
 #include "trace2.h"
+#include "xdiff-interface.h"
 
 /*
  * Idea here is very simple.
@@ -59,6 +60,7 @@ struct span_cache_entry {
 	struct spanhash_top *value;
 	size_t value_bytes;
 	unsigned char is_text;
+	unsigned char auto_binary;
 };
 
 struct diff_spanhash_cache {
@@ -177,7 +179,8 @@ static void span_cache_clear_locked(struct repository *r)
 
 static struct spanhash_top *span_cache_lookup(struct repository *r,
 					      const struct object_id *oid,
-					      int is_text)
+					      int is_text, int require_auto_binary,
+					      int count_miss)
 {
 	struct diff_spanhash_cache *cache;
 	struct span_cache_entry *entry;
@@ -186,6 +189,8 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 	pthread_mutex_lock(&span_cache_mutex);
 	cache = r->spanhash_cache;
 	entry = cache ? span_cache_find(cache, oid, is_text) : NULL;
+	if (entry && require_auto_binary && entry->auto_binary == is_text)
+		entry = NULL;
 	if (entry) {
 		copy = malloc(entry->value_bytes);
 		if (copy) {
@@ -198,16 +203,17 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 			span_cache_bypassed++;
 		}
 	}
-	if (!copy)
+	if (!copy && count_miss)
 		span_cache_misses++;
 	pthread_mutex_unlock(&span_cache_mutex);
 	return copy;
 }
 
 static void span_cache_insert(struct repository *r,
-			      const struct object_id *oid, int is_text,
+			      const struct diff_filespec *one, int is_text,
 			      const struct spanhash_top *value)
 {
+	const struct object_id *oid = &one->oid;
 	struct diff_spanhash_cache *cache;
 	struct span_cache_entry *entry;
 	size_t bucket;
@@ -258,6 +264,8 @@ static void span_cache_insert(struct repository *r,
 	}
 	oidcpy(&entry->oid, oid);
 	entry->is_text = is_text;
+	entry->auto_binary = one->size &&
+			     buffer_is_binary(one->data, one->size);
 	entry->value_bytes = bytes;
 	entry->value = malloc(bytes);
 	if (!entry->value) {
@@ -427,7 +435,7 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 		if (one->oid_data_unreplaced) {
 			is_text = !diff_filespec_is_binary(r, one);
 			saved_errno = errno;
-			count = span_cache_lookup(r, &one->oid, is_text);
+			count = span_cache_lookup(r, &one->oid, is_text, 0, 1);
 		}
 
 		if (!count) {
@@ -437,13 +445,42 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 			saved_errno = errno;
 			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
 			if (is_text >= 0)
-				span_cache_insert(r, &one->oid, is_text, count);
+				span_cache_insert(r, one, is_text, count);
 		}
 		errno = saved_errno;
 		if (count_p)
 			*count_p = count;
 	}
 	return count;
+}
+
+void diffcore_reuse_cached_spanhash(struct repository *r,
+				    struct diff_filespec *one)
+{
+	int is_binary, is_text, saved_errno;
+	struct spanhash_top *count;
+
+	if (one->cnt_data || !diff_filespec_can_reuse_spanhash(r, one))
+		return;
+
+	saved_errno = errno;
+	is_binary = diff_filespec_binary_driver(r, one);
+	if (is_binary >= 0) {
+		is_text = !is_binary;
+		count = span_cache_lookup(r, &one->oid, is_text, 0, 0);
+	} else {
+		is_text = 1;
+		count = span_cache_lookup(r, &one->oid, is_text, 1, 0);
+		if (!count) {
+			is_text = 0;
+			count = span_cache_lookup(r, &one->oid, is_text, 1, 0);
+		}
+	}
+	if (count) {
+		one->cnt_data = count;
+		one->is_binary = !is_text;
+	}
+	errno = saved_errno;
 }
 
 void diffcore_prepare_count_changes(struct repository *r,
