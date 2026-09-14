@@ -270,4 +270,34 @@ test_expect_success 'inexact rename with a rehashed span table' '
 	)
 '
 
+test_expect_success 'empty ODB destination size is populated once' '
+	test_create_repo empty-destination &&
+	(
+		cd empty-destination &&
+		for i in 1 2 3 4
+		do
+			printf "nonempty-%s\n" "$i" >"source-$i" || return 1
+		done &&
+		git add source-* &&
+		old_tree=$(git write-tree) &&
+		git rm -f -- source-* &&
+		: >empty &&
+		git add empty &&
+		new_tree=$(git write-tree) &&
+		printf "A\tempty\nD\tsource-1\nD\tsource-2\nD\tsource-3\nD\tsource-4\n" >expect &&
+		GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+			git diff-tree -r -M --name-status "$old_tree" "$new_tree" >untraced &&
+		test_cmp expect untraced &&
+		GIT_TRACE2_EVENT="$PWD/empty-destination.trace" \
+			git diff-tree -r -M --name-status "$old_tree" "$new_tree" >traced &&
+		test_cmp untraced traced &&
+		test_trace2_data diff rename/inexact/size_rejected 4 \
+			<empty-destination.trace &&
+		test_trace2_data diff rename/populate/size-only-count 5 \
+			<empty-destination.trace &&
+		test_trace2_data diff rename/populate/full-count 0 \
+			<empty-destination.trace
+	)
+'
+
 test_done

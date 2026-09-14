@@ -4381,6 +4381,7 @@ void fill_filespec(struct diff_filespec *spec, const struct object_id *oid,
 		spec->mode = canon_mode(mode);
 		oidcpy(&spec->oid, oid);
 		spec->oid_valid = oid_valid;
+		spec->zero_size_known = 0;
 		spec->oid_data_unreplaced = 0;
 	}
 }
@@ -4525,6 +4526,7 @@ retry:
 		s->populate_failed = 0;
 		s->data = NULL;
 		s->size = 0;
+		s->zero_size_known = 0;
 		s->is_binary = -1;
 		s->oid_data_unreplaced = 0;
 	}
@@ -4532,7 +4534,7 @@ retry:
 	if (s->data)
 		return 0;
 
-	if (size_only && 0 < s->size)
+	if (size_only && (0 < s->size || s->zero_size_known))
 		return 0;
 
 	if (S_ISGITLINK(s->mode)) {
@@ -4653,6 +4655,7 @@ retry:
 
 object_read:
 		s->size = cast_size_t_to_ulong(size_st);
+		s->zero_size_known = size_only && !s->size;
 		if (size_only || check_binary) {
 			if (size_only)
 				return 0;

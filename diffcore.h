@@ -66,6 +66,7 @@ struct diff_filespec {
 	unsigned should_free : 1; /* data should be free()'ed */
 	unsigned should_munmap : 1; /* data should be munmap()'ed */
 	unsigned populate_failed : 1; /* failed worktree sentinel */
+	unsigned zero_size_known:1; /* successful size-only ODB read */
 	unsigned oid_data_unreplaced : 1; /* data came from an unreplaced ODB blob */
 	unsigned dirty_submodule : 2;  /* For submodules: its work tree is dirty */
 #define DIRTY_SUBMODULE_UNTRACKED 1

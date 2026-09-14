@@ -196,7 +196,8 @@ static int populate_similarity_filespec(struct repository *r,
 	/* Do not time the population helper's cached successful returns. */
 	if (!trace2_is_enabled() ||
 	    (!s->populate_failed &&
-	     (s->data || (options->check_size_only && s->size))))
+	     (s->data || (options->check_size_only &&
+			  (s->size || s->zero_size_known)))))
 		return diff_populate_filespec(r, s, options);
 
 	saved_errno = errno;
@@ -264,10 +265,8 @@ static int estimate_similarity(struct repository *r,
 	 * Need to check that source and destination sizes are
 	 * filled in before comparing them.
 	 *
-	 * If we already have "cnt_data" filled in, we know it's
-	 * all good (avoid checking the size for zero, as that
-	 * is a possible size - we really should have a flag to
-	 * say whether the size is valid or not!)
+	 * If "cnt_data" is filled in, the size is known, including zero.
+	 * Otherwise, populate the size before comparing the pair.
 	 */
 	dpf_opt->check_size_only = 1;
 
