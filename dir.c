@@ -3873,6 +3873,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.repaired_subtrees = 0;
 	dir->internal.can_prune_replay = 0;
 	dir->internal.stat_prevalidated = 0;
+	dir->internal.untracked_cache_revalidated = 0;
 	dir->internal.icase_scan_budget_used = 0;
 
 	if (has_symlink_leading_path(path, len)) {
@@ -3883,6 +3884,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	untracked = validate_untracked_cache(dir, len, istate, pathspec,
 					     &negative_only, &revalidated);
 	dir->internal.stat_prevalidated = revalidated;
+	dir->internal.untracked_cache_revalidated = !!untracked && revalidated;
 	trace2_data_intmax("untracked_cache", istate->repo, "requested-flags",
 			   dir->flags);
 	trace2_data_intmax("untracked_cache", istate->repo, "stored-flags",

@@ -1110,6 +1110,54 @@ test_expect_success 'prepare production pending-cache index' '
 	)
 '
 
+test_expect_success 'ls-files persists a revalidated cache with a glob pathspec' '
+	(
+		cd pending-cache &&
+		cp .git/pending .git/ls-files-pending &&
+		GIT_INDEX_FILE=.git/ls-files-pending &&
+		export GIT_INDEX_FILE &&
+		echo a/loose/one >.git/ls-files-expected &&
+		GIT_TRACE2_EVENT="$PWD/.git/ls-files-first.trace" \
+			git ls-files --others --exclude-standard -- \
+			":(glob)**/one" >.git/ls-files-first.out &&
+		test_cmp .git/ls-files-expected .git/ls-files-first.out &&
+		test_trace2_data untracked_cache negative-only 1 \
+			<.git/ls-files-first.trace &&
+		test_grep "\"event\":\"timer\".*\"category\":\"untracked_cache\",\"name\":\"revalidate\",\"intervals\":1," \
+			.git/ls-files-first.trace &&
+		test-tool dump-untracked-cache state >.git/ls-files-state &&
+		echo trusted >.git/ls-files-trusted &&
+		test_cmp .git/ls-files-trusted .git/ls-files-state &&
+		GIT_TRACE2_EVENT="$PWD/.git/ls-files-second.trace" \
+			git ls-files --others --exclude-standard -- \
+			":(glob)**/one" >.git/ls-files-second.out &&
+		test_cmp .git/ls-files-first.out .git/ls-files-second.out &&
+		test_grep ! "\"event\":\"timer\".*\"category\":\"untracked_cache\",\"name\":\"revalidate\"" \
+			.git/ls-files-second.trace
+	)
+'
+
+test_expect_success 'ls-files keeps a pending cache when an optional lock is unavailable' '
+	test_when_finished "rm -f pending-cache/.git/ls-files-locked.lock" &&
+	(
+		cd pending-cache &&
+		cp .git/pending .git/ls-files-unlocked &&
+		GIT_INDEX_FILE=.git/ls-files-unlocked \
+			git --no-optional-locks ls-files --others \
+			--exclude-standard -- ":(glob)**/one" \
+			>.git/ls-files-unlocked.out &&
+		test_cmp .git/ls-files-expected .git/ls-files-unlocked.out &&
+		test_cmp .git/pending .git/ls-files-unlocked &&
+		cp .git/pending .git/ls-files-locked &&
+		: >.git/ls-files-locked.lock &&
+		GIT_INDEX_FILE=.git/ls-files-locked \
+			git ls-files --others --exclude-standard -- \
+			":(glob)**/one" >.git/ls-files-locked.out &&
+		test_cmp .git/ls-files-expected .git/ls-files-locked.out &&
+		test_cmp .git/pending .git/ls-files-locked
+	)
+'
+
 test_expect_success 'pending stat results do not outlive one directory read' '
 	test_when_finished "rm -f pending-cache/b/new" &&
 	(

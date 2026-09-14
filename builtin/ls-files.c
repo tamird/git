@@ -805,7 +805,9 @@ int cmd_ls_files(int argc,
 	}
 
 	show_files(repo, &dir);
-	if (dir.internal.repaired_subtrees && use_optional_locks() &&
+	if ((dir.internal.repaired_subtrees ||
+	     dir.internal.untracked_cache_revalidated) &&
+	    use_optional_locks() &&
 	    repo_hold_locked_index(repo, &index_lock, 0) >= 0)
 		repo_update_index_if_able(repo, &index_lock);
 
