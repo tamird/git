@@ -187,6 +187,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "follow-pickaxe/ordinary-tree-read",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_PICKAXE_MATCHER_PREPARE] = {
+		.category = "pickaxe",
+		.name = "matcher-prepare",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_PICKAXE_FILTER] = {
 		.category = "pickaxe",
 		.name = "filter",

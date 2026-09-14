@@ -527,6 +527,8 @@ void diffcore_pickaxe(struct diff_options *o)
 	if (opts & ~DIFF_PICKAXE_KIND_OBJFIND &&
 	    (!needle || !*needle))
 		BUG("should have needle under -G or -S");
+	if (opts & (DIFF_PICKAXE_KIND_S | DIFF_PICKAXE_KIND_G))
+		trace2_timer_start(TRACE2_TIMER_ID_PICKAXE_MATCHER_PREPARE);
 	if (opts & (DIFF_PICKAXE_REGEX | DIFF_PICKAXE_KIND_G)) {
 		int cflags = REG_EXTENDED | REG_NEWLINE;
 		if (o->pickaxe_opts & DIFF_PICKAXE_IGNORE_CASE)
@@ -569,6 +571,8 @@ void diffcore_pickaxe(struct diff_options *o)
 	} else {
 		BUG("unknown pickaxe_opts flag");
 	}
+	if (opts & (DIFF_PICKAXE_KIND_S | DIFF_PICKAXE_KIND_G))
+		trace2_timer_stop(TRACE2_TIMER_ID_PICKAXE_MATCHER_PREPARE);
 
 	if ((opts & (DIFF_PICKAXE_KIND_S | DIFF_PICKAXE_KIND_G)) &&
 	    o->pickaxe_index_state) {
