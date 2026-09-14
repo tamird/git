@@ -271,6 +271,26 @@ test_expect_success JSON_PP 'basic trace2_data' '
 	test_cmp expect actual
 '
 
+test_expect_success JSON_PP,MACOS 'event stream, Darwin resource usage' '
+	test_when_finished "rm trace.event" &&
+	GIT_TRACE2_EVENT="$(pwd)/trace.event" test-tool trace2 001return 0 &&
+	perl -MJSON::PP - trace.event <<-"EOF"
+		my %values;
+		while (<>) {
+			my $event = decode_json($_);
+			next unless $event->{event} eq "data" &&
+				$event->{category} eq "process";
+			$values{$event->{key}} = $event->{value};
+		}
+		for my $key (qw(darwin/user_cpu_us darwin/system_cpu_us
+				darwin/minor_faults darwin/major_faults)) {
+			die "missing or invalid $key\n"
+				unless defined $values{$key} &&
+					$values{$key} =~ /\A[0-9]+\z/;
+		}
+	EOF
+'
+
 # Now test without environment variables and get all Trace2 settings
 # from the global config.
 

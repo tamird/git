@@ -2,6 +2,7 @@
 #include "strbuf.h"
 #include "strvec.h"
 #include "trace2.h"
+#include <sys/resource.h>
 #include <sys/sysctl.h>
 
 /*
@@ -67,6 +68,23 @@ cleanup:
 	strbuf_release(&name);
 }
 
+static void trace_resource_usage(void)
+{
+	struct rusage usage;
+
+	if (getrusage(RUSAGE_SELF, &usage))
+		return;
+
+	trace2_data_intmax("process", NULL, "darwin/user_cpu_us",
+			   (intmax_t)usage.ru_utime.tv_sec * 1000000 +
+				   usage.ru_utime.tv_usec);
+	trace2_data_intmax("process", NULL, "darwin/system_cpu_us",
+			   (intmax_t)usage.ru_stime.tv_sec * 1000000 +
+				   usage.ru_stime.tv_usec);
+	trace2_data_intmax("process", NULL, "darwin/minor_faults", usage.ru_minflt);
+	trace2_data_intmax("process", NULL, "darwin/major_faults", usage.ru_majflt);
+}
+
 void trace2_collect_process_info(enum trace2_process_info_reason reason)
 {
 	struct strvec names = STRVEC_INIT;
@@ -84,11 +102,7 @@ void trace2_collect_process_info(enum trace2_process_info_reason reason)
 		break;
 
 	case TRACE2_PROCESS_INFO_EXIT:
-		/*
-		 * The Windows version of this calls its
-		 * get_peak_memory_info() here. We may want to insert
-		 * similar process-end statistics here in the future.
-		 */
+		trace_resource_usage();
 		break;
 
 	default:

@@ -218,6 +218,8 @@ while (<>) {
 	my $cat = $line->{'category'};
 	my $key = $line->{'key'};
 	my $value = $line->{'value'};
+	# Platform-specific process counters vary between runs.
+	next if $cat eq 'process';
 	$processes->{$sid}->{'data'}->{$cat}->{$key} = $value;
     }
 
