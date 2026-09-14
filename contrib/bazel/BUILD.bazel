@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "curl-zlib.patch",
     "defs.bzl",
+    "openssl-source-opensslconf.patch",
     "rules-rs-zlib.patch",
 ])
 

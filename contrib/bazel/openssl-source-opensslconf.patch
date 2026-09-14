@@ -1,0 +1,10 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -554,5 +554,6 @@
+         }),
+         out = src,
+     )
+     for src in _COMMON_GENERATED_FILES_COMBINED
++    if src != "include/openssl/opensslconf.h"
+ ]

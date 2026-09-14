@@ -25,6 +25,12 @@ single_version_override(
 )
 
 single_version_override(
+    module_name = "openssl",
+    patches = ["//contrib/bazel:openssl-source-opensslconf.patch"],
+    patch_strip = 1,
+)
+
+single_version_override(
     module_name = "rules_rs",
     patches = ["//contrib/bazel:rules-rs-zlib.patch"],
     patch_strip = 1,
