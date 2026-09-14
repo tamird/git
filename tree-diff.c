@@ -676,6 +676,8 @@ static uintmax_t follow_tree_cache_hits, follow_tree_cache_misses;
 static uintmax_t follow_tree_cache_evictions, follow_tree_cache_bypassed;
 static uintmax_t follow_tree_cache_retained, follow_tree_cache_peak;
 static int follow_tree_cache_report_registered;
+static uintmax_t follow_tree_cache_ordinary_selected;
+static uintmax_t follow_tree_cache_ordinary_present;
 
 static size_t follow_tree_cache_bytes(const struct diff_follow_tree_cache *cache)
 {
@@ -708,7 +710,19 @@ static void follow_tree_cache_report(void)
 			   follow_tree_cache_bypassed);
 	trace2_data_intmax("diff", NULL, "follow-tree-cache/peak_bytes",
 			   follow_tree_cache_peak);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/ordinary-probe/selected",
+			   follow_tree_cache_ordinary_selected);
+	trace2_data_intmax("diff", NULL, "follow-tree-cache/ordinary-probe/present",
+			   follow_tree_cache_ordinary_present);
 	errno = saved_errno;
+}
+
+/* Called under follow_tree_cache_mutex. */
+static void follow_tree_cache_register_report(void)
+{
+	if (!follow_tree_cache_report_registered && trace2_is_enabled() &&
+	    !atexit(follow_tree_cache_report))
+		follow_tree_cache_report_registered = 1;
 }
 
 static size_t follow_tree_cache_bucket(const struct object_id *oid)
@@ -735,6 +749,33 @@ static struct follow_tree_cache_entry *follow_tree_cache_find(
 		if (entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
 			return entry;
 	return NULL;
+}
+
+/* Observe existing entries without changing the cache or its hit/miss counts. */
+static void follow_tree_cache_probe_ordinary(struct repository *repo,
+					     const struct object_id *oid)
+{
+	struct diff_follow_tree_cache *cache;
+	int replace_mode, saved_errno;
+
+	/*
+	 * Stable 1/64 OID sampling can miss a hot OID entirely. The cache only
+	 * contains trees inserted by unrestricted --follow searches.
+	 */
+	if (oid->hash[0] & (TRACE2_FOLLOW_OID_SAMPLE_MODULUS - 1))
+		return;
+	saved_errno = errno;
+	replace_mode = replace_refs_enabled(repo);
+	pthread_mutex_lock(&follow_tree_cache_mutex);
+	follow_tree_cache_register_report();
+	follow_tree_cache_ordinary_selected++;
+	cache = repo->follow_tree_cache;
+	if (cache && cache->replace_mode == replace_mode &&
+	    follow_tree_cache_eligible(repo, oid) &&
+	    follow_tree_cache_find(cache, oid))
+		follow_tree_cache_ordinary_present++;
+	pthread_mutex_unlock(&follow_tree_cache_mutex);
+	errno = saved_errno;
 }
 
 static void follow_tree_cache_clear_locked(struct repository *repo)
@@ -779,9 +820,7 @@ static void *follow_tree_cache_lookup(struct repository *repo,
 	int saved_errno = errno;
 
 	pthread_mutex_lock(&follow_tree_cache_mutex);
-	if (!follow_tree_cache_report_registered && trace2_is_enabled() &&
-	    !atexit(follow_tree_cache_report))
-		follow_tree_cache_report_registered = 1;
+	follow_tree_cache_register_report();
 	cache = repo->follow_tree_cache;
 	if (cache && cache->replace_mode != replace_mode) {
 		follow_tree_cache_clear_locked(repo);
@@ -1279,6 +1318,8 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 			return fill_tree_descriptor(opt->repo, desc, oid);
 
 		saved_errno = errno;
+		follow_tree_cache_probe_ordinary(opt->repo, oid);
+		errno = saved_errno;
 		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
 		errno = saved_errno;
 		buffer = fill_tree_descriptor(opt->repo, desc, oid);
