@@ -311,9 +311,9 @@ int repo_verify_index(struct repository *repo);
 int repo_read_index_unmerged(struct repository *);
 /*
  * Opportunistically update the index but do not complain if we can't.
- * The lockfile is always committed or rolled back.
+ * The lockfile is always committed or rolled back. Return 1 if written.
  */
-void repo_update_index_if_able(struct repository *, struct lock_file *);
+int repo_update_index_if_able(struct repository *, struct lock_file *);
 
 /*
  * Return 1 if upgrade repository format to target_version succeeded,

@@ -700,6 +700,7 @@ enum fsmonitor_untracked_cache_save_outcome {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED = 7,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_UNREADABLE = 8,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED = 9,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_ALREADY_PRESENT = 10,
 };
 
 /* Keep these private Trace2 reply values stable. */
@@ -707,6 +708,7 @@ enum fsmonitor_untracked_cache_save_reply {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS = 1,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISSING = 2,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER = 3,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_EXISTS = 4,
 };
 
 void fsmonitor_ipc__save_untracked_cache(
@@ -783,8 +785,11 @@ void fsmonitor_ipc__save_untracked_cache(
 				   "untracked-cache/compressed", 1);
 	}
 
-	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
-		    "put %s %s ", oid_to_hex(index_oid),
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "%s %s %s ",
+		    mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
+			    "put-if-absent" :
+			    "put",
+		    oid_to_hex(index_oid),
 		    istate->fsmonitor_last_update);
 	start = command.len;
 	strbuf_grow(&command, snapshot.len * 2);
@@ -801,7 +806,11 @@ void fsmonitor_ipc__save_untracked_cache(
 		goto done;
 	}
 	if (answer.len != 2 || memcmp(answer.buf, "ok", 2)) {
-		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK;
+		outcome = answer.len == 6 &&
+					  !memcmp(answer.buf, "exists", 6) &&
+					  mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
+				  FSMONITOR_UNTRACKED_CACHE_SAVE_ALREADY_PRESENT :
+				  FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK;
 		if (trace2_is_enabled()) {
 			int saved_errno = errno;
 			enum fsmonitor_untracked_cache_save_reply reply =
@@ -811,6 +820,8 @@ void fsmonitor_ipc__save_untracked_cache(
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS;
 			else if (answer.len == 7 && !memcmp(answer.buf, "missing", 7))
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISSING;
+			else if (answer.len == 6 && !memcmp(answer.buf, "exists", 6))
+				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_EXISTS;
 			trace2_data_intmax("fsmonitor", istate->repo,
 					   "untracked-cache/save-reply", reply);
 			errno = saved_errno;

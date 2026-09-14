@@ -497,6 +497,150 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 	done
 '
 
+test_expect_success 'lock-free diff shares tracked validity without replacing status snapshot' '
+	test_when_finished "stop_daemon_delete_repo test_diff_snapshot" &&
+	git init test_diff_snapshot &&
+	(
+		cd test_diff_snapshot &&
+		test_commit base tracked &&
+		mkdir -p nested &&
+		test_commit nested nested/tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		test-tool chmtime =-300 . nested
+	) &&
+	start_daemon -C test_diff_snapshot &&
+	(
+		cd test_diff_snapshot &&
+		git status --porcelain >../diff-snapshot.initial &&
+		test-tool fsmonitor-client flush >/dev/null &&
+		git status --porcelain -uno >../diff-snapshot.pending &&
+		test_must_be_empty ../diff-snapshot.pending &&
+		test-tool dump-untracked-cache state >../diff-snapshot.state &&
+		test_grep "^pending " ../diff-snapshot.state &&
+		# Leave the pending tree on disk, but invalidate its tracked bitmap.
+		test-tool fsmonitor-client flush >/dev/null &&
+		git hash-object .git/index >../diff-snapshot.index-before &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-scoped.trace" \
+			git --no-optional-locks diff --name-only -- tracked \
+			>../diff-snapshot-scoped.out &&
+		test_must_be_empty ../diff-snapshot-scoped.out &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../diff-snapshot-scoped.trace &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-first.trace" \
+			git --no-optional-locks diff --name-only \
+			>../diff-snapshot-first.out &&
+		test_must_be_empty ../diff-snapshot-first.out &&
+		test_trace2_data index preload/sum_lstat 1 \
+			<../diff-snapshot-first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../diff-snapshot-first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 0 \
+			<../diff-snapshot-first.trace &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-tree.trace" \
+			git --no-optional-locks diff HEAD --name-only \
+			>../diff-snapshot-tree.out &&
+		test_must_be_empty ../diff-snapshot-tree.out &&
+		test_trace2_data fsmonitor tracked-cache/restored 2 \
+			<../diff-snapshot-tree.trace &&
+		test_trace2_data index preload/sum_lstat 0 \
+			<../diff-snapshot-tree.trace &&
+		git hash-object .git/index >../diff-snapshot.index-after &&
+		test_cmp ../diff-snapshot.index-before \
+			../diff-snapshot.index-after &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-status.trace" \
+			git --no-optional-locks status --porcelain \
+			>../diff-snapshot-status.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../diff-snapshot.expect &&
+		test_cmp ../diff-snapshot.expect ../diff-snapshot-status.out &&
+		test_cmp ../diff-snapshot.initial ../diff-snapshot-status.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../diff-snapshot-status.trace &&
+		test_trace2_data fsmonitor tracked-cache/restored 2 \
+			<../diff-snapshot-status.trace &&
+		! have_t2_data_event index preload/sum_lstat \
+			<../diff-snapshot-status.trace &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<../diff-snapshot-status.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+			<../diff-snapshot-status.trace &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-preserve.trace" \
+			test-tool fsmonitor-client save-untracked-cache \
+			--current-token --if-absent &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 10 \
+			<../diff-snapshot-preserve.trace &&
+		GIT_TRACE2_EVENT_NESTING=4 \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-warm.trace" \
+			git --no-optional-locks status --porcelain \
+			>../diff-snapshot-warm.out &&
+		test_cmp ../diff-snapshot.initial ../diff-snapshot-warm.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../diff-snapshot-warm.trace &&
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<../diff-snapshot-warm.trace &&
+		test_trace2_data status untracked/directories-visited 0 \
+			<../diff-snapshot-warm.trace &&
+		test-tool fsmonitor-client query --token=builtin:fake \
+			>../diff-snapshot.token-before &&
+		echo modified >>tracked &&
+		test-tool fsmonitor-client query --token=builtin:fake \
+			>../diff-snapshot.token-advanced &&
+		! cmp -s ../diff-snapshot.token-before \
+			../diff-snapshot.token-advanced &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-new-token.trace" \
+			git --no-optional-locks diff --name-only \
+			>../diff-snapshot-new-token.out &&
+		echo tracked >../diff-snapshot-new-token.expect &&
+		test_cmp ../diff-snapshot-new-token.expect \
+			../diff-snapshot-new-token.out &&
+		test_trace2_data fsmonitor untracked-cache/restore miss \
+			<../diff-snapshot-new-token.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../diff-snapshot-new-token.trace &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-new-token-status.trace" \
+			git --no-optional-locks status --porcelain \
+			>../diff-snapshot-new-token-status.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../diff-snapshot-new-token-status.expect &&
+		test_cmp ../diff-snapshot-new-token-status.expect \
+			../diff-snapshot-new-token-status.out &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
+			<../diff-snapshot-new-token-status.trace &&
+		test-tool fsmonitor-client query --token=builtin:fake \
+			>../diff-snapshot.token-before &&
+		git -c core.fsmonitor=false update-index --add \
+			--cacheinfo 100644,$(git rev-parse HEAD:tracked),index-only &&
+		test-tool fsmonitor-client query --token=builtin:fake \
+			>../diff-snapshot.token-after &&
+		test_cmp ../diff-snapshot.token-before \
+			../diff-snapshot.token-after &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-new-index.trace" \
+			test-tool fsmonitor-client save-untracked-cache \
+			--current-token --if-absent &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../diff-snapshot-new-index.trace &&
+		test-tool fsmonitor-client flush >/dev/null &&
+		git status --porcelain -uno >../diff-snapshot-last-pending.out &&
+		test-tool fsmonitor-client flush >/dev/null &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-writable.trace" \
+			git diff --name-only >../diff-snapshot-writable.out &&
+		git --no-optional-locks -c core.fsmonitor=false diff --name-only \
+			>../diff-snapshot-writable.expect &&
+		test_cmp ../diff-snapshot-writable.expect \
+			../diff-snapshot-writable.out &&
+		test_trace2_data index write/cache_nr 3 \
+			<../diff-snapshot-writable.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../diff-snapshot-writable.trace
+	)
+'
+
 test_expect_success 'git diff rereads an index after a worktree change' '
 	test_when_finished "stop_daemon_delete_repo test_diff_refresh_changed" &&
 	git init test_diff_refresh_changed &&

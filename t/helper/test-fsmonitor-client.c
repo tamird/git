@@ -89,7 +89,8 @@ static int do_send_flush(void)
 	return 0;
 }
 
-static int do_save_untracked_cache(const char *token)
+static int do_save_untracked_cache(const char *token, int current_token,
+				   int if_absent)
 {
 	struct index_state *istate = the_repository->index;
 
@@ -99,9 +100,11 @@ static int do_save_untracked_cache(const char *token)
 	if (token) {
 		free(istate->fsmonitor_last_update);
 		istate->fsmonitor_last_update = xstrdup(token);
-	}
+	} else if (current_token)
+		refresh_fsmonitor(istate);
 	fsmonitor_ipc__save_untracked_cache(
-		istate, FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
+		istate, if_absent ? FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT :
+				    FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
 	return 0;
 }
 
@@ -407,6 +410,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 {
 	const char *subcmd;
 	const char *token = NULL;
+	int current_token = 0, if_absent = 0;
 	int nr_threads = 1;
 	int nr_requests = 1;
 
@@ -415,7 +419,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client query [<token>]",
 		"test-tool fsmonitor-client flush",
 		"test-tool fsmonitor-client ipc-path",
-		"test-tool fsmonitor-client save-untracked-cache [--token=<token>]",
+		"test-tool fsmonitor-client save-untracked-cache [--token=<token> | --current-token] [--if-absent]",
 		"test-tool fsmonitor-client save-overdeep-untracked-cache",
 		"test-tool fsmonitor-client test-untracked-snapshot-dir-bound",
 		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
@@ -426,6 +430,10 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	struct option options[] = {
 		OPT_STRING(0, "token", &token, "token",
 			   "command token to send to the server"),
+		OPT_BOOL(0, "current-token", &current_token,
+			 "refresh the token from the daemon"),
+		OPT_BOOL(0, "if-absent", &if_absent,
+			 "preserve a snapshot already saved at the current token"),
 
 		OPT_INTEGER(0, "threads", &nr_threads, "number of client threads"),
 		OPT_INTEGER(0, "requests", &nr_requests, "number of requests per thread"),
@@ -457,7 +465,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	}
 
 	if (!strcmp(subcmd, "save-untracked-cache"))
-		return do_save_untracked_cache(token);
+		return do_save_untracked_cache(token, current_token, if_absent);
 	if (!strcmp(subcmd, "save-overdeep-untracked-cache"))
 		return do_save_overdeep_untracked_cache();
 	if (!strcmp(subcmd, "test-untracked-snapshot-dir-bound"))

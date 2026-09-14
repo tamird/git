@@ -764,6 +764,8 @@ static int fsmonitor_handle_untracked_cache(
 	strbuf_addstr(&response, "miss");
 	if (skip_prefix(command, "get ", &p))
 		save = 0;
+	else if (skip_prefix(command, "put-if-absent ", &p))
+		save = 2;
 	else if (skip_prefix(command, "put ", &p))
 		save = 1;
 	else
@@ -827,6 +829,13 @@ static int fsmonitor_handle_untracked_cache(
 
 	strbuf_reset(&response);
 	if (save) {
+		/* A concurrent status may have saved a complete tree. */
+		if (save == 2 && state->untracked_cache_data.len &&
+		    !strcmp(index_oid.buf, state->untracked_cache_oid.buf) &&
+		    !strcmp(token.buf, state->untracked_cache_token.buf)) {
+			strbuf_addstr(&response, "exists");
+			goto unlock;
+		}
 		strbuf_swap(&state->untracked_cache_oid, &index_oid);
 		strbuf_swap(&state->untracked_cache_token, &token);
 		strbuf_swap(&state->untracked_cache_data, &snapshot);

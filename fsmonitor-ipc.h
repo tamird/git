@@ -21,6 +21,8 @@ enum fsmonitor_untracked_cache_result {
 enum fsmonitor_untracked_cache_save_mode {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL,
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPAIR,
+	/* Preserve a snapshot that another command saved while this one ran. */
+	FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT,
 };
 
 /* Hash the canonical worktree root and its stable filesystem identity. */

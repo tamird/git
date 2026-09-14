@@ -143,9 +143,46 @@ static void builtin_diff_blobs(struct rev_info *revs,
 	diff_flush(&revs->diffopt);
 }
 
+static int diff_snapshot_eligible(const struct rev_info *revs,
+				  int sparse_validation_scoped)
+{
+	const struct index_state *istate = the_repository->index;
+
+	return !revs->prune_data.nr && !revs->diffopt.pathspec.nr &&
+	       !revs->diffopt.prefix_length && !sparse_validation_scoped &&
+	       !istate->split_index && istate->untracked &&
+	       istate->untracked->root && istate->untracked->fsmonitor_resync &&
+	       fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_IPC;
+}
+
+static int restore_diff_snapshot(const struct rev_info *revs,
+				 int sparse_validation_scoped)
+{
+	const char *reason;
+
+	if (!diff_snapshot_eligible(revs, sparse_validation_scoped))
+		return 0;
+	return fsmonitor_ipc__restore_untracked_cache(the_repository->index,
+						      &reason) ==
+	       FSMONITOR_UNTRACKED_CACHE_HIT;
+}
+
+static void save_diff_snapshot(const struct rev_info *revs,
+			       int sparse_validation_scoped, int restored)
+{
+	if (restored || !diff_snapshot_eligible(revs, sparse_validation_scoped) ||
+	    !(the_repository->index->cache_changed & FSMONITOR_CHANGED))
+		return;
+
+	/* The pending untracked tree stays invalid until status scans it. */
+	fsmonitor_ipc__save_untracked_cache(the_repository->index,
+					    FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT);
+}
+
 static int builtin_diff_index(struct rev_info *revs,
 			      int argc, const char **argv,
-			      int *sparse_validation_scoped)
+			      int *sparse_validation_scoped,
+			      int *snapshot_restored)
 {
 	unsigned int option = 0;
 	while (1 < argc) {
@@ -173,6 +210,8 @@ static int builtin_diff_index(struct rev_info *revs,
 			    sparse_validation_scoped) < 0) {
 			die_errno("repo_read_index_preload");
 		}
+		*snapshot_restored = restore_diff_snapshot(revs,
+							   *sparse_validation_scoped);
 		preload_index(the_repository->index,
 			      &revs->diffopt.pathspec, 0);
 	} else if (repo_read_index(the_repository) < 0) {
@@ -253,13 +292,15 @@ static void builtin_diff_combined(struct rev_info *revs,
 	oid_array_clear(&parents);
 }
 
-static void update_index_if_able(struct lock_file *lock_file)
+static int update_index_if_able(struct lock_file *lock_file)
 {
 	uint64_t start = getnanotime();
+	int written;
 
-	repo_update_index_if_able(the_repository, lock_file);
+	written = repo_update_index_if_able(the_repository, lock_file);
 	trace2_data_intmax("diff", the_repository, "finalize/index-update-us",
 			   (getnanotime() - start) / 1000);
+	return written;
 }
 
 /*
@@ -278,7 +319,7 @@ enum diff_index_reuse_outcome {
 	DIFF_INDEX_REUSE_REPLY_CONTENT_MISMATCH = 9,
 };
 
-static void refresh_index_quietly(const struct pathspec *pathspec,
+static int refresh_index_quietly(const struct pathspec *pathspec,
 				 int allow_index_reuse)
 {
 	struct lock_file lock_file = LOCK_INIT;
@@ -291,7 +332,7 @@ static void refresh_index_quietly(const struct pathspec *pathspec,
 
 	fd = repo_hold_locked_index(the_repository, &lock_file, 0);
 	if (fd < 0)
-		return;
+		return 0;
 
 	/* A synchronized, unchanged token proves the first snapshot is current. */
 	token = istate->fsmonitor_last_update;
@@ -329,12 +370,13 @@ static void refresh_index_quietly(const struct pathspec *pathspec,
 	}
 	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED,
 		      pathspec, NULL, NULL);
-	update_index_if_able(&lock_file);
+	return update_index_if_able(&lock_file);
 }
 
 static void builtin_diff_files(struct rev_info *revs, int argc,
 			       const char **argv,
-			       int *sparse_validation_scoped)
+			       int *sparse_validation_scoped,
+			       int *snapshot_restored)
 {
 	unsigned int options = 0;
 
@@ -372,6 +414,8 @@ static void builtin_diff_files(struct rev_info *revs, int argc,
 		    sparse_validation_scoped) < 0) {
 		die_errno("repo_read_index_preload");
 	}
+	*snapshot_restored = restore_diff_snapshot(revs,
+						   *sparse_validation_scoped);
 	if (!revs->diffopt.pathspec.nr &&
 	    !revs->diffopt.flags.quick &&
 	    !revs->diffopt.flags.find_copies_harder &&
@@ -504,6 +548,7 @@ int cmd_diff(int argc,
 	int nongit = 0, no_index = 0;
 	int sparse_validation_scoped = 0;
 	int worktree_diff = 0;
+	int snapshot_restored = 0, index_written = 0;
 	int result;
 	struct symdiff sdiff;
 	uint64_t t_begin = getnanotime();
@@ -715,7 +760,8 @@ int cmd_diff(int argc,
 		switch (blobs) {
 		case 0:
 			builtin_diff_files(&rev, argc, argv,
-					   &sparse_validation_scoped);
+					   &sparse_validation_scoped,
+					   &snapshot_restored);
 			worktree_diff = 1;
 			break;
 		case 1:
@@ -736,7 +782,8 @@ int cmd_diff(int argc,
 		usage(builtin_diff_usage);
 	else if (ent.nr == 1)
 		worktree_diff = builtin_diff_index(&rev, argc, argv,
-						   &sparse_validation_scoped);
+						   &sparse_validation_scoped,
+						   &snapshot_restored);
 	else if (ent.nr == 2) {
 		if (sdiff.warn)
 			warning(_("%s...%s: multiple merge bases, using %s"),
@@ -759,9 +806,9 @@ int cmd_diff(int argc,
 	}
 	t_dispatch_end = getnanotime();
 	if (1 < rev.diffopt.skip_stat_unmatch && use_optional_locks())
-		refresh_index_quietly(&rev.prune_data,
-				      !ent.nr && !blobs &&
-				      !sparse_validation_scoped);
+		index_written = refresh_index_quietly(
+			&rev.prune_data,
+			!ent.nr && !blobs && !sparse_validation_scoped);
 	else if (!sparse_validation_scoped && worktree_diff &&
 		 rev.diffopt.skip_stat_unmatch &&
 		 (the_repository->index->cache_changed & FSMONITOR_CHANGED) &&
@@ -769,8 +816,11 @@ int cmd_diff(int argc,
 		struct lock_file lock_file = LOCK_INIT;
 
 		if (repo_hold_locked_index(the_repository, &lock_file, 0) >= 0)
-			update_index_if_able(&lock_file);
+			index_written = update_index_if_able(&lock_file);
 	}
+	if (worktree_diff && !index_written)
+		save_diff_snapshot(&rev, sparse_validation_scoped,
+				   snapshot_restored);
 	release_revisions(&rev);
 	object_array_clear(&ent);
 	symdiff_release(&sdiff);

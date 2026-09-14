@@ -2925,15 +2925,15 @@ int has_racy_timestamp(struct index_state *istate)
 	return 0;
 }
 
-void repo_update_index_if_able(struct repository *repo,
-			       struct lock_file *lockfile)
+int repo_update_index_if_able(struct repository *repo,
+			      struct lock_file *lockfile)
 {
 	if ((repo->index->cache_changed ||
 	     has_racy_timestamp(repo->index)) &&
 	    repo_verify_index(repo))
-		write_locked_index(repo->index, lockfile, COMMIT_LOCK);
-	else
-		rollback_lock_file(lockfile);
+		return !write_locked_index(repo->index, lockfile, COMMIT_LOCK);
+	rollback_lock_file(lockfile);
+	return 0;
 }
 
 static int record_eoie(void)
