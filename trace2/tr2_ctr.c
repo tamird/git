@@ -52,6 +52,26 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "parallel/items-total",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_CALLS] = {
+		.category = "sequencer",
+		.name = "empty-check/cache-tree-validate/calls-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_VALID] = {
+		.category = "sequencer",
+		.name = "empty-check/cache-tree-validate/valid-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_NODES] = {
+		.category = "sequencer",
+		.name = "empty-check/cache-tree-validate/nodes-total",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_OBJECT_CHECKS] = {
+		.category = "sequencer",
+		.name = "empty-check/cache-tree-validate/object-checks-total",
+		.want_per_thread_events = 0,
+	},
 
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_COMPLETED] = {
 		.category = "diff",

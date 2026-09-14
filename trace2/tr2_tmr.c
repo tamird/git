@@ -116,6 +116,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "empty-check",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE] = {
+		.category = "sequencer",
+		.name = "empty-check/cache-tree-validate",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_SEQUENCER_COMMIT_OBJECT] = {
 		.category = "sequencer",
 		.name = "commit-object",

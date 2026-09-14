@@ -93,8 +93,16 @@ test_expect_success 'rebase from ambiguous branch name' '
 	test_when_finished "rm -f rebase.trace" &&
 	git checkout -b topic side &&
 	GIT_TRACE2_EVENT="$PWD/rebase.trace" git rebase main &&
+	test "$(grep -c \
+		"\"event\":\"counter\".*\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/calls-total\",\"count\":2}" \
+		rebase.trace)" = 1 &&
+	test_grep "\"event\":\"counter\".*\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/valid-total\",\"count\":2}" rebase.trace &&
+	test_grep "\"event\":\"counter\".*\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/nodes-total\",\"count\":2}" rebase.trace &&
+	test_grep "\"event\":\"counter\".*\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/object-checks-total\",\"count\":2}" rebase.trace &&
+	test_grep ! "\"event\":\"th_counter\".*\"category\":\"sequencer\",\"name\":\"empty-check/cache-tree-validate/" rebase.trace &&
+	test_grep ! "\"event\":\"data\".*\"category\":\"sequencer\",\"key\":\"empty-check/cache-tree-validate/" rebase.trace &&
 	for phase in rebase:1 checkout-onto:1 pick:2 empty-check:2 \
-		commit-object:2 update-head:2
+		empty-check/cache-tree-validate:2 commit-object:2 update-head:2
 	do
 		name=${phase%:*} &&
 		intervals=${phase#*:} &&

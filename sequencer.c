@@ -816,8 +816,33 @@ static int do_recursive_merge(struct repository *r,
 static struct object_id *get_cache_tree_oid(struct index_state *istate)
 {
 	struct cache_tree *cache_tree = cache_tree_get(istate);
+	int valid;
 
-	if (!cache_tree_fully_valid(cache_tree)) {
+	if (trace2_is_enabled()) {
+		uintmax_t nodes = 0, object_checks = 0;
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE);
+		errno = saved_errno;
+		valid = cache_tree_fully_valid_with_counts(cache_tree, &nodes,
+							   &object_checks);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE);
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_CALLS, 1);
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_VALID, valid);
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_NODES, nodes);
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_SEQUENCER_EMPTY_CACHE_TREE_VALIDATE_OBJECT_CHECKS,
+			object_checks);
+		errno = saved_errno;
+	} else {
+		valid = cache_tree_fully_valid(cache_tree);
+	}
+
+	if (!valid) {
 		if (cache_tree_update(istate, 0)) {
 			error(_("unable to update cache tree"));
 			return NULL;
