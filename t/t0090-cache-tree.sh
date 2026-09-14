@@ -163,11 +163,15 @@ test_cache_tree_update_metrics () {
 		test_line_count = 1 "$update_trace.data" || return 1
 		shift
 	done &&
+	test_trace2_data cache_tree update/entries-visited-total \
+		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
+	test_trace2_data cache_tree update/entry-object-checks-total \
+		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
 	grep '"event":"data".*"category":"cache_tree","key":"update/' \
 		"$update_trace" >"$update_trace.data" &&
-	test_line_count = 10 "$update_trace.data" &&
+	test_line_count = 12 "$update_trace.data" &&
 	grep '"nesting":1,' "$update_trace.data" >"$update_trace.depth" &&
-	test_line_count = 10 "$update_trace.depth" &&
+	test_line_count = 12 "$update_trace.depth" &&
 	update_writes=$(cache_tree_update_value "$update_trace" object-write-calls) &&
 	update_commits=$(cache_tree_update_value "$update_trace" owned-odb-commit-calls) &&
 	test_cache_tree_update_time "$update_trace" object-write "$update_writes" &&
@@ -685,7 +689,9 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 		git cat-file -e "$(cat .git/actual)^{tree}" &&
 		test_region cache_tree update .git/update.trace &&
 		test_trace2_data cache_tree validate/valid-total 0 <.git/update.trace &&
-		test_cache_tree_update_metrics .git/update.trace 1 0 3 1 0 0 2 1
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 1 0 0 2 1 &&
+		test_trace2_data cache_tree update/entries-visited-total 3 <.git/update.trace &&
+		test_trace2_data cache_tree update/entry-object-checks-total 3 <.git/update.trace
 	)
 '
 
@@ -734,6 +740,8 @@ test_expect_success 'cache-tree repair reports hash-only work' '
 	(
 		cd update-repair &&
 		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		git update-index --add --cacheinfo 160000,"$(git rev-parse HEAD)",a/gitlink &&
+		git write-tree >/dev/null &&
 		cp .git/index .git/expect.index &&
 		run_cache_tree_update_trace 0 .git/expect test-tool cache-tree --empty update &&
 		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
@@ -741,7 +749,9 @@ test_expect_success 'cache-tree repair reports hash-only work' '
 		test_cmp .git/expect .git/actual &&
 		test_cmp .git/expect.err .git/actual.err &&
 		test_cmp .git/expect.index .git/index &&
-		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1 &&
+		test_trace2_data cache_tree update/entries-visited-total 5 <.git/update.trace &&
+		test_trace2_data cache_tree update/entry-object-checks-total 4 <.git/update.trace
 	)
 '
 

@@ -210,6 +210,14 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "update/hash-only-nodes-total",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRIES_VISITED] = {
+		.category = "cache_tree",
+		.name = "update/entries-visited-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECKS] = {
+		.category = "cache_tree",
+		.name = "update/entry-object-checks-total",
+	},
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS] = {
 		.category = "cache_tree",
 		.name = "update/object-write-calls-total",

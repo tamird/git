@@ -397,6 +397,7 @@ static int must_check_existence(const struct cache_entry *ce)
 
 struct cache_tree_update_stats {
 	uint64_t nodes, reused, sparse, hash_only;
+	uint64_t entries_visited, entry_object_checks;
 	uint64_t object_write_calls, object_write_ns;
 	uint64_t owned_odb_commit_calls, owned_odb_commit_ns;
 };
@@ -424,6 +425,10 @@ static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
 			   stats->sparse);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY,
 			   stats->hash_only);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRIES_VISITED,
+			   stats->entries_visited);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECKS,
+			   stats->entry_object_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS,
 			   stats->object_write_calls);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS,
@@ -555,7 +560,7 @@ static int update_one(struct cache_tree *it,
 		unsigned mode;
 		int expected_missing = 0;
 		int contains_ita = 0;
-		int ce_missing_ok;
+		int ce_missing_ok, oid_is_null;
 
 		path = ce->name;
 		pathlen = ce_namelen(ce);
@@ -585,9 +590,14 @@ static int update_one(struct cache_tree *it,
 			i++;
 		}
 
+		if (stats)
+			stats->entries_visited++;
 		ce_missing_ok = mode == S_IFGITLINK || missing_ok ||
 			!must_check_existence(ce);
-		if (is_null_oid(oid) ||
+		oid_is_null = is_null_oid(oid);
+		if (stats && !oid_is_null && !ce_missing_ok)
+			stats->entry_object_checks++;
+		if (oid_is_null ||
 		    (!ce_missing_ok &&
 		     !odb_has_object(the_repository->objects, oid,
 				     ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))) {
