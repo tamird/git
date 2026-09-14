@@ -1302,7 +1302,7 @@ static int store_updated_refs(struct display_state *display_state,
 			 * in case FETCH_HEAD is not to be updated, so we can
 			 * skip the classification in that case.
 			 */
-			if (fetch_head->fp) {
+			if (fetch_head->fp && want_status == FETCH_HEAD_MERGE) {
 				struct commit *commit = NULL;
 
 				/*

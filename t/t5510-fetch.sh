@@ -122,6 +122,39 @@ test_expect_success "fetch test for-merge" '
 	)
 '
 
+test_expect_success 'fetch classifies refs before ordering FETCH_HEAD' '
+	test_when_finished "rm -rf fetch-status" &&
+	mkdir fetch-status &&
+	git init fetch-status/source &&
+	git -C fetch-status/source commit --allow-empty -m base &&
+	git -C fetch-status/source branch -M main &&
+	commit=$(git -C fetch-status/source rev-parse main) &&
+	blob=$(printf "blob\n" | git -C fetch-status/source hash-object -w --stdin) &&
+	git -C fetch-status/source update-ref refs/blobs/noncommit "$blob" &&
+	git -C fetch-status/source update-ref refs/tags/noncommit "$blob" &&
+	git -C fetch-status/source tag -a -m annotated annotated main &&
+	annotated=$(git -C fetch-status/source rev-parse refs/tags/annotated) &&
+	git init fetch-status/client &&
+	git -C fetch-status/client remote add origin ../source &&
+	git -C fetch-status/client config remote.origin.fetch \
+		+refs/heads/main:refs/remotes/origin/main &&
+	git -C fetch-status/client fetch --tags origin \
+		refs/heads/main refs/blobs/noncommit &&
+	{
+		printf "%s\t\n" "$commit" &&
+		printf "%s\tnot-for-merge\n" "$blob" &&
+		printf "%s\tnot-for-merge\n" "$annotated" &&
+		printf "%s\tnot-for-merge\n" "$blob"
+	} >fetch-status/expected &&
+	cut -f -2 fetch-status/client/.git/FETCH_HEAD >fetch-status/actual &&
+	test_cmp fetch-status/expected fetch-status/actual &&
+	test "$(git -C fetch-status/client rev-parse refs/remotes/origin/main)" = "$commit" &&
+	git -C fetch-status/client fetch --no-tags origin refs/tags/annotated &&
+	printf "%s\t\n" "$annotated" >fetch-status/expected &&
+	cut -f -2 fetch-status/client/.git/FETCH_HEAD >fetch-status/actual &&
+	test_cmp fetch-status/expected fetch-status/actual
+'
+
 test_expect_success "fetch test remote HEAD" '
 	(
 		cd two &&
