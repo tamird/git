@@ -3741,6 +3741,7 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_region ! grep index-identity/token-write token-hit.trace &&
 	test_trace2_data grep index_identity/token_read_outcome 0 \
 		<token-hit.trace &&
+	rm -f .git/index.grep-token &&
 	: >.git/index.grep-token &&
 	env GIT_TRACE2_EVENT_NESTING=2 \
 		GIT_TRACE2_EVENT="$PWD/token-invalid.trace" \
