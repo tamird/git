@@ -7,6 +7,7 @@
 #include "ref-filter.h"
 #include "remote.h"
 #include "parse-options.h"
+#include "trace2.h"
 #include "wildmatch.h"
 
 static const char * const ls_remote_usage[] = {
@@ -142,7 +143,9 @@ int cmd_ls_remote(int argc,
 	if (server_options.nr)
 		transport->server_options = &server_options;
 
+	trace2_timer_start(TRACE2_TIMER_ID_LS_REMOTE_REMOTE_REFS);
 	ref = transport_get_remote_refs(transport, &transport_options);
+	trace2_timer_stop(TRACE2_TIMER_ID_LS_REMOTE_REMOTE_REFS);
 	if (ref) {
 		int hash_algo = hash_algo_by_ptr(transport_get_hash_algo(transport));
 		repo_set_hash_algo(the_repository, hash_algo);

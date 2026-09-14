@@ -531,6 +531,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "consume/update-local-ref",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_LS_REMOTE_REMOTE_REFS] = {
+		.category = "ls-remote",
+		.name = "remote-refs",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };
