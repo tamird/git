@@ -516,6 +516,21 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "as-is/write-index",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_FETCH_CONSUME_CONNECTIVITY_CHECK] = {
+		.category = "fetch",
+		.name = "consume/connectivity-check",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_FETCH_CONSUME_CLASSIFY_REF] = {
+		.category = "fetch",
+		.name = "consume/classify-ref",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_FETCH_CONSUME_UPDATE_LOCAL_REF] = {
+		.category = "fetch",
+		.name = "consume/update-local-ref",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

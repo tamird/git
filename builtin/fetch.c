@@ -1265,10 +1265,14 @@ static int store_updated_refs(struct display_state *display_state,
 
 	if (!connectivity_checked) {
 		struct check_connected_options opt = CHECK_CONNECTED_INIT;
+		int connected;
 
 		opt.exclude_hidden_refs_section = "fetch";
 		rm = ref_map;
-		if (check_connected(iterate_ref_map, &rm, &opt)) {
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_CONSUME_CONNECTIVITY_CHECK);
+		connected = check_connected(iterate_ref_map, &rm, &opt);
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_CONSUME_CONNECTIVITY_CHECK);
+		if (connected) {
 			rc = error(_("%s did not send all necessary objects"),
 				   display_state->url);
 			goto abort;
@@ -1305,6 +1309,7 @@ static int store_updated_refs(struct display_state *display_state,
 			if (fetch_head->fp && want_status == FETCH_HEAD_MERGE) {
 				struct commit *commit = NULL;
 
+				trace2_timer_start(TRACE2_TIMER_ID_FETCH_CONSUME_CLASSIFY_REF);
 				/*
 				 * References in "refs/tags/" are often going to point
 				 * to annotated tags, which are not part of the
@@ -1322,6 +1327,7 @@ static int store_updated_refs(struct display_state *display_state,
 					if (!commit)
 						rm->fetch_head_status = FETCH_HEAD_NOT_FOR_MERGE;
 				}
+				trace2_timer_stop(TRACE2_TIMER_ID_FETCH_CONSUME_CLASSIFY_REF);
 			}
 
 			if (rm->fetch_head_status != want_status)
@@ -1366,8 +1372,10 @@ static int store_updated_refs(struct display_state *display_state,
 					  display_state->url_len);
 
 			if (ref) {
+				trace2_timer_start(TRACE2_TIMER_ID_FETCH_CONSUME_UPDATE_LOCAL_REF);
 				rc |= update_local_ref(ref, transaction, rm,
 						       config, display_array, rejections);
+				trace2_timer_stop(TRACE2_TIMER_ID_FETCH_CONSUME_UPDATE_LOCAL_REF);
 				free(ref);
 			} else if (write_fetch_head || dry_run) {
 				/*
