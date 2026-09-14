@@ -71,6 +71,7 @@ static struct grep_index_prepared *content_index_prepared;
 static struct grep_index_query *content_index_query;
 static unsigned char *content_index_ipc_result;
 static size_t content_index_ipc_nr;
+static int content_index_direct_fallback;
 static unsigned char *content_index_negative_result;
 static size_t content_index_negative_nr;
 static size_t content_index_negative_entries;
@@ -287,6 +288,7 @@ static void trace_worker_target_growth(void)
 #define GREP_TREE_INDEX_MAX_REQUESTS	  2
 #define GREP_MIN_FILES_FOR_THREADS 32
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
+#define GREP_INDEX_DIRECT_UNKNOWN_MAX_OIDS 9
 
 #define GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES (1U << 14)
 #define GREP_UNTRACKED_SCOPE_MATCH_BUDGET   (1U << 16)
@@ -1040,7 +1042,7 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 			if (!content_index) {
 				grep_index_query_free(content_index_query);
 				content_index_query = NULL;
-			} else {
+			} else if (!content_index_direct_fallback) {
 				trace2_region_enter("grep", "prepare_content_index",
 						    opt->repo);
 				content_index_prepared = grep_index_prepare(
@@ -1311,6 +1313,7 @@ static int grep_cache_query_content_index_oids(
 	size_t *positions = NULL;
 	unsigned char *maybe = NULL;
 	size_t nr_oids = 0;
+	size_t unknown_oids = 0;
 	size_t oids_alloc = 0;
 	size_t positions_alloc = 0;
 	size_t limit = literal_selected ? *selected_nr : repo->index->cache_nr;
@@ -1320,6 +1323,7 @@ static int grep_cache_query_content_index_oids(
 	int query_result;
 	int result = 1;
 
+	content_index_direct_fallback = 0;
 	if (trace_enabled) {
 		saved_errno = errno;
 		trace2_timer_start(TRACE2_TIMER_ID_GREP_CONTENT_INDEX_SELECT_OIDS);
@@ -1375,6 +1379,7 @@ static int grep_cache_query_content_index_oids(
 	}
 	for (size_t i = 0; i < nr_oids; i++) {
 		content_index_ipc_result[positions[i]] = maybe[i];
+		unknown_oids += maybe[i] == GREP_INDEX_IPC_UNKNOWN;
 		if (cached &&
 		    repo->index->sparse_index == INDEX_EXPANDED &&
 		    maybe[i] != GREP_INDEX_IPC_IMPOSSIBLE) {
@@ -1382,6 +1387,10 @@ static int grep_cache_query_content_index_oids(
 			(*selected)[(*selected_nr)++] = positions[i];
 		}
 	}
+	content_index_direct_fallback = unknown_oids &&
+		unknown_oids <= git_env_ulong(
+			"GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS",
+			GREP_INDEX_DIRECT_UNKNOWN_MAX_OIDS);
 	if (cached && repo->index->sparse_index == INDEX_EXPANDED) {
 		*use_selected = 1;
 		trace2_data_intmax("grep", repo,

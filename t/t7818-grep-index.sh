@@ -3563,6 +3563,49 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 	mv "$worktree_missing_object.save" "$worktree_missing_object"
 '
 
+test_expect_success FSMONITOR_DAEMON \
+	'selected OID unknowns use direct filters for a small batch' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git rm -f --ignore-unmatch -- \
+				literal-candidate-direct-present \
+				literal-candidate-direct-absent &&
+			    rm -f literal-direct-*.trace" &&
+	test_path_is_file .git/objects/info/grep-index/chain-transposed &&
+	test_config grep.worktreeBlobCache true &&
+	test_config core.fsmonitor true &&
+	GIT_TEST_GREP_INDEX_MEMORY_MAX_ENTRIES=0 \
+		git fsmonitor--daemon start &&
+	echo "literal fallback present needle 7818" \
+		>literal-candidate-direct-present &&
+	echo "literal fallback unrelated contents" \
+		>literal-candidate-direct-absent &&
+	git add literal-candidate-direct-present \
+		literal-candidate-direct-absent &&
+	git status --porcelain >/dev/null &&
+	set -- literal-candidate-* &&
+	git grep --no-content-index -F \
+		"literal fallback present needle 7818" -- "$@" >expect &&
+	GIT_TRACE2_EVENT="$PWD/literal-direct-small.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback present needle 7818" -- "$@" \
+			>actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err &&
+	test_content_index_ipc_query literal-direct-small.trace 42 42 1 2 40 0 &&
+	test_region grep load_content_index literal-direct-small.trace &&
+	test_region ! grep prepare_content_index literal-direct-small.trace &&
+	GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=1 \
+	GIT_TRACE2_EVENT="$PWD/literal-direct-prepared.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback present needle 7818" -- "$@" \
+			>actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err &&
+	test_content_index_ipc_query literal-direct-prepared.trace 42 42 1 2 40 0 &&
+	test_region grep load_content_index literal-direct-prepared.trace &&
+	test_region grep prepare_content_index literal-direct-prepared.trace
+'
+
 test_expect_success 'content index prunes impossible blobs' '
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
