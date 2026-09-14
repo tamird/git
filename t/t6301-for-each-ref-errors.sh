@@ -43,6 +43,11 @@ test_expect_success 'Missing objects are reported correctly' '
 	echo "fatal: missing object $MISSING for refs/heads/missing" >missing-err &&
 	test_must_fail git for-each-ref 2>err &&
 	test_cmp missing-err err &&
+	test_must_fail git for-each-ref --sort=committerdate \
+		--format="%(refname)" refs/heads/missing refs/tags/testtag \
+		>sorted-out 2>sorted-err &&
+	test_must_be_empty sorted-out &&
+	test_cmp missing-err sorted-err &&
 	(
 		cat brief-list &&
 		echo "$MISSING refs/heads/missing"
@@ -50,6 +55,24 @@ test_expect_success 'Missing objects are reported correctly' '
 	git for-each-ref --format="%(objectname) %(refname)" >brief-out 2>brief-err &&
 	test_cmp missing-brief-expected brief-out &&
 	test_must_be_empty brief-err
+'
+
+test_expect_success 'date sort verifies objects found in a stale commit graph' '
+	test_when_finished "rm -rf stale-graph-repo" &&
+	git init stale-graph-repo &&
+	(
+		cd stale-graph-repo &&
+		test_commit first &&
+		test_commit second &&
+		git commit-graph write --reachable &&
+		oid=$(git rev-parse HEAD) &&
+		rm .git/objects/"$(test_oid_to_path "$oid")" &&
+		test_must_fail git for-each-ref --sort=committerdate \
+			--format="%(refname)" refs/heads refs/tags \
+			>out 2>err &&
+		test_must_be_empty out &&
+		test_grep "missing object $oid for refs/" err
+	)
 '
 
 test_expect_success 'missing ancestors are reported by contains filters' '

@@ -219,6 +219,21 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "materialized/sort",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-preload",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_GRAPH_LOOKUP] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-preload/graph-lookup",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_OBJECT_EXISTS] = {
+		.category = "ref-filter",
+		.name = "materialized/sort-preload/object-exists",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE] = {
 		.category = "ref-filter",
 		.name = "materialized/sort-populate",

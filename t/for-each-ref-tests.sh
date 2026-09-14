@@ -544,6 +544,16 @@ test_expect_success 'cache object metadata shared by refs' '
 		<metadata-cache.trace &&
 	test_trace2_data ref-filter object_metadata/hits 1 \
 		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/preload/candidates 3 \
+		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/preload/allocated 1 \
+		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/preload/unique 2 \
+		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/preload/graph-hits 0 \
+		<metadata-cache.trace &&
+	test_trace2_data ref-filter object_metadata/preload/verified 0 \
+		<metadata-cache.trace &&
 	test_grep ! \
 		"\"category\":\"ref-filter\",\"name\":\"iterative/filter-format\"" \
 		metadata-cache.trace &&
@@ -586,6 +596,25 @@ test_expect_success 'cache object metadata shared by refs' '
 		<metadata-graph.trace &&
 	test_trace2_data ref-filter object_metadata/hits 3 \
 		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/preload/candidates 3 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/preload/allocated 1 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/preload/unique 2 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/preload/graph-hits 2 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter object_metadata/preload/verified 2 \
+		<metadata-graph.trace &&
+	cat >reverse-expect <<-\EOF &&
+	refs/heads/duplicate-a
+	refs/heads/duplicate-b
+	refs/heads/duplicate-old
+	EOF
+	${git_for_each_ref} --format="%(refname)" \
+		--sort=-committerdate refs/heads/duplicate-a \
+		refs/heads/duplicate-b refs/heads/duplicate-old >actual &&
+	test_cmp reverse-expect actual &&
 	GIT_TRACE2_EVENT="$PWD/metadata-formatted.trace" \
 		${git_for_each_ref} --format="%(refname)" \
 		--sort=committerdate:iso8601 refs/heads/duplicate-a \
@@ -599,8 +628,8 @@ test_expect_success 'cache object metadata shared by refs' '
 		metadata-cache:graph-lookup:2 \
 		metadata-cache:object-exists:0 \
 		metadata-cache:object-info:2 \
-		metadata-graph:graph-lookup:2 \
-		metadata-graph:object-exists:2 \
+		metadata-graph:graph-lookup:0 \
+		metadata-graph:object-exists:0 \
 		metadata-graph:object-info:0 \
 		metadata-formatted:graph-lookup:0 \
 		metadata-formatted:object-exists:0 \
@@ -629,6 +658,27 @@ test_expect_success 'cache object metadata shared by refs' '
 		test_grep ! \
 			"\"event\":\"region_[^\"]*\".*\"category\":\"ref-filter\",\"label\":\"$population_name\"" \
 			"$population_trace" || return 1
+	done &&
+	for preload_expectation in \
+		metadata-cache:graph-lookup:2 \
+		metadata-cache:object-exists:0 \
+		metadata-graph:graph-lookup:2 \
+		metadata-graph:object-exists:2
+	do
+		preload_trace=${preload_expectation%%:*}.trace &&
+		preload_timer=${preload_expectation#*:} &&
+		preload_name=materialized/sort-preload/${preload_timer%:*} &&
+		preload_intervals=${preload_timer##*:} &&
+		if test "$preload_intervals" = 0
+		then
+			test_grep ! \
+				"\"category\":\"ref-filter\",\"name\":\"$preload_name\"" \
+				"$preload_trace"
+		else
+			test_grep \
+				"\"event\":\"timer\".*\"category\":\"ref-filter\",\"name\":\"$preload_name\",\"intervals\":$preload_intervals," \
+				"$preload_trace"
+		fi || return 1
 	done &&
 	GIT_TRACE2_EVENT="$PWD/metadata-subject.trace" \
 		${git_for_each_ref} --format="%(refname) %(subject)" \

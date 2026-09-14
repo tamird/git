@@ -2532,6 +2532,36 @@ static char *get_worktree_path(const struct ref_array_item *ref)
 	return xstrdup(lookup_result->wt->path);
 }
 
+static int use_ref_filter_object_metadata(void)
+{
+	if (ref_filter_object_metadata_enabled < 0) {
+		int wants_object_metadata = 0;
+
+		ref_filter_object_metadata_enabled = 1;
+		for (int i = 0; i < used_atom_cnt; i++) {
+			struct used_atom *atom = &used_atom[i];
+			const char *name = atom->name;
+
+			if (atom->atom_type == ATOM_COMMITTERDATE &&
+			    *name != '*' && atom->used_in_numeric_sort &&
+			    !atom->used_in_string_sort && !atom->used_in_format) {
+				wants_object_metadata = 1;
+				continue;
+			}
+			if (atom->source == SOURCE_OBJ ||
+			    (atom->source == SOURCE_OTHER &&
+			     atom->atom_type != ATOM_OBJECTNAME &&
+			     atom->atom_type != ATOM_AHEADBEHIND &&
+			     atom->atom_type != ATOM_ISBASE)) {
+				ref_filter_object_metadata_enabled = 0;
+				break;
+			}
+		}
+		ref_filter_object_metadata_enabled &= wants_object_metadata;
+	}
+	return ref_filter_object_metadata_enabled;
+}
+
 /*
  * Parse the object referred by ref, and grab needed value.
  */
@@ -2720,32 +2750,7 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err,
 					       oid_to_hex(&ref->objectname), ref->refname);
 	}
 
-	if (ref_filter_object_metadata_enabled < 0) {
-		int wants_object_metadata = 0;
-
-		ref_filter_object_metadata_enabled = 1;
-		for (i = 0; i < used_atom_cnt; i++) {
-			struct used_atom *atom = &used_atom[i];
-			const char *name = atom->name;
-
-			if (atom->atom_type == ATOM_COMMITTERDATE &&
-			    *name != '*' && atom->used_in_numeric_sort &&
-			    !atom->used_in_string_sort && !atom->used_in_format) {
-				wants_object_metadata = 1;
-				continue;
-			}
-			if (atom->source == SOURCE_OBJ ||
-			    (atom->source == SOURCE_OTHER &&
-			     atom->atom_type != ATOM_OBJECTNAME &&
-			     atom->atom_type != ATOM_AHEADBEHIND &&
-			     atom->atom_type != ATOM_ISBASE)) {
-				ref_filter_object_metadata_enabled = 0;
-				break;
-			}
-		}
-		ref_filter_object_metadata_enabled &= wants_object_metadata;
-	}
-	metadata = ref_filter_object_metadata_enabled ?
+	metadata = use_ref_filter_object_metadata() ?
 			   oidmap_get(&ref_filter_object_metadata, &ref->objectname) :
 			   NULL;
 	if (ref_filter_object_metadata_enabled && !metadata &&
@@ -3730,6 +3735,104 @@ struct ref_sorting {
 	enum ref_sorting_order sort_flags;
 };
 
+struct ref_filter_preload_stats {
+	size_t unique;
+	size_t graph_hits;
+	size_t verified;
+	int trace;
+};
+
+static int preload_ref_object_metadata(const struct object_id *oid, void *data)
+{
+	struct ref_filter_preload_stats *stats = data;
+	struct ref_filter_object_metadata *metadata;
+	struct commit *commit;
+	int has_object;
+
+	stats->unique++;
+	if (oidmap_get(&ref_filter_object_metadata, oid))
+		return 0;
+
+	if (stats->trace)
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_GRAPH_LOOKUP);
+	commit = lookup_commit_in_graph(the_repository, oid);
+	if (stats->trace)
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_GRAPH_LOOKUP);
+	if (!commit)
+		return 0;
+	stats->graph_hits++;
+	if (stats->trace)
+		trace2_timer_start(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_OBJECT_EXISTS);
+	has_object = odb_has_object(the_repository->objects, oid, 0);
+	if (stats->trace)
+		trace2_timer_stop(
+			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_OBJECT_EXISTS);
+	if (!has_object)
+		return 0;
+	stats->verified++;
+
+	CALLOC_ARRAY(metadata, 1);
+	oidcpy(&metadata->ent.oid, oid);
+	metadata->type = OBJ_COMMIT;
+	metadata->committerdate = commit->date;
+	oidmap_put(&ref_filter_object_metadata, metadata);
+	ref_filter_object_metadata_entries++;
+	return 0;
+}
+
+static void preload_ref_sort_metadata(struct ref_sorting *sorting,
+				      struct ref_array *array)
+{
+	struct ref_filter_preload_stats stats = { 0 };
+	struct oid_array oids = OID_ARRAY_INIT;
+	struct used_atom *atom;
+	int allocated = 0;
+
+	/* Sorting fewer than two refs does not call the comparator. */
+	if (!sorting || array->nr < 2 ||
+	    array->nr > REF_FILTER_OBJECT_METADATA_MAX_ENTRIES -
+				ref_filter_object_metadata_entries)
+		return;
+
+	atom = &used_atom[sorting->atom];
+	if (atom->atom_type != ATOM_COMMITTERDATE || *atom->name == '*' ||
+	    !atom->used_in_numeric_sort || atom->used_in_string_sort ||
+	    atom->used_in_format ||
+	    (sorting->sort_flags & REF_SORTING_VERSION) ||
+	    !use_ref_filter_object_metadata())
+		return;
+
+	/* Sorting OIDs visits nearby pack-index and MIDX keys. */
+	stats.trace = trace2_is_enabled();
+	trace2_timer_start(TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD);
+	oids.oid = malloc(st_mult(array->nr, sizeof(*oids.oid)));
+	if (!oids.oid)
+		goto done;
+	allocated = 1;
+	oids.nr = oids.alloc = array->nr;
+	for (int i = 0; i < array->nr; i++)
+		oidcpy(&oids.oid[i], &array->items[i]->objectname);
+
+	/* Missing OIDs must take the original lazy path; do not cache failures. */
+	oid_array_for_each_unique(&oids, preload_ref_object_metadata, &stats);
+done:
+	trace2_timer_stop(TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/preload/candidates", array->nr);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/preload/allocated", allocated);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/preload/unique", stats.unique);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/preload/graph-hits", stats.graph_hits);
+	trace2_data_intmax("ref-filter", the_repository,
+			   "object_metadata/preload/verified", stats.verified);
+	oid_array_clear(&oids);
+}
+
 static inline int can_do_iterative_format(struct ref_filter *filter,
 					  struct ref_sorting *sorting)
 {
@@ -3804,6 +3907,7 @@ void filter_and_format_refs(struct ref_filter *filter, unsigned int type,
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_PREPARE);
 		trace2_timer_start(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
+		preload_ref_sort_metadata(sorting, &array);
 		ref_array_sort_internal(sorting, &array, trace2_is_enabled());
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT);
