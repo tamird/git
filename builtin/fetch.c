@@ -1467,7 +1467,9 @@ static int fetch_and_consume_refs(struct display_state *display_state,
 	 * We don't need to perform a fetch in case we can already satisfy all
 	 * refs.
 	 */
+	trace2_timer_start(TRACE2_TIMER_ID_FETCH_CHECK_EXIST_AND_CONNECTED);
 	ret = check_exist_and_connected(ref_map);
+	trace2_timer_stop(TRACE2_TIMER_ID_FETCH_CHECK_EXIST_AND_CONNECTED);
 	if (ret) {
 		trace2_region_enter("fetch", "fetch_refs", the_repository);
 		ret = transport_fetch_refs(transport, ref_map);
@@ -2052,8 +2054,10 @@ static int do_fetch(struct transport *transport,
 
 	transport_ls_refs_options_release(&transport_ls_refs_options);
 
+	trace2_timer_start(TRACE2_TIMER_ID_FETCH_GET_REF_MAP);
 	ref_map = get_ref_map(transport->remote, remote_refs, rs,
 			      tags, &autotags);
+	trace2_timer_stop(TRACE2_TIMER_ID_FETCH_GET_REF_MAP);
 	if (!update_head_ok)
 		check_not_current_branch(ref_map);
 
@@ -2081,12 +2085,14 @@ static int do_fetch(struct transport *transport,
 		 * explicitly (via command line or configuration); we
 		 * don't care whether --tags was specified.
 		 */
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_PRUNE_REFS);
 		if (rs->nr) {
 			retcode = prune_refs(&display_state, rs, transaction, ref_map);
 		} else {
 			retcode = prune_refs(&display_state, &transport->remote->fetch,
 					     transaction, ref_map);
 		}
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_PRUNE_REFS);
 		if (retcode != 0)
 			retcode = 1;
 	}
