@@ -606,6 +606,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "pending-sample/append",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_MARK_TREES] = {
+		.category = "revision",
+		.name = "pending-negative-tree/mark-contents",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

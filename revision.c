@@ -485,7 +485,8 @@ void add_pending_oid(struct rev_info *revs, const char *name,
 }
 
 static struct commit *handle_commit(struct rev_info *revs,
-				    struct object_array_entry *entry, int sample)
+				    struct object_array_entry *entry, int sample,
+				    struct tree_mark_stats *tree_stats)
 {
 	struct object *object = entry->item;
 	const char *name = entry->name;
@@ -568,7 +569,20 @@ static struct commit *handle_commit(struct rev_info *revs,
 		if (!revs->tree_objects)
 			return NULL;
 		if (flags & UNINTERESTING) {
-			mark_tree_contents_uninteresting(revs->repo, tree, NULL);
+			if (tree_stats) {
+				int saved_errno = errno;
+
+				tree_stats->roots++;
+				trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_MARK_TREES);
+				errno = saved_errno;
+			}
+			mark_tree_contents_uninteresting(revs->repo, tree, tree_stats);
+			if (tree_stats) {
+				int saved_errno = errno;
+
+				trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_MARK_TREES);
+				errno = saved_errno;
+			}
 			return NULL;
 		}
 		add_pending_object_with_path(revs, object, name, mode, path);
@@ -4522,6 +4536,11 @@ int prepare_revision_walk(struct rev_info *revs)
 	int i;
 	struct object_array old_pending;
 	struct commit_list **next = &revs->commits;
+	struct tree_mark_stats tree_stats = {
+		.parse_counts_valid = 1,
+	};
+	struct tree_mark_stats *pending_tree_stats =
+		trace2_is_enabled() && revs->tree_objects ? &tree_stats : NULL;
 
 	memcpy(&old_pending, &revs->pending, sizeof(old_pending));
 	revs->pending.nr = 0;
@@ -4540,7 +4559,7 @@ int prepare_revision_walk(struct rev_info *revs)
 			trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_ENTRY);
 			trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_HANDLE);
 		}
-		commit = handle_commit(revs, e, sample);
+		commit = handle_commit(revs, e, sample, pending_tree_stats);
 		if (sample)
 			trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_HANDLE);
 		if (commit) {
@@ -4557,6 +4576,27 @@ int prepare_revision_walk(struct rev_info *revs)
 			trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_ENTRY);
 	}
 	trace2_region_leave("revision", "prepare_pending", revs->repo);
+	if (tree_stats.roots) {
+		int saved_errno = errno;
+
+		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/roots",
+				   tree_stats.roots);
+		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/trees-expanded",
+				   tree_stats.trees_expanded);
+		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/tree-bytes",
+				   tree_stats.tree_bytes);
+		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/parse-counts-valid",
+				   tree_stats.parse_counts_valid);
+		if (tree_stats.parse_counts_valid) {
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/parse-needed-count",
+					   tree_stats.parse_needed_count);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/parse-already-count",
+					   tree_stats.already_parsed_count);
+		}
+		errno = saved_errno;
+	}
 	object_array_clear(&old_pending);
 
 	/* Signal whether we need per-parent treesame decoration */

@@ -579,7 +579,7 @@ void put_revision_mark(const struct rev_info *revs,
 void mark_parents_uninteresting(struct rev_info *revs, struct commit *commit);
 
 struct tree_mark_stats {
-	/* Non-null roots requested by the nonsparse edge walk. */
+	/* Non-null roots requested for tree marking. */
 	uint64_t roots;
 	uint64_t roots_already_uninteresting;
 	/* Successfully expanded trees and their logical tree-object bytes. */
