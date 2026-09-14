@@ -4458,8 +4458,9 @@ struct ondisk_untracked_cache {
 
 #define ouc_offset(x) offsetof(struct ondisk_untracked_cache, x)
 
-#define UNTRACKED_SNAPSHOT_MAX_DIRS    (512 * 1024)
 #define UNTRACKED_SNAPSHOT_MAX_ENTRIES (1024 * 1024)
+/* Every serialized non-root directory consumes a parent entry. */
+#define UNTRACKED_SNAPSHOT_MAX_DIRS    (UNTRACKED_SNAPSHOT_MAX_ENTRIES + 1)
 #define UNTRACKED_SNAPSHOT_MAX_DEPTH   1024
 
 struct write_data {

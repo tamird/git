@@ -148,7 +148,7 @@ static int do_save_overdeep_untracked_cache(void)
 /* Test the first directory count that exceeded the former snapshot limit. */
 static int test_untracked_snapshot_dir_bound(void)
 {
-	enum { nr_children = 256 * 1024 };
+	enum { nr_children = 512 * 1024 };
 	struct untracked_cache synthetic = { 0 };
 	struct untracked_cache *restored = NULL;
 	struct untracked_cache_dir *root, *child;
