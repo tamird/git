@@ -4458,9 +4458,9 @@ struct ondisk_untracked_cache {
 
 #define ouc_offset(x) offsetof(struct ondisk_untracked_cache, x)
 
-#define UNTRACKED_SNAPSHOT_MAX_DIRS (256 * 1024)
+#define UNTRACKED_SNAPSHOT_MAX_DIRS    (512 * 1024)
 #define UNTRACKED_SNAPSHOT_MAX_ENTRIES (1024 * 1024)
-#define UNTRACKED_SNAPSHOT_MAX_DEPTH 1024
+#define UNTRACKED_SNAPSHOT_MAX_DEPTH   1024
 
 struct write_data {
 	int index;	   /* number of written untracked_cache_dir */

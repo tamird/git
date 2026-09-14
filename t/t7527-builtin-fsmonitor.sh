@@ -10,6 +10,13 @@ then
 	test_done
 fi
 
+test_expect_success 'untracked snapshot round-trips beyond 256k directories' '
+	test_when_finished "rm -rf test_untracked_snapshot_dir_bound" &&
+	git init test_untracked_snapshot_dir_bound &&
+	test-tool -C test_untracked_snapshot_dir_bound fsmonitor-client \
+		test-untracked-snapshot-dir-bound
+'
+
 # Verify that the filesystem delivers events to the daemon.
 # On some configurations (e.g., overlayfs with older kernels),
 # inotify watches succeed but events are never delivered.  The

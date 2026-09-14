@@ -145,6 +145,60 @@ static int do_save_overdeep_untracked_cache(void)
 	return 0;
 }
 
+/* Test the first directory count that exceeded the former snapshot limit. */
+static int test_untracked_snapshot_dir_bound(void)
+{
+	enum { nr_children = 256 * 1024 };
+	struct untracked_cache synthetic = { 0 };
+	struct untracked_cache *restored = NULL;
+	struct untracked_cache_dir *root, *child;
+	struct strbuf snapshot = STRBUF_INIT;
+	enum untracked_snapshot_bound bound;
+	char child_name[16];
+	int ret = 1;
+
+	synthetic.exclude_per_dir = ".gitignore";
+	strbuf_init(&synthetic.ident, 0);
+	FLEX_ALLOC_STR(root, name, "");
+	root->valid = root->recurse = 1;
+	CALLOC_ARRAY(root->dirs, nr_children);
+	root->dirs_nr = root->dirs_alloc = nr_children;
+	for (int i = 0; i < nr_children; i++) {
+		xsnprintf(child_name, sizeof(child_name), "d%06d", i);
+		FLEX_ALLOC_STR(child, name, child_name);
+		child->valid = child->recurse = 1;
+		root->dirs[i] = child;
+	}
+	synthetic.root = root;
+
+	if (write_untracked_snapshot(&snapshot, &synthetic, &bound) !=
+		    UNTRACKED_CACHE_ENCODING_LEGACY ||
+	    bound != UNTRACKED_SNAPSHOT_BOUND_NONE) {
+		error("snapshot rejected %d directory nodes", nr_children + 1);
+		goto done;
+	}
+	restored = read_untracked_snapshot(snapshot.buf, snapshot.len);
+	if (!restored || !restored->root ||
+	    restored->root->dirs_nr != nr_children ||
+	    strcmp(restored->root->dirs[0]->name, "d000000") ||
+	    strcmp(restored->root->dirs[nr_children - 1]->name, child_name)) {
+		error("snapshot failed to round-trip %d directory nodes",
+		      nr_children + 1);
+		goto done;
+	}
+	ret = 0;
+
+done:
+	free_untracked_cache(restored);
+	for (int i = 0; i < nr_children; i++)
+		free(root->dirs[i]);
+	free(root->dirs);
+	free(root);
+	strbuf_release(&synthetic.ident);
+	strbuf_release(&snapshot);
+	return ret;
+}
+
 static int do_poison_untracked_cache(const char *token)
 {
 	struct index_state *istate = the_repository->index;
@@ -356,13 +410,14 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 	int nr_threads = 1;
 	int nr_requests = 1;
 
-	const char * const fsmonitor_client_usage[] = {
+	const char *const fsmonitor_client_usage[] = {
 		"test-tool fsmonitor-client test-trivial-response",
 		"test-tool fsmonitor-client query [<token>]",
 		"test-tool fsmonitor-client flush",
 		"test-tool fsmonitor-client ipc-path",
 		"test-tool fsmonitor-client save-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client save-overdeep-untracked-cache",
+		"test-tool fsmonitor-client test-untracked-snapshot-dir-bound",
 		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
@@ -405,6 +460,8 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		return do_save_untracked_cache(token);
 	if (!strcmp(subcmd, "save-overdeep-untracked-cache"))
 		return do_save_overdeep_untracked_cache();
+	if (!strcmp(subcmd, "test-untracked-snapshot-dir-bound"))
+		return test_untracked_snapshot_dir_bound();
 
 	if (!strcmp(subcmd, "poison-untracked-cache"))
 		return do_poison_untracked_cache(token);
