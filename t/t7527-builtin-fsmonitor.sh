@@ -2710,6 +2710,81 @@ test_expect_success 'status reports negative-only mode at default trace depth' '
 	done
 '
 
+test_expect_success 'disjoint literal status defers pending untracked resync' '
+	test_when_finished "stop_daemon_delete_repo test_pathspec_pending" &&
+	git init test_pathspec_pending &&
+	(
+		cd test_pathspec_pending &&
+		mkdir -p left/deep right/deep &&
+		echo "*.tmp" >left/deep/.gitignore &&
+		: >left/deep/tracked &&
+		git add . &&
+		git commit -m base &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true
+	) &&
+	start_daemon -C test_pathspec_pending &&
+	(
+		cd test_pathspec_pending &&
+		git status --porcelain >/dev/null &&
+		test-tool fsmonitor-client flush >/dev/null &&
+		git status --porcelain -uno >/dev/null &&
+		test-tool dump-untracked-cache state >../pathspec-pending.before &&
+		test_grep "^pending " ../pathspec-pending.before &&
+		printf "*.tmp\n!visible.tmp\n" >left/deep/.gitignore &&
+		: >left/deep/visible.tmp &&
+		: >left/deep/hidden.tmp &&
+		: >right/deep/other &&
+		cat >../pathspec-pending.expect <<-\EOF &&
+		 M left/deep/.gitignore
+		?? left/deep/visible.tmp
+		?? right/deep/other
+		EOF
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -- \
+			left/deep/.gitignore left/deep/visible.tmp \
+			left/deep/hidden.tmp right/deep/other \
+			>../pathspec-pending.uncached &&
+		test_cmp ../pathspec-pending.expect \
+			../pathspec-pending.uncached &&
+		GIT_TRACE2_EVENT="$PWD/../pathspec-pending.trace" \
+			git status --porcelain -- \
+			left/deep/.gitignore left/deep/visible.tmp \
+			left/deep/hidden.tmp right/deep/other \
+			>../pathspec-pending.actual &&
+		test_cmp ../pathspec-pending.expect ../pathspec-pending.actual &&
+		test_trace2_data status untracked/cache-present 0 \
+			<../pathspec-pending.trace &&
+		test_trace2_data status untracked/cache-pending-skip 1 \
+			<../pathspec-pending.trace &&
+		test_grep ! "\"category\":\"untracked_cache\".*\"name\":\"revalidate\"" \
+			../pathspec-pending.trace &&
+		test-tool dump-untracked-cache state >../pathspec-pending.after &&
+		test_grep "^pending " ../pathspec-pending.after &&
+		GIT_TRACE2_EVENT="$PWD/../pathspec-pending-glob.trace" \
+			git --no-optional-locks status --porcelain -- \
+			"*visible.tmp" >../pathspec-pending-glob.actual &&
+		echo "?? left/deep/visible.tmp" \
+			>../pathspec-pending-glob.expect &&
+		test_cmp ../pathspec-pending-glob.expect \
+			../pathspec-pending-glob.actual &&
+		test_trace2_data status untracked/cache-present 1 \
+			<../pathspec-pending-glob.trace &&
+		test_trace2_data status untracked/cache-pending-skip 0 \
+			<../pathspec-pending-glob.trace &&
+		test_trace2_data status untracked/cache-resync 1 \
+			<../pathspec-pending-glob.trace &&
+		git status --porcelain >../pathspec-pending-full.actual &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain \
+			>../pathspec-pending-full.uncached &&
+		test_cmp ../pathspec-pending-full.uncached \
+			../pathspec-pending-full.actual &&
+		test-tool dump-untracked-cache state >../pathspec-pending.full &&
+		test_grep "^trusted$" ../pathspec-pending.full
+	)
+'
+
 test_expect_success PTHREADS \
 	'parallel directory validation recovers after daemon restart' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_revalidate" &&

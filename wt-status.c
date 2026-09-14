@@ -803,6 +803,36 @@ static void wt_status_collect_changes_initial(struct wt_status *s)
 	strbuf_release(&base);
 }
 
+static int skip_pending_untracked_cache(const struct pathspec *pathspec,
+					const struct untracked_cache *uc)
+{
+	char *prefix;
+	int i;
+
+	if (!uc || !uc->fsmonitor_resync || pathspec->nr < 2 ||
+	    (pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL)))
+		return 0;
+
+	for (i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		const char *slash = strchr(item->match, '/');
+
+		if (item->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL) ||
+		    item->nowildcard_len != item->len ||
+		    !slash || !slash[1])
+			return 0;
+	}
+
+	/* A shared directory prefix already avoids cache validation. */
+	prefix = common_prefix(pathspec);
+	if (prefix) {
+		free(prefix);
+		return 0;
+	}
+
+	return 1;
+}
+
 static void wt_status_collect_untracked(struct wt_status *s)
 {
 	int i;
@@ -811,6 +841,7 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	uint64_t t_fill_begin, t_fill_end, t_end;
 	struct index_state *istate = s->repo->index;
 	int cache_present;
+	int cache_pending_skip = 0;
 	int trace_cache_state;
 	int cache_root_present = 0;
 	int cache_root_valid = 0;
@@ -832,7 +863,11 @@ static void wt_status_collect_untracked(struct wt_status *s)
 		if (s->show_ignored_mode == SHOW_MATCHING_IGNORED)
 			dir.flags |= DIR_SHOW_IGNORED_TOO_MODE_MATCHING;
 	} else {
-		dir.untracked = istate->untracked;
+		/* Keep the pending cache for a later full status. */
+		cache_pending_skip = skip_pending_untracked_cache(
+			&s->pathspec, istate->untracked);
+		if (!cache_pending_skip)
+			dir.untracked = istate->untracked;
 	}
 	cache_present = !!dir.untracked;
 	stored_flags = cache_present ? dir.untracked->dir_flags : 0;
@@ -872,6 +907,8 @@ static void wt_status_collect_untracked(struct wt_status *s)
 
 	trace2_data_intmax("status", s->repo, "untracked/cache-present",
 			   cache_present);
+	trace2_data_intmax("status", s->repo, "untracked/cache-pending-skip",
+			   cache_pending_skip);
 	if (trace_cache_state) {
 		trace2_data_intmax("status", s->repo,
 				   "untracked/cache-root-present",
