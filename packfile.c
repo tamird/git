@@ -1583,7 +1583,21 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 			}
 			/* Installed packs are immutable; validate the header and base first. */
 			if (!get_cached_delta_size(p, obj_offset, &size)) {
+				int traced = trace2_is_enabled();
+				int saved_errno = errno;
+
+				if (traced) {
+					trace2_timer_start(
+						TRACE2_TIMER_ID_PACK_DELTA_SIZE_CACHE_MISS_DECODE);
+					errno = saved_errno;
+				}
 				size = get_size_from_delta(p, &w_curs, tmp_pos);
+				if (traced) {
+					saved_errno = errno;
+					trace2_timer_stop(
+						TRACE2_TIMER_ID_PACK_DELTA_SIZE_CACHE_MISS_DECODE);
+					errno = saved_errno;
+				}
 				if (size == 0) {
 					ret = -1;
 					goto out;

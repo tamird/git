@@ -546,6 +546,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "remote-refs",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_PACK_DELTA_SIZE_CACHE_MISS_DECODE] = {
+		.category = "pack",
+		.name = "delta-size-cache/miss-decode",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };
