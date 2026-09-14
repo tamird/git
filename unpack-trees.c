@@ -2158,7 +2158,9 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		}
 	}
 
+	trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_CHECK_UPDATES, 1);
 	ret = check_updates(o, &o->internal.result) ? (-2) : 0;
+	trace_checkout_timer(TRACE2_TIMER_ID_UNPACK_TREES_CHECK_UPDATES, 0);
 	if (o->dst_index) {
 		move_index_extensions(&o->internal.result, o->src_index);
 		if (!ret) {

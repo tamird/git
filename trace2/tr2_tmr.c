@@ -271,6 +271,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "format-output/abbrev",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_CHECK_UPDATES] = {
+		.category = "unpack_trees",
+		.name = "check-updates",
+		.want_per_thread_events = 0,
+	},
 	/* Disjoint checkout-entry phases within unpack-trees queue_entries. */
 	[TRACE2_TIMER_ID_UNPACK_TREES_PREPARE_ENTRY] = {
 		.category = "unpack_trees",
