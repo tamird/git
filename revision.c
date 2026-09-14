@@ -833,25 +833,57 @@ static int bloom_query_entry_cmp(const void *cmp_data,
 			      sizeof(*e1->key->hashes)));
 }
 
+static int recursive_glob_directory(const struct pathspec_item *pi,
+				    const char **directory, size_t *len)
+{
+	const char *start, *end;
+
+	if (!(pi->magic & PATHSPEC_GLOB) ||
+	    !skip_prefix(pi->match, "**/", &start))
+		return 0;
+	end = strchr(start, '/');
+	if (!end || end == start || strcmp(end, "/**"))
+		return 0;
+	for (const char *p = start; p < end; p++)
+		if (is_glob_special(*p))
+			return 0;
+
+	*directory = start;
+	*len = end - start;
+	return 1;
+}
+
 static int convert_pathspec_to_bloom_keyvec(
 	struct bloom_keyvec **out,
 	struct bloom_keyvec **components_out,
 	const struct pathspec_item *pi,
+	int recurse_submodules,
 	const struct bloom_filter_settings *settings)
 {
 	char *path_alloc = NULL;
-	const char *path;
+	const char *path = NULL;
 	size_t len;
 	int res = -1;
 	const char *basename;
 
-	if (settings->hash_version == 3 &&
-	    pathspec_item_get_recursive_basename(pi, &basename)) {
-		*out = bloom_keyvec_new(basename, strlen(basename), settings);
-		if (components_out)
-			*components_out = bloom_keyvec_new(
-				basename, strlen(basename), settings);
-		return 0;
+	if (settings->hash_version == 3) {
+		if (pathspec_item_get_recursive_basename(pi, &basename)) {
+			path = basename;
+			len = strlen(path);
+		} else if (!recurse_submodules &&
+			   recursive_glob_directory(pi, &basename, &len)) {
+			/* Every matching path contains this directory basename. */
+			path_alloc = xmemdupz(basename, len);
+			path = path_alloc;
+		}
+		if (path) {
+			*out = bloom_keyvec_new(path, len, settings);
+			if (components_out)
+				*components_out = bloom_keyvec_new(path, len,
+								   settings);
+			res = 0;
+			goto cleanup;
+		}
 	}
 
 	len = pi->nowildcard_len;
@@ -1034,6 +1066,7 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 				    &revs->bloom_query_components[query_nr] :
 				    NULL,
 			    &pathspec->items[i],
+			    pathspec->recurse_submodules,
 			    revs->bloom_filter_settings)) {
 			release_revisions_bloom_keyvecs(revs);
 			return -1;

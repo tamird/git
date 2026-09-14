@@ -430,11 +430,23 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 	(
 		cd basename-v3 &&
 		test_commit base unrelated &&
-		mkdir -p nested/target &&
+		mkdir -p nested/target nested/sibling target outside &&
 		test_commit nested nested/target/file &&
+		test_commit root target/file &&
+		test_commit sibling nested/sibling/file &&
+		test_commit named-file outside/target &&
 		test_commit named nested/file4 &&
 		test_commit escaped nested/foobar &&
 		test_commit other unrelated &&
+		mv nested/target/file moved &&
+		git add -A &&
+		git commit -m moved &&
+		cat >.gitattributes <<-EOF &&
+		target/** report
+		nested/target/** -report
+		EOF
+		git add .gitattributes &&
+		git commit -m attrs &&
 		git -c commitGraph.changedPathsVersion=3 commit-graph write \
 			--reachable --changed-paths &&
 		git -c core.commitGraph=false log --format=%s \
@@ -455,6 +467,101 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 			-- "**/foo\\bar" >expect-escaped &&
 		git log --format=%s -- "**/foo\\bar" >actual-escaped &&
 		test_cmp expect-escaped actual-escaped
+	)
+'
+
+test_expect_success 'version 3 prunes recursive directory globs' '
+	(
+		cd basename-v3 &&
+		git -c core.commitGraph=false log --format=%s -- \
+			":(glob)**/target/**" >expect &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-dir.event" \
+			git log --format=%s -- ":(glob)**/target/**" >actual &&
+		test_cmp expect actual &&
+		test_trace2_data bloom active 1 \
+			<"$TRASH_DIRECTORY/recursive-dir.event" &&
+		test_grep "\"definitely_not\":[1-9]" \
+			"$TRASH_DIRECTORY/recursive-dir.event" &&
+		test_grep "^root$" actual &&
+		test_grep "^nested$" actual &&
+		test_grep "^moved$" actual &&
+		test_grep ! "^named-file$" actual &&
+
+		git -c core.commitGraph=false log --format=%s -- \
+			":(glob)**/target/**" ":(glob)**/sibling/**" \
+			":(exclude,glob)**/target/**" >expect &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-multi.event" \
+			git log --format=%s -- \
+				":(glob)**/target/**" ":(glob)**/sibling/**" \
+				":(exclude,glob)**/target/**" >actual &&
+		test_cmp expect actual &&
+		test_trace2_data bloom active 1 \
+			<"$TRASH_DIRECTORY/recursive-multi.event" &&
+		test_grep "^sibling$" actual &&
+		test_grep ! "^root$" actual &&
+		test_grep ! "^nested$" actual &&
+
+		git -c core.commitGraph=false log --format=%s -- \
+			":(glob,attr:report)**/target/**" >expect &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-attr.event" \
+			git log --format=%s -- \
+				":(glob,attr:report)**/target/**" >actual &&
+		test_cmp expect actual &&
+		test_trace2_data bloom active 1 \
+			<"$TRASH_DIRECTORY/recursive-attr.event" &&
+		test_grep "^root$" actual &&
+		test_grep ! "^nested$" actual &&
+
+		(
+			cd nested &&
+			git -c core.commitGraph=false log --format=%s -- \
+				":(glob)**/target/**" >expect &&
+			git log --format=%s -- \
+				":(glob)**/target/**" >actual &&
+			test_cmp expect actual
+		)
+	)
+'
+
+test_expect_success 'other glob shapes do not use directory basename filters' '
+	(
+		cd basename-v3 &&
+		i=0 &&
+		for pattern in \
+			":(glob)**/tar\get/**" \
+			":(glob)**/target/file*" \
+			":(icase,glob)**/TARGET/**"
+		do
+			git -c core.commitGraph=false log --format=%s -- \
+				"$pattern" >expect &&
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-other-$i.event" \
+				git log --format=%s -- "$pattern" >actual &&
+			test_cmp expect actual &&
+			test_trace2_data bloom active 0 \
+				<"$TRASH_DIRECTORY/recursive-other-$i.event" &&
+			i=$((i + 1)) || return 1
+		done &&
+		git -c core.commitGraph=false log --format=%s -- \
+			":(literal)**/target/**" >expect &&
+		git log --format=%s -- ":(literal)**/target/**" >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'version 2 cannot prune recursive directory globs' '
+	(
+		cd basename-v3 &&
+		git -c commitGraph.changedPathsVersion=2 commit-graph write \
+			--reachable --changed-paths &&
+		test-tool read-graph >graph-v2 &&
+		test_grep "bloom(2," graph-v2 &&
+		git -c core.commitGraph=false log --format=%s -- \
+			":(glob)**/target/**" >expect &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-v2.event" \
+			git log --format=%s -- ":(glob)**/target/**" >actual &&
+		test_cmp expect actual &&
+		test_trace2_data bloom active 0 \
+			<"$TRASH_DIRECTORY/recursive-v2.event"
 	)
 '
 
