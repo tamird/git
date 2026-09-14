@@ -72,6 +72,22 @@ test_expect_success 'initial setup validation' '
 	git cat-file blob $blob_3 > /dev/null
 '
 
+test_expect_success 'repeated packed delta sizes keep their own values' '
+	{
+		printf "%s\n" "$blob_2" "$blob_3" "$blob_2" "$blob_3"
+	} >input &&
+	{
+		printf "%s blob %s\n" "$blob_2" "$(test_file_size file_2)" &&
+		printf "%s blob %s\n" "$blob_3" "$(test_file_size file_3)" &&
+		printf "%s blob %s\n" "$blob_2" "$(test_file_size file_2)" &&
+		printf "%s blob %s\n" "$blob_3" "$(test_file_size file_3)"
+	} >expect &&
+	GIT_TRACE2_EVENT="$PWD/delta-size.trace" \
+		git cat-file --batch-check <input >actual &&
+	test_cmp expect actual &&
+	test_trace2_data pack delta-size-cache/hits 2 <delta-size.trace
+'
+
 test_expect_success 'create corruption in header of first object' '
 	do_corrupt_object $blob_1 0 < zero &&
 	test_must_fail git cat-file blob $blob_1 > /dev/null &&

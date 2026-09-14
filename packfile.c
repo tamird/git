@@ -14,6 +14,7 @@
 #include "commit.h"
 #include "object.h"
 #include "tag.h"
+#include "trace2.h"
 #include "trace.h"
 #include "tree-walk.h"
 #include "tree.h"
@@ -43,6 +44,129 @@ static unsigned int pack_open_fds;
 static unsigned int pack_max_fds;
 static size_t peak_pack_mapped;
 static size_t pack_mapped;
+
+/* At most 512 KiB per pack and 16 MiB across the process. */
+#define DELTA_SIZE_CACHE_SLOTS	   (1u << 15)
+#define DELTA_SIZE_CACHE_MAX_BYTES (16u * 1024 * 1024)
+
+struct packed_delta_size_cache_entry {
+	off_t offset;
+	size_t size;
+};
+
+#ifndef NO_PTHREADS
+static pthread_mutex_t delta_size_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+static size_t delta_size_cache_bytes;
+static int delta_size_cache_report_registered;
+struct delta_size_cache_stats {
+	intmax_t hits, misses, evictions, bypassed, peak_bytes;
+};
+static struct delta_size_cache_stats delta_size_cache_stats;
+
+static void delta_size_cache_report(void)
+{
+	int saved_errno = errno;
+	struct delta_size_cache_stats stats;
+
+	pthread_mutex_lock(&delta_size_cache_mutex);
+	stats = delta_size_cache_stats;
+	pthread_mutex_unlock(&delta_size_cache_mutex);
+
+	trace2_data_intmax("pack", NULL, "delta-size-cache/hits",
+			   stats.hits);
+	trace2_data_intmax("pack", NULL, "delta-size-cache/misses",
+			   stats.misses);
+	trace2_data_intmax("pack", NULL, "delta-size-cache/evictions",
+			   stats.evictions);
+	trace2_data_intmax("pack", NULL, "delta-size-cache/bypassed",
+			   stats.bypassed);
+	trace2_data_intmax("pack", NULL, "delta-size-cache/peak_bytes",
+			   stats.peak_bytes);
+	errno = saved_errno;
+}
+
+static unsigned int delta_size_cache_slot(off_t offset)
+{
+	uint64_t hash = (uint64_t)offset;
+
+	hash ^= hash >> 16;
+	hash ^= hash >> 32;
+	return (unsigned int)hash & (DELTA_SIZE_CACHE_SLOTS - 1);
+}
+
+static int get_cached_delta_size(struct packed_git *p, off_t offset, size_t *size)
+{
+	struct packed_delta_size_cache_entry *entry;
+	int saved_errno = errno;
+	int found = 0;
+
+	pthread_mutex_lock(&delta_size_cache_mutex);
+	if (!delta_size_cache_report_registered && !atexit(delta_size_cache_report))
+		delta_size_cache_report_registered = 1;
+	entry = NULL;
+	if (p->delta_size_cache)
+		entry = &p->delta_size_cache[delta_size_cache_slot(offset)];
+	if (entry && entry->size && entry->offset == offset) {
+		*size = entry->size;
+		delta_size_cache_stats.hits++;
+		found = 1;
+	} else {
+		delta_size_cache_stats.misses++;
+	}
+	pthread_mutex_unlock(&delta_size_cache_mutex);
+	errno = saved_errno;
+	return found;
+}
+
+static void cache_delta_size(struct packed_git *p, off_t offset, size_t size)
+{
+	const size_t cache_size = DELTA_SIZE_CACHE_SLOTS *
+				  sizeof(*p->delta_size_cache);
+	struct packed_delta_size_cache_entry *entry;
+	int saved_errno = errno;
+
+	pthread_mutex_lock(&delta_size_cache_mutex);
+	if (!p->delta_size_cache) {
+		if (delta_size_cache_bytes >
+		    DELTA_SIZE_CACHE_MAX_BYTES - cache_size) {
+			delta_size_cache_stats.bypassed++;
+			goto out;
+		}
+		p->delta_size_cache = calloc(DELTA_SIZE_CACHE_SLOTS,
+					     sizeof(*p->delta_size_cache));
+		if (!p->delta_size_cache) {
+			delta_size_cache_stats.bypassed++;
+			goto out;
+		}
+		delta_size_cache_bytes += cache_size;
+		if (delta_size_cache_stats.peak_bytes < delta_size_cache_bytes)
+			delta_size_cache_stats.peak_bytes = delta_size_cache_bytes;
+	}
+	entry = &p->delta_size_cache[delta_size_cache_slot(offset)];
+	if (entry->size && entry->offset != offset)
+		delta_size_cache_stats.evictions++;
+	entry->offset = offset;
+	entry->size = size;
+out:
+	pthread_mutex_unlock(&delta_size_cache_mutex);
+	errno = saved_errno;
+}
+
+void clear_packed_delta_size_cache(struct packed_git *p)
+{
+	int saved_errno = errno;
+
+	pthread_mutex_lock(&delta_size_cache_mutex);
+	if (p->delta_size_cache) {
+		FREE_AND_NULL(p->delta_size_cache);
+		delta_size_cache_bytes -=
+			sizeof(struct packed_delta_size_cache_entry) *
+			DELTA_SIZE_CACHE_SLOTS;
+	}
+	pthread_mutex_unlock(&delta_size_cache_mutex);
+	errno = saved_errno;
+}
 
 #define SZ_FMT PRIuMAX
 static inline uintmax_t sz_fmt(size_t s) { return s; }
@@ -357,6 +481,7 @@ static void close_pack_mtimes(struct packed_git *p)
 
 void close_pack(struct packed_git *p)
 {
+	clear_packed_delta_size_cache(p);
 	close_pack_windows(p);
 	close_pack_fd(p);
 	close_pack_index(p);
@@ -1456,10 +1581,14 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 				ret = -1;
 				goto out;
 			}
-			size = get_size_from_delta(p, &w_curs, tmp_pos);
-			if (size == 0) {
-				ret = -1;
-				goto out;
+			/* Installed packs are immutable; validate the header and base first. */
+			if (!get_cached_delta_size(p, obj_offset, &size)) {
+				size = get_size_from_delta(p, &w_curs, tmp_pos);
+				if (size == 0) {
+					ret = -1;
+					goto out;
+				}
+				cache_delta_size(p, obj_offset, size);
 			}
 		}
 		*oi->sizep = size;

@@ -933,8 +933,10 @@ static void odb_source_packed_free(struct odb_source *source)
 
 	chdir_notify_unregister(odb_source_packed_reparent, packed);
 
-	for (struct packfile_list_entry *e = packed->packs.head; e; e = e->next)
+	for (struct packfile_list_entry *e = packed->packs.head; e; e = e->next) {
+		clear_packed_delta_size_cache(e->pack);
 		free(e->pack);
+	}
 	packfile_list_clear(&packed->packs);
 
 	strmap_clear(&packed->packs_by_path, 0);

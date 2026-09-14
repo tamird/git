@@ -13,6 +13,7 @@
 /* in odb.h */
 struct object_info;
 struct odb_stream;
+struct packed_delta_size_cache_entry;
 
 struct packed_git {
 	struct pack_window *windows;
@@ -22,6 +23,7 @@ struct packed_git {
 	uint32_t num_objects;
 	size_t crc_offset;
 	struct oidset bad_objects;
+	struct packed_delta_size_cache_entry *delta_size_cache;
 	int index_version;
 	time_t mtime;
 	int pack_fd;
@@ -242,6 +244,7 @@ unsigned char *use_pack(struct packed_git *, struct pack_window **, off_t,
 			size_t *);
 void close_pack_windows(struct packed_git *);
 void close_pack(struct packed_git *);
+void clear_packed_delta_size_cache(struct packed_git *);
 void unuse_pack(struct pack_window **);
 void clear_delta_base_cache(void);
 struct packed_git *add_packed_git(struct repository *r, const char *path,
