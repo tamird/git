@@ -485,7 +485,7 @@ void add_pending_oid(struct rev_info *revs, const char *name,
 }
 
 static struct commit *handle_commit(struct rev_info *revs,
-				    struct object_array_entry *entry)
+				    struct object_array_entry *entry, int sample)
 {
 	struct object *object = entry->item;
 	const char *name = entry->name;
@@ -531,11 +531,21 @@ static struct commit *handle_commit(struct rev_info *revs,
 	 */
 	if (object->type == OBJ_COMMIT) {
 		struct commit *commit = (struct commit *)object;
+		int parsed;
 
-		if (repo_parse_commit(revs->repo, commit) < 0)
+		if (sample)
+			trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_PARSE_COMMIT);
+		parsed = repo_parse_commit(revs->repo, commit);
+		if (sample)
+			trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_PARSE_COMMIT);
+		if (parsed < 0)
 			die("unable to parse commit %s", name);
 		if (flags & UNINTERESTING) {
+			if (sample)
+				trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_MARK_PARENTS);
 			mark_parents_uninteresting(revs, commit);
+			if (sample)
+				trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_MARK_PARENTS);
 
 			if (!revs->topo_order || !generation_numbers_enabled(the_repository))
 				revs->limited = 1;
@@ -4517,16 +4527,34 @@ int prepare_revision_walk(struct rev_info *revs)
 	revs->pending.nr = 0;
 	revs->pending.alloc = 0;
 	revs->pending.objects = NULL;
+	trace2_data_intmax("revision", revs->repo, "pending_entries",
+			   old_pending.nr);
 	trace2_region_enter("revision", "prepare_pending", revs->repo);
 	for (i = 0; i < old_pending.nr; i++) {
 		struct object_array_entry *e = old_pending.objects + i;
-		struct commit *commit = handle_commit(revs, e);
+		struct commit *commit;
+		/* Sample the first 64 entries and every 64th thereafter. */
+		int sample = i < 64 || !(i & 63);
+
+		if (sample) {
+			trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_ENTRY);
+			trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_HANDLE);
+		}
+		commit = handle_commit(revs, e, sample);
+		if (sample)
+			trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_HANDLE);
 		if (commit) {
 			if (!(commit->object.flags & SEEN)) {
+				if (sample)
+					trace2_timer_start(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_APPEND);
 				commit->object.flags |= SEEN;
 				next = commit_list_append(commit, next);
+				if (sample)
+					trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_APPEND);
 			}
 		}
+		if (sample)
+			trace2_timer_stop(TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_ENTRY);
 	}
 	trace2_region_leave("revision", "prepare_pending", revs->repo);
 	object_array_clear(&old_pending);

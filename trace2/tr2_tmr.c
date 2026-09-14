@@ -581,6 +581,31 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "delta-size-cache/miss-decode",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_PARSE_COMMIT] = {
+		.category = "revision",
+		.name = "pending-sample/parse-commit",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_MARK_PARENTS] = {
+		.category = "revision",
+		.name = "pending-sample/mark-parents",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_ENTRY] = {
+		.category = "revision",
+		.name = "pending-sample/entry",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_HANDLE] = {
+		.category = "revision",
+		.name = "pending-sample/handle",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REVISION_PENDING_SAMPLE_APPEND] = {
+		.category = "revision",
+		.name = "pending-sample/append",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };
