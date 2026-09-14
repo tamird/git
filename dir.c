@@ -1824,8 +1824,9 @@ static struct path_pattern *last_matching_pattern_from_lists(
  * which has a char length of baselen.
  */
 static enum untracked_ignore_load_result prep_exclude(struct dir_struct *dir,
-			 struct index_state *istate,
-			 const char *base, int baselen)
+						      struct index_state *istate,
+						      const char *base, int baselen,
+						      int trace_resync_ignore_attempts)
 {
 	struct exclude_list_group *group;
 	struct pattern_list *pl;
@@ -1953,6 +1954,12 @@ static enum untracked_ignore_load_result prep_exclude(struct dir_struct *dir,
 			pl->src = strbuf_detach(&sb, NULL);
 			if (untracked)
 				oidcpy(&oid_stat.oid, &untracked->exclude_oid);
+			if (trace_resync_ignore_attempts) {
+				int saved_errno = errno;
+
+				trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE_ATTEMPT);
+				errno = saved_errno;
+			}
 			if (dir->internal.trace_normal_ignore_loads) {
 				int saved_errno = errno;
 
@@ -1962,6 +1969,12 @@ static enum untracked_ignore_load_result prep_exclude(struct dir_struct *dir,
 			add_patterns(pl->src, pl->src, stk->baselen, pl, istate,
 				     PATTERN_NOFOLLOW,
 				     untracked ? &oid_stat : NULL, &loaded);
+			if (trace_resync_ignore_attempts) {
+				int saved_errno = errno;
+
+				trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE_ATTEMPT);
+				errno = saved_errno;
+			}
 			if (dir->internal.trace_normal_ignore_loads) {
 				int saved_errno = errno;
 
@@ -2037,7 +2050,7 @@ struct path_pattern *last_matching_pattern(struct dir_struct *dir,
 	const char *basename = strrchr(pathname, '/');
 	basename = (basename) ? basename+1 : pathname;
 
-	prep_exclude(dir, istate, pathname, basename-pathname);
+	prep_exclude(dir, istate, pathname, basename - pathname, 0);
 
 	if (dir->internal.pattern)
 		return dir->internal.pattern;
@@ -2822,10 +2835,10 @@ static int valid_cached_dir(struct dir_struct *dir,
 	 */
 	if (path->len && path->buf[path->len - 1] != '/') {
 		strbuf_addch(path, '/');
-		prep_exclude(dir, istate, path->buf, path->len);
+		prep_exclude(dir, istate, path->buf, path->len, 0);
 		strbuf_setlen(path, path->len - 1);
 	} else
-		prep_exclude(dir, istate, path->buf, path->len);
+		prep_exclude(dir, istate, path->buf, path->len, 0);
 
 	/* hopefully prep_exclude() haven't invalidated this entry... */
 	return untracked->valid;
@@ -3535,9 +3548,10 @@ static void validate_untracked_global_excludes(struct dir_struct *dir)
 }
 
 static int revalidate_untracked_ignores(struct dir_struct *dir,
-				       struct index_state *istate,
-				       struct untracked_cache_dir *node,
-				       struct strbuf *path)
+					struct index_state *istate,
+					struct untracked_cache_dir *node,
+					struct strbuf *path,
+					int trace_resync_ignore_attempts)
 {
 	size_t i, len = path->len;
 
@@ -3554,7 +3568,8 @@ static int revalidate_untracked_ignores(struct dir_struct *dir,
 	}
 	if (len)
 		strbuf_addch(path, '/');
-	if (prep_exclude(dir, istate, path->buf, path->len) ==
+	if (prep_exclude(dir, istate, path->buf, path->len,
+			 trace_resync_ignore_attempts) ==
 	    UNTRACKED_IGNORE_INDETERMINATE) {
 		strbuf_setlen(path, len);
 		return -1;
@@ -3568,7 +3583,8 @@ static int revalidate_untracked_ignores(struct dir_struct *dir,
 		if (len)
 			strbuf_addch(path, '/');
 		strbuf_addstr(path, node->dirs[i]->name);
-		if (revalidate_untracked_ignores(dir, istate, node->dirs[i], path)) {
+		if (revalidate_untracked_ignores(dir, istate, node->dirs[i],
+						 path, trace_resync_ignore_attempts)) {
 			strbuf_setlen(path, len);
 			return -1;
 		}
@@ -3610,7 +3626,8 @@ static int revalidate_pending_untracked_cache(struct dir_struct *dir,
 	saved_errno = errno;
 	trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE);
 	errno = saved_errno;
-	ret = revalidate_untracked_ignores(dir, istate, uc->root, &path);
+	ret = revalidate_untracked_ignores(dir, istate, uc->root, &path,
+					   trace2_is_enabled());
 	saved_errno = errno;
 	trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE);
 	errno = saved_errno;

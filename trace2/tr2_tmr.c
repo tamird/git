@@ -428,6 +428,12 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "revalidate/ignore",
 		.want_per_thread_events = 0,
 	},
+	/* Includes attempts to read per-directory ignore files that are absent. */
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_REVALIDATE_IGNORE_ATTEMPT] = {
+		.category = "untracked_cache",
+		.name = "revalidate/ignore-attempt",
+		.want_per_thread_events = 0,
+	},
 
 	[TRACE2_TIMER_ID_DIR_IGNORE_LOAD] = {
 		.category = "dir",

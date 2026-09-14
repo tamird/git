@@ -1082,7 +1082,7 @@ test_expect_success 'prepare production pending-cache index' '
 		echo tracked >a/tracked &&
 		echo tracked >a/deep/tracked &&
 		echo tracked >b/tracked &&
-		: >a/.gitignore &&
+		printf 'ignored/\n' >a/.gitignore &&
 		git add a/tracked a/deep/tracked a/.gitignore b/tracked &&
 		git commit -m base &&
 		echo untracked >a/loose/one &&
@@ -1144,12 +1144,15 @@ test_expect_success 'pending stat results do not outlive one directory read' '
 		test_grep "b/new" .git/twice-out &&
 		grep "\"event\":\"timer\".*\"category\":\"untracked_cache\"" \
 			.git/twice-event >.git/twice-timers &&
-		test_line_count = 3 .git/twice-timers &&
+		test_line_count = 4 .git/twice-timers &&
+		# The root lacks .gitignore, while a/ has a tracked rule.
 		for timer in revalidate revalidate/stat revalidate/ignore
 		do
 			test_grep "\"name\":\"$timer\",\"intervals\":1," \
 				.git/twice-timers || return 1
 		done &&
+		test_grep "\"name\":\"revalidate/ignore-attempt\",\"intervals\":2," \
+			.git/twice-timers &&
 		test_grep ! "\"event\":\"th_timer\".*\"category\":\"untracked_cache\"" \
 			.git/twice-event &&
 		grep "\"event\":\"timer\".*\"category\":\"dir\"" \
