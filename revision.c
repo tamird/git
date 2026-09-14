@@ -4517,6 +4517,7 @@ int prepare_revision_walk(struct rev_info *revs)
 	revs->pending.nr = 0;
 	revs->pending.alloc = 0;
 	revs->pending.objects = NULL;
+	trace2_region_enter("revision", "prepare_pending", revs->repo);
 	for (i = 0; i < old_pending.nr; i++) {
 		struct object_array_entry *e = old_pending.objects + i;
 		struct commit *commit = handle_commit(revs, e);
@@ -4527,6 +4528,7 @@ int prepare_revision_walk(struct rev_info *revs)
 			}
 		}
 	}
+	trace2_region_leave("revision", "prepare_pending", revs->repo);
 	object_array_clear(&old_pending);
 
 	/* Signal whether we need per-parent treesame decoration */
@@ -4550,7 +4552,12 @@ int prepare_revision_walk(struct rev_info *revs)
 	if (revs->no_walk)
 		return 0;
 	if (revs->limited) {
-		if (limit_list(revs) < 0)
+		int ret;
+
+		trace2_region_enter("revision", "limit_list", revs->repo);
+		ret = limit_list(revs);
+		trace2_region_leave("revision", "limit_list", revs->repo);
+		if (ret < 0)
 			return -1;
 		if (revs->topo_order)
 			sort_in_topological_order(&revs->commits, revs->sort_order);
