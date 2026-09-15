@@ -361,11 +361,17 @@ test_expect_success 'verify after commit-graph-chain corruption (tip)' '
 	git clone --no-hardlinks . verify-chain-tip &&
 	(
 		cd verify-chain-tip &&
+		old_digit=$(dd if="$graphdir/commit-graph-chain" bs=1 skip=70 count=1 2>/dev/null) &&
+		case "$old_digit" in
+		0) other_digit=1 ;;
+		[0-9a-f]) other_digit=0 ;;
+		*) false ;;
+		esac &&
 		corrupt_file "$graphdir/commit-graph-chain" 70 "G" &&
 		test_must_fail git commit-graph verify 2>test_err &&
 		grep -v "^+" test_err >err &&
 		test_grep "invalid commit-graph chain" err &&
-		corrupt_file "$graphdir/commit-graph-chain" 70 "A" &&
+		corrupt_file "$graphdir/commit-graph-chain" 70 "$other_digit" &&
 		test_must_fail git commit-graph verify 2>test_err &&
 		grep -v "^+" test_err >err &&
 		test_grep "unable to find all commit-graph files" err
