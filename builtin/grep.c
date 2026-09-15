@@ -282,6 +282,7 @@ static void trace_worker_target_growth(void)
 
 #define GREP_RESULT_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_INDEX_OVERLAY_SAMPLE_SIZE (1U << 12)
+#define GREP_INDEX_OVERLAY_PREFIX_SIZE (1U << 7)
 #define GREP_TREE_INDEX_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_TREE_INDEX_BATCH_SIZE	  (1U << 16)
 #define GREP_TREE_INDEX_BATCH_MAX_BYTES	  (16U * 1024 * 1024)
@@ -2170,6 +2171,7 @@ static int grep_cache(struct grep_opt *opt,
 						GREP_INDEX_OVERLAY_SAMPLE_SIZE);
 					size_t queried = 0;
 					uint64_t sample_rejected = 0;
+					uint64_t prefix_rejected = 0;
 					int bypassed = 0;
 
 					if (!sample_size ||
@@ -2186,10 +2188,14 @@ static int grep_cache(struct grep_opt *opt,
 						uint64_t rejected = 0;
 
 						queried = sample_size;
-						for (size_t i = 0; i < sample_size; i++)
+						for (size_t i = 0; i < sample_size; i++) {
 							if (results[i] ==
-							    GREP_INDEX_IPC_IMPOSSIBLE)
+							    GREP_INDEX_IPC_IMPOSSIBLE) {
 								sample_rejected++;
+								if (i < GREP_INDEX_OVERLAY_PREFIX_SIZE)
+									prefix_rejected++;
+							}
+						}
 						if (sample_size < nr_oids) {
 							if (sample_rejected * 8 < sample_size) {
 								bypassed = 1;
@@ -2228,6 +2234,11 @@ static int grep_cache(struct grep_opt *opt,
 							"grep", repo,
 							"content_index_overlay_rejected",
 							rejected);
+						if (sample_size >= GREP_INDEX_OVERLAY_PREFIX_SIZE)
+							trace2_data_intmax(
+								"grep", repo,
+								"content_index_overlay_prefix_128_rejected",
+								prefix_rejected);
 						if (bypassed)
 							trace2_data_intmax(
 								"grep", repo,
