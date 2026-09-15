@@ -52,6 +52,9 @@ struct spanhash_top {
 /* Retained cache memory is limited per repository, including the buckets. */
 #define SPANHASH_CACHE_LIMIT (32u * 1024u * 1024u)
 #define SPANHASH_CACHE_BUCKETS (1u << 13)
+#define SPAN_SAMPLE_MODULUS 64
+#define SPAN_SAMPLE_MAX_KEYS (1u << 16)
+#define SPAN_SAMPLE_MAX_SELECTED (1u << 18)
 
 struct span_cache_entry {
 	struct span_cache_entry *next;
@@ -69,10 +72,27 @@ struct diff_spanhash_cache {
 	size_t entry_bytes;
 };
 
+struct span_sample_entry {
+	struct span_sample_entry *next;
+	struct repository *repo;
+	struct object_id oid;
+	uint64_t last_build;
+	unsigned char is_text;
+};
+
+struct span_sample_state {
+	struct span_sample_entry **buckets;
+	uint64_t build, selected, first, repeat_hit, repeat_miss;
+	uint64_t miss_gap_le_4096, miss_gap_le_65536, miss_gap_gt_65536;
+	size_t keys;
+	int invalid, truncated, registered;
+};
+
 static pthread_mutex_t span_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uintmax_t span_cache_hits, span_cache_misses, span_cache_evictions;
 static uintmax_t span_cache_bypassed, span_cache_retained, span_cache_peak;
 static int span_cache_report_registered;
+static struct span_sample_state span_sample;
 
 static size_t spanhash_bytes(const struct spanhash_top *value)
 {
@@ -85,6 +105,123 @@ static size_t span_cache_bucket(const struct object_id *oid, int is_text)
 {
 	return (oidhash(oid) ^ (is_text ? 0x9e3779b9u : 0u)) &
 		(SPANHASH_CACHE_BUCKETS - 1);
+}
+
+static void span_sample_report(void)
+{
+	int saved_errno = errno;
+
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/valid",
+			   !span_sample.invalid);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/truncated",
+			   span_sample.truncated);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/selected",
+			   span_sample.selected);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/first",
+			   span_sample.first);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/repeat-hit",
+			   span_sample.repeat_hit);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/repeat-miss",
+			   span_sample.repeat_miss);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/miss-gap-le-4096",
+			   span_sample.miss_gap_le_4096);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/miss-gap-le-65536",
+			   span_sample.miss_gap_le_65536);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/miss-gap-gt-65536",
+			   span_sample.miss_gap_gt_65536);
+	errno = saved_errno;
+}
+
+/* Called under span_cache_mutex; gaps count build lookups, not time or bytes. */
+static uint64_t span_sample_probe(struct repository *r,
+				  const struct object_id *oid, int is_text)
+{
+	struct span_sample_entry *entry;
+	size_t bucket;
+	uint64_t gap = 0;
+
+	if (!trace2_is_enabled() || !oid->algo || span_sample.invalid)
+		return 0;
+	if (!span_sample.buckets) {
+		if (oid->hash[0] & (SPAN_SAMPLE_MODULUS - 1))
+			return 0;
+		if (!span_sample.registered) {
+			if (atexit(span_sample_report)) {
+				span_sample.invalid = 1;
+				return 0;
+			}
+			span_sample.registered = 1;
+		}
+		span_sample.buckets = calloc(SPANHASH_CACHE_BUCKETS,
+					    sizeof(*span_sample.buckets));
+		if (!span_sample.buckets) {
+			span_sample.invalid = 1;
+			return 0;
+		}
+	}
+	if (span_sample.build == UINT64_MAX) {
+		span_sample.invalid = 1;
+		return 0;
+	}
+	span_sample.build++;
+	if (oid->hash[0] & (SPAN_SAMPLE_MODULUS - 1))
+		return 0;
+	if (span_sample.selected == SPAN_SAMPLE_MAX_SELECTED) {
+		span_sample.invalid = span_sample.truncated = 1;
+		return 0;
+	}
+	bucket = span_cache_bucket(oid, is_text);
+	for (entry = span_sample.buckets[bucket]; entry; entry = entry->next)
+		if (entry->repo == r && entry->is_text == is_text &&
+		    entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
+			break;
+	if (!entry) {
+		if (span_sample.keys == SPAN_SAMPLE_MAX_KEYS) {
+			span_sample.invalid = span_sample.truncated = 1;
+			return 0;
+		}
+		entry = malloc(sizeof(*entry));
+		if (!entry) {
+			span_sample.invalid = 1;
+			return 0;
+		}
+		entry->repo = r;
+		oidcpy(&entry->oid, oid);
+		entry->is_text = is_text;
+		entry->next = span_sample.buckets[bucket];
+		span_sample.buckets[bucket] = entry;
+		span_sample.keys++;
+		span_sample.first++;
+	} else {
+		gap = span_sample.build - entry->last_build;
+	}
+	entry->last_build = span_sample.build;
+	span_sample.selected++;
+	return gap;
+}
+
+/* A cleared repository can be reallocated at the same address. */
+static void span_sample_clear_repo(struct repository *r)
+{
+	size_t i;
+
+	if (!span_sample.buckets)
+		return;
+	for (i = 0; i < SPANHASH_CACHE_BUCKETS; i++) {
+		struct span_sample_entry **slot = &span_sample.buckets[i];
+
+		while (*slot) {
+			struct span_sample_entry *entry = *slot;
+
+			if (entry->repo != r) {
+				slot = &entry->next;
+				continue;
+			}
+			*slot = entry->next;
+			free(entry);
+			span_sample.keys--;
+		}
+	}
 }
 
 static struct span_cache_entry *span_cache_find(struct diff_spanhash_cache *cache,
@@ -185,8 +322,14 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 	struct diff_spanhash_cache *cache;
 	struct span_cache_entry *entry;
 	struct spanhash_top *copy = NULL;
+	uint64_t sample_gap = 0;
+	int saved_errno = errno;
 
 	pthread_mutex_lock(&span_cache_mutex);
+	/* Prepopulation probes do not necessarily lead to a span build. */
+	if (count_miss)
+		sample_gap = span_sample_probe(r, oid, is_text);
+	errno = saved_errno;
 	cache = r->spanhash_cache;
 	entry = cache ? span_cache_find(cache, oid, is_text) : NULL;
 	if (entry && require_auto_binary && entry->auto_binary == is_text)
@@ -201,6 +344,19 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 			/* Reclaim optional memory before building the usual table. */
 			span_cache_clear_locked(r);
 			span_cache_bypassed++;
+		}
+	}
+	if (sample_gap) {
+		if (copy)
+			span_sample.repeat_hit++;
+		else {
+			span_sample.repeat_miss++;
+			if (sample_gap <= 4096)
+				span_sample.miss_gap_le_4096++;
+			else if (sample_gap <= 65536)
+				span_sample.miss_gap_le_65536++;
+			else
+				span_sample.miss_gap_gt_65536++;
 		}
 	}
 	if (!copy && count_miss)
@@ -289,6 +445,7 @@ void diffcore_delta_cache_clear(struct repository *r)
 {
 	pthread_mutex_lock(&span_cache_mutex);
 	span_cache_clear_locked(r);
+	span_sample_clear_repo(r);
 	pthread_mutex_unlock(&span_cache_mutex);
 }
 

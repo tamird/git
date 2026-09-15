@@ -3009,6 +3009,8 @@ test_expect_success 'log --follow reuses an object across rename comparisons' '
 	(
 		cd span-follow &&
 		test_seq 1 700 >first &&
+		# This blob selects the same 1/64 OID sample in SHA-1 and SHA-256.
+		printf "span-sample-00920\n" >>first &&
 		git add first &&
 		git commit -m first &&
 		git mv first second &&
@@ -3032,7 +3034,45 @@ test_expect_success 'log --follow reuses an object across rename comparisons' '
 			span.trace &&
 		test_grep -E \
 			"\"category\":\"diff\",\"key\":\"spanhash/cache/hits\",\"value\":\"[1-9][0-9]*\"" \
-			span.trace
+			span.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/valid 1 <span.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/truncated 0 <span.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/selected 1 <span.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/first 1 <span.trace &&
+		# Prepopulation lookups must not count as repeated builds.
+		test_trace2_data_singular diff spanhash/build-sample/repeat-hit 0 <span.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/repeat-miss 0 <span.trace
+	)
+'
+
+test_expect_success 'spanhash sampler detects repeated build lookups' '
+	test_create_repo span-break &&
+	(
+		cd span-break &&
+		test_seq 1 700 >one &&
+		printf "span-sample-00920\n" >>one &&
+		cp one two &&
+		git add one two &&
+		git commit -m base &&
+		sed "1s/.*/changed/" one >edited &&
+		mv edited one &&
+		sed "2s/.*/changed again/" two >edited &&
+		mv edited two &&
+		git add one two &&
+		git commit -m edited &&
+		printf "M\tone\nM\ttwo\n" >expect &&
+		GIT_TRACE2_EVENT=0 git diff-tree -r -B -M --name-status HEAD^ HEAD >untraced &&
+		test_cmp expect untraced &&
+		GIT_TRACE2_EVENT="$PWD/break.trace" \
+			git diff-tree -r -B -M --name-status HEAD^ HEAD >actual &&
+		test_cmp expect actual &&
+		# Break detection compares both shared base blobs before rename prepopulation.
+		test_trace2_data_singular diff spanhash/build-sample/valid 1 <break.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/truncated 0 <break.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/selected 2 <break.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/first 1 <break.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/repeat-hit 1 <break.trace &&
+		test_trace2_data_singular diff spanhash/build-sample/repeat-miss 0 <break.trace
 	)
 '
 
