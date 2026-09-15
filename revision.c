@@ -4571,6 +4571,7 @@ int prepare_revision_walk(struct rev_info *revs)
 	struct commit_list **next = &revs->commits;
 	struct tree_mark_stats tree_stats = {
 		.parse_counts_valid = 1,
+		.parse_timings_valid = 1,
 	};
 	struct tree_mark_stats *pending_tree_stats =
 		trace2_is_enabled() && revs->tree_objects ? &tree_stats : NULL;
@@ -4620,6 +4621,8 @@ int prepare_revision_walk(struct rev_info *revs)
 				   tree_stats.tree_bytes);
 		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/parse-counts-valid",
 				   tree_stats.parse_counts_valid);
+		trace2_data_intmax("revision", revs->repo, "pending-negative-tree/parse-timings-valid",
+				   tree_stats.parse_timings_valid);
 		if (tree_stats.parse_counts_valid) {
 			trace2_data_intmax("revision", revs->repo,
 					   "pending-negative-tree/parse-needed-count",
@@ -4628,6 +4631,10 @@ int prepare_revision_walk(struct rev_info *revs)
 					   "pending-negative-tree/parse-already-count",
 					   tree_stats.already_parsed_count);
 		}
+		if (tree_stats.parse_timings_valid)
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/parse-needed-us",
+					   tree_stats.parse_needed_ns / 1000);
 		errno = saved_errno;
 	}
 	object_array_clear(&old_pending);
