@@ -10,7 +10,6 @@
 #include "hash.h"
 #include "list.h"
 #include "odb.h"
-#include "parse.h"
 #include "replace-object.h"
 #include "trace2.h"
 #include "tree.h"
@@ -653,12 +652,9 @@ static void follow_change(struct diff_options *opt,
 }
 
 /* The retained limit includes entries and buckets, per repository. */
-#define FOLLOW_TREE_CACHE_LIMIT	  (32u * 1024u * 1024u)
-#define FOLLOW_TREE_CACHE_ENTRIES (1u << 16)
-#define FOLLOW_TREE_CACHE_BUCKETS (1u << 13)
-#define FOLLOW_TREE_CACHE_LARGE_LIMIT	(128u * 1024u * 1024u)
-#define FOLLOW_TREE_CACHE_LARGE_ENTRIES (1u << 18)
-#define FOLLOW_TREE_CACHE_LARGE_BUCKETS (1u << 15)
+#define FOLLOW_TREE_CACHE_LIMIT	  (128u * 1024u * 1024u)
+#define FOLLOW_TREE_CACHE_ENTRIES (1u << 18)
+#define FOLLOW_TREE_CACHE_BUCKETS (1u << 15)
 
 struct follow_tree_cache_entry {
 	struct follow_tree_cache_entry *next;
@@ -673,7 +669,6 @@ struct diff_follow_tree_cache {
 	struct list_head lru;
 	size_t entry_bytes, entries;
 	int replace_mode;
-	int large_mode;
 };
 
 static pthread_mutex_t follow_tree_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -684,16 +679,10 @@ static int follow_tree_cache_report_registered;
 static uintmax_t follow_tree_cache_ordinary_selected;
 static uintmax_t follow_tree_cache_ordinary_present;
 
-static size_t follow_tree_cache_bucket_count(const struct diff_follow_tree_cache *cache)
-{
-	return cache->large_mode ? FOLLOW_TREE_CACHE_LARGE_BUCKETS :
-				   FOLLOW_TREE_CACHE_BUCKETS;
-}
-
 static size_t follow_tree_cache_bytes(const struct diff_follow_tree_cache *cache)
 {
 	return sizeof(*cache) +
-	       follow_tree_cache_bucket_count(cache) * sizeof(cache->buckets[0]) +
+	       FOLLOW_TREE_CACHE_BUCKETS * sizeof(cache->buckets[0]) +
 	       cache->entry_bytes;
 }
 
@@ -736,11 +725,10 @@ static void follow_tree_cache_register_report(void)
 		follow_tree_cache_report_registered = 1;
 }
 
-static size_t follow_tree_cache_bucket(const struct diff_follow_tree_cache *cache,
-				       const struct object_id *oid)
+static size_t follow_tree_cache_bucket(const struct object_id *oid)
 {
 	return (oidhash(oid) ^ (oid->algo * 0x9e3779b9u)) &
-	       (follow_tree_cache_bucket_count(cache) - 1);
+	       (FOLLOW_TREE_CACHE_BUCKETS - 1);
 }
 
 static int follow_tree_cache_eligible(struct repository *repo,
@@ -756,7 +744,7 @@ static struct follow_tree_cache_entry *follow_tree_cache_find(
 {
 	struct follow_tree_cache_entry *entry;
 
-	for (entry = cache->buckets[follow_tree_cache_bucket(cache, oid)]; entry;
+	for (entry = cache->buckets[follow_tree_cache_bucket(oid)]; entry;
 	     entry = entry->next)
 		if (entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
 			return entry;
@@ -870,11 +858,20 @@ static void follow_tree_cache_insert(struct repository *repo,
 {
 	struct diff_follow_tree_cache *cache;
 	struct follow_tree_cache_entry *entry;
-	size_t before, bucket, bucket_count, limit;
-	int large_mode, saved_errno = errno;
+	size_t before, bucket;
+	int saved_errno = errno;
 
 	if (!follow_tree_cache_eligible(repo, oid))
 		return;
+	/* Subtract before adding, including one byte for the trailing NUL. */
+	if (size >= FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) -
+			    sizeof(*cache) - FOLLOW_TREE_CACHE_BUCKETS * sizeof(void *)) {
+		pthread_mutex_lock(&follow_tree_cache_mutex);
+		follow_tree_cache_bypassed++;
+		pthread_mutex_unlock(&follow_tree_cache_mutex);
+		errno = saved_errno;
+		return;
+	}
 	pthread_mutex_lock(&follow_tree_cache_mutex);
 	if (replace_refs_enabled(repo) != replace_mode) {
 		follow_tree_cache_clear_locked(repo);
@@ -886,26 +883,13 @@ static void follow_tree_cache_insert(struct repository *repo,
 		follow_tree_cache_clear_locked(repo);
 		cache = NULL;
 	}
-	/* The per-command pilot setting is fixed when the cache is created. */
-	large_mode = cache ? cache->large_mode :
-			     git_env_bool("GIT_TEST_FOLLOW_TREE_CACHE_LARGE", 0);
-	limit = large_mode ? FOLLOW_TREE_CACHE_LARGE_LIMIT : FOLLOW_TREE_CACHE_LIMIT;
-	bucket_count = large_mode ? FOLLOW_TREE_CACHE_LARGE_BUCKETS :
-				    FOLLOW_TREE_CACHE_BUCKETS;
-	/* Subtract before adding, including one byte for the trailing NUL. */
-	if (size >= limit - sizeof(*entry) - sizeof(*cache) -
-			    bucket_count * sizeof(void *)) {
-		follow_tree_cache_bypassed++;
-		goto done;
-	}
 	if (!cache) {
 		cache = calloc(1, sizeof(*cache));
 		if (!cache) {
 			follow_tree_cache_bypassed++;
 			goto done;
 		}
-		cache->large_mode = large_mode;
-		cache->buckets = calloc(bucket_count,
+		cache->buckets = calloc(FOLLOW_TREE_CACHE_BUCKETS,
 					sizeof(cache->buckets[0]));
 		if (!cache->buckets) {
 			free(cache);
@@ -925,14 +909,13 @@ static void follow_tree_cache_insert(struct repository *repo,
 		goto done;
 	}
 	before = follow_tree_cache_bytes(cache);
-	while (cache->entries == (large_mode ? FOLLOW_TREE_CACHE_LARGE_ENTRIES :
-					       FOLLOW_TREE_CACHE_ENTRIES) ||
+	while (cache->entries == FOLLOW_TREE_CACHE_ENTRIES ||
 	       follow_tree_cache_bytes(cache) >
-		       limit - sizeof(*entry) - size - 1) {
+		       FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) - size - 1) {
 		struct follow_tree_cache_entry *oldest =
 			list_entry(cache->lru.prev, struct follow_tree_cache_entry, lru);
 		struct follow_tree_cache_entry **slot =
-			&cache->buckets[follow_tree_cache_bucket(cache, &oldest->oid)];
+			&cache->buckets[follow_tree_cache_bucket(&oldest->oid)];
 
 		while (*slot && *slot != oldest)
 			slot = &(*slot)->next;
@@ -955,7 +938,7 @@ static void follow_tree_cache_insert(struct repository *repo,
 	entry->buffer[size] = '\0';
 	entry->size = size;
 	oidcpy(&entry->oid, oid);
-	bucket = follow_tree_cache_bucket(cache, oid);
+	bucket = follow_tree_cache_bucket(oid);
 	entry->next = cache->buckets[bucket];
 	cache->buckets[bucket] = entry;
 	list_add(&entry->lru, &cache->lru);
