@@ -148,6 +148,7 @@ test_expect_success 'setup repo for checkout with various types of changes' '
 		echo "B2 i" >i &&
 		test_ln_s_add b j &&
 		git -C k checkout B2 &&
+		git -C k update-index --refresh &&
 		mkdir m &&
 		echo m/m >m/m &&
 
@@ -265,7 +266,10 @@ do
 					"$root_trace" || return 1
 			done
 		fi &&
-		verify_checkout $repo &&
+		git -C "$repo" diff-index --cached --ignore-submodules=none --exit-code HEAD -- &&
+		git -C "$repo" diff --no-ext-diff --ignore-submodules=none --exit-code &&
+		git -C "$repo" status --porcelain >"$repo".status &&
+		test_must_be_empty "$repo".status &&
 		test_unpack_timer "$root_trace" queue-entries/prepare-entry 13 &&
 		test_unpack_timer "$root_trace" queue-entries/prepare-entry/check-path 13 &&
 		test_unpack_timer "$root_trace" queue-entries/prepare-entry/create-directories any &&
@@ -490,6 +494,73 @@ test_expect_success 'parallel checkout traces worker load' '
 		done <worker-sids &&
 		test_parallel_checkout_items "$root_trace" 4
 	)
+'
+
+test_expect_success 'checkout queue traces existing and absent paths' '
+	set_checkout_config 2 0 &&
+	git init queue-outcomes &&
+	(
+		cd queue-outcomes &&
+		echo B1 >changed &&
+		echo common >same &&
+		git add changed same &&
+		git commit -m first &&
+		git branch B1 &&
+		echo B2-longer >changed &&
+		echo B2 >added &&
+		git add changed added &&
+		git commit -m second &&
+		git branch B2 &&
+		git switch B1
+	) &&
+	cp -R -P queue-outcomes queue-outcomes-traced &&
+	cp -R -P queue-outcomes queue-outcomes-plain &&
+	checkout_event_path="$(pwd)/queue-outcomes.trace" &&
+	rm -f "$checkout_event_path" &&
+	run_traced_switch () {
+		GIT_TRACE2_EVENT="$checkout_event_path" git -C queue-outcomes-traced switch B2 \
+			>traced.out 2>traced.err
+	} &&
+	test_checkout_workers 2 run_traced_switch &&
+	git -C queue-outcomes-plain switch B2 >plain.out 2>plain.err &&
+	test_cmp traced.out plain.out &&
+	test_cmp traced.err plain.err &&
+	root_sid=$(sed -n "1s/.*\"sid\":\"\\([^\"]*\\)\".*/\\1/p" "$checkout_event_path") &&
+	test -n "$root_sid" &&
+	root_trace="$checkout_event_path.root" &&
+	grep -F "\"sid\":\"$root_sid\"" "$checkout_event_path" >"$root_trace" &&
+	for pair in \
+		"queue_entries/count 2" \
+		"queue_entries/path_found 1" \
+		"queue_entries/path_missing_or_blocked 1" \
+		"queue_entries/path_error 0" \
+		"queue_entries/match_changed 1" \
+		"queue_entries/match_unchanged 0" \
+		"queue_entries/path_unlinked 1"
+	do
+		set -- $pair &&
+		grep "\"category\":\"unpack_trees\",\"key\":\"$1\"" \
+			"$root_trace" >count &&
+		test_line_count = 1 count &&
+		test_grep "\"value\":\"$2\"" count || return 1
+	done &&
+	test_unpack_timer "$root_trace" queue-entries/prepare-entry 2 &&
+	test_unpack_timer "$root_trace" queue-entries/prepare-entry/check-path 2 &&
+	test_unpack_timer "$root_trace" \
+		queue-entries/prepare-entry/existing-match-remove 1 &&
+	git -C queue-outcomes-traced ls-files --stage >traced.index &&
+	git -C queue-outcomes-plain ls-files --stage >plain.index &&
+	test_cmp traced.index plain.index &&
+	for path in changed added same
+	do
+		test_cmp "queue-outcomes-traced/$path" \
+			"queue-outcomes-plain/$path" || return 1
+	done &&
+	test "$(cat queue-outcomes-traced/changed)" = B2-longer &&
+	test "$(cat queue-outcomes-traced/added)" = B2 &&
+	test "$(cat queue-outcomes-traced/same)" = common &&
+	test -z "$(git -C queue-outcomes-traced status --porcelain)" &&
+	test -z "$(git -C queue-outcomes-plain status --porcelain)"
 '
 
 test_expect_success SYMLINKS 'parallel checkout checks for symlinks in leading dirs' '

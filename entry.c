@@ -511,6 +511,14 @@ static void checkout_entry_trace_timer(enum trace2_timer_id *active_phase,
 	errno = saved_errno;
 }
 
+static int checkout_existing_return(enum trace2_timer_id *active_phase,
+				    int result)
+{
+	checkout_entry_trace_timer(active_phase,
+			   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_REMOVE, 0);
+	return result;
+}
+
 static int checkout_entry_ca_internal(struct cache_entry *ce,
 				      struct conv_attrs *ca,
 				      const struct checkout *state,
@@ -550,10 +558,28 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 	path_status = check_path(path.buf, path.len, &st, state->base_dir_len);
 	checkout_entry_trace_timer(active_phase,
 				   TRACE2_TIMER_ID_UNPACK_TREES_CHECK_PATH, 0);
+	if (state->queue_trace) {
+		if (!path_status)
+			state->queue_trace->path_found++;
+		else if (errno == ENOENT)
+			state->queue_trace->path_missing_or_blocked++;
+		else
+			state->queue_trace->path_error++;
+	}
 	if (!path_status) {
 		const struct submodule *sub;
-		unsigned changed = ie_match_stat(state->istate, ce, &st,
-						 CE_MATCH_IGNORE_VALID | CE_MATCH_IGNORE_SKIP_WORKTREE);
+		unsigned changed;
+
+		checkout_entry_trace_timer(active_phase,
+			   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_REMOVE, 1);
+		changed = ie_match_stat(state->istate, ce, &st,
+					CE_MATCH_IGNORE_VALID | CE_MATCH_IGNORE_SKIP_WORKTREE);
+		if (state->queue_trace) {
+			if (changed)
+				state->queue_trace->match_changed++;
+			else
+				state->queue_trace->match_unchanged++;
+		}
 		/*
 		 * Needs to be checked before !changed returns early,
 		 * as the possibly empty directory was not changed
@@ -561,6 +587,8 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 		sub = submodule_from_ce(ce);
 		if (sub) {
 			int err;
+			checkout_entry_trace_timer(active_phase,
+			   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_REMOVE, 0);
 			if (!is_submodule_populated_gently(ce->name, &err)) {
 				struct stat sb;
 				if (lstat(ce->name, &sb))
@@ -577,13 +605,13 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 		}
 
 		if (!changed)
-			return 0;
+			return checkout_existing_return(active_phase, 0);
 		if (!state->force) {
 			if (!state->quiet)
 				fprintf(stderr,
 					"%s already exists, no checkout\n",
 					path.buf);
-			return -1;
+			return checkout_existing_return(active_phase, -1);
 		}
 
 		if (state->clone)
@@ -598,7 +626,7 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 		if (S_ISDIR(st.st_mode)) {
 			/* If it is a gitlink, leave it alone! */
 			if (S_ISGITLINK(ce->ce_mode))
-				return 0;
+				return checkout_existing_return(active_phase, 0);
 			/*
 			 * We must avoid replacing submodules' leading
 			 * directories with symbolic links, lest recursive
@@ -612,10 +640,17 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 			 * just as well keep the directories during a clone.
 			 */
 			if (state->clone && S_ISLNK(ce->ce_mode))
-				return 0;
+				return checkout_existing_return(active_phase, 0);
 			remove_subtree(&path);
-		} else if (unlink(path.buf))
-			return error_errno("unable to unlink old '%s'", path.buf);
+		} else {
+			if (unlink(path.buf))
+				return checkout_existing_return(active_phase,
+					error_errno("unable to unlink old '%s'", path.buf));
+			if (state->queue_trace)
+				state->queue_trace->path_unlinked++;
+		}
+		checkout_entry_trace_timer(active_phase,
+			   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_REMOVE, 0);
 	} else if (state->not_new)
 		return 0;
 
@@ -645,7 +680,7 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 		      int *nr_checkouts)
 {
 	enum trace2_timer_id phase = TRACE2_TIMER_ID_UNPACK_TREES_PREPARE_ENTRY;
-	enum trace2_timer_id *active_phase = state->trace_queue_entries ?
+	enum trace2_timer_id *active_phase = state->queue_trace ?
 		&phase : NULL;
 	int saved_errno = errno;
 	int ret;

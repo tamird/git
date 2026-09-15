@@ -437,6 +437,7 @@ static int check_updates(struct unpack_trees_options *o,
 {
 	unsigned cnt = 0;
 	uintmax_t remove_count = 0, checkout_count = 0;
+	struct checkout_queue_trace queue_trace = { 0 };
 	int errs = 0;
 	int trace_counts = trace2_is_enabled();
 	struct progress *progress;
@@ -517,7 +518,7 @@ static int check_updates(struct unpack_trees_options *o,
 	if (pc_workers > 1)
 		init_parallel_checkout();
 	trace2_region_enter("unpack_trees", "queue_entries", index->repo);
-	state.trace_queue_entries = trace_counts;
+	state.queue_trace = trace_counts ? &queue_trace : NULL;
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 
@@ -536,11 +537,29 @@ static int check_updates(struct unpack_trees_options *o,
 				display_progress(progress, ++cnt);
 		}
 	}
-	state.trace_queue_entries = 0;
+	state.queue_trace = NULL;
 	trace2_region_leave("unpack_trees", "queue_entries", index->repo);
-	if (trace_counts)
+	if (trace_counts) {
+		int saved_errno = errno;
+
 		trace2_data_intmax("unpack_trees", index->repo,
 				   "queue_entries/count", checkout_count);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/path_found", queue_trace.path_found);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/path_missing_or_blocked",
+				   queue_trace.path_missing_or_blocked);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/path_error", queue_trace.path_error);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/match_unchanged",
+				   queue_trace.match_unchanged);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/match_changed", queue_trace.match_changed);
+		trace2_data_intmax("unpack_trees", index->repo,
+				   "queue_entries/path_unlinked", queue_trace.path_unlinked);
+		errno = saved_errno;
+	}
 	if (pc_workers > 1)
 		errs |= run_parallel_checkout(&state, pc_workers, pc_threshold,
 					      progress, &cnt);

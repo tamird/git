@@ -6,6 +6,11 @@
 struct cache_entry;
 struct index_state;
 
+struct checkout_queue_trace {
+	intmax_t path_found, path_missing_or_blocked, path_error;
+	intmax_t match_unchanged, match_changed, path_unlinked;
+};
+
 struct checkout {
 	struct index_state *istate;
 	const char *base_dir;
@@ -18,8 +23,8 @@ struct checkout {
 		 not_new:1,
 		 clone:1,
 		 refresh_cache:1;
-	/* Only the queue_entries loop in check_updates() sets this. */
-	unsigned trace_queue_entries:1;
+	/* Only the queue_entries loop in check_updates() supplies this. */
+	struct checkout_queue_trace *queue_trace;
 };
 #define CHECKOUT_INIT { .base_dir = "" }
 
