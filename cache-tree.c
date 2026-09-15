@@ -11,6 +11,7 @@
 #include "object-file.h"
 #include "odb.h"
 #include "odb/transaction.h"
+#include "parse.h"
 #include "read-cache-ll.h"
 #include "replace-object.h"
 #include "repository.h"
@@ -338,16 +339,134 @@ static int cache_tree_fully_valid_internal(struct cache_tree *it,
 	return 1;
 }
 
+#define CACHE_TREE_OID_ORDER_MAX_NODES 1000000
+
+struct cache_tree_oid_order {
+	struct cache_tree **nodes;
+	size_t nr, alloc;
+};
+
+static int collect_valid_cache_tree_nodes(struct cache_tree *it,
+					  struct cache_tree_oid_order *order)
+{
+	int i;
+	size_t next_alloc;
+
+	if (!it || it->entry_count < 0)
+		return 0;
+	if (order->nr == CACHE_TREE_OID_ORDER_MAX_NODES)
+		return 0;
+	if (order->nr == order->alloc) {
+		next_alloc = order->alloc ? order->alloc * 2 : 256;
+		if (next_alloc > CACHE_TREE_OID_ORDER_MAX_NODES)
+			next_alloc = CACHE_TREE_OID_ORDER_MAX_NODES;
+		REALLOC_ARRAY(order->nodes, next_alloc);
+		order->alloc = next_alloc;
+	}
+	order->nodes[order->nr++] = it;
+	for (i = 0; i < it->subtree_nr; i++)
+		if (!collect_valid_cache_tree_nodes(it->down[i]->cache_tree, order))
+			return 0;
+	return 1;
+}
+
+static int cache_tree_oid_order_cmp(const void *a, const void *b)
+{
+	const struct cache_tree *const *one = a;
+	const struct cache_tree *const *two = b;
+
+	return oidcmp(&(*one)->oid, &(*two)->oid);
+}
+
+static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
+					    struct cache_tree_validation_stats *stats)
+{
+	struct cache_tree_oid_order order = { 0 };
+	size_t i;
+	uint64_t ordered_object_check_ns = 0;
+	int exists, saved_errno;
+
+	if (!collect_valid_cache_tree_nodes(it, &order)) {
+		saved_errno = errno;
+		trace2_data_intmax("cache_tree", the_repository,
+				   "validate/oid-order/structural-fallback", 1);
+		errno = saved_errno;
+		goto fallback;
+	}
+	QSORT(order.nodes, order.nr, cache_tree_oid_order_cmp);
+	for (i = 0; i < order.nr; i++) {
+		if (stats && stats->time_object_checks) {
+			saved_errno = errno;
+			trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
+			errno = saved_errno;
+		}
+		exists = odb_has_object(the_repository->objects, &order.nodes[i]->oid,
+					ODB_HAS_OBJECT_RECHECK_PACKED |
+						ODB_HAS_OBJECT_FETCH_PROMISOR);
+		if (stats && stats->time_object_checks) {
+			saved_errno = errno;
+			ordered_object_check_ns +=
+				trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
+			errno = saved_errno;
+		}
+		if (!exists) {
+			if (stats) {
+				stats->object_checks += i + 1;
+				stats->object_check_ns += ordered_object_check_ns;
+			}
+			saved_errno = errno;
+			trace2_data_intmax("cache_tree", the_repository,
+					   "validate/oid-order/probes", i + 1);
+			trace2_data_intmax("cache_tree", the_repository,
+					   "validate/oid-order/fallback", 1);
+			errno = saved_errno;
+			goto fallback;
+		}
+	}
+	if (stats) {
+		stats->nodes += order.nr;
+		stats->object_checks += order.nr;
+		stats->object_check_ns += ordered_object_check_ns;
+	}
+	saved_errno = errno;
+	trace2_data_intmax("cache_tree", the_repository,
+			   "validate/oid-order/probes", order.nr);
+	errno = saved_errno;
+	free(order.nodes);
+	return 1;
+
+fallback:
+	free(order.nodes);
+	return cache_tree_fully_valid_internal(it, stats);
+}
+
+static int cache_tree_fully_valid_maybe_oid_order(struct cache_tree *it,
+						  struct cache_tree_validation_stats *stats)
+{
+	int saved_errno;
+
+	if (!git_env_bool("GIT_TEST_CACHE_TREE_OID_ORDER", 0))
+		return cache_tree_fully_valid_internal(it, stats);
+	if (repo_has_promisor_remote(the_repository)) {
+		saved_errno = errno;
+		trace2_data_intmax("cache_tree", the_repository,
+				   "validate/oid-order/promisor-bypass", 1);
+		errno = saved_errno;
+		return cache_tree_fully_valid_internal(it, stats);
+	}
+	return cache_tree_fully_valid_oid_order(it, stats);
+}
+
 int cache_tree_fully_valid(struct cache_tree *it)
 {
-	return cache_tree_fully_valid_internal(it, NULL);
+	return cache_tree_fully_valid_maybe_oid_order(it, NULL);
 }
 
 int cache_tree_fully_valid_with_counts(struct cache_tree *it,
 				       uintmax_t *nodes, uintmax_t *object_checks)
 {
 	struct cache_tree_validation_stats stats = { 0 };
-	int valid = cache_tree_fully_valid_internal(it, &stats);
+	int valid = cache_tree_fully_valid_maybe_oid_order(it, &stats);
 
 	*nodes = stats.nodes;
 	*object_checks = stats.object_checks;
@@ -366,6 +485,7 @@ static void trace_cache_tree_validation(const struct cache_tree_validation_stats
 	 * the entire ODB call, including retries and promisor fetches. The rest
 	 * of validate includes decoding, iteration, and diagnostic overhead;
 	 * neither duration is CPU time.
+	 * On ordered fallback, nodes report the canonical DFS traversal.
 	 */
 	static struct {
 		uintmax_t calls, valid, skipped;
@@ -1038,8 +1158,8 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 
 	trace2_region_enter("cache_tree", "validate", index_state->repo);
 	was_valid = !(flags & WRITE_TREE_IGNORE_CACHE_TREE) &&
-		    cache_tree_fully_valid_internal(cache_tree_get(index_state),
-					   trace_validation ? &validation : NULL);
+		    cache_tree_fully_valid_maybe_oid_order(cache_tree_get(index_state),
+							   trace_validation ? &validation : NULL);
 	trace2_region_leave("cache_tree", "validate", index_state->repo);
 	if (trace_validation)
 		trace_cache_tree_validation(&validation, was_valid,

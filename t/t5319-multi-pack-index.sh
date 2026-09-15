@@ -1399,29 +1399,32 @@ test_expect_success 'lookup recovers object whose midx-owning pack was removed' 
 	(
 		cd repo &&
 
-		# "keep" ends up only in the big pack; "dup" is deliberately
-		# placed in two packs so the midx has to choose an owner.
+		# "keep" ends up only in the big pack; the blob and nested tree
+		# have duplicate owners in the big and moderate packs.
 		test_commit keep &&
 		echo duplicated-content >dup &&
-		git add dup &&
+		mkdir nested &&
+		echo nested-content >nested/file &&
+		git add dup nested/file &&
 		git commit -m dup &&
 		dup_oid=$(git rev-parse HEAD:dup) &&
+		nested_oid=$(git rev-parse HEAD:nested) &&
+		git rev-parse HEAD^{tree} >expected-tree &&
 
-		# Roll every object, including dup, into a single big pack.
+		# Roll every object into a single big pack.
 		git repack -adq &&
 
-		# Build a second, "moderate" pack that also contains dup, so dup
-		# now lives in two packs that the midx will cover.
-		moderate=$(echo "$dup_oid" |
+		# Build a second, moderate pack covering the duplicate objects.
+		moderate=$(printf "%s\n%s\n" "$dup_oid" "$nested_oid" |
 			git pack-objects --quiet $objdir/pack/pack) &&
 
-		# Attribute dup to the moderate pack in the midx.
+		# Attribute both duplicates to the moderate pack in the midx.
 		git multi-pack-index write \
 			--preferred-pack="pack-$moderate.idx" &&
 
 		# Simulate a concurrent "git repack" retiring the moderate pack:
 		# its files disappear, but the now-stale midx still names it as
-		# the owner of dup.  A valid copy of dup survives in the big pack.
+		# the owner.  Valid copies survive in the big pack.
 		rm -f $objdir/pack/pack-$moderate.* &&
 
 		# The midx routes the lookup to the deleted pack, and the regular
@@ -1429,7 +1432,16 @@ test_expect_success 'lookup recovers object whose midx-owning pack was removed' 
 		# would appear missing even though it is physically present.
 		echo blob >expect &&
 		git cat-file -t "$dup_oid" >actual &&
-		test_cmp expect actual
+		test_cmp expect actual &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
+			git commit --allow-empty -m recovered &&
+		git rev-parse HEAD^{tree} >actual-tree &&
+		test_cmp expected-tree actual-tree &&
+		test_trace2_data cache_tree validate/oid-order/probes 2 <.git/ordered.trace &&
+		test_grep ! "\"key\":\"validate/oid-order/fallback\"" .git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 1 <.git/ordered.trace &&
+		test_grep ! "\"event\":\"timer\".*\"category\":\"commit\",\"name\":\"as-is/cache-tree-update\"" .git/ordered.trace
 	)
 '
 

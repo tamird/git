@@ -600,10 +600,88 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 	)
 '
 
+test_expect_success 'OID-ordered validation falls back for a missing nested tree' '
+	test_when_finished "rm -fr oid-order-missing" &&
+	git init oid-order-missing &&
+	(
+		cd oid-order-missing &&
+		git config gc.auto 0 &&
+		mkdir nested sibling &&
+		printf "%s\n" nested >nested/file &&
+		printf "%s\n" sibling >sibling/file &&
+		git add nested sibling &&
+		git commit -m base &&
+		git rev-parse HEAD^{tree} >expect &&
+		nested_oid=$(git rev-parse HEAD:nested) &&
+		nested_path="$(git rev-parse --git-path objects)/$(test_oid_to_path "$nested_oid")" &&
+		rm "$nested_path" &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/default.trace" \
+			git commit --allow-empty -m default &&
+		git rev-parse HEAD^{tree} >actual &&
+		test_cmp expect actual &&
+		test_grep ! "\"key\":\"validate/oid-order/probes\"" .git/default.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 0 <.git/default.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/default.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/object-checks 2 <.git/default.trace &&
+		test_commit_as_is_timer .git/default.trace cache-tree-update 1 &&
+		rm -f "$nested_path" &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
+			git commit --allow-empty -m ordered &&
+		git rev-parse HEAD^{tree} >actual &&
+		test_cmp expect actual &&
+		test_trace2_data cache_tree validate/oid-order/probes "[1-3]" <.git/ordered.trace &&
+		probes=$(sed -n "s|.*validate/oid-order/probes\",\"value\":\"\([1-3]\)\".*|\1|p" .git/ordered.trace) &&
+		test -n "$probes" &&
+		test_trace2_data cache_tree validate/oid-order/fallback 1 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-checked 1 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 0 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/object-checks "$((2 + probes))" <.git/ordered.trace &&
+		test_commit_as_is_timer .git/ordered.trace cache-tree-update 1
+	)
+'
+
+test_expect_success 'OID-ordered validation bypasses promised object fetches' '
+	test_when_finished "rm -fr oid-order-promisor-client oid-order-promisor-server" &&
+	git init --bare oid-order-promisor-server &&
+	git init oid-order-promisor-client &&
+	(
+		cd oid-order-promisor-client &&
+		git config gc.auto 0 &&
+		mkdir nested &&
+		printf "%s\n" content >nested/file &&
+		git add nested &&
+		git commit -m base &&
+		nested_oid=$(git rev-parse HEAD:nested) &&
+		git remote add origin ../oid-order-promisor-server &&
+		git push origin HEAD:refs/heads/for-test &&
+		git -C ../oid-order-promisor-server config \
+			uploadpack.allowanysha1inwant true &&
+		git config core.repositoryformatversion 1 &&
+		git config extensions.partialclone origin &&
+		git config remote.origin.promisor true &&
+		rm "$(git rev-parse --git-path objects)/$(test_oid_to_path "$nested_oid")" &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
+			git commit --allow-empty -m fetched &&
+		test_grep ! "\"key\":\"validate/oid-order/probes\"" .git/ordered.trace &&
+		test_trace2_data cache_tree validate/oid-order/promisor-bypass 1 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-checked 1 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-valid 1 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/ordered.trace &&
+		test_trace2_data commit as-is/cache-tree-validate/object-checks 2 <.git/ordered.trace &&
+		test_commit_as_is_timer .git/ordered.trace cache-tree-update absent &&
+		git cat-file -e "$nested_oid"
+	)
+'
+
 test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_commit use-valid &&
 	test_when_finished "git checkout -- use-valid.t &&
-		rm -f .git/cache-tree-validate.trace .git/cache-tree-ignore.trace \
+		rm -f .git/cache-tree-validate.trace .git/cache-tree-ordered.trace \
+			.git/cache-tree-ignore.trace \
 			.git/cache-tree-stash.trace" &&
 	test-tool dump-cache-tree >actual &&
 	nodes=$(grep -cv "#(ref)" actual) &&
@@ -621,6 +699,17 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-validate.trace &&
 	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate.trace &&
 	test_cache_tree_object_check_time .git/cache-tree-validate.trace "$nodes" &&
+
+	GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-ordered.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 git write-tree >actual &&
+	test_cmp expect actual &&
+	test_trace2_data cache_tree validate/oid-order/probes "$nodes" <.git/cache-tree-ordered.trace &&
+	test_grep ! "\"key\":\"validate/oid-order/fallback\"" .git/cache-tree-ordered.trace &&
+	test_trace2_data cache_tree validate/valid-total 1 <.git/cache-tree-ordered.trace &&
+	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-ordered.trace &&
+	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-ordered.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-ordered.trace "$nodes" &&
 
 	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-ignore.trace" \
 	GIT_TRACE2_EVENT_NESTING=2 \
