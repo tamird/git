@@ -50,7 +50,9 @@ struct decoration_context {
 	struct decoration_filter *filter;
 	int defer_object_lookups;
 	int saw_deferrable_ref;
+	int graph_miss_after_deferral;
 	size_t object_lookups;
+	size_t graph_miss_prior_object_lookups;
 };
 
 static char decoration_colors[][COLOR_MAXLEN] = {
@@ -266,6 +268,9 @@ static int collect_ref_decoration(const struct reference *ref, void *cb_data)
 			context->saw_deferrable_ref = 1;
 		} else if (!repo_find_oid_in_commit_graph(the_repository,
 							  ref->oid)) {
+			context->graph_miss_after_deferral = 1;
+			context->graph_miss_prior_object_lookups =
+				context->object_lookups;
 			context->defer_object_lookups = 0;
 		} else {
 			struct commit *commit = lookup_commit(the_repository,
@@ -357,6 +362,13 @@ void load_ref_decorations(struct decoration_filter *filter, int flags,
 		trace2_data_intmax("log", the_repository,
 				   "decorations/object-lookups",
 				   context.object_lookups);
+		trace2_data_intmax("log", the_repository,
+				   "decorations/defer-requested",
+				   defer_object_lookups);
+		if (context.graph_miss_after_deferral)
+			trace2_data_intmax("log", the_repository,
+					   "decorations/graph-miss-prior-object-lookups",
+					   context.graph_miss_prior_object_lookups);
 		for_each_commit_graft(add_graft_decoration, &context);
 	}
 }
