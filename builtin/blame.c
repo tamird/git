@@ -33,6 +33,7 @@
 #include "refs.h"
 #include "setup.h"
 #include "tag.h"
+#include "trace2.h"
 #include "write-or-die.h"
 
 static const char blame_usage[] = N_("git blame [<options>] [<rev-opts>] [<rev>] [--] <file>");
@@ -1285,7 +1286,49 @@ parse_done:
 						     _("Blaming lines"),
 						     num_lines);
 
-	assign_blame(&sb, opt);
+	{
+		int trace_assignment = trace2_is_enabled();
+		int saved_errno = errno;
+		int faults_valid = 0;
+#ifndef GIT_WINDOWS_NATIVE
+		struct rusage usage_before, usage_after;
+		int have_usage_before = 0;
+#endif
+
+		if (trace_assignment) {
+			trace2_region_enter("blame", "assign", the_repository);
+#ifndef GIT_WINDOWS_NATIVE
+			have_usage_before =
+				!getrusage(RUSAGE_SELF, &usage_before);
+#endif
+			errno = saved_errno;
+		}
+
+		assign_blame(&sb, opt);
+
+		saved_errno = errno;
+		if (trace_assignment) {
+#ifndef GIT_WINDOWS_NATIVE
+			if (have_usage_before &&
+			    !getrusage(RUSAGE_SELF, &usage_after) &&
+			    usage_before.ru_majflt >= 0 &&
+			    usage_after.ru_majflt >= usage_before.ru_majflt)
+				faults_valid = 1;
+#endif
+			trace2_region_leave("blame", "assign", the_repository);
+			trace2_data_intmax("blame", the_repository,
+					   "assign/major-faults-valid",
+					   faults_valid);
+#ifndef GIT_WINDOWS_NATIVE
+			if (faults_valid)
+				trace2_data_intmax("blame", the_repository,
+						   "assign/major-faults",
+						   usage_after.ru_majflt -
+							   usage_before.ru_majflt);
+#endif
+			errno = saved_errno;
+		}
+	}
 
 	stop_progress(&pi.progress);
 
