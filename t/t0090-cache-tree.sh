@@ -557,10 +557,20 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		test_trace2_data commit as-is/cache-tree-valid 1 <.git/valid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/valid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/object-checks 2 <.git/valid.trace &&
+		(test_have_prereq MINGW ||
+		 test_trace2_data commit as-is/cache-tree-validate/major-faults "[0-9][0-9]*" <.git/valid.trace) &&
 		test_grep ! "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"validate/object-check\"" .git/valid.trace &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-validate 1 &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-update absent &&
 		test_commit_as_is_timer .git/valid.trace write-index 1 &&
+		current_branch=$(git symbolic-ref --short HEAD) &&
+		GIT_TRACE2_EVENT="$PWD/.git/checkout.trace" git switch "$current_branch" &&
+		test_trace2_data checkout cache-tree-validate/nodes 2 <.git/checkout.trace &&
+		test_trace2_data checkout cache-tree-validate/object-checks 2 <.git/checkout.trace &&
+		test_trace2_data checkout cache-tree-validate/valid 1 <.git/checkout.trace &&
+		(test_have_prereq MINGW ||
+		 test_trace2_data checkout cache-tree-validate/major-faults "[0-9][0-9]*" <.git/checkout.trace) &&
+		test_grep "\"event\":\"timer\".*\"category\":\"checkout\",\"name\":\"cache-tree-validate\",\"intervals\":1," .git/checkout.trace &&
 		echo changed >dir/file &&
 		git add dir/file &&
 		GIT_TRACE2_EVENT="$PWD/.git/invalid.trace" git commit -m changed &&
@@ -568,6 +578,8 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		test_trace2_data commit as-is/cache-tree-valid 0 <.git/invalid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/nodes 1 <.git/invalid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/object-checks 0 <.git/invalid.trace &&
+		(test_have_prereq MINGW ||
+		 test_trace2_data commit as-is/cache-tree-validate/major-faults "[0-9][0-9]*" <.git/invalid.trace) &&
 		test_commit_as_is_timer .git/invalid.trace cache-tree-validate 1 &&
 		test_commit_as_is_timer .git/invalid.trace cache-tree-update 1 &&
 		test_commit_as_is_timer .git/invalid.trace write-index 1 &&
@@ -578,6 +590,7 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		test_trace2_data commit as-is/cache-tree-valid 0 <.git/refresh.trace &&
 		test_grep ! "\"key\":\"as-is/cache-tree-validate/nodes\"" .git/refresh.trace &&
 		test_grep ! "\"key\":\"as-is/cache-tree-validate/object-checks\"" .git/refresh.trace &&
+		test_grep ! "\"key\":\"as-is/cache-tree-validate/major-faults\"" .git/refresh.trace &&
 		test_commit_as_is_timer .git/refresh.trace cache-tree-validate absent &&
 		test_commit_as_is_timer .git/refresh.trace cache-tree-update 1 &&
 		test_commit_as_is_timer .git/refresh.trace write-index 1 &&

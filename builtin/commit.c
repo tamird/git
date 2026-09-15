@@ -494,6 +494,13 @@ static const char *prepare_index(const char **argv, const char *prefix,
 			int trace_validation = trace2_is_enabled();
 			uintmax_t nodes = 0, object_checks = 0;
 			int saved_errno = errno;
+#ifndef GIT_WINDOWS_NATIVE
+			struct rusage usage_before, usage_after;
+			int have_usage_before = 0;
+
+			if (trace_validation)
+				have_usage_before = !getrusage(RUSAGE_SELF, &usage_before);
+#endif
 
 			trace2_timer_start(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
@@ -508,6 +515,14 @@ static const char *prepare_index(const char **argv, const char *prefix,
 			trace2_timer_stop(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
 			if (trace_validation) {
+#ifndef GIT_WINDOWS_NATIVE
+				if (have_usage_before &&
+				    !getrusage(RUSAGE_SELF, &usage_after) &&
+				    usage_after.ru_majflt >= usage_before.ru_majflt)
+					trace2_data_intmax("commit", the_repository,
+						"as-is/cache-tree-validate/major-faults",
+						usage_after.ru_majflt - usage_before.ru_majflt);
+#endif
 				trace2_data_intmax("commit", the_repository,
 						   "as-is/cache-tree-validate/nodes",
 						   nodes);

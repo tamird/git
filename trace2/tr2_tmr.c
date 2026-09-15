@@ -531,6 +531,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "update/owned-odb-commit",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_CHECKOUT_CACHE_TREE_VALIDATE] = {
+		.category = "checkout",
+		.name = "cache-tree-validate",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE] = {
 		.category = "commit",
 		.name = "as-is/cache-tree-validate",

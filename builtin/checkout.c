@@ -932,8 +932,49 @@ static int merge_working_tree(const struct checkout_opts *opts,
 			*writeout_error = 1;
 	}
 
-	if (!cache_tree_fully_valid(cache_tree_get(the_repository->index)))
-		cache_tree_update(the_repository->index, WRITE_TREE_SILENT | WRITE_TREE_REPAIR);
+	{
+		struct cache_tree *cache_tree = cache_tree_get(the_repository->index);
+		int valid, trace_validation = trace2_is_enabled();
+		uintmax_t nodes = 0, object_checks = 0;
+		int saved_errno = errno;
+#ifndef GIT_WINDOWS_NATIVE
+		struct rusage usage_before, usage_after;
+		int have_usage_before = 0;
+
+		if (trace_validation)
+			have_usage_before = !getrusage(RUSAGE_SELF, &usage_before);
+#endif
+
+		trace2_timer_start(TRACE2_TIMER_ID_CHECKOUT_CACHE_TREE_VALIDATE);
+		errno = saved_errno;
+		if (trace_validation)
+			valid = cache_tree_fully_valid_with_counts(cache_tree,
+							     &nodes, &object_checks);
+		else
+			valid = cache_tree_fully_valid(cache_tree);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_CHECKOUT_CACHE_TREE_VALIDATE);
+		if (trace_validation) {
+#ifndef GIT_WINDOWS_NATIVE
+			if (have_usage_before &&
+			    !getrusage(RUSAGE_SELF, &usage_after) &&
+			    usage_after.ru_majflt >= usage_before.ru_majflt)
+				trace2_data_intmax("checkout", the_repository,
+					"cache-tree-validate/major-faults",
+					usage_after.ru_majflt - usage_before.ru_majflt);
+#endif
+			trace2_data_intmax("checkout", the_repository,
+					   "cache-tree-validate/nodes", nodes);
+			trace2_data_intmax("checkout", the_repository,
+					   "cache-tree-validate/object-checks", object_checks);
+			trace2_data_intmax("checkout", the_repository,
+					   "cache-tree-validate/valid", valid);
+		}
+		errno = saved_errno;
+		if (!valid)
+			cache_tree_update(the_repository->index,
+					  WRITE_TREE_SILENT | WRITE_TREE_REPAIR);
+	}
 
 	if (write_locked_index(the_repository->index, &lock_file, COMMIT_LOCK))
 		die(_("unable to write new index file"));
