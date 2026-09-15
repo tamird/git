@@ -2746,11 +2746,16 @@ int write_commit_graph(struct odb_source *source,
 		ctx.approx_nr_objects = 0;
 
 	if (ctx.append && g) {
-		for (i = 0; i < g->num_commits; i++) {
-			struct object_id oid;
-			oidread(&oid, g->chunk_oid_lookup + st_mult(g->hash_algo->rawsz, i),
-				r->hash_algo);
-			oid_array_append(&ctx.oids, &oid);
+		/* Incremental split writes retain the base layers. */
+		for (struct commit_graph *layer = g; layer; layer = layer->base_graph) {
+			for (i = 0; i < layer->num_commits; i++) {
+				struct object_id oid;
+				oidread(&oid, layer->chunk_oid_lookup + st_mult(layer->hash_algo->rawsz, i),
+					r->hash_algo);
+				oid_array_append(&ctx.oids, &oid);
+			}
+			if (ctx.split && !replace)
+				break;
 		}
 	}
 

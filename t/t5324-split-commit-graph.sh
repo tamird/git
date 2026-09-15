@@ -29,6 +29,7 @@ test_expect_success 'setup repo' '
 
 graph_read_expect() {
 	NUM_BASE=0
+	NUM_CHUNKS=${4:-4}
 	if test ! -z $2
 	then
 		NUM_BASE=$2
@@ -39,7 +40,7 @@ graph_read_expect() {
 		OPTIONS=" read_generation_data"
 	fi
 	cat >expect <<- EOF
-	header: 43475048 1 $(test_oid oid_version) 4 $NUM_BASE
+	header: 43475048 1 $(test_oid oid_version) $NUM_CHUNKS $NUM_BASE
 	num_commits: $1
 	chunks: oid_fanout oid_lookup commit_metadata generation_data
 	options:$OPTIONS
@@ -472,6 +473,45 @@ test_expect_success '--split=replace replaces the chain' '
 	test_line_count = 1 graph-files &&
 	verify_chain_files_exist $graphdir &&
 	graph_read_expect 2
+'
+
+test_expect_success '--append keeps an unreachable base commit when flattening or replacing' '
+	test_when_finished "rm -rf append-replace" &&
+	git init append-replace &&
+	(
+		cd append-replace &&
+		git config core.commitGraph true &&
+		git config gc.auto 0 &&
+		git config gc.writeCommitGraph false &&
+		root_tree=$(git hash-object -t tree -w --stdin </dev/null) &&
+		base=$(git commit-tree "$root_tree" -m base) &&
+		tip=$(git commit-tree "$root_tree" -m tip) &&
+		test "$base" != "$tip" &&
+		test_path_is_file ".git/objects/$(test_oid_to_path "$base")" &&
+		git for-each-ref --format="%(objectname)" >refs &&
+		test_must_be_empty refs &&
+		printf "%s\n" "$base" >base &&
+		printf "%s\n" "$tip" >tip &&
+		git commit-graph write --stdin-commits --split=no-merge <base &&
+		git commit-graph write --stdin-commits --split=no-merge <tip &&
+		test_line_count = 2 "$graphdir/commit-graph-chain" &&
+		graph_read_expect 1 1 "" 5 &&
+		git commit-graph write --stdin-commits --append <tip &&
+		test_path_is_missing "$graphdir/commit-graph-chain" &&
+		test_path_is_file "$infodir/commit-graph" &&
+		graph_read_expect 2 0 &&
+		git commit-graph verify &&
+		git commit-graph write --stdin-commits --split=replace <base &&
+		graph_read_expect 1 0 &&
+		git commit-graph write --stdin-commits --split=no-merge <tip &&
+		test_line_count = 2 "$graphdir/commit-graph-chain" &&
+		graph_read_expect 1 1 "" 5 &&
+		git commit-graph write --stdin-commits --append --split=replace <tip &&
+		test_line_count = 1 "$graphdir/commit-graph-chain" &&
+		graph_read_expect 2 0 &&
+		git commit-graph verify &&
+		git cat-file -e "$base^{commit}"
+	)
 '
 
 test_expect_success ULIMIT_FILE_DESCRIPTORS 'handles file descriptor exhaustion' '
