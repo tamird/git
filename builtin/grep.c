@@ -48,6 +48,11 @@
 #include "wrapper.h"
 #include "write-or-die.h"
 
+#ifdef __APPLE__
+# include <mach/mach.h>
+# include <mach/task_info.h>
+#endif
+
 static const char *grep_prefix;
 
 static char const * const grep_usage[] = {
@@ -2678,6 +2683,9 @@ struct grep_tree_query_context {
 	int trace_enabled;
 	/* At least one root grep_tree() call returned normally. */
 	int tree_walk_completed;
+#ifdef __APPLE__
+	int tree_pageins_invalid;
+#endif
 	int tree_object_read_invalid;
 	int tree_object_read_bytes_overflow;
 	int tree_object_read_source_invalid;
@@ -2698,6 +2706,9 @@ struct grep_tree_query_context {
 	uint64_t pathspec_rejected;
 	uint64_t basename_rejected;
 	uint64_t tree_walk_ns;
+#ifdef __APPLE__
+	uint64_t tree_pageins;
+#endif
 	uint64_t tree_object_read_ns;
 	uint64_t tree_object_read_max_ns;
 	uint64_t tree_object_read_slow_count;
@@ -3906,6 +3917,26 @@ static void prefetch_grep_blobs(struct grep_opt *opt,
 	trace2_region_leave("grep", "prefetch_blobs", opt->repo);
 }
 
+#ifdef __APPLE__
+/* Page-ins cover the whole task, including workers active during the walk. */
+static int grep_tree_pageins_sample(uint64_t *pageins)
+{
+	task_events_info_data_t events;
+	mach_msg_type_number_t count = TASK_EVENTS_INFO_COUNT;
+	int saved_errno = errno;
+	int valid = task_info(mach_task_self(), TASK_EVENTS_INFO,
+			      (task_info_t)&events, &count) == KERN_SUCCESS &&
+		    count == TASK_EVENTS_INFO_COUNT &&
+		    events.pageins >= 0 && events.pageins < INT32_MAX;
+
+	if (valid)
+		*pageins = (uint64_t)events.pageins;
+	errno = saved_errno;
+	return valid;
+}
+
+#endif
+
 static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct object *obj, const char *name, const char *path,
 		       struct grep_tree_query_context *query)
@@ -3924,6 +3955,9 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		unsigned long size;
 		struct strbuf base;
 		uint64_t tree_begin = 0;
+#ifdef __APPLE__
+		uint64_t pageins_begin = 0, pageins_end = 0;
+#endif
 		int hit, len;
 
 		data = odb_read_object_peeled(opt->repo->objects, &obj->oid,
@@ -3965,13 +3999,30 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		} else {
 			init_tree_desc(&tree, &obj->oid, data, size);
 		}
-		if (query->trace_enabled)
+		if (query->trace_enabled) {
+#ifdef __APPLE__
+			if (!query->tree_pageins_invalid &&
+			    !grep_tree_pageins_sample(&pageins_begin))
+				query->tree_pageins_invalid = 1;
+#endif
 			tree_begin = getnanotime();
+		}
 		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
 				obj->type == OBJ_COMMIT, batch_ptr, query);
 		if (query->trace_enabled) {
 			query->tree_walk_ns += getnanotime() - tree_begin;
 			query->tree_walk_completed = 1;
+#ifdef __APPLE__
+			if (!query->tree_pageins_invalid) {
+				if (!grep_tree_pageins_sample(&pageins_end) ||
+				    pageins_end < pageins_begin ||
+				    pageins_end - pageins_begin >
+					    INTMAX_MAX - query->tree_pageins)
+					query->tree_pageins_invalid = 1;
+				else
+					query->tree_pageins += pageins_end - pageins_begin;
+			}
+#endif
 		}
 		if (batch_ptr) {
 			hit |= flush_grep_tree_batch(batch_ptr);
@@ -4220,6 +4271,17 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 		}
 		errno = saved_errno;
 	}
+#ifdef __APPLE__
+	if (query.trace_enabled && query.tree_walk_completed &&
+	    !query.tree_pageins_invalid) {
+		int saved_errno = errno;
+
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_walk_process_pageins",
+				   query.tree_pageins);
+		errno = saved_errno;
+	}
+#endif
 	{
 		int saved_errno = errno;
 
