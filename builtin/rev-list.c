@@ -707,6 +707,7 @@ int cmd_rev_list(int argc,
 	int bisect_find_all = 0;
 	int use_bitmap_index = 0;
 	int filter_provided_objects = 0;
+	int trace_connectivity = 0;
 	const char *show_progress = NULL;
 	int ret = 0;
 
@@ -932,6 +933,31 @@ int cmd_rev_list(int argc,
 		if (!try_bitmap_traversal(&revs, filter_provided_objects))
 			goto cleanup;
 	}
+	trace_connectivity = trace2_is_enabled() && revs.diffopt.flags.quick &&
+			     revs.read_from_stdin && revs.tag_objects &&
+			     revs.tree_objects && revs.blob_objects &&
+			     !revs.edge_hint && !show_disk_usage;
+	if (trace_connectivity) {
+		intmax_t positive_inputs = 0, preexcluded_inputs = 0;
+		unsigned int j;
+		int saved_errno = errno;
+
+		for (j = 0; j < revs.cmdline.nr; j++) {
+			const struct rev_cmdline_entry *entry = &revs.cmdline.rev[j];
+
+			if (entry->whence != REV_CMD_REV ||
+			    (entry->flags & UNINTERESTING))
+				continue;
+			positive_inputs++;
+			if (entry->item->flags & UNINTERESTING)
+				preexcluded_inputs++;
+		}
+		trace2_data_intmax("rev-list", the_repository,
+				   "positive-input/tips", positive_inputs);
+		trace2_data_intmax("rev-list", the_repository,
+				   "positive-input/preexcluded", preexcluded_inputs);
+		errno = saved_errno;
+	}
 
 	trace2_region_enter("rev-list", "prepare_revision_walk", the_repository);
 	ret = prepare_revision_walk(&revs);
@@ -946,22 +972,16 @@ int cmd_rev_list(int argc,
 			.parse_counts_valid = 1,
 			.parse_timings_valid = 1,
 		};
-		int trace_tree_marking =
-			trace2_is_enabled() && revs.diffopt.flags.quick &&
-			revs.read_from_stdin && revs.tag_objects &&
-			revs.tree_objects && revs.blob_objects &&
-			!revs.edge_hint && !show_disk_usage;
-
 		trace2_region_enter("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		if (trace_tree_marking)
+		if (trace_connectivity)
 			mark_edges_uninteresting_with_stats(&revs, show_edge,
 							   &stats);
 		else
 			mark_edges_uninteresting(&revs, show_edge, 0);
 		trace2_region_leave("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		if (trace_tree_marking) {
+		if (trace_connectivity) {
 			int saved_errno;
 
 			trace2_data_intmax("rev-list", the_repository,
@@ -1047,6 +1067,14 @@ int cmd_rev_list(int argc,
 		&revs, show_commit, show_object, &info,
 		(arg_print_omitted ? &omitted_objects : NULL));
 	trace2_region_leave("rev-list", "traverse_commit_list", the_repository);
+	if (trace_connectivity) {
+		int saved_errno = errno;
+
+		trace2_data_intmax("rev-list", the_repository,
+				   "positive-traversed/selected-total",
+				   progress_counter);
+		errno = saved_errno;
+	}
 
 	if (arg_print_omitted) {
 		struct oidset_iter iter;
