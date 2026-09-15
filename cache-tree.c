@@ -1142,15 +1142,28 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	};
 	struct lock_file lock_file = LOCK_INIT;
 	int ret;
-	int write_index = !(flags & WRITE_TREE_NO_INDEX_WRITE);
+	int validate_only = !!(flags & WRITE_TREE_VALIDATE_ONLY);
+	int write_index = !(flags & (WRITE_TREE_NO_INDEX_WRITE | WRITE_TREE_VALIDATE_ONLY));
 	int trace_validation = trace2_is_enabled();
 
-	flags &= ~WRITE_TREE_NO_INDEX_WRITE;
+	if (validate_only) {
+		if (flags & ~(WRITE_TREE_VALIDATE_ONLY | WRITE_TREE_NO_INDEX_WRITE) ||
+		    prefix)
+			return WRITE_TREE_INVALID_VALIDATION_FLAGS;
+		if (repo_has_promisor_remote(index_state->repo))
+			return WRITE_TREE_PROMISOR_REPOSITORY;
+	}
+	flags &= ~(WRITE_TREE_NO_INDEX_WRITE | WRITE_TREE_VALIDATE_ONLY);
 	if (write_index)
 		hold_lock_file_for_update(&lock_file, index_path, LOCK_DIE_ON_ERROR);
 
-	entries = read_index_from(index_state, index_path,
-				  repo_get_git_dir(the_repository));
+	if (validate_only)
+		entries = read_index_from_with_options(index_state, index_path,
+						       repo_get_git_dir(the_repository),
+						       READ_INDEX_NO_SIDE_EFFECTS);
+	else
+		entries = read_index_from(index_state, index_path,
+					  repo_get_git_dir(the_repository));
 	if (entries < 0) {
 		ret = WRITE_TREE_UNREADABLE_INDEX;
 		goto out;
@@ -1164,6 +1177,13 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	if (trace_validation)
 		trace_cache_tree_validation(&validation, was_valid,
 					    !!(flags & WRITE_TREE_IGNORE_CACHE_TREE));
+
+	if (validate_only) {
+		ret = was_valid ? 0 : WRITE_TREE_INVALID_CACHE_TREE;
+		if (!ret)
+			oidcpy(oid, &cache_tree_get(index_state)->oid);
+		goto out;
+	}
 
 	ret = write_index_as_tree_internal(oid, index_state, was_valid, flags,
 					   prefix);

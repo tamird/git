@@ -54,6 +54,15 @@ int cmd_write_tree(int argc,
 			.flags = PARSE_OPT_HIDDEN | PARSE_OPT_NOARG,
 			.defval = WRITE_TREE_IGNORE_CACHE_TREE,
 		},
+		{
+			.type = OPTION_BIT,
+			.long_name = "validate-cache-tree-only",
+			.value = &flags,
+			.precision = sizeof(flags),
+			.help = N_("validate the existing cache-tree"),
+			.flags = PARSE_OPT_HIDDEN | PARSE_OPT_NOARG | PARSE_OPT_NONEG,
+			.defval = WRITE_TREE_VALIDATE_ONLY,
+		},
 		OPT_END()
 	};
 
@@ -81,6 +90,15 @@ int cmd_write_tree(int argc,
 		break;
 	case WRITE_TREE_PREFIX_ERROR:
 		die("%s: prefix %s not found", me, tree_prefix);
+		break;
+	case WRITE_TREE_INVALID_CACHE_TREE:
+		die("%s: existing cache-tree is missing or invalid", me);
+		break;
+	case WRITE_TREE_PROMISOR_REPOSITORY:
+		die("%s: --validate-cache-tree-only is unavailable with a promisor remote", me);
+		break;
+	case WRITE_TREE_INVALID_VALIDATION_FLAGS:
+		die("%s: --validate-cache-tree-only cannot be combined with other write-tree options", me);
 		break;
 	}
 	return ret;

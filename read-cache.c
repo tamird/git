@@ -2024,13 +2024,15 @@ static void tweak_split_index(struct index_state *istate)
 	}
 }
 
-static void post_read_index_from(struct index_state *istate)
+static void post_read_index_from(struct index_state *istate, unsigned int options)
 {
 	trace2_region_enter("index", "post_read", istate->repo);
 	check_ce_order(istate);
-	tweak_untracked_cache(istate);
-	tweak_split_index(istate);
-	tweak_fsmonitor(istate);
+	if (!(options & READ_INDEX_NO_SIDE_EFFECTS)) {
+		tweak_untracked_cache(istate);
+		tweak_split_index(istate);
+		tweak_fsmonitor(istate);
+	}
 	trace2_region_leave("index", "post_read", istate->repo);
 }
 
@@ -2305,7 +2307,9 @@ static void set_new_index_sparsity(struct index_state *istate)
 }
 
 /* remember to discard_cache() before reading a different cache! */
-int do_read_index(struct index_state *istate, const char *path, int must_exist)
+static int do_read_index_with_options(struct index_state *istate,
+				      const char *path, int must_exist,
+				      unsigned int options)
 {
 	int fd;
 	struct stat st;
@@ -2329,7 +2333,8 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	fd = git_open(path);
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
-			set_new_index_sparsity(istate);
+			if (!(options & READ_INDEX_NO_SIDE_EFFECTS))
+				set_new_index_sparsity(istate);
 			istate->initialized = 1;
 			return 0;
 		}
@@ -2458,11 +2463,13 @@ int do_read_index(struct index_state *istate, const char *path, int must_exist)
 	 * to be full. Otherwise, correct the sparsity based on repository
 	 * settings and other properties of the index (if necessary).
 	 */
-	prepare_repo_settings(istate->repo);
-	if (istate->repo->settings.command_requires_full_index)
-		ensure_full_index(istate);
-	else
-		ensure_correct_sparsity(istate);
+	if (!(options & READ_INDEX_NO_SIDE_EFFECTS)) {
+		prepare_repo_settings(istate->repo);
+		if (istate->repo->settings.command_requires_full_index)
+			ensure_full_index(istate);
+		else
+			ensure_correct_sparsity(istate);
+	}
 
 	return istate->cache_nr;
 
@@ -2471,6 +2478,11 @@ unmap:
 		close(fd);
 	munmap((void *)mmap, mmap_size);
 	die(_("index file corrupt"));
+}
+
+int do_read_index(struct index_state *istate, const char *path, int must_exist)
+{
+	return do_read_index_with_options(istate, path, must_exist, 0);
 }
 
 /*
@@ -2487,8 +2499,8 @@ static void freshen_shared_index(const char *shared_index, int warn)
 	trace2_region_leave("index", "shared/freshen", the_repository);
 }
 
-int read_index_from(struct index_state *istate, const char *path,
-		    const char *gitdir)
+int read_index_from_with_options(struct index_state *istate, const char *path,
+				 const char *gitdir, unsigned int options)
 {
 	struct split_index *split_index;
 	int ret;
@@ -2502,14 +2514,14 @@ int read_index_from(struct index_state *istate, const char *path,
 	trace2_region_enter_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 	trace_performance_enter();
-	ret = do_read_index(istate, path, 0);
+	ret = do_read_index_with_options(istate, path, 0, options);
 	trace_performance_leave("read cache %s", path);
 	trace2_region_leave_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 
 	split_index = istate->split_index;
 	if (!split_index || is_null_oid(&split_index->base_oid)) {
-		post_read_index_from(istate);
+		post_read_index_from(istate, options);
 		return ret;
 	}
 
@@ -2526,7 +2538,8 @@ int read_index_from(struct index_state *istate, const char *path,
 		trace2_region_enter_printf("index", "shared/do_read_index",
 					the_repository, "%s", base_path);
 
-		ret = do_read_index(split_index->base, base_path, 0);
+		ret = do_read_index_with_options(split_index->base, base_path,
+						 0, options);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					the_repository, "%s", base_path);
 	} else {
@@ -2536,7 +2549,8 @@ int read_index_from(struct index_state *istate, const char *path,
 		free(path_copy);
 		trace2_region_enter_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
-		ret = do_read_index(split_index->base, base_path2, 1);
+		ret = do_read_index_with_options(split_index->base, base_path2,
+						 1, options);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
 		free(base_path2);
@@ -2546,14 +2560,21 @@ int read_index_from(struct index_state *istate, const char *path,
 		    base_oid_hex, base_path,
 		    oid_to_hex(&split_index->base->oid));
 
-	freshen_shared_index(base_path, 0);
+	if (!(options & READ_INDEX_NO_SIDE_EFFECTS))
+		freshen_shared_index(base_path, 0);
 	trace2_region_enter("index", "shared/merge", istate->repo);
 	merge_base_index(istate);
 	trace2_region_leave("index", "shared/merge", istate->repo);
-	post_read_index_from(istate);
+	post_read_index_from(istate, options);
 	trace_performance_leave("read cache %s", base_path);
 	free(base_path);
 	return ret;
+}
+
+int read_index_from(struct index_state *istate, const char *path,
+		    const char *gitdir)
+{
+	return read_index_from_with_options(istate, path, gitdir, 0);
 }
 
 int is_index_unborn(struct index_state *istate)

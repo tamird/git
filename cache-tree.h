@@ -46,11 +46,15 @@ int cache_tree_verify(struct repository *, struct index_state *);
 #define WRITE_TREE_SILENT 8
 #define WRITE_TREE_REPAIR 16
 #define WRITE_TREE_NO_INDEX_WRITE    32
+#define WRITE_TREE_VALIDATE_ONLY     64
 
 /* error return codes */
 #define WRITE_TREE_UNREADABLE_INDEX (-1)
 #define WRITE_TREE_UNMERGED_INDEX (-2)
 #define WRITE_TREE_PREFIX_ERROR (-3)
+#define WRITE_TREE_INVALID_CACHE_TREE	    (-4)
+#define WRITE_TREE_PROMISOR_REPOSITORY	    (-5)
+#define WRITE_TREE_INVALID_VALIDATION_FLAGS (-6)
 
 struct tree *write_in_core_index_as_tree(struct repository *repo,
 					 struct index_state *index_state);

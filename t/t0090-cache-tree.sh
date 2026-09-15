@@ -115,6 +115,24 @@ setup_cache_tree_update_repo () {
 	)
 }
 
+snapshot_cache_tree_validation_state () {
+	cp .git/index .git/validate-only.expect.index &&
+	test-tool chmtime --get .git/index >.git/validate-only.expect.mtime &&
+	git count-objects -v >.git/validate-only.expect.objects &&
+	ls .git/objects/pack >.git/validate-only.expect.packs
+}
+
+test_cache_tree_validation_state_unchanged () {
+	test_cmp_bin .git/validate-only.expect.index .git/index &&
+	test-tool chmtime --get .git/index >.git/validate-only.actual.mtime &&
+	test_cmp .git/validate-only.expect.mtime .git/validate-only.actual.mtime &&
+	git count-objects -v >.git/validate-only.actual.objects &&
+	test_cmp .git/validate-only.expect.objects .git/validate-only.actual.objects &&
+	ls .git/objects/pack >.git/validate-only.actual.packs &&
+	test_cmp .git/validate-only.expect.packs .git/validate-only.actual.packs &&
+	test_path_is_missing .git/index.lock
+}
+
 cache_tree_update_value () {
 	sed -n "s/.*\"key\":\"update\\/$2-total\",\"value\":\"\\([0-9][0-9]*\\)\".*/\\1/p" "$1"
 }
@@ -615,6 +633,31 @@ test_expect_success 'OID-ordered validation falls back for a missing nested tree
 		nested_oid=$(git rev-parse HEAD:nested) &&
 		nested_path="$(git rev-parse --git-path objects)/$(test_oid_to_path "$nested_oid")" &&
 		rm "$nested_path" &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/validate-default.trace" \
+			test_must_fail git write-tree --validate-cache-tree-only >actual 2>err &&
+		test_must_be_empty actual &&
+		test_grep "existing cache-tree is missing or invalid" err &&
+		test_cache_tree_validation_state_unchanged &&
+		test_path_is_missing "$nested_path" &&
+		test_trace2_data cache_tree validate/valid-total 0 <.git/validate-default.trace &&
+		test_trace2_data cache_tree validate/object-checks-total 2 <.git/validate-default.trace &&
+		test_cache_tree_object_check_time .git/validate-default.trace 2 &&
+		test_grep ! "\"category\":\"cache_tree\",\"label\":\"update\"" .git/validate-default.trace &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/validate-ordered.trace" \
+			test_must_fail git write-tree --validate-cache-tree-only >actual 2>err &&
+		test_must_be_empty actual &&
+		test_cache_tree_validation_state_unchanged &&
+		test_path_is_missing "$nested_path" &&
+		test_trace2_data cache_tree validate/oid-order/probes "[1-3]" <.git/validate-ordered.trace &&
+		validate_probes=$(sed -n "s|.*validate/oid-order/probes\",\"value\":\"\([1-3]\)\".*|\1|p" .git/validate-ordered.trace) &&
+		test -n "$validate_probes" &&
+		test_trace2_data cache_tree validate/valid-total 0 <.git/validate-ordered.trace &&
+		test_trace2_data cache_tree validate/object-checks-total "$((2 + validate_probes))" <.git/validate-ordered.trace &&
+		test_cache_tree_object_check_time .git/validate-ordered.trace "$((2 + validate_probes))" &&
+		test_grep ! "\"category\":\"cache_tree\",\"label\":\"update\"" .git/validate-ordered.trace &&
 		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
 		GIT_TRACE2_EVENT="$PWD/.git/default.trace" \
 			git commit --allow-empty -m default &&
@@ -663,6 +706,15 @@ test_expect_success 'OID-ordered validation bypasses promised object fetches' '
 		git config extensions.partialclone origin &&
 		git config remote.origin.promisor true &&
 		rm "$(git rev-parse --git-path objects)/$(test_oid_to_path "$nested_oid")" &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/validation-reject.trace" \
+			test_must_fail git write-tree --validate-cache-tree-only >actual 2>err &&
+		test_must_be_empty actual &&
+		test_grep "unavailable with a promisor remote" err &&
+		test_cache_tree_validation_state_unchanged &&
+		test_path_is_missing "$(git rev-parse --git-path objects)/$(test_oid_to_path "$nested_oid")" &&
+		test_grep ! "\"category\":\"cache_tree\",\"label\":\"validate\"" .git/validation-reject.trace &&
 		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
 		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
 			git commit --allow-empty -m fetched &&
@@ -681,8 +733,10 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_commit use-valid &&
 	test_when_finished "git checkout -- use-valid.t &&
 		rm -f .git/cache-tree-validate.trace .git/cache-tree-ordered.trace \
+			.git/cache-tree-validate-only-default.trace \
+			.git/cache-tree-validate-only-ordered.trace \
 			.git/cache-tree-ignore.trace \
-			.git/cache-tree-stash.trace" &&
+			.git/cache-tree-stash.trace .git/validate-only.*" &&
 	test-tool dump-cache-tree >actual &&
 	nodes=$(grep -cv "#(ref)" actual) &&
 	git rev-parse HEAD^{tree} >expect &&
@@ -710,6 +764,37 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-ordered.trace &&
 	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-ordered.trace &&
 	test_cache_tree_object_check_time .git/cache-tree-ordered.trace "$nodes" &&
+	snapshot_cache_tree_validation_state &&
+	GIT_TEST_CACHE_TREE_OID_ORDER=0 \
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-validate-only-default.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 git write-tree --validate-cache-tree-only >actual &&
+	test_cmp expect actual &&
+	test_cache_tree_validation_state_unchanged &&
+	test_trace2_data cache_tree validate/valid-total 1 <.git/cache-tree-validate-only-default.trace &&
+	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate-only-default.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-validate-only-default.trace "$nodes" &&
+	GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-validate-only-ordered.trace" \
+	GIT_TRACE2_EVENT_NESTING=2 git write-tree --validate-cache-tree-only >actual &&
+	test_cmp expect actual &&
+	test_cache_tree_validation_state_unchanged &&
+	test_trace2_data cache_tree validate/oid-order/probes "$nodes" <.git/cache-tree-validate-only-ordered.trace &&
+	test_trace2_data cache_tree validate/valid-total 1 <.git/cache-tree-validate-only-ordered.trace &&
+	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate-only-ordered.trace &&
+	test_cache_tree_object_check_time .git/cache-tree-validate-only-ordered.trace "$nodes" &&
+	GIT_TRACE2_EVENT="$PWD/.git/validate-only.incompatible.trace" \
+		test_must_fail git write-tree --validate-cache-tree-only \
+			--ignore-cache-tree >actual 2>err &&
+	test_must_be_empty actual &&
+	test_grep "cannot be combined" err &&
+	test_grep ! "\"category\":\"cache_tree\",\"label\":\"validate\"" \
+		.git/validate-only.incompatible.trace &&
+	test_cache_tree_validation_state_unchanged &&
+	test_must_fail git write-tree --validate-cache-tree-only \
+		--prefix=use-valid/ >actual 2>err &&
+	test_must_be_empty actual &&
+	test_grep "cannot be combined" err &&
+	test_cache_tree_validation_state_unchanged &&
 
 	GIT_TRACE2_EVENT="$PWD/.git/cache-tree-ignore.trace" \
 	GIT_TRACE2_EVENT_NESTING=2 \
@@ -971,6 +1056,125 @@ test_expect_success 'cache-tree update totals accumulate across returning region
 		test "$update_writes" -gt 0 &&
 		test "$update_nodes" = "$((update_reused + update_hash_only + update_writes))" &&
 		test_cache_tree_update_bound .git/update.trace "$update_calls"
+	)
+'
+
+test_expect_success 'validation-only keeps a split shared index unchanged' '
+	test_when_finished "rm -rf validate-only-split" &&
+	setup_cache_tree_update_repo validate-only-split &&
+	(
+		cd validate-only-split &&
+		git update-index --split-index &&
+		base=$(test-tool dump-split-index .git/index | sed -n "s/^base //p") &&
+		test -n "$base" &&
+		shared=".git/sharedindex.$base" &&
+		test_path_is_file "$shared" &&
+		test-tool chmtime =-3600 "$shared" &&
+		test-tool chmtime --get "$shared" >.git/expect.shared.mtime &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TRACE2_EVENT="$PWD/.git/valid.trace" \
+			git write-tree --validate-cache-tree-only >actual &&
+		test_cmp .git/base.tree actual &&
+		test_cache_tree_validation_state_unchanged &&
+		test-tool chmtime --get "$shared" >.git/actual.shared.mtime &&
+		test_cmp .git/expect.shared.mtime .git/actual.shared.mtime &&
+		test_trace2_data cache_tree validate/valid-total 1 <.git/valid.trace &&
+		test_cache_tree_object_check_time .git/valid.trace 3 &&
+		echo changed >a/file &&
+		git add a/file &&
+		test_invalid_cache_tree a/ &&
+		base=$(test-tool dump-split-index .git/index | sed -n "s/^base //p") &&
+		test -n "$base" &&
+		shared=".git/sharedindex.$base" &&
+		test_path_is_file "$shared" &&
+		test-tool chmtime =-3600 "$shared" &&
+		test-tool chmtime --get "$shared" >.git/expect.shared.mtime &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TRACE2_EVENT="$PWD/.git/invalid.trace" \
+			test_must_fail git write-tree --validate-cache-tree-only >actual 2>err &&
+		test_must_be_empty actual &&
+		test_grep "existing cache-tree is missing or invalid" err &&
+		test_cache_tree_validation_state_unchanged &&
+		test-tool chmtime --get "$shared" >.git/actual.shared.mtime &&
+		test_cmp .git/expect.shared.mtime .git/actual.shared.mtime &&
+		test_trace2_data cache_tree validate/valid-total 0 <.git/invalid.trace &&
+		test_trace2_data cache_tree validate/object-checks-total 0 <.git/invalid.trace &&
+		test_cache_tree_object_check_time .git/invalid.trace 0 &&
+		test_grep ! "\"category\":\"cache_tree\",\"label\":\"update\"" .git/invalid.trace
+	)
+'
+
+test_expect_success 'validation-only avoids sparse conversion and config writes' '
+	test_when_finished "rm -rf validate-only-sparse" &&
+	setup_cache_tree_update_repo validate-only-sparse &&
+	(
+		cd validate-only-sparse &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		git sparse-checkout set --cone --no-sparse-index a &&
+		git write-tree >actual &&
+		test_cmp .git/base.tree actual &&
+		test_path_is_file .git/config.worktree &&
+		cp .git/config .git/expect.config &&
+		cp .git/config.worktree .git/expect.config.worktree &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TEST_SPARSE_INDEX=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/sparse.trace" \
+			git write-tree --validate-cache-tree-only >actual &&
+		test_cmp .git/base.tree actual &&
+		test_cache_tree_validation_state_unchanged &&
+		test_cmp_bin .git/expect.config .git/config &&
+		test_cmp_bin .git/expect.config.worktree .git/config.worktree &&
+		test_trace2_data cache_tree validate/valid-total 1 <.git/sparse.trace &&
+		test_cache_tree_object_check_time .git/sparse.trace 3 &&
+		test_grep ! "\"category\":\"index\",\"label\":\"convert_to_sparse\"" .git/sparse.trace
+	)
+'
+
+test_expect_success 'validation-only skips an enabled FSMonitor hook' '
+	test_when_finished "rm -rf validate-only-fsmonitor" &&
+	setup_cache_tree_update_repo validate-only-fsmonitor &&
+	(
+		cd validate-only-fsmonitor &&
+		git config fsmonitor.allowRemote true &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			echo invoked >.git/fsmonitor-invoked
+			printf "token\0"
+		EOF
+		git config core.fsmonitor .git/hooks/fsmonitor-test &&
+		git config core.fsmonitorHookVersion 2 &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_path_is_file .git/fsmonitor-invoked &&
+		rm .git/fsmonitor-invoked &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TRACE2_EVENT="$PWD/.git/fsmonitor.trace" \
+			git write-tree --validate-cache-tree-only >actual &&
+		test_cmp .git/base.tree actual &&
+		test_cache_tree_validation_state_unchanged &&
+		test_path_is_missing .git/fsmonitor-invoked &&
+		test_trace2_data cache_tree validate/valid-total 1 <.git/fsmonitor.trace &&
+		test_cache_tree_object_check_time .git/fsmonitor.trace 3
+	)
+'
+
+test_expect_success 'validation-only rejects an index without cache-tree' '
+	test_when_finished "rm -rf validate-only-absent" &&
+	setup_cache_tree_update_repo validate-only-absent &&
+	(
+		cd validate-only-absent &&
+		test-tool scrap-cache-tree &&
+		test_no_cache_tree &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TRACE2_EVENT="$PWD/.git/absent.trace" \
+			test_must_fail git write-tree --validate-cache-tree-only >actual 2>err &&
+		test_must_be_empty actual &&
+		test_grep "existing cache-tree is missing or invalid" err &&
+		test_cache_tree_validation_state_unchanged &&
+		test_trace2_data cache_tree validate/valid-total 0 <.git/absent.trace &&
+		test_trace2_data cache_tree validate/object-checks-total 0 <.git/absent.trace &&
+		test_cache_tree_object_check_time .git/absent.trace 0 &&
+		test_grep ! "\"category\":\"cache_tree\",\"label\":\"update\"" \
+			.git/absent.trace
 	)
 '
 

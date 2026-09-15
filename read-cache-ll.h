@@ -289,6 +289,13 @@ int do_read_index(struct index_state *istate, const char *path,
 		  int must_exist); /* for testting only! */
 int read_index_from(struct index_state *, const char *path,
 		    const char *gitdir);
+/*
+ * Read the on-disk index without sparse conversion or external refreshes.
+ * A sparse index may validate a different cache-tree than an ordinary reader.
+ */
+#define READ_INDEX_NO_SIDE_EFFECTS 1
+int read_index_from_with_options(struct index_state *, const char *path,
+				 const char *gitdir, unsigned int options);
 int is_index_unborn(struct index_state *);
 
 /* For use with `write_locked_index()`. */
