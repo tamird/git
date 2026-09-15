@@ -1207,6 +1207,58 @@ static size_t grep_index_pcre_quantifier_len(const char *pattern,
 	return i - start;
 }
 
+/*
+ * Outer assertions only restrict a match: it still contains one complete
+ * literal alternative. Expose those alternatives to the top-level OR parser.
+ */
+static int grep_index_pcre_literal_alternation(const char *pattern, size_t len,
+					       size_t *scan_start,
+					       size_t *scan_end)
+{
+	size_t i = 0;
+	size_t alternative_start;
+	size_t alternatives_nr = 1;
+	size_t body_start;
+	size_t body_end;
+
+	if (i < len && pattern[i] == '^')
+		i++;
+	if (i + 1 < len && pattern[i] == '\\' &&
+	    (pattern[i + 1] == 'b' || pattern[i + 1] == 'B'))
+		i += 2;
+	if (len - i < 3 || memcmp(pattern + i, "(?:", 3))
+		return 0;
+	body_start = alternative_start = i + 3;
+	for (i = body_start; i < len && pattern[i] != ')'; i++) {
+		unsigned char ch = pattern[i];
+
+		if (ch == '|') {
+			if (i - alternative_start < 3 ||
+			    alternatives_nr == GREP_INDEX_MAX_QUERY_ALTERNATIVES)
+				return 0;
+			alternatives_nr++;
+			alternative_start = i + 1;
+		} else if (ch < ' ' || ch > '~' ||
+			   is_regex_special(ch) || ch == ']' || ch == '}') {
+			return 0;
+		}
+	}
+	if (i == len || i - alternative_start < 3 || alternatives_nr < 2)
+		return 0;
+	body_end = i;
+	i++;
+	if (i + 1 < len && pattern[i] == '\\' &&
+	    (pattern[i + 1] == 'b' || pattern[i + 1] == 'B'))
+		i += 2;
+	if (i < len && pattern[i] == '$')
+		i++;
+	if (i != len)
+		return 0;
+	*scan_start = body_start;
+	*scan_end = body_end;
+	return 1;
+}
+
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
@@ -1702,6 +1754,11 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			}
 		}
 
+		if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+		    !opt->ignore_case)
+			grep_index_pcre_literal_alternation(p->pattern,
+							    p->patternlen,
+							    &scan_start, &scan_end);
 		if (pattern_type == GREP_PATTERN_TYPE_ERE ||
 		    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
 		     !opt->ignore_case &&

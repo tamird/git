@@ -4931,6 +4931,86 @@ test_expect_success LIBPCRE2 'content index prunes PCRE alternatives' '
 	test_must_be_empty err
 '
 
+test_expect_success LIBPCRE2 'content index filters whole literal PCRE groups' '
+	pattern="\\b(?:ordinary|present)\\b" &&
+	printf "%s\n" "ordinary:ordinary contents" \
+		"present:present needle" >expect &&
+	git grep --cached --no-content-index -P "$pattern" \
+		-- ordinary present >actual-unindexed &&
+	git grep --cached -P "$pattern" -- ordinary present >actual &&
+	test_cmp expect actual-unindexed &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -P \
+		"\\b(?:missingalpha|absentbeta)\\b" -- short 2>err &&
+	test_must_be_empty err &&
+	mv "$object.save" "$object" &&
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "test ! -e \"$object.save\" ||
+			    mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -P \
+		"^\\b(?:missingalpha|present)\\b" -- present 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2 'modified worktree matches PCRE group alternative' '
+	test_when_finished "git checkout -- short" &&
+	printf "missingalpha\n" >short &&
+	echo "short:missingalpha" >expect &&
+	git grep -P "\\b(?:missingalpha|absentbeta)\\b" -- short \
+		>actual &&
+	test_cmp expect actual
+'
+
+test_expect_success LIBPCRE2 'unsafe PCRE groups retain normal blob reads' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	for pattern in \
+		"\\b(?:missingalpha|absentbeta)?\\b" \
+		"\\b(?:missingalpha|)\\b" \
+		"\\b(?:missingalpha|x)\\b" \
+		"\\b(?:(?i)missingalpha|absentbeta)\\b" \
+		"\\b(?:missingalpha|absentbeta)\\b|x"
+	do
+		test_must_fail git grep --cached -P "$pattern" \
+			-- short 2>err &&
+		test_grep "unable to read" err || return 1
+	done &&
+	test_must_fail git grep --cached -i -P \
+		"\\b(?:MISSINGALPHA|ABSENTBETA)\\b" -- short 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success LIBPCRE2,FSMONITOR_DAEMON \
+	'daemon queries literal PCRE group alternatives' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+			    git config --unset core.fsmonitor &&
+			    rm -f pcre-or-ipc.trace" &&
+	git config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/pcre-or-ipc.trace" \
+		git grep --cached -P \
+		"\\b(?:missingalpha|absentbeta)\\b" -- short 2>err &&
+	test_must_be_empty err &&
+	test_region grep query_content_index_ipc pcre-or-ipc.trace &&
+	test_trace2_data grep content_index_ipc_candidates 0 \
+		<pcre-or-ipc.trace &&
+	! test_grep '"key":"content_index_negative_cache_entries"' \
+		pcre-or-ipc.trace
+'
+
 test_expect_success 'possible matches use normal blob reads' '
 	oid=$(git rev-parse :present) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
