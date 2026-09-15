@@ -578,6 +578,30 @@ void put_revision_mark(const struct rev_info *revs,
 
 void mark_parents_uninteresting(struct rev_info *revs, struct commit *commit);
 
+struct tree_mark_odb_read_stats {
+	uint64_t attempts;
+	uint64_t ns;
+	int invalid;
+};
+
+struct tree_mark_odb_sample_stats {
+	uint64_t count;
+	uint64_t parse_ns;
+	uint64_t packed_read_count;
+	uint64_t loose_read_count;
+	uint64_t inmemory_read_count;
+	uint64_t unknown_read_count;
+	uint64_t fallback_pack_attempts;
+	struct tree_mark_odb_read_stats location;
+	struct tree_mark_odb_read_stats content;
+	struct tree_mark_odb_read_stats midx_search;
+	struct tree_mark_odb_read_stats midx_resolve;
+	struct tree_mark_odb_read_stats fallback;
+	int invalid;
+	int kind_invalid;
+	int lookup_invalid;
+};
+
 struct tree_mark_stats {
 	/* Non-null roots requested for tree marking. */
 	uint64_t roots;
@@ -595,6 +619,9 @@ struct tree_mark_stats {
 	uint64_t parse_needed_ns;
 	int parse_counts_valid;
 	int parse_timings_valid;
+	/* Only the pending negative-tree walk enables sampled ODB reads. */
+	int sample_odb;
+	struct tree_mark_odb_sample_stats odb_sample;
 };
 
 void mark_tree_uninteresting(struct repository *r, struct tree *tree);

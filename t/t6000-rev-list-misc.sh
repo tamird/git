@@ -87,6 +87,49 @@ test_expect_success 'propagate uninteresting flag down correctly' '
 	test_must_be_empty actual
 '
 
+test_expect_success 'sample packed reads while marking a negative tree' '
+	test_when_finished "rm -rf odb-sample odb-sample.trace" &&
+	git init odb-sample &&
+	mkdir -p odb-sample/dir/subdir &&
+	echo base >odb-sample/dir/subdir/file &&
+	git -C odb-sample add dir &&
+	git -C odb-sample commit -m base &&
+	echo want >odb-sample/dir/subdir/other &&
+	git -C odb-sample add dir &&
+	git -C odb-sample commit -m want &&
+	git -C odb-sample repack -ad &&
+	git -C odb-sample multi-pack-index write --no-bitmap &&
+	git -C odb-sample rev-list --objects --no-object-names \
+		HEAD "^HEAD~^{tree}" >expect &&
+	GIT_TRACE2_EVENT="$PWD/odb-sample.trace" git -C odb-sample rev-list \
+		--objects --no-object-names HEAD "^HEAD~^{tree}" >actual &&
+	test_cmp expect actual &&
+	# The root is already parsed when the argument is resolved.
+	test_grep "\"key\":\"pending-negative-tree/parse-already-count\",\"value\":\"1\"" \
+		odb-sample.trace &&
+	test_grep "\"key\":\"pending-negative-tree/parse-needed-count\",\"value\":\"2\"" \
+		odb-sample.trace &&
+	test_grep "\"key\":\"pending-negative-tree/odb-sample-valid\",\"value\":\"[01]\"" \
+		odb-sample.trace &&
+	if grep -q "\"key\":\"pending-negative-tree/parse-timings-valid\",\"value\":\"1\"" \
+		odb-sample.trace
+	then
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-valid\",\"value\":\"1\"" \
+			odb-sample.trace &&
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-kind-valid\",\"value\":\"1\"" \
+			odb-sample.trace &&
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-count\",\"value\":\"2\"" \
+			odb-sample.trace &&
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-packed-reads\",\"value\":\"2\"" \
+			odb-sample.trace &&
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-midx-search-count\",\"value\":\"2\"" \
+			odb-sample.trace
+	else
+		test_grep "\"key\":\"pending-negative-tree/odb-sample-valid\",\"value\":\"0\"" \
+			odb-sample.trace
+	fi
+'
+
 test_expect_success 'symleft flag bit is propagated down from tag' '
 	git log --format="%m %s" --left-right v1.0...main >actual &&
 	cat >expect <<-\EOF &&

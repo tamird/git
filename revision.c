@@ -100,12 +100,118 @@ static int revision_trace_time(uint64_t *now)
 #endif
 }
 
+static void record_tree_mark_odb_read(struct tree_mark_odb_read_stats *stats,
+				      uint64_t count, uint64_t ns, int invalid,
+				      uint64_t parse_ns)
+{
+	if (stats->invalid)
+		return;
+	if (invalid || ns > parse_ns ||
+	    count > (uint64_t)INTMAX_MAX - stats->attempts ||
+	    unsigned_add_overflows(stats->ns, ns)) {
+		stats->invalid = 1;
+		return;
+	}
+	stats->attempts += count;
+	stats->ns += ns;
+}
+
+static void record_tree_mark_odb_sample(struct tree_mark_odb_sample_stats *stats,
+					const struct odb_read_result *result,
+					uint64_t parse_ns)
+{
+	if (stats->count == (uint64_t)INTMAX_MAX ||
+	    unsigned_add_overflows(stats->parse_ns, parse_ns))
+		stats->invalid = 1;
+	if (!stats->invalid) {
+		stats->count++;
+		stats->parse_ns += parse_ns;
+		switch (result->kind) {
+		case ODB_READ_RESULT_PACKED_CACHE_COPY:
+		case ODB_READ_RESULT_PACKED_UNPACK:
+			stats->packed_read_count++;
+			break;
+		case ODB_READ_RESULT_LOOSE:
+			stats->loose_read_count++;
+			break;
+		case ODB_READ_RESULT_INMEMORY:
+			stats->inmemory_read_count++;
+			break;
+		case ODB_READ_RESULT_UNKNOWN:
+			stats->unknown_read_count++;
+			break;
+		default:
+			stats->kind_invalid = 1;
+		}
+	}
+	if (result->invalid)
+		stats->kind_invalid = 1;
+
+	record_tree_mark_odb_read(&stats->location,
+				  result->packed_entry_location_attempt_count,
+				  result->packed_entry_location_ns,
+				  result->packed_entry_location_invalid, parse_ns);
+	record_tree_mark_odb_read(&stats->content,
+				  result->packed_content_attempt_count,
+				  result->packed_content_ns,
+				  result->packed_content_invalid, parse_ns);
+	/* The location and content intervals are disjoint parts of the parse. */
+	if (!stats->location.invalid && !stats->content.invalid &&
+	    result->packed_entry_location_ns >
+		    parse_ns - result->packed_content_ns) {
+		stats->location.invalid = 1;
+		stats->content.invalid = 1;
+	}
+	if (stats->lookup_invalid || stats->location.invalid ||
+	    result->packed_lookup.invalid)
+		stats->lookup_invalid = 1;
+	else {
+		uint64_t search =
+			result->packed_lookup.ns[ODB_PACKED_LOOKUP_MIDX_SEARCH];
+		uint64_t resolve =
+			result->packed_lookup.ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE];
+		uint64_t fallback =
+			result->packed_lookup.ns[ODB_PACKED_LOOKUP_FALLBACK];
+
+		record_tree_mark_odb_read(&stats->midx_search,
+					  result->packed_lookup.count[ODB_PACKED_LOOKUP_MIDX_SEARCH],
+					  result->packed_lookup.ns[ODB_PACKED_LOOKUP_MIDX_SEARCH],
+					  0, parse_ns);
+		record_tree_mark_odb_read(&stats->midx_resolve,
+					  result->packed_lookup.count[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
+					  result->packed_lookup.ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
+					  0, parse_ns);
+		record_tree_mark_odb_read(&stats->fallback,
+					  result->packed_lookup.count[ODB_PACKED_LOOKUP_FALLBACK],
+					  result->packed_lookup.ns[ODB_PACKED_LOOKUP_FALLBACK],
+					  0, parse_ns);
+		if (stats->midx_search.invalid || stats->midx_resolve.invalid ||
+		    stats->fallback.invalid ||
+		    result->packed_lookup.count[ODB_PACKED_LOOKUP_MIDX_SEARCH] >
+			    result->packed_entry_location_attempt_count ||
+		    result->packed_lookup.count[ODB_PACKED_LOOKUP_MIDX_RESOLVE] >
+			    result->packed_entry_location_attempt_count ||
+		    result->packed_lookup.count[ODB_PACKED_LOOKUP_FALLBACK] >
+			    result->packed_entry_location_attempt_count ||
+		    search > result->packed_entry_location_ns ||
+		    resolve > result->packed_entry_location_ns - search ||
+		    fallback > result->packed_entry_location_ns - search - resolve ||
+		    result->packed_lookup.fallback_pack_attempts >
+			    (uint64_t)INTMAX_MAX - stats->fallback_pack_attempts)
+			stats->lookup_invalid = 1;
+		else
+			stats->fallback_pack_attempts +=
+				result->packed_lookup.fallback_pack_attempts;
+	}
+}
+
 static int parse_tree_for_marking(struct tree *tree,
 				  struct tree_mark_stats *stats)
 {
+	struct odb_read_result result;
 	uint64_t started = 0, finished;
 	intmax_t *count;
-	int already_parsed, trace_timing = 0;
+	int already_parsed, trace_timing = 0, sample_odb = 0;
 	int ret;
 
 	if (!stats)
@@ -133,16 +239,36 @@ static int parse_tree_for_marking(struct tree *tree,
 		else
 			trace_timing = 1;
 	}
+	if (stats->sample_odb &&
+	    (!stats->parse_counts_valid || !stats->parse_timings_valid))
+		stats->odb_sample.invalid = 1;
 
-	ret = repo_parse_tree_gently(the_repository, tree, 1);
+	/* Sample the first 64 needed parses, then every 64th to limit timer calls. */
+	if (stats->sample_odb && trace_timing && stats->parse_counts_valid &&
+	    (stats->parse_needed_count <= 64 ||
+	     !(stats->parse_needed_count & 63)))
+		sample_odb = 1;
+
+	if (sample_odb)
+		ret = repo_parse_tree_gently_with_result(the_repository, tree, 1,
+							 &result);
+	else
+		ret = repo_parse_tree_gently(the_repository, tree, 1);
 
 	if (trace_timing) {
 		if (revision_trace_time(&finished) || finished < started ||
 		    unsigned_add_overflows(stats->parse_needed_ns,
-					   finished - started))
+					   finished - started)) {
 			stats->parse_timings_valid = 0;
-		else
+			if (stats->sample_odb)
+				stats->odb_sample.invalid = 1;
+		} else {
 			stats->parse_needed_ns += finished - started;
+			if (sample_odb)
+				record_tree_mark_odb_sample(&stats->odb_sample,
+							    &result,
+							    finished - started);
+		}
 	}
 
 	return ret;
@@ -4572,6 +4698,7 @@ int prepare_revision_walk(struct rev_info *revs)
 	struct tree_mark_stats tree_stats = {
 		.parse_counts_valid = 1,
 		.parse_timings_valid = 1,
+		.sample_odb = 1,
 	};
 	struct tree_mark_stats *pending_tree_stats =
 		trace2_is_enabled() && revs->tree_objects ? &tree_stats : NULL;
@@ -4635,6 +4762,89 @@ int prepare_revision_walk(struct rev_info *revs)
 			trace2_data_intmax("revision", revs->repo,
 					   "pending-negative-tree/parse-needed-us",
 					   tree_stats.parse_needed_ns / 1000);
+		trace2_data_intmax("revision", revs->repo,
+				   "pending-negative-tree/odb-sample-valid",
+				   !tree_stats.odb_sample.invalid);
+		trace2_data_intmax("revision", revs->repo,
+				   "pending-negative-tree/odb-sample-kind-valid",
+				   !tree_stats.odb_sample.invalid &&
+					   !tree_stats.odb_sample.kind_invalid);
+		if (!tree_stats.odb_sample.invalid) {
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-count",
+					   tree_stats.odb_sample.count);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-parse-us",
+					   tree_stats.odb_sample.parse_ns / 1000);
+			if (!tree_stats.odb_sample.kind_invalid) {
+				trace2_data_intmax("revision", revs->repo,
+						   "pending-negative-tree/odb-sample-packed-reads",
+						   tree_stats.odb_sample.packed_read_count);
+				trace2_data_intmax("revision", revs->repo,
+						   "pending-negative-tree/odb-sample-loose-reads",
+						   tree_stats.odb_sample.loose_read_count);
+				trace2_data_intmax("revision", revs->repo,
+						   "pending-negative-tree/odb-sample-inmemory-reads",
+						   tree_stats.odb_sample.inmemory_read_count);
+				trace2_data_intmax("revision", revs->repo,
+						   "pending-negative-tree/odb-sample-unknown-reads",
+						   tree_stats.odb_sample.unknown_read_count);
+			}
+		}
+		trace2_data_intmax("revision", revs->repo,
+				   "pending-negative-tree/odb-sample-location-valid",
+				   !tree_stats.odb_sample.invalid &&
+					   !tree_stats.odb_sample.location.invalid);
+		if (!tree_stats.odb_sample.invalid &&
+		    !tree_stats.odb_sample.location.invalid) {
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-location-count",
+					   tree_stats.odb_sample.location.attempts);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-location-us",
+					   tree_stats.odb_sample.location.ns / 1000);
+		}
+		trace2_data_intmax("revision", revs->repo,
+				   "pending-negative-tree/odb-sample-content-valid",
+				   !tree_stats.odb_sample.invalid &&
+					   !tree_stats.odb_sample.content.invalid);
+		if (!tree_stats.odb_sample.invalid &&
+		    !tree_stats.odb_sample.content.invalid) {
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-content-count",
+					   tree_stats.odb_sample.content.attempts);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-content-us",
+					   tree_stats.odb_sample.content.ns / 1000);
+		}
+		trace2_data_intmax("revision", revs->repo,
+				   "pending-negative-tree/odb-sample-lookup-valid",
+				   !tree_stats.odb_sample.invalid &&
+					   !tree_stats.odb_sample.lookup_invalid);
+		if (!tree_stats.odb_sample.invalid &&
+		    !tree_stats.odb_sample.lookup_invalid) {
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-midx-search-count",
+					   tree_stats.odb_sample.midx_search.attempts);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-midx-search-us",
+					   tree_stats.odb_sample.midx_search.ns / 1000);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-midx-resolve-count",
+					   tree_stats.odb_sample.midx_resolve.attempts);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-midx-resolve-us",
+					   tree_stats.odb_sample.midx_resolve.ns / 1000);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-fallback-count",
+					   tree_stats.odb_sample.fallback.attempts);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-fallback-us",
+					   tree_stats.odb_sample.fallback.ns / 1000);
+			trace2_data_intmax("revision", revs->repo,
+					   "pending-negative-tree/odb-sample-fallback-pack-attempts",
+					   tree_stats.odb_sample.fallback_pack_attempts);
+		}
 		errno = saved_errno;
 	}
 	object_array_clear(&old_pending);
