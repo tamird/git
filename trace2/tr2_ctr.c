@@ -238,6 +238,30 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "cache_tree",
 		.name = "update/entry-object-checks-total",
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS] = {
+		.category = "cache_tree",
+		.name = "update/entry-object-check-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECKS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-object-checks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-object-check-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECKS] = {
+		.category = "cache_tree",
+		.name = "update/repair-tree-checks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECK_NS] = {
+		.category = "cache_tree",
+		.name = "update/repair-tree-check-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY_NS] = {
+		.category = "cache_tree",
+		.name = "update/hash-only-ns-total",
+	},
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS] = {
 		.category = "cache_tree",
 		.name = "update/object-write-calls-total",
@@ -597,7 +621,19 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 			const char *name = tr2_counter_metadata[cid].name;
 			uint64_t value = final_counter_block.counter[cid].value;
 
-			if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS) {
+			if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS) {
+				name = "update/entry-object-check-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS) {
+				name = "update/reuse-object-check-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECK_NS) {
+				name = "update/repair-tree-check-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY_NS) {
+				name = "update/hash-only-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS) {
 				name = "update/object-write-us-total";
 				value /= 1000;
 			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS) {

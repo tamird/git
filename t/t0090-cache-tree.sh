@@ -185,11 +185,17 @@ test_cache_tree_update_metrics () {
 		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
 	test_trace2_data cache_tree update/entry-object-checks-total \
 		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
+	for update_key in entry-object-check-us reuse-object-checks \
+		reuse-object-check-us repair-tree-checks repair-tree-check-us hash-only-us
+	do
+		test_trace2_data cache_tree "update/$update_key-total" \
+			'[0-9][0-9]*' <"$update_trace" >/dev/null || return 1
+	done &&
 	grep '"event":"data".*"category":"cache_tree","key":"update/' \
 		"$update_trace" >"$update_trace.data" &&
-	test_line_count = 12 "$update_trace.data" &&
+	test_line_count = 18 "$update_trace.data" &&
 	grep '"nesting":1,' "$update_trace.data" >"$update_trace.depth" &&
-	test_line_count = 12 "$update_trace.depth" &&
+	test_line_count = 18 "$update_trace.depth" &&
 	update_writes=$(cache_tree_update_value "$update_trace" object-write-calls) &&
 	update_commits=$(cache_tree_update_value "$update_trace" owned-odb-commit-calls) &&
 	test_cache_tree_update_time "$update_trace" object-write "$update_writes" &&
@@ -200,10 +206,16 @@ test_cache_tree_update_metrics () {
 test_cache_tree_update_bound () {
 	update_trace="$1" &&
 	update_calls="$2" &&
+	update_entry_us=$(cache_tree_update_value "$update_trace" entry-object-check-us) &&
+	update_reuse_us=$(cache_tree_update_value "$update_trace" reuse-object-check-us) &&
+	update_repair_us=$(cache_tree_update_value "$update_trace" repair-tree-check-us) &&
+	update_hash_us=$(cache_tree_update_value "$update_trace" hash-only-us) &&
 	update_write_us=$(cache_tree_update_value "$update_trace" object-write-us) &&
 	update_commit_us=$(cache_tree_update_value "$update_trace" owned-odb-commit-us) &&
 	# This fixture retains all returning regions, all on the main thread.
-	awk -v work="$((update_write_us + update_commit_us))" -v calls="$update_calls" '
+	awk -v work="$((update_entry_us + update_reuse_us + update_repair_us + \
+		update_hash_us + update_write_us + update_commit_us))" \
+		-v calls="$update_calls" '
 	/"event":"region_leave"/ && /"thread":"main"/ &&
 	/"category":"cache_tree","label":"update"/ {
 		elapsed = $0
@@ -878,7 +890,9 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 		test_trace2_data cache_tree validate/valid-total 0 <.git/update.trace &&
 		test_cache_tree_update_metrics .git/update.trace 1 0 3 1 0 0 2 1 &&
 		test_trace2_data cache_tree update/entries-visited-total 3 <.git/update.trace &&
-		test_trace2_data cache_tree update/entry-object-checks-total 3 <.git/update.trace
+		test_trace2_data cache_tree update/entry-object-checks-total 3 <.git/update.trace &&
+		test_trace2_data cache_tree update/reuse-object-checks-total 1 <.git/update.trace &&
+		test_trace2_data cache_tree update/repair-tree-checks-total 0 <.git/update.trace
 	)
 '
 
@@ -938,7 +952,9 @@ test_expect_success 'cache-tree repair reports hash-only work' '
 		test_cmp .git/expect.index .git/index &&
 		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1 &&
 		test_trace2_data cache_tree update/entries-visited-total 5 <.git/update.trace &&
-		test_trace2_data cache_tree update/entry-object-checks-total 4 <.git/update.trace
+		test_trace2_data cache_tree update/entry-object-checks-total 4 <.git/update.trace &&
+		test_trace2_data cache_tree update/repair-tree-checks-total 3 <.git/update.trace &&
+		test_trace2_data cache_tree update/reuse-object-checks-total 0 <.git/update.trace
 	)
 '
 
@@ -955,7 +971,8 @@ test_expect_success 'cache-tree dry-run reports hash-only work' '
 		test_cmp .git/expect .git/actual &&
 		test_cmp .git/expect.err .git/actual.err &&
 		test_cmp .git/expect.index .git/index &&
-		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 0 3 0 1 &&
+		test_trace2_data cache_tree update/repair-tree-checks-total 0 <.git/update.trace
 	)
 '
 

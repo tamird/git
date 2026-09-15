@@ -517,7 +517,9 @@ static int must_check_existence(const struct cache_entry *ce)
 
 struct cache_tree_update_stats {
 	uint64_t nodes, reused, sparse, hash_only;
-	uint64_t entries_visited, entry_object_checks;
+	uint64_t entries_visited, entry_object_checks, entry_object_check_ns;
+	uint64_t reuse_object_checks, reuse_object_check_ns;
+	uint64_t repair_tree_checks, repair_tree_check_ns, hash_only_ns;
 	uint64_t object_write_calls, object_write_ns;
 	uint64_t owned_odb_commit_calls, owned_odb_commit_ns;
 };
@@ -549,6 +551,18 @@ static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
 			   stats->entries_visited);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECKS,
 			   stats->entry_object_checks);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS,
+			   stats->entry_object_check_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECKS,
+			   stats->reuse_object_checks);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS,
+			   stats->reuse_object_check_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECKS,
+			   stats->repair_tree_checks);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECK_NS,
+			   stats->repair_tree_check_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY_NS,
+			   stats->hash_only_ns);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_CALLS,
 			   stats->object_write_calls);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS,
@@ -557,6 +571,46 @@ static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
 			   stats->owned_odb_commit_calls);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS,
 			   stats->owned_odb_commit_ns);
+	errno = saved_errno;
+}
+
+static int update_has_object(const struct object_id *oid,
+			     enum odb_has_object_flags flags, uint64_t *elapsed_ns)
+{
+	uint64_t start, elapsed;
+	int exists, saved_errno;
+
+	if (!elapsed_ns)
+		return odb_has_object(the_repository->objects, oid, flags);
+	saved_errno = errno;
+	start = getnanotime();
+	errno = saved_errno;
+	exists = odb_has_object(the_repository->objects, oid, flags);
+	saved_errno = errno;
+	elapsed = getnanotime() - start;
+	*elapsed_ns += elapsed;
+	errno = saved_errno;
+	return exists;
+}
+
+static void update_hash_tree(const struct strbuf *buffer, struct object_id *oid,
+			     uint64_t *elapsed_ns)
+{
+	uint64_t start, elapsed;
+	int saved_errno;
+
+	if (!elapsed_ns) {
+		hash_object_file(the_hash_algo, buffer->buf, buffer->len,
+				 OBJ_TREE, oid);
+		return;
+	}
+	saved_errno = errno;
+	start = getnanotime();
+	errno = saved_errno;
+	hash_object_file(the_hash_algo, buffer->buf, buffer->len, OBJ_TREE, oid);
+	saved_errno = errno;
+	elapsed = getnanotime() - start;
+	*elapsed_ns += elapsed;
 	errno = saved_errno;
 }
 
@@ -602,12 +656,17 @@ static int update_one(struct cache_tree *it,
 		}
 	}
 
-	if (0 <= it->entry_count &&
-	    odb_has_object(the_repository->objects, &it->oid,
-			   ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR)) {
+	if (0 <= it->entry_count) {
 		if (stats)
-			stats->reused++;
-		return it->entry_count;
+			stats->reuse_object_checks++;
+		if (update_has_object(&it->oid,
+				      ODB_HAS_OBJECT_RECHECK_PACKED |
+					      ODB_HAS_OBJECT_FETCH_PROMISOR,
+				      stats ? &stats->reuse_object_check_ns : NULL)) {
+			if (stats)
+				stats->reused++;
+			return it->entry_count;
+		}
 	}
 
 	/*
@@ -719,8 +778,10 @@ static int update_one(struct cache_tree *it,
 			stats->entry_object_checks++;
 		if (oid_is_null ||
 		    (!ce_missing_ok &&
-		     !odb_has_object(the_repository->objects, oid,
-				     ODB_HAS_OBJECT_RECHECK_PACKED | ODB_HAS_OBJECT_FETCH_PROMISOR))) {
+		     !update_has_object(oid,
+					ODB_HAS_OBJECT_RECHECK_PACKED |
+						ODB_HAS_OBJECT_FETCH_PROMISOR,
+					stats ? &stats->entry_object_check_ns : NULL))) {
 			strbuf_release(&buffer);
 			if (expected_missing)
 				return -1;
@@ -768,15 +829,18 @@ static int update_one(struct cache_tree *it,
 		stats->hash_only++;
 	if (repair) {
 		struct object_id oid;
-		hash_object_file(the_hash_algo, buffer.buf, buffer.len,
-				 OBJ_TREE, &oid);
-		if (odb_has_object(the_repository->objects, &oid, ODB_HAS_OBJECT_RECHECK_PACKED))
+
+		update_hash_tree(&buffer, &oid, stats ? &stats->hash_only_ns : NULL);
+		if (stats)
+			stats->repair_tree_checks++;
+		if (update_has_object(&oid, ODB_HAS_OBJECT_RECHECK_PACKED,
+				      stats ? &stats->repair_tree_check_ns : NULL))
 			oidcpy(&it->oid, &oid);
 		else
 			to_invalidate = 1;
 	} else if (dryrun) {
-		hash_object_file(the_hash_algo, buffer.buf, buffer.len,
-				 OBJ_TREE, &it->oid);
+		update_hash_tree(&buffer, &it->oid,
+				 stats ? &stats->hash_only_ns : NULL);
 	} else {
 		int ret;
 
