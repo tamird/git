@@ -175,6 +175,7 @@ struct index_state {
 	struct split_index *split_index;
 	struct cache_time timestamp;
 	struct stat index_file_stat;
+	size_t index_file_entries_end;
 	int index_file_fd;
 	struct object_id index_file_identity;
 	unsigned name_hash_initialized : 1,
@@ -186,7 +187,12 @@ struct index_state {
 		 lazy_cache_tree : 1,
 		 index_file_fd_valid : 1,
 		 index_file_identity_valid : 1,
-		 index_file_stat_valid : 1;
+		 index_file_stat_valid : 1,
+		 index_file_parsed_generation_valid : 1,
+		 index_file_entries_end_valid : 1,
+		 index_file_used_ieot : 1,
+		 index_file_has_link : 1,
+		 index_file_has_sdir : 1;
 	enum sparse_index_mode sparse_index;
 	struct hashmap name_hash;
 	struct hashmap dir_hash;

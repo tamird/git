@@ -12,8 +12,11 @@
 #include "wrapper.h"
 
 #define GREP_INDEX_TOKEN_SIGNATURE 0x47574944
-#define GREP_INDEX_TOKEN_VERSION     5
-#define GREP_INDEX_TOKEN_HEADER_SIZE 76
+#define GREP_INDEX_TOKEN_VERSION	6
+#define GREP_INDEX_TOKEN_HEADER_SIZE	92
+#define GREP_INDEX_TOKEN_V5_HEADER_SIZE 76
+#define GREP_INDEX_EOIE_SIZE		32
+#define GREP_INDEX_IEOT_SIGNATURE	0x49454f54 /* IEOT */
 
 /* Numeric Trace2 outcomes; token reads and writes are best effort. */
 enum grep_index_token_read_outcome {
@@ -22,6 +25,7 @@ enum grep_index_token_read_outcome {
 	GREP_INDEX_TOKEN_READ_MISSING,
 	GREP_INDEX_TOKEN_READ_FAILED,
 	GREP_INDEX_TOKEN_READ_INVALID,
+	GREP_INDEX_TOKEN_READ_ENTRY_MATCH,
 };
 
 enum grep_index_token_write_outcome {
@@ -30,6 +34,7 @@ enum grep_index_token_write_outcome {
 	GREP_INDEX_TOKEN_WRITE_OPTIONAL_LOCKS_DISABLED,
 	GREP_INDEX_TOKEN_WRITE_LOCK_FAILED,
 	GREP_INDEX_TOKEN_WRITE_COMMIT_FAILED,
+	GREP_INDEX_TOKEN_WRITE_ENTRIES_CHANGED,
 };
 
 static void hash_uint32(struct git_hash_ctx *ctx, uint32_t value)
@@ -221,22 +226,123 @@ static void *map_file(const char *path, size_t *map_size, int *read_errno)
 	return map == MAP_FAILED ? NULL : map;
 }
 
+static int same_index_stat(const struct stat *a, const struct stat *b)
+{
+	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+	       a->st_size == b->st_size &&
+	       a->st_mtime == b->st_mtime &&
+	       ST_MTIME_NSEC(*a) == ST_MTIME_NSEC(*b) &&
+	       a->st_ctime == b->st_ctime &&
+	       ST_CTIME_NSEC(*a) == ST_CTIME_NSEC(*b);
+}
+
+static int parsed_entries_unchanged(const struct index_state *istate)
+{
+	return istate->index_file_parsed_generation_valid &&
+	       !(istate->cache_changed & (SOMETHING_CHANGED | CE_ENTRY_ADDED |
+					  CE_ENTRY_REMOVED | CE_ENTRY_CHANGED));
+}
+
+/* Hash the bytes parsed into this index, never a later pathname generation. */
+static int index_entry_checksum(struct repository *repo,
+				struct index_state *istate,
+				struct object_id *oid)
+{
+	const unsigned char *map;
+	const unsigned char *eoie;
+	struct stat st, after;
+	struct git_hash_ctx ctx;
+	size_t size, offset, end = istate->index_file_entries_end;
+	int ieot_seen = 0;
+	int result = -1;
+
+	if (!istate->index_file_fd_valid ||
+	    !istate->index_file_stat_valid ||
+	    !istate->index_file_entries_end_valid ||
+	    istate->index_file_has_link || istate->index_file_has_sdir ||
+	    istate->split_index || istate->sparse_index ||
+	    !parsed_entries_unchanged(istate) ||
+	    fstat(istate->index_file_fd, &st) ||
+	    !same_index_stat(&st, &istate->index_file_stat) ||
+	    st.st_size < 0)
+		return -1;
+	size = xsize_t(st.st_size);
+	if (size < sizeof(struct cache_header) + GREP_INDEX_EOIE_SIZE +
+			    repo->hash_algo->rawsz ||
+	    end <= sizeof(struct cache_header) ||
+	    end >= size - GREP_INDEX_EOIE_SIZE - repo->hash_algo->rawsz)
+		return -1;
+	trace2_region_enter("grep", "index-identity/entry-checksum", repo);
+	map = xmmap_gently(NULL, size, PROT_READ, MAP_PRIVATE,
+			   istate->index_file_fd, 0);
+	if (map == MAP_FAILED)
+		goto done;
+	eoie = map + size - GREP_INDEX_EOIE_SIZE - repo->hash_algo->rawsz;
+	if (get_be32(map) != CACHE_SIGNATURE ||
+	    get_be32(map + 4) != istate->version ||
+	    get_be32(map + 8) != istate->cache_nr ||
+	    get_be32(eoie) != 0x454f4945 || /* EOIE */
+	    get_be32(eoie + 4) != 24 ||
+	    get_be32(eoie + 8) != end ||
+	    !hasheq(map + size - repo->hash_algo->rawsz,
+		    istate->oid.hash, repo->hash_algo))
+		goto unmap;
+	git_hash_init(&ctx, repo->hash_algo);
+	git_hash_update(&ctx, "grep-index-entry-bytes-v6",
+			sizeof("grep-index-entry-bytes-v6") - 1);
+	hash_uint32(&ctx, istate->index_file_used_ieot);
+	git_hash_update(&ctx, map + sizeof(struct cache_header),
+			end - sizeof(struct cache_header));
+	for (offset = end; offset < (size_t)(eoie - map);) {
+		uint32_t extsize;
+
+		if ((size_t)(eoie - map) - offset < 8)
+			goto unmap;
+		extsize = get_be32(map + offset + 4);
+		if (extsize > (size_t)(eoie - map) - offset - 8)
+			goto unmap;
+		if (get_be32(map + offset) == GREP_INDEX_IEOT_SIGNATURE) {
+			git_hash_update(&ctx, map + offset, 8 + extsize);
+			ieot_seen = 1;
+		}
+		offset += 8 + extsize;
+	}
+	if (offset != (size_t)(eoie - map) ||
+	    (istate->index_file_used_ieot && !ieot_seen))
+		goto unmap;
+	git_hash_final_oid(oid, &ctx);
+	if (!fstat(istate->index_file_fd, &after) &&
+	    same_index_stat(&st, &after))
+		result = 0;
+unmap:
+	munmap((void *)map, size);
+done:
+	trace2_region_leave("grep", "index-identity/entry-checksum", repo);
+	return result;
+}
+
 static enum grep_index_token_read_outcome load_token(
 	struct repository *repo, struct index_state *istate,
 	const struct object_id *scope_oid,
-	struct grep_index_identity *identity, int *read_errno)
+	struct grep_index_identity *identity,
+	struct object_id *entry_checksum_out, int *read_errno)
 {
 	const unsigned char *map;
 	const struct stat *st = &istate->index_file_stat;
 	struct strbuf path = STRBUF_INIT;
+	struct object_id entry_checksum;
 	size_t expected;
 	size_t map_size;
 	size_t rawsz = repo->hash_algo->rawsz;
+	size_t header_size;
+	uint32_t version;
 	enum grep_index_token_read_outcome result = GREP_INDEX_TOKEN_READ_INVALID;
 
 	*read_errno = 0;
 	if (!istate->index_file_stat_valid)
 		return GREP_INDEX_TOKEN_READ_NO_INDEX_STAT;
+	if (!parsed_entries_unchanged(istate))
+		return GREP_INDEX_TOKEN_READ_INVALID;
 	token_path(repo, &path);
 	map = map_file(path.buf, &map_size, read_errno);
 	if (!map) {
@@ -246,33 +352,51 @@ static enum grep_index_token_read_outcome load_token(
 			result = GREP_INDEX_TOKEN_READ_FAILED;
 		goto cleanup;
 	}
-	expected = GREP_INDEX_TOKEN_HEADER_SIZE + 5 * rawsz;
+	if (map_size < 8)
+		goto unmap;
+	version = get_be32(map + 4);
+	header_size = version == 5 ? GREP_INDEX_TOKEN_V5_HEADER_SIZE :
+				     GREP_INDEX_TOKEN_HEADER_SIZE;
+	expected = header_size + (version == 5 ? 5 : 6) * rawsz;
 	if (map_size != expected ||
 	    !hashfile_checksum_valid(repo->hash_algo, map, map_size) ||
 	    get_be32(map) != GREP_INDEX_TOKEN_SIGNATURE ||
-	    get_be32(map + 4) != GREP_INDEX_TOKEN_VERSION ||
+	    (version != 5 && version != GREP_INDEX_TOKEN_VERSION) ||
 	    get_be32(map + 8) != repo->hash_algo->format_id ||
 	    get_be32(map + 12) != istate->cache_nr ||
-	    get_be64(map + 16) != (uint64_t)st->st_dev ||
-	    get_be64(map + 24) != (uint64_t)st->st_ino ||
-	    get_be64(map + 32) != (uint64_t)st->st_size ||
-	    get_be64(map + 40) != (uint64_t)st->st_mtime ||
-	    get_be64(map + 48) != ST_MTIME_NSEC(*st) ||
-	    get_be64(map + 56) != (uint64_t)st->st_ctime ||
-	    get_be64(map + 64) != ST_CTIME_NSEC(*st) ||
 	    get_be32(map + 72) != istate->sparse_index ||
-	    !hasheq(map + GREP_INDEX_TOKEN_HEADER_SIZE,
-		    istate->oid.hash, repo->hash_algo) ||
-	    !hasheq(map + GREP_INDEX_TOKEN_HEADER_SIZE + rawsz,
+	    (version == GREP_INDEX_TOKEN_VERSION &&
+	     get_be32(map + 88) != istate->index_file_used_ieot) ||
+	    !hasheq(map + header_size + rawsz,
 		    scope_oid->hash, repo->hash_algo))
 		goto unmap;
+	if (get_be64(map + 16) == (uint64_t)st->st_dev &&
+	    get_be64(map + 24) == (uint64_t)st->st_ino &&
+	    get_be64(map + 32) == (uint64_t)st->st_size &&
+	    get_be64(map + 40) == (uint64_t)st->st_mtime &&
+	    get_be64(map + 48) == ST_MTIME_NSEC(*st) &&
+	    get_be64(map + 56) == (uint64_t)st->st_ctime &&
+	    get_be64(map + 64) == ST_CTIME_NSEC(*st) &&
+	    hasheq(map + header_size, istate->oid.hash, repo->hash_algo))
+		result = GREP_INDEX_TOKEN_READ_HIT;
+	else if (version == GREP_INDEX_TOKEN_VERSION &&
+		 get_be32(map + 76) == istate->version &&
+		 get_be64(map + 80) == istate->index_file_entries_end &&
+		 istate->index_file_entries_end_valid &&
+		 index_entry_checksum(repo, istate, &entry_checksum) == 0 &&
+		 hasheq(map + header_size + 4 * rawsz,
+			entry_checksum.hash, repo->hash_algo)) {
+		oidcpy(entry_checksum_out, &entry_checksum);
+		result = GREP_INDEX_TOKEN_READ_ENTRY_MATCH;
+	}
+	if (result == GREP_INDEX_TOKEN_READ_INVALID)
+		goto unmap;
 	oidread(&identity->oid_sequence,
-		map + GREP_INDEX_TOKEN_HEADER_SIZE + 2 * rawsz,
+		map + header_size + 2 * rawsz,
 		repo->hash_algo);
 	oidread(&identity->worktree,
-		map + GREP_INDEX_TOKEN_HEADER_SIZE + 3 * rawsz,
+		map + header_size + 3 * rawsz,
 		repo->hash_algo);
-	result = GREP_INDEX_TOKEN_READ_HIT;
 
 unmap:
 	munmap((void *)map, map_size);
@@ -284,9 +408,11 @@ cleanup:
 static enum grep_index_token_write_outcome write_token(
 	struct repository *repo, struct index_state *istate,
 	const struct object_id *scope_oid,
-	const struct grep_index_identity *identity, int *error_errno)
+	const struct grep_index_identity *identity,
+	const struct object_id *verified_entry_checksum, int *error_errno)
 {
 	const struct stat *st = &istate->index_file_stat;
+	struct object_id entry_checksum;
 	struct hashfile *f = NULL;
 	struct lock_file lock = LOCK_INIT;
 	struct strbuf path = STRBUF_INIT;
@@ -297,6 +423,8 @@ static enum grep_index_token_write_outcome write_token(
 	*error_errno = 0;
 	if (!istate->index_file_stat_valid)
 		return GREP_INDEX_TOKEN_WRITE_NO_INDEX_STAT;
+	if (!parsed_entries_unchanged(istate))
+		return GREP_INDEX_TOKEN_WRITE_ENTRIES_CHANGED;
 	if (!use_optional_locks())
 		return GREP_INDEX_TOKEN_WRITE_OPTIONAL_LOCKS_DISABLED;
 	trace2_region_enter("grep", "index-identity/token-write", repo);
@@ -307,6 +435,10 @@ static enum grep_index_token_write_outcome write_token(
 		result = GREP_INDEX_TOKEN_WRITE_LOCK_FAILED;
 		goto cleanup;
 	}
+	if (verified_entry_checksum)
+		oidcpy(&entry_checksum, verified_entry_checksum);
+	else if (index_entry_checksum(repo, istate, &entry_checksum))
+		oidclr(&entry_checksum, repo->hash_algo);
 	f = hashfd(repo->hash_algo, fd, get_lock_file_path(&lock));
 	hashwrite_be32(f, GREP_INDEX_TOKEN_SIGNATURE);
 	hashwrite_be32(f, GREP_INDEX_TOKEN_VERSION);
@@ -320,10 +452,15 @@ static enum grep_index_token_write_outcome write_token(
 	hashwrite_be64(f, st->st_ctime);
 	hashwrite_be64(f, ST_CTIME_NSEC(*st));
 	hashwrite_be32(f, istate->sparse_index);
+	hashwrite_be32(f, is_null_oid(&entry_checksum) ? 0 : istate->version);
+	hashwrite_be64(f, is_null_oid(&entry_checksum) ? 0 :
+							 istate->index_file_entries_end);
+	hashwrite_be32(f, istate->index_file_used_ieot);
 	hashwrite(f, istate->oid.hash, repo->hash_algo->rawsz);
 	hashwrite(f, scope_oid->hash, repo->hash_algo->rawsz);
 	hashwrite(f, identity->oid_sequence.hash, repo->hash_algo->rawsz);
 	hashwrite(f, identity->worktree.hash, repo->hash_algo->rawsz);
+	hashwrite(f, entry_checksum.hash, repo->hash_algo->rawsz);
 	finalize_hashfile(f, NULL, FSYNC_COMPONENT_NONE, CSUM_HASH_IN_STREAM);
 	f = NULL;
 	if (commit_lock_file(&lock)) {
@@ -346,11 +483,13 @@ int grep_index_identity_get(struct repository *repo,
 {
 	struct git_hash_ctx ctx;
 	struct object_id scope_oid;
+	struct object_id entry_checksum;
 	enum grep_index_token_read_outcome read_outcome;
 	enum grep_index_token_write_outcome write_outcome;
 	int compute_result, read_errno, write_errno;
 
 	hash_scope(repo, &scope_oid);
+	oidclr(&entry_checksum, repo->hash_algo);
 	oidcpy(&identity->worktree_scope, &scope_oid);
 	oidclr(&identity->worktree_split_base_identity, repo->hash_algo);
 	if (istate->split_index && istate->split_index->base &&
@@ -371,7 +510,7 @@ int grep_index_identity_get(struct repository *repo,
 	}
 	trace2_region_enter("grep", "index-identity/token-read", repo);
 	read_outcome = load_token(repo, istate, &scope_oid, identity,
-				  &read_errno);
+				  &entry_checksum, &read_errno);
 	trace2_region_leave("grep", "index-identity/token-read", repo);
 	trace2_data_intmax("grep", repo, "index_identity/token_read_outcome",
 			   read_outcome);
@@ -381,6 +520,8 @@ int grep_index_identity_get(struct repository *repo,
 				   read_errno);
 	if (read_outcome == GREP_INDEX_TOKEN_READ_HIT)
 		return 0;
+	if (read_outcome == GREP_INDEX_TOKEN_READ_ENTRY_MATCH)
+		goto write;
 	trace2_region_enter("grep", "index-identity/compute", repo);
 	compute_result = compute_identity(repo, istate, identity);
 	trace2_region_leave("grep", "index-identity/compute", repo);
@@ -388,7 +529,12 @@ int grep_index_identity_get(struct repository *repo,
 			   !!compute_result);
 	if (compute_result)
 		return -1;
+
+write:
 	write_outcome = write_token(repo, istate, &scope_oid, identity,
+				    read_outcome == GREP_INDEX_TOKEN_READ_ENTRY_MATCH ?
+					    &entry_checksum :
+					    NULL,
 				    &write_errno);
 	trace2_data_intmax("grep", repo, "index_identity/token_write_outcome",
 			   write_outcome);

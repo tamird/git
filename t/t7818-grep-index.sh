@@ -1910,6 +1910,168 @@ test_expect_success 'pickaxe index threshold spans commits' '
 		pickaxe-regex-threshold.trace
 '
 
+test_expect_success SHA1 'grep token reuses unchanged v4 entries after an index rewrite' '
+	original_index_version=$(git update-index --show-index-version) &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	export GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES" &&
+	test_when_finished "git reset -q -- token-v6-entry token-v6-0-before &&
+		git update-index --index-version $original_index_version &&
+		git update-index --no-fsmonitor --no-untracked-cache &&
+		rm -rf token-v6-untracked &&
+		rm -f token-v6-entry token-v6-0-before \
+			.git/token-v6-dirty .git/index.grep-token \
+			.git/index.grep-token.lock \
+			.git/index.grep-worktree \
+			.git/index.grep-worktree-generation \
+			.git/index.grep-worktree-recovery \
+			token-v6-*.trace token-v6-status.out" &&
+	test_hook --setup --clobber fsmonitor-token-v6 <<-\EOF &&
+		printf "token-v6-last\0"
+		if test -f .git/token-v6-dirty
+		then
+			printf "token-v6-entry\0"
+		fi
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-token-v6 &&
+	test_config core.untrackedCache true &&
+	test_config grep.worktreeBlobCache true &&
+	test_config index.skipHash true &&
+	test_config index.threads 2 &&
+	test_config index.recordEndOfIndexEntries true &&
+	git update-index --index-version 4 &&
+	printf "token original contents\n" >token-v6-entry &&
+	test-tool chmtime =-5 token-v6-entry &&
+	git add token-v6-entry &&
+	git update-index --fsmonitor --untracked-cache &&
+	git status --porcelain --untracked-files=all >/dev/null &&
+	echo "token-v6-entry:token original contents" >expect &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-created.trace" git grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_path_is_file .git/index.grep-token &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<token-v6-created.trace &&
+	mkdir token-v6-untracked &&
+	echo untracked >token-v6-untracked/file &&
+	test-tool chmtime =-5 . &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-status.trace" \
+		git status --porcelain --untracked-files=all >token-v6-status.out &&
+	test_grep token-v6-untracked/ token-v6-status.out &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-rewrite.trace" \
+		git update-index --force-write-index &&
+	test_trace2_data index write/version 4 <token-v6-rewrite.trace &&
+	GIT_TRACE2_EVENT_NESTING=10 \
+	GIT_TRACE2_EVENT="$PWD/token-v6-stale.trace" \
+		git --no-optional-locks grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 5 \
+		<token-v6-stale.trace &&
+	test_region grep index-identity/entry-checksum \
+		token-v6-stale.trace &&
+	test_region ! grep index-identity/compute token-v6-stale.trace &&
+	test_path_is_file .git/index.grep-token &&
+	: >.git/index.grep-token.lock &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-lock-failed.trace" \
+		git grep "token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 5 \
+		<token-v6-lock-failed.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 3 \
+		<token-v6-lock-failed.trace &&
+	rm .git/index.grep-token.lock &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-rebound.trace" \
+		git grep "token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 5 \
+		<token-v6-rebound.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<token-v6-rebound.trace &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-hit.trace" \
+		git --no-optional-locks grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 0 \
+		<token-v6-hit.trace &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-decoder.trace" \
+		git -c index.threads=4 --no-optional-locks grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<token-v6-decoder.trace &&
+	git update-index --chmod=+x token-v6-entry &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-mode.trace" \
+		git --no-optional-locks grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<token-v6-mode.trace &&
+	echo "before token" >token-v6-0-before &&
+	test-tool chmtime =-5 token-v6-0-before &&
+	git add token-v6-0-before &&
+	printf "%s\n" "token-v6-0-before:before token" \
+		"token-v6-entry:token original contents" >expect &&
+	GIT_TRACE2_EVENT_NESTING=10 \
+	GIT_TRACE2_EVENT="$PWD/token-v6-shift.trace" \
+		git --no-optional-locks grep token -- \
+		token-v6-0-before token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<token-v6-shift.trace
+'
+
+test_expect_success !SHA1 'grep token falls back without a parsed SHA-256 EOIE' '
+	original_index_version=$(git update-index --show-index-version) &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 &&
+	export GIT_TEST_GREP_LITERAL_PATHS &&
+	test_when_finished "unset GIT_TEST_GREP_LITERAL_PATHS" &&
+	test_when_finished "git reset -q -- token-v6-sha256 &&
+		git update-index --index-version $original_index_version &&
+		git update-index --no-fsmonitor &&
+		rm -f token-v6-sha256 .git/index.grep-token \
+			.git/index.grep-worktree \
+			.git/index.grep-worktree-generation \
+			.git/index.grep-worktree-recovery \
+			token-v6-sha256-*.trace" &&
+	test_hook --setup --clobber fsmonitor-token-v6-sha256 <<-\EOF &&
+		printf "sha256-fsmonitor-last\0"
+	EOF
+	test_config core.fsmonitor .git/hooks/fsmonitor-token-v6-sha256 &&
+	test_config grep.worktreeBlobCache true &&
+	test_config index.skipHash true &&
+	test_config index.threads 2 &&
+	test_config index.recordEndOfIndexEntries true &&
+	git update-index --index-version 4 &&
+	echo "sha256 entry contents" >token-v6-sha256 &&
+	test-tool chmtime =-5 token-v6-sha256 &&
+	git add token-v6-sha256 &&
+	git update-index --fsmonitor &&
+	git status --porcelain >/dev/null &&
+	echo "token-v6-sha256:sha256 entry contents" >expect &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-sha256-created.trace" \
+		git grep "sha256 entry contents" -- token-v6-sha256 >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<token-v6-sha256-created.trace &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-sha256-rewrite.trace" \
+		git update-index --force-write-index &&
+	test_trace2_data index write/version 4 \
+		<token-v6-sha256-rewrite.trace &&
+	GIT_TRACE2_EVENT_NESTING=10 \
+	GIT_TRACE2_EVENT="$PWD/token-v6-sha256-fallback.trace" \
+		git --no-optional-locks grep "sha256 entry contents" \
+		-- token-v6-sha256 >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<token-v6-sha256-fallback.trace &&
+	test_region grep index-identity/compute token-v6-sha256-fallback.trace &&
+	test_region ! grep index-identity/entry-checksum \
+		token-v6-sha256-fallback.trace
+'
+
 test_expect_success FSMONITOR_DAEMON \
 	'pickaxe selects content index backend' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
@@ -4155,6 +4317,60 @@ test_expect_success FSMONITOR_DAEMON \
 		test_trace2_data grep producer_driver_lookup_count 2 \
 			<candidate-producer-I.trace
 	fi
+'
+
+test_expect_success FSMONITOR_DAEMON \
+	'grep keeps the disk token after a RAM-only entry refresh' '
+	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
+		git checkout -- ordinary &&
+		rm -f .git/index.grep-token \
+			.git/index.grep-worktree \
+			.git/index.grep-worktree-generation \
+			.git/index.grep-worktree-recovery \
+			ram-token-*.trace ram-token.before" &&
+	test_config grep.worktreeBlobCache true &&
+	test_config core.fsmonitor true &&
+	git fsmonitor--daemon start &&
+	git checkout -- ordinary &&
+	git status --porcelain >/dev/null &&
+	rm -f .git/index.grep-token \
+		.git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 \
+		git grep "ordinary contents" -- "ord*" >actual &&
+	echo "ordinary:ordinary contents" >expect &&
+	test_cmp expect actual &&
+	test_path_is_file .git/index.grep-worktree &&
+	git update-index --no-fsmonitor-valid ordinary &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 \
+	GIT_TRACE2_EVENT="$PWD/ram-token-created.trace" \
+		git grep "ordinary contents" -- "ord*" >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<ram-token-created.trace &&
+	cp .git/index.grep-token ram-token.before &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 \
+	GIT_TRACE2_EVENT="$PWD/ram-token-exact.trace" \
+		git --no-optional-locks grep "ordinary contents" \
+		-- "ord*" >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 0 \
+		<ram-token-exact.trace &&
+	test-tool chmtime +5 ordinary &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 \
+	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+	GIT_TRACE2_EVENT_NESTING=10 \
+	GIT_TRACE2_EVENT="$PWD/ram-token-refreshed.trace" \
+		git --no-optional-locks grep "ordinary contents" \
+		-- "ord*" >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 4 \
+		<ram-token-refreshed.trace &&
+	test_region grep index-identity/compute ram-token-refreshed.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 5 \
+		<ram-token-refreshed.trace &&
+	test_cmp ram-token.before .git/index.grep-token
 '
 
 test_expect_success FSMONITOR_DAEMON \

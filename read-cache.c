@@ -1810,6 +1810,7 @@ static int read_index_extension(struct index_state *istate,
 	case CACHE_EXT_LINK:
 		if (read_link_extension(istate, data, sz))
 			return -1;
+		istate->index_file_has_link = 1;
 		break;
 	case CACHE_EXT_UNTRACKED:
 	case CACHE_EXT_UNTRACKED_PENDING:
@@ -1835,6 +1836,7 @@ static int read_index_extension(struct index_state *istate,
 	case CACHE_EXT_SPARSE_DIRECTORIES:
 		/* no content, only an indicator */
 		istate->sparse_index = INDEX_COLLAPSED;
+		istate->index_file_has_sdir = 1;
 		break;
 	default:
 		if (*ext < 'A' || 'Z' < *ext)
@@ -2330,6 +2332,11 @@ static int do_read_index_with_options(struct index_state *istate,
 	istate->index_file_fd_valid = 0;
 	istate->index_file_identity_valid = 0;
 	istate->index_file_stat_valid = 0;
+	istate->index_file_parsed_generation_valid = 0;
+	istate->index_file_entries_end_valid = 0;
+	istate->index_file_used_ieot = 0;
+	istate->index_file_has_link = 0;
+	istate->index_file_has_sdir = 0;
 	fd = git_open(path);
 	if (fd < 0) {
 		if (!must_exist && errno == ENOENT) {
@@ -2433,10 +2440,16 @@ static int do_read_index_with_options(struct index_state *istate,
 		ieot = read_ieot_extension(mmap, mmap_size, extension_offset);
 
 	if (ieot) {
+		istate->index_file_used_ieot = 1;
 		src_offset += load_cache_entries_threaded(istate, mmap, mmap_size, nr_threads, ieot);
 		free(ieot);
 	} else {
 		src_offset += load_all_cache_entries(istate, mmap, mmap_size, src_offset);
+	}
+	if ((extension_offset ? extension_offset :
+				read_eoie_extension(mmap, mmap_size)) == src_offset) {
+		istate->index_file_entries_end = src_offset;
+		istate->index_file_entries_end_valid = 1;
 	}
 
 	istate->timestamp.sec = st.st_mtime;
@@ -2451,6 +2464,7 @@ static int do_read_index_with_options(struct index_state *istate,
 		p.src_offset = src_offset;
 		load_index_extensions(&p);
 	}
+	istate->index_file_parsed_generation_valid = 1;
 	munmap((void *)mmap, mmap_size);
 
 	trace2_data_intmax("index", istate->repo, "read/version",
@@ -3672,6 +3686,8 @@ int write_locked_index(struct index_state *istate, struct lock_file *lock,
 		istate->index_file_fd_valid = 0;
 	}
 	istate->index_file_identity_valid = 0;
+	istate->index_file_parsed_generation_valid = 0;
+	istate->index_file_entries_end_valid = 0;
 
 	if (istate->fsmonitor_last_update)
 		fill_fsmonitor_bitmap(istate);
@@ -3938,9 +3954,9 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	 * signature is after the index header and before the eoie extension.
 	 */
 	offset = get_be32(index);
-	if (mmap + offset < mmap + sizeof(struct cache_header))
+	if (offset < sizeof(struct cache_header))
 		return 0;
-	if (mmap + offset >= eoie)
+	if (offset >= (size_t)(eoie - mmap))
 		return 0;
 	index += sizeof(uint32_t);
 
@@ -3955,7 +3971,7 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	 */
 	src_offset = offset;
 	git_hash_init(&c, the_hash_algo);
-	while (src_offset < mmap_size - the_hash_algo->rawsz - EOIE_SIZE_WITH_HEADER) {
+	while (src_offset < (size_t)(eoie - mmap)) {
 		/* After an array of active_nr index entries,
 		 * there can be arbitrary number of extended
 		 * sections, each of which is prefixed with
@@ -3963,11 +3979,12 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 		 * in 4-byte network byte order.
 		 */
 		uint32_t extsize;
+		if ((size_t)(eoie - mmap) - src_offset < 8)
+			return 0;
 		memcpy(&extsize, mmap + src_offset + 4, 4);
 		extsize = ntohl(extsize);
 
-		/* verify the extension size isn't so large it will wrap around */
-		if (src_offset + 8 + extsize < src_offset)
+		if (extsize > (size_t)(eoie - mmap) - src_offset - 8)
 			return 0;
 
 		git_hash_update(&c, mmap + src_offset, 8);
