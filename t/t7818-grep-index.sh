@@ -3569,11 +3569,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'selected OID unknowns use direct filters for a small batch' '
+	'selected OID unknowns skip preparation for 42 objects' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git rm -f --ignore-unmatch -- \
 				literal-candidate-direct-present \
-				literal-candidate-direct-absent &&
+				literal-candidate-direct-absent \
+				literal-candidate-direct-extra-* &&
 			    rm -f literal-direct-*.trace" &&
 	test_path_is_file .git/objects/info/grep-index/chain-transposed &&
 	test_config grep.worktreeBlobCache true &&
@@ -3584,31 +3585,61 @@ test_expect_success FSMONITOR_DAEMON \
 		>literal-candidate-direct-present &&
 	echo "literal fallback unrelated contents" \
 		>literal-candidate-direct-absent &&
+	test_seq -f "literal-candidate-direct-extra-%02g" 1 40 |
+	while read path
+	do
+		printf "literal fallback unknown %s\n" "$path" >"$path" ||
+			exit 1
+	done &&
 	git add literal-candidate-direct-present \
-		literal-candidate-direct-absent &&
+		literal-candidate-direct-absent \
+		literal-candidate-direct-extra-* &&
 	git status --porcelain >/dev/null &&
 	set -- literal-candidate-* &&
 	git grep --no-content-index -F \
 		"literal fallback present needle 7818" -- "$@" >expect &&
-	GIT_TRACE2_EVENT="$PWD/literal-direct-small.trace" \
+	GIT_TRACE2_EVENT="$PWD/literal-direct-present.trace" \
 		git --no-optional-locks grep -F \
 			"literal fallback present needle 7818" -- "$@" \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-small.trace 42 42 1 2 40 0 &&
-	test_region grep load_content_index literal-direct-small.trace &&
-	test_region ! grep prepare_content_index literal-direct-small.trace &&
-	GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=1 \
+	test_content_index_ipc_query literal-direct-present.trace 82 82 1 42 40 0 &&
+	test_region grep load_content_index literal-direct-present.trace &&
+	test_region ! grep prepare_content_index literal-direct-present.trace &&
+	GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
 	GIT_TRACE2_EVENT="$PWD/literal-direct-prepared.trace" \
 		git --no-optional-locks grep -F \
 			"literal fallback present needle 7818" -- "$@" \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-prepared.trace 42 42 1 2 40 0 &&
+	test_content_index_ipc_query literal-direct-prepared.trace 82 82 1 42 40 0 &&
 	test_region grep load_content_index literal-direct-prepared.trace &&
-	test_region grep prepare_content_index literal-direct-prepared.trace
+	test_region grep prepare_content_index literal-direct-prepared.trace &&
+	test_must_fail git grep --no-content-index -F \
+		"literal fallback absent needle 7818" -- "$@" >expect &&
+	test_must_be_empty expect &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/literal-direct-absent.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback absent needle 7818" -- "$@" \
+			>actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err &&
+	test_content_index_ipc_query literal-direct-absent.trace 82 82 1 42 -1 -1 &&
+	test_region grep load_content_index literal-direct-absent.trace &&
+	test_region ! grep prepare_content_index literal-direct-absent.trace &&
+	test_must_fail env GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
+		GIT_TRACE2_EVENT="$PWD/literal-direct-absent-prepared.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback absent needle 7818" -- "$@" \
+			>actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err &&
+	test_content_index_ipc_query literal-direct-absent-prepared.trace \
+		82 82 1 42 -1 -1 &&
+	test_region grep load_content_index literal-direct-absent-prepared.trace &&
+	test_region grep prepare_content_index literal-direct-absent-prepared.trace
 '
 
 test_expect_success 'content index prunes impossible blobs' '
