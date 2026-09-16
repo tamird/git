@@ -9,7 +9,8 @@ git-ls-remote - List references in a remote repository
 SYNOPSIS
 --------
 [verse]
-'git ls-remote' [--branches] [--tags] [--refs] [--upload-pack=<exec>]
+'git ls-remote' [--branches] [--tags] [--refs] [--exact-ref]
+	      [--upload-pack=<exec>]
 	      [-q | --quiet] [--exit-code] [--get-url] [--sort=<key>]
 	      [--symref] [<repository> [<patterns>...]]
 
@@ -36,6 +37,18 @@ OPTIONS
 
 --refs::
 	Do not show peeled tags or pseudorefs like `HEAD` in the output.
+
+--exact-ref::
+	When listing refs, require at least one <patterns> argument and
+	treat each one as a complete refname under `refs/` or `HEAD`.
+	Match the full name rather than a tail or glob pattern. Abbreviated
+	names and wildcards are rejected. With protocol version 2, each name
+	is sent as a ref-prefix to limit the remote's advertisement; refs with
+	the same prefix but a different name are filtered locally.
+	Older protocols send the full advertisement, which Git filters locally.
+	An annotated tag's peeled form is also shown unless
+	`--refs` is given. With `--get-url`, no refs are listed and patterns
+	are ignored.
 
 -q::
 --quiet::
@@ -100,6 +113,8 @@ OPTIONS
 	(so a full name like `refs/heads/foo` matches) or from a slash
 	separator (so `bar` matches `refs/heads/bar` but not
 	`refs/heads/foobar`).
+	With `--exact-ref`, each argument is a complete refname as described
+	above.
 
 OUTPUT
 ------

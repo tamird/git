@@ -7,11 +7,13 @@
 #include "ref-filter.h"
 #include "remote.h"
 #include "parse-options.h"
+#include "refs.h"
 #include "trace2.h"
 #include "wildmatch.h"
 
-static const char * const ls_remote_usage[] = {
-	N_("git ls-remote [--branches] [--tags] [--refs] [--upload-pack=<exec>]\n"
+static const char *const ls_remote_usage[] = {
+	N_("git ls-remote [--branches] [--tags] [--refs] [--exact-ref]\n"
+	   "              [--upload-pack=<exec>]\n"
 	   "              [-q | --quiet] [--exit-code] [--get-url] [--sort=<key>]\n"
 	   "              [--symref] [<repository> [<patterns>...]]"),
 	NULL
@@ -39,6 +41,22 @@ static int tail_match(const struct strvec *pattern, const char *path)
 	return 0;
 }
 
+static int exact_ref_match(const struct strvec *names, const char *refname)
+{
+	for (size_t i = 0; i < names->nr; i++) {
+		const char *name = names->v[i];
+
+		if (!strcmp(refname, name))
+			return 1;
+		/* An annotated tag also has a peeled pseudo-ref. */
+		if (starts_with(name, "refs/tags/") &&
+		    starts_with(refname, name) &&
+		    !strcmp(refname + strlen(name), "^{}"))
+			return 1;
+	}
+	return 0;
+}
+
 int cmd_ls_remote(int argc,
 		  const char **argv,
 		  const char *prefix,
@@ -47,6 +65,7 @@ int cmd_ls_remote(int argc,
 	const char *dest = NULL;
 	unsigned flags = 0;
 	int get_url = 0;
+	int exact_ref = 0;
 	int quiet = 0;
 	int status = 0;
 	int show_symref_target = 0;
@@ -82,6 +101,7 @@ int cmd_ls_remote(int argc,
 			  N_("deprecated synonym for --branches"), REF_BRANCHES,
 			  PARSE_OPT_HIDDEN),
 		OPT_BIT(0, "refs", &flags, N_("do not show peeled tags"), REF_NORMAL),
+		OPT_BOOL(0, "exact-ref", &exact_ref, N_("match fully qualified refnames exactly")),
 		OPT_BOOL(0, "get-url", &get_url,
 			 N_("take url.<base>.insteadOf into account")),
 		OPT_REF_SORT(&sorting_options),
@@ -117,13 +137,26 @@ int cmd_ls_remote(int argc,
 
 	packet_trace_identity("ls-remote");
 
-	for (int i = 1; i < argc; i++)
-		strvec_pushf(&pattern, "*/%s", argv[i]);
-
-	if (flags & REF_TAGS)
-		strvec_push(&transport_options.ref_prefixes, "refs/tags/");
-	if (flags & REF_BRANCHES)
-		strvec_push(&transport_options.ref_prefixes, "refs/heads/");
+	if (exact_ref && !get_url) {
+		if (argc < 2)
+			die(_("--exact-ref requires at least one fully qualified refname"));
+		for (int i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "HEAD") &&
+			    (!starts_with(argv[i], "refs/") ||
+			     check_refname_format(argv[i], 0)))
+				die(_("'%s' is not a valid fully qualified refname"),
+				    argv[i]);
+			strvec_push(&pattern, argv[i]);
+			strvec_push(&transport_options.ref_prefixes, argv[i]);
+		}
+	} else if (!exact_ref) {
+		for (int i = 1; i < argc; i++)
+			strvec_pushf(&pattern, "*/%s", argv[i]);
+		if (flags & REF_TAGS)
+			strvec_push(&transport_options.ref_prefixes, "refs/tags/");
+		if (flags & REF_BRANCHES)
+			strvec_push(&transport_options.ref_prefixes, "refs/heads/");
+	}
 
 	remote = remote_get(dest);
 	if (!remote) {
@@ -157,7 +190,8 @@ int cmd_ls_remote(int argc,
 		struct ref_array_item *item;
 		if (!check_ref_type(ref, flags))
 			continue;
-		if (!tail_match(&pattern, ref->name))
+		if (exact_ref ? !exact_ref_match(&pattern, ref->name) :
+				!tail_match(&pattern, ref->name))
 			continue;
 		item = ref_array_push(&ref_array, ref->name, &ref->old_oid, NULL);
 		item->symref = xstrdup_or_null(ref->symref);

@@ -48,6 +48,19 @@ test_expect_success 'ref advertisement is filtered with ls-remote using protocol
 	test_cmp expect actual
 '
 
+test_expect_success 'ls-remote --exact-ref sends a full v2 ref-prefix' '
+	test_when_finished "rm -f log &&
+		git -C \"$daemon_parent\" update-ref -d refs/heads/other" &&
+	head=$(git -C "$daemon_parent" rev-parse refs/heads/main) &&
+	git -C "$daemon_parent" update-ref refs/heads/other "$head" &&
+	printf "%s\trefs/heads/main\n" "$head" >expect &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -c protocol.version=2 \
+		ls-remote --exact-ref "$GIT_DAEMON_URL/parent" refs/heads/main >actual &&
+	test_cmp expect actual &&
+	test_grep "ls-remote> ref-prefix refs/heads/main" log &&
+	test_grep ! "ls-remote< .*refs/heads/other" log
+'
+
 test_expect_success 'clone with git:// using protocol v2' '
 	test_when_finished "rm -f log" &&
 
@@ -1167,6 +1180,18 @@ test_expect_success 'ls-remote with v2 http sends only one POST' '
 
 	grep "Send header: POST" log >posts &&
 	test_line_count = 1 posts
+'
+
+test_expect_success 'ls-remote --exact-ref sends a ref-prefix over v2 http' '
+	test_when_finished "rm -f log" &&
+	head=$(git -C "$HTTPD_DOCUMENT_ROOT_PATH/http_parent" \
+		rev-parse refs/heads/main) &&
+	printf "%s\trefs/heads/main\n" "$head" >expect &&
+	GIT_TRACE_PACKET="$(pwd)/log" git -c protocol.version=2 \
+		ls-remote --exact-ref "$HTTPD_URL/smart/http_parent" \
+		refs/heads/main >actual &&
+	test_cmp expect actual &&
+	test_grep "ls-remote> ref-prefix refs/heads/main" log
 '
 
 test_expect_success 'push with http:// and a config of v2 does not request v2' '

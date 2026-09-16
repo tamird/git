@@ -365,6 +365,83 @@ test_expect_success 'ls-remote prefixes work with all protocol versions' '
 	test_cmp expect actual.v2
 '
 
+test_expect_success 'ls-remote --exact-ref validates full refnames' '
+	test_must_fail git ls-remote --exact-ref self 2>err &&
+	test_grep "requires at least one" err &&
+	test_must_fail git ls-remote --exact-ref self heads/main 2>err &&
+	test_grep "not a valid fully qualified refname" err &&
+	test_must_fail git ls-remote --exact-ref self "refs/heads/ma*" 2>err &&
+	test_grep "not a valid fully qualified refname" err &&
+	git ls-remote --get-url self >expect &&
+	git ls-remote --exact-ref --get-url self >actual &&
+	test_cmp expect actual &&
+	git ls-remote --exact-ref --get-url self heads/main >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'ls-remote --exact-ref excludes suffix and prefix matches' '
+	test_when_finished "git update-ref -d refs/extra/refs/heads/main &&
+		git update-ref -d refs/heads/main-extra" &&
+	head=$(git rev-parse HEAD) &&
+	git update-ref refs/extra/refs/heads/main "$head" &&
+	git update-ref refs/heads/main-extra "$head" &&
+	printf "%s\trefs/heads/main\n" "$head" >expect.exact &&
+	printf "%s\trefs/extra/refs/heads/main\n%s\trefs/heads/main\n" \
+		"$head" "$head" >expect.legacy &&
+	git -c protocol.version=0 ls-remote self refs/heads/main >legacy &&
+	test_cmp expect.legacy legacy &&
+	git -c protocol.version=0 ls-remote --exact-ref \
+		self refs/heads/main >actual &&
+	test_cmp expect.exact actual &&
+	git -c protocol.version=2 ls-remote self refs/heads/main >legacy &&
+	test_cmp expect.legacy legacy &&
+	git -c protocol.version=2 ls-remote --exact-ref \
+		self refs/heads/main >actual &&
+	test_cmp expect.exact actual
+'
+
+test_expect_success 'ls-remote --exact-ref handles HEAD and no matches' '
+	head=$(git rev-parse HEAD) &&
+	target=$(git symbolic-ref HEAD) &&
+	printf "ref: %s\tHEAD\n%s\tHEAD\n" "$target" "$head" >expect &&
+	git -c protocol.version=0 ls-remote --exact-ref --symref self HEAD >actual &&
+	test_cmp expect actual &&
+	git -c protocol.version=2 ls-remote --exact-ref --symref self HEAD >actual &&
+	test_cmp expect actual &&
+	git ls-remote --exact-ref --refs self HEAD >actual &&
+	test_must_be_empty actual &&
+	git ls-remote --exact-ref self refs/heads/does-not-exist >actual &&
+	test_must_be_empty actual &&
+	test_expect_code 2 git ls-remote --exact-ref --exit-code \
+		self refs/heads/does-not-exist >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success 'ls-remote --exact-ref preserves tag peeling and sorting' '
+	test_when_finished "git tag -d exact-annotated" &&
+	git tag -a -m annotated exact-annotated &&
+	tag=$(git rev-parse refs/tags/exact-annotated) &&
+	peeled=$(git rev-parse "refs/tags/exact-annotated^{}") &&
+	printf "%s\trefs/tags/exact-annotated\n%s\trefs/tags/exact-annotated^{}\n" \
+		"$tag" "$peeled" >expect &&
+	git -c protocol.version=0 ls-remote --exact-ref --tags \
+		self refs/tags/exact-annotated >actual &&
+	test_cmp expect actual &&
+	git -c protocol.version=2 ls-remote --exact-ref --tags \
+		self refs/tags/exact-annotated >actual &&
+	test_cmp expect actual &&
+	printf "%s\trefs/tags/exact-annotated\n" "$tag" >expect.refs &&
+	git ls-remote --exact-ref --tags --refs \
+		self refs/tags/exact-annotated >actual &&
+	test_cmp expect.refs actual &&
+	git ls-remote --exact-ref --branches self refs/tags/exact-annotated >actual &&
+	test_must_be_empty actual &&
+	generate_references refs/tags/mark1.2 refs/tags/mark1.10 >expect.sort &&
+	git ls-remote --exact-ref --tags --sort=version:refname self \
+		refs/tags/mark1.10 refs/tags/mark1.2 >actual &&
+	test_cmp expect.sort actual
+'
+
 test_expect_success 'v0 clients can handle multiple symrefs' '
 	# Modern versions of Git will not return multiple symref capabilities
 	# for v0, so we have to hard-code the response. Note that we will
