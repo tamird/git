@@ -15,7 +15,7 @@
 #include "strbuf.h"
 #include "trace2.h"
 
-/* Only cache-tree reuse existence checks request this diagnostic. */
+/* Cache-tree update and ordered validation sample existence checks. */
 struct packed_lookup_probe {
 	struct odb_packed_lookup lookup;
 	uint64_t started, attempt_ns;
@@ -170,8 +170,7 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	struct odb_read_result *result = oi ? oi->read_resultp : NULL;
 	struct odb_packed_lookup *lookup;
 	struct packed_lookup_probe probe;
-	struct packed_lookup_probe *diagnostic =
-		!oi && (flags & OBJECT_INFO_TRACE_PACKED_LOOKUP) ? &probe : NULL;
+	struct packed_lookup_probe *diagnostic = NULL;
 	struct pack_entry e;
 	uint64_t started = 0, finished;
 	int ret, found, timed = 0;
@@ -179,6 +178,9 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	if (result && !oi->contentp &&
 	    (!oi->sizep || !result->size_info_enabled))
 		result = NULL;
+	if (!oi && (flags & (OBJECT_INFO_TRACE_PACKED_LOOKUP |
+			     OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP)))
+		diagnostic = &probe;
 	lookup = result ? &result->packed_lookup : NULL;
 	if (diagnostic)
 		lookup = &diagnostic->lookup;
@@ -256,11 +258,21 @@ out:
 		strbuf_addf(errmsg, _("packed object %s (stored in %s) is corrupt"),
 			    oid_to_hex(oid), bad_pack->pack_name);
 	if (diagnostic) {
+		int ordered_validation = !!(flags &
+					    OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP);
+		enum trace2_counter_id first =
+			TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS;
+		enum trace2_counter_id invalid =
+			TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID;
 		int saved_errno = errno;
 
+		if (ordered_validation) {
+			first = TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_ATTEMPTS;
+			invalid = TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID;
+		}
 		/* An invalid attempt contributes no partial stage measurements. */
 		if (diagnostic->invalid || lookup->invalid) {
-			trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID, 1);
+			trace2_counter_add(invalid, 1);
 		} else {
 			/* Keep these values in the Trace2 counter ID order. */
 			const uint64_t values[] = {
@@ -274,10 +286,11 @@ out:
 				lookup->ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
 				lookup->count[ODB_PACKED_LOOKUP_FALLBACK],
 				lookup->ns[ODB_PACKED_LOOKUP_FALLBACK],
+				lookup->fallback_pack_attempts,
 			};
 
-			trace2_counter_add_many(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS,
-						values, ARRAY_SIZE(values));
+			trace2_counter_add_many(first, values,
+						ARRAY_SIZE(values) - !ordered_validation);
 		}
 		errno = saved_errno;
 	}

@@ -1022,6 +1022,9 @@ int odb_has_object(struct object_database *odb, const struct object_id *oid,
 		object_info_flags |= OBJECT_INFO_SKIP_FETCH_OBJECT;
 	if (flags & ODB_HAS_OBJECT_TRACE_PACKED_LOOKUP)
 		object_info_flags |= OBJECT_INFO_TRACE_PACKED_LOOKUP;
+	if (flags & ODB_HAS_OBJECT_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP)
+		object_info_flags |=
+			OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP;
 
 	return odb_read_object_info_extended(odb, oid, NULL, object_info_flags) >= 0;
 }

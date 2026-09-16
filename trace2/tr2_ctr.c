@@ -1,4 +1,5 @@
 #include "git-compat-util.h"
+#include "strbuf.h"
 #include "trace2/tr2_tgt.h"
 #include "trace2/tr2_tls.h"
 #include "trace2/tr2_ctr.h"
@@ -338,6 +339,58 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "cache_tree",
 		.name = "update/reuse-packed-invalid-total",
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-lookup-selected-checks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_ATTEMPTS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_ATTEMPT_NS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-attempt-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_PREPARES] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-prepares-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_PREPARE_NS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-prepare-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_MIDX_SEARCHES] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-midx-searches-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_MIDX_SEARCH_NS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-midx-search-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_MIDX_RESOLVES] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-midx-resolves-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_MIDX_RESOLVE_NS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-midx-resolve-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_FALLBACKS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-fallbacks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_FALLBACK_NS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-fallback-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_FALLBACK_PACK_ATTEMPTS] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-fallback-pack-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID] = {
+		.category = "cache_tree",
+		.name = "validate/oid-order/packed-invalid-total",
+	},
 
 	/* Add additional metadata before here. */
 };
@@ -474,6 +527,32 @@ void tr2_emit_per_thread_counters(tr2_tgt_evt_counter_t *fn_apply)
 			fn_apply(&tr2_counter_metadata[cid],
 				 &ctx->counter_block.counter[cid],
 				 0);
+}
+
+static void emit_cache_tree_snapshot(enum trace2_counter_id first,
+				     enum trace2_counter_id last)
+{
+	struct strbuf us_name = STRBUF_INIT;
+	enum trace2_counter_id cid;
+	int saved_errno = errno;
+
+	for (cid = first; cid <= last; cid++) {
+		const char *name = tr2_counter_metadata[cid].name;
+		uint64_t value = final_counter_block.counter[cid].value;
+
+		if (ends_with(name, "-ns-total")) {
+			strbuf_reset(&us_name);
+			strbuf_add(&us_name, name,
+				   strlen(name) - strlen("-ns-total"));
+			strbuf_addstr(&us_name, "-us-total");
+			name = us_name.buf;
+			value /= 1000;
+		}
+		if (value <= INTMAX_MAX)
+			trace2_data_intmax("cache_tree", NULL, name, value);
+	}
+	strbuf_release(&us_name);
+	errno = saved_errno;
 }
 
 void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
@@ -679,60 +758,13 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		errno = saved_errno;
 	}
 
-	/*
-	 * DATA-only consumers need a complete, cumulative update snapshot,
-	 * including zero write/commit counts. Convert elapsed nanoseconds only
-	 * after aggregation. Emit only after at least one update region returns.
-	 */
-	if (final_counter_block.counter[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS].value) {
-		int saved_errno = errno;
-
-		for (cid = TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS;
-		     cid <= TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID;
-		     cid++) {
-			const char *name = tr2_counter_metadata[cid].name;
-			uint64_t value = final_counter_block.counter[cid].value;
-
-			if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS) {
-				name = "update/entry-object-check-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECK_NS) {
-				name = "update/reused-child-parent-check-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS) {
-				name = "update/reuse-object-check-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECK_NS) {
-				name = "update/repair-tree-check-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_HASH_ONLY_NS) {
-				name = "update/hash-only-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OBJECT_WRITE_NS) {
-				name = "update/object-write-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS) {
-				name = "update/owned-odb-commit-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPT_NS) {
-				name = "update/reuse-packed-attempt-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_PREPARE_NS) {
-				name = "update/reuse-packed-prepare-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_SEARCH_NS) {
-				name = "update/reuse-packed-midx-search-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_RESOLVE_NS) {
-				name = "update/reuse-packed-midx-resolve-us-total";
-				value /= 1000;
-			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_FALLBACK_NS) {
-				name = "update/reuse-packed-fallback-us-total";
-				value /= 1000;
-			}
-			if (value <= INTMAX_MAX)
-				trace2_data_intmax("cache_tree", NULL, name, value);
-		}
-		errno = saved_errno;
-	}
+	/* Include zero stages for completed updates and selected probes. */
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS].value)
+		emit_cache_tree_snapshot(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS,
+					 TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID);
+	if (final_counter_block.counter[
+		TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS].value)
+		emit_cache_tree_snapshot(
+			TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS,
+			TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID);
 }

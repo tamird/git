@@ -609,10 +609,14 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
 			git commit --allow-empty -m ordered &&
 		test_trace2_data cache_tree validate/oid-order/probes 2 <.git/ordered.trace &&
+		test_trace2_data cache_tree validate/oid-order/packed-lookup-selected-checks-total 2 \
+			<.git/ordered.trace &&
 		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
 		GIT_TRACE2_EVENT="$PWD/.git/dfs.trace" \
 			git commit --allow-empty -m dfs &&
 		test_grep ! '"key":"validate/oid-order/probes"' .git/dfs.trace &&
+		test_grep ! '"key":"validate/oid-order/packed-lookup-selected-checks-total"' \
+			.git/dfs.trace &&
 		current_branch=$(git symbolic-ref --short HEAD) &&
 		GIT_TRACE2_EVENT="$PWD/.git/checkout.trace" git switch "$current_branch" &&
 		test_trace2_data checkout cache-tree-validate/nodes 2 <.git/checkout.trace &&
@@ -935,7 +939,7 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 	)
 '
 
-test_expect_success 'cache-tree update samples large reuse checks' '
+test_expect_success 'cache-tree update and ordered validation sample packed checks' '
 	test_when_finished "rm -rf update-probes" &&
 	setup_cache_tree_update_repo update-probes &&
 	(
@@ -946,8 +950,72 @@ test_expect_success 'cache-tree update samples large reuse checks' '
 			sed "s|^|100644 $blob	|" |
 			git update-index --index-info &&
 		git commit -m many-directories &&
+		git rev-parse HEAD^{tree} >.git/expected.tree &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/loose-validate.trace" \
+			git write-tree --validate-cache-tree-only >.git/loose-validated.tree &&
+		test_cmp .git/expected.tree .git/loose-validated.tree &&
+		test_cache_tree_validation_state_unchanged &&
+		test_trace2_data cache_tree validate/oid-order/packed-lookup-selected-checks-total 1026 \
+			<.git/loose-validate.trace &&
+		test_trace2_data cache_tree validate/oid-order/packed-midx-searches-total 0 \
+			<.git/loose-validate.trace &&
+		test_trace2_data cache_tree validate/oid-order/packed-midx-resolves-total 0 \
+			<.git/loose-validate.trace &&
+		test_trace2_data cache_tree validate/oid-order/packed-fallback-pack-attempts-total 0 \
+			<.git/loose-validate.trace &&
+		if test_have_prereq ODB_MONOTONIC_CLOCK
+		then
+			test_trace2_data cache_tree validate/oid-order/packed-attempts-total 1026 \
+				<.git/loose-validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-fallbacks-total 1026 \
+				<.git/loose-validate.trace
+		else
+			test_trace2_data cache_tree validate/oid-order/packed-attempts-total 0 \
+				<.git/loose-validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-invalid-total 1026 \
+				<.git/loose-validate.trace
+		fi &&
 		git repack -ad &&
 		git multi-pack-index write &&
+		snapshot_cache_tree_validation_state &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/validate.trace" \
+			git write-tree --validate-cache-tree-only >.git/validated.tree &&
+		test_cmp .git/expected.tree .git/validated.tree &&
+		test_cache_tree_validation_state_unchanged &&
+		test_trace2_data cache_tree validate/oid-order/packed-lookup-selected-checks-total 1026 \
+			<.git/validate.trace &&
+		test_grep ! "\"key\":\"update/reuse-packed-attempts-total\"" \
+			.git/validate.trace &&
+		if test_have_prereq ODB_MONOTONIC_CLOCK
+		then
+			test_trace2_data cache_tree validate/oid-order/packed-attempts-total 1026 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-midx-searches-total 1026 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-midx-resolves-total 1026 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-fallbacks-total 0 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-fallback-pack-attempts-total 0 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-invalid-total 0 \
+				<.git/validate.trace
+		else
+			test_trace2_data cache_tree validate/oid-order/packed-attempts-total 0 \
+				<.git/validate.trace &&
+			test_trace2_data cache_tree validate/oid-order/packed-invalid-total 1026 \
+				<.git/validate.trace
+		fi &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/dfs-validate.trace" \
+			git write-tree --validate-cache-tree-only >.git/dfs-validated.tree &&
+		test_cmp .git/expected.tree .git/dfs-validated.tree &&
+		test_cache_tree_validation_state_unchanged &&
+		test_grep ! "\"key\":\"validate/oid-order/packed-lookup-selected-checks-total\"" \
+			.git/dfs-validate.trace &&
 		echo changed >a/file &&
 		git add a/file &&
 		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \

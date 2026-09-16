@@ -341,6 +341,8 @@ static int cache_tree_fully_valid_internal(struct cache_tree *it,
 
 #define CACHE_TREE_OID_ORDER_MIN_ENTRIES 1000000
 #define CACHE_TREE_OID_ORDER_MAX_NODES 1000000
+#define CACHE_TREE_OID_ORDER_PROBE_PREFIX   1024
+#define CACHE_TREE_OID_ORDER_PROBE_INTERVAL 64
 
 struct cache_tree_oid_order {
 	struct cache_tree **nodes;
@@ -385,6 +387,8 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 	struct cache_tree_oid_order order = { 0 };
 	size_t i;
 	uint64_t ordered_object_check_ns = 0;
+	uint64_t selected_checks = 0;
+	int trace_packed = trace2_is_enabled();
 	int exists, saved_errno;
 
 	if (!collect_valid_cache_tree_nodes(it, &order)) {
@@ -399,14 +403,25 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 	trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PROBE_LOOP);
 	errno = saved_errno;
 	for (i = 0; i < order.nr; i++) {
+		enum odb_has_object_flags check_flags =
+			ODB_HAS_OBJECT_RECHECK_PACKED |
+			ODB_HAS_OBJECT_FETCH_PROMISOR;
+
+		/* Cover short validations, then sample every 64th ordered check. */
+		if (trace_packed &&
+		    (i < CACHE_TREE_OID_ORDER_PROBE_PREFIX ||
+		     !((i - CACHE_TREE_OID_ORDER_PROBE_PREFIX) %
+		       CACHE_TREE_OID_ORDER_PROBE_INTERVAL))) {
+			check_flags |= ODB_HAS_OBJECT_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP;
+			selected_checks++;
+		}
 		if (stats && stats->time_object_checks) {
 			saved_errno = errno;
 			trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
 			errno = saved_errno;
 		}
-		exists = odb_has_object(the_repository->objects, &order.nodes[i]->oid,
-					ODB_HAS_OBJECT_RECHECK_PACKED |
-						ODB_HAS_OBJECT_FETCH_PROMISOR);
+		exists = odb_has_object(the_repository->objects,
+					&order.nodes[i]->oid, check_flags);
 		if (stats && stats->time_object_checks) {
 			saved_errno = errno;
 			ordered_object_check_ns +=
@@ -419,6 +434,14 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 	saved_errno = errno;
 	trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PROBE_LOOP);
 	errno = saved_errno;
+	/* The DFS fallback is excluded; selected checks can miss packed storage. */
+	if (selected_checks) {
+		saved_errno = errno;
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS,
+			selected_checks);
+		errno = saved_errno;
+	}
 	if (i < order.nr) {
 		if (stats) {
 			stats->object_checks += i + 1;
