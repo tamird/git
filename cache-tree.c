@@ -395,6 +395,9 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 		goto fallback;
 	}
 	QSORT(order.nodes, order.nr, cache_tree_oid_order_cmp);
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PROBE_LOOP);
+	errno = saved_errno;
 	for (i = 0; i < order.nr; i++) {
 		if (stats && stats->time_object_checks) {
 			saved_errno = errno;
@@ -410,19 +413,24 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 				trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
 			errno = saved_errno;
 		}
-		if (!exists) {
-			if (stats) {
-				stats->object_checks += i + 1;
-				stats->object_check_ns += ordered_object_check_ns;
-			}
-			saved_errno = errno;
-			trace2_data_intmax("cache_tree", the_repository,
-					   "validate/oid-order/probes", i + 1);
-			trace2_data_intmax("cache_tree", the_repository,
-					   "validate/oid-order/fallback", 1);
-			errno = saved_errno;
-			goto fallback;
+		if (!exists)
+			break;
+	}
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PROBE_LOOP);
+	errno = saved_errno;
+	if (i < order.nr) {
+		if (stats) {
+			stats->object_checks += i + 1;
+			stats->object_check_ns += ordered_object_check_ns;
 		}
+		saved_errno = errno;
+		trace2_data_intmax("cache_tree", the_repository,
+				   "validate/oid-order/probes", i + 1);
+		trace2_data_intmax("cache_tree", the_repository,
+				   "validate/oid-order/fallback", 1);
+		errno = saved_errno;
+		goto fallback;
 	}
 	if (stats) {
 		stats->nodes += order.nr;
