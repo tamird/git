@@ -158,8 +158,12 @@ test_expect_success 'fetch changes via http' '
 	echo content >>file &&
 	git commit -a -m two &&
 	git push public &&
-	(cd clone && git pull) &&
-	test_cmp file clone/file
+	(cd clone && GIT_TRACE2_EVENT="$PWD/fetch.trace" git pull) &&
+	test_cmp file clone/file &&
+	test_trace2_data http response/write-callback-us "[0-9-][0-9]*" \
+		<clone/fetch.trace >/dev/null &&
+	test_trace2_data http response/write-bytes "[1-9][0-9]*" \
+		<clone/fetch.trace >/dev/null
 '
 
 test_expect_success 'used upload-pack service' '

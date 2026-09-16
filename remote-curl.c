@@ -22,6 +22,7 @@
 #include "setup.h"
 #include "protocol.h"
 #include "quote.h"
+#include "trace.h"
 #include "trace2.h"
 #include "transport.h"
 #include "url.h"
@@ -835,6 +836,11 @@ struct rpc_in_data {
 	struct rpc_state *rpc;
 	struct active_request_slot *slot;
 	int check_pktline;
+	int trace_response;
+	int invalid_time;
+	int invalid_bytes;
+	uint64_t callback_ns;
+	uint64_t written_bytes;
 	struct check_pktline_state pktline_state;
 };
 
@@ -859,7 +865,39 @@ static size_t rpc_in(char *ptr, size_t eltsize,
 	if (data->check_pktline)
 		check_pktline(&data->pktline_state, ptr, size);
 	write_or_die(data->rpc->in, ptr, size);
+	if (data->trace_response && !data->invalid_bytes) {
+		if ((uintmax_t)size > (uintmax_t)INTMAX_MAX - data->written_bytes)
+			data->invalid_bytes = 1;
+		else
+			data->written_bytes += size;
+	}
 	return size;
+}
+
+static size_t rpc_in_trace(char *ptr, size_t eltsize,
+			   size_t nmemb, void *buffer_)
+{
+	struct rpc_in_data *data = buffer_;
+	uint64_t started, finished;
+	size_t written;
+	int saved_errno = errno;
+
+	started = data->invalid_time ? 0 : getmonotonicnanotime();
+	errno = saved_errno;
+	written = rpc_in(ptr, eltsize, nmemb, buffer_);
+	saved_errno = errno;
+	if (!started)
+		data->invalid_time = 1;
+	else {
+		finished = getmonotonicnanotime();
+		if (!finished || finished < started ||
+		    finished - started > UINT64_MAX - data->callback_ns)
+			data->invalid_time = 1;
+		else
+			data->callback_ns += finished - started;
+	}
+	errno = saved_errno;
+	return written;
 }
 
 static int run_slot(struct active_request_slot *slot,
@@ -934,7 +972,7 @@ static int post_rpc(struct rpc_state *rpc, int stateless_connect, int flush_rece
 	int use_gzip = rpc->gzip_request;
 	char *gzip_body = NULL;
 	size_t gzip_size = 0;
-	int err, large_request = 0;
+	int err, large_request = 0, saved_errno;
 	int needs_100_continue = 0;
 	struct rpc_in_data rpc_in_data;
 
@@ -1073,17 +1111,39 @@ retry:
 	}
 
 	curl_easy_setopt(slot->curl, CURLOPT_HTTPHEADER, headers);
-	curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION, rpc_in);
+	memset(&rpc_in_data, 0, sizeof(rpc_in_data));
 	rpc_in_data.rpc = rpc;
 	rpc_in_data.slot = slot;
 	rpc_in_data.check_pktline = stateless_connect;
-	memset(&rpc_in_data.pktline_state, 0, sizeof(rpc_in_data.pktline_state));
+	saved_errno = errno;
+	rpc_in_data.trace_response = trace2_is_enabled();
+	if (rpc_in_data.trace_response && !getmonotonicnanotime())
+		rpc_in_data.invalid_time = 1;
+	errno = saved_errno;
+	if (rpc_in_data.trace_response && !rpc_in_data.invalid_time)
+		curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION, rpc_in_trace);
+	else
+		curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION, rpc_in);
 	curl_easy_setopt(slot->curl, CURLOPT_WRITEDATA, &rpc_in_data);
 	curl_easy_setopt(slot->curl, CURLOPT_FAILONERROR, 0L);
 
 
 	rpc->any_written = 0;
 	err = run_slot(slot, NULL);
+	if (rpc_in_data.trace_response) {
+		intmax_t callback_us = -1, written_bytes = -1;
+
+		saved_errno = errno;
+		if (!rpc_in_data.invalid_time)
+			callback_us = (intmax_t)(rpc_in_data.callback_ns / 1000);
+		if (!rpc_in_data.invalid_bytes)
+			written_bytes = (intmax_t)rpc_in_data.written_bytes;
+		trace2_data_intmax("http", the_repository,
+				   "response/write-callback-us", callback_us);
+		trace2_data_intmax("http", the_repository,
+				   "response/write-bytes", written_bytes);
+		errno = saved_errno;
+	}
 	if (err == HTTP_REAUTH && !large_request) {
 		http_reauth_prepare(0);
 		curl_slist_free_all(headers);

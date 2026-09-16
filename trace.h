@@ -123,6 +123,9 @@ void trace_disable(struct trace_key *key);
  */
 uint64_t getnanotime(void);
 
+/* Returns monotonic nanoseconds for elapsed measurements, or 0 if unavailable. */
+uint64_t getmonotonicnanotime(void);
+
 void trace_command_performance(const char **argv);
 void trace_verbatim(struct trace_key *key, const void *buf, unsigned len);
 uint64_t trace_performance_enter(void);

@@ -67,6 +67,10 @@ test_expect_success 'push to remote repository (standard)' '
 		<http-push.trace >/dev/null &&
 	test_trace2_data http features/spnego "[01]" \
 		<http-push.trace >/dev/null &&
+	test_trace2_data http response/write-callback-us "[0-9-][0-9]*" \
+		<http-push.trace >/dev/null &&
+	test_trace2_data http response/write-bytes "[1-9][0-9]*" \
+		<http-push.trace >/dev/null &&
 	test_trace2_data http response/http-code 200 \
 		<http-push.trace >http-success &&
 	test_line_count -ge 2 http-success &&

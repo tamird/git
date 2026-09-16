@@ -2295,29 +2295,6 @@ struct http_response_write_trace {
 	int invalid;
 };
 
-static int http_response_write_time(uint64_t *now)
-{
-#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
-	struct timespec timestamp;
-	int saved_errno = errno;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
-
-	errno = saved_errno;
-	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
-	    timestamp.tv_nsec >= 1000000000)
-		return -1;
-	if ((uint64_t)timestamp.tv_sec >
-	    (UINT64_MAX - (uint64_t)timestamp.tv_nsec) / 1000000000ULL)
-		return -1;
-	*now = (uint64_t)timestamp.tv_sec * 1000000000ULL +
-	       (uint64_t)timestamp.tv_nsec;
-	return 0;
-#else
-	(void)now;
-	return -1;
-#endif
-}
-
 static size_t fwrite_http_response_trace(char *ptr, size_t eltsize,
 					 size_t nmemb, void *context)
 {
@@ -2325,7 +2302,7 @@ static size_t fwrite_http_response_trace(char *ptr, size_t eltsize,
 	uint64_t started, finished;
 	size_t written;
 	int saved_errno = errno;
-	int timed = !trace->invalid && !http_response_write_time(&started);
+	int timed = !trace->invalid && (started = getmonotonicnanotime());
 
 	errno = saved_errno;
 	if (trace->target == HTTP_REQUEST_FILE)
@@ -2333,7 +2310,7 @@ static size_t fwrite_http_response_trace(char *ptr, size_t eltsize,
 	else
 		written = fwrite_buffer(ptr, eltsize, nmemb, trace->result);
 	saved_errno = errno;
-	if (!timed || http_response_write_time(&finished) ||
+	if (!timed || !(finished = getmonotonicnanotime()) ||
 	    finished < started ||
 	    finished - started > UINT64_MAX - trace->callback_ns)
 		trace->invalid = 1;
@@ -2362,10 +2339,8 @@ static int http_request(const char *url,
 	saved_errno = errno;
 	trace_response = trace2_is_enabled();
 	errno = saved_errno;
-#if !defined(HAVE_CLOCK_GETTIME) || !defined(HAVE_CLOCK_MONOTONIC)
-	if (result)
+	if (trace_response && result && !getmonotonicnanotime())
 		write_trace.invalid = 1;
-#endif
 	curl_easy_setopt(slot->curl, CURLOPT_HTTPGET, 1L);
 
 	if (!result) {

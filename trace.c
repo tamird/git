@@ -332,9 +332,16 @@ int trace_want(struct trace_key *key)
 static inline uint64_t highres_nanos(void)
 {
 	struct timespec ts;
+	uint64_t seconds;
+
 	if (clock_gettime(CLOCK_MONOTONIC, &ts))
 		return 0;
-	return (uint64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
+	if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000)
+		return 0;
+	seconds = (uint64_t)ts.tv_sec;
+	if (seconds > (UINT64_MAX - (uint64_t)ts.tv_nsec) / 1000000000ULL)
+		return 0;
+	return seconds * 1000000000ULL + ts.tv_nsec;
 }
 
 #elif defined (GIT_WINDOWS_NATIVE)
@@ -376,6 +383,15 @@ static inline uint64_t highres_nanos(void)
 #else
 # define highres_nanos() 0
 #endif
+
+uint64_t getmonotonicnanotime(void)
+{
+	int saved_errno = errno;
+	uint64_t now = highres_nanos();
+
+	errno = saved_errno;
+	return now;
+}
 
 static inline uint64_t gettimeofday_nanos(void)
 {
