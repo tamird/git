@@ -555,6 +555,9 @@ test_expect_success 'cache object metadata shared by refs' '
 	test_trace2_data ref-filter object_metadata/preload/verified 0 \
 		<metadata-cache.trace &&
 	test_grep ! \
+		'"category":"ref-filter","key":"object_metadata/preload/packed-lookup-selected-checks-total"' \
+		metadata-cache.trace &&
+	test_grep ! \
 		"\"category\":\"ref-filter\",\"name\":\"iterative/filter-format\"" \
 		metadata-cache.trace &&
 	for phase in prepare sort format-output cleanup
@@ -605,6 +608,9 @@ test_expect_success 'cache object metadata shared by refs' '
 	test_trace2_data ref-filter object_metadata/preload/graph-hits 2 \
 		<metadata-graph.trace &&
 	test_trace2_data ref-filter object_metadata/preload/verified 2 \
+		<metadata-graph.trace &&
+	test_trace2_data ref-filter \
+		object_metadata/preload/packed-lookup-selected-checks-total 2 \
 		<metadata-graph.trace &&
 	cat >reverse-expect <<-\EOF &&
 	refs/heads/duplicate-a

@@ -3735,6 +3735,9 @@ struct ref_sorting {
 	enum ref_sorting_order sort_flags;
 };
 
+#define REF_FILTER_PRELOAD_PROBE_PREFIX	  256
+#define REF_FILTER_PRELOAD_PROBE_INTERVAL 128
+
 struct ref_filter_preload_stats {
 	size_t unique;
 	size_t graph_hits;
@@ -3747,6 +3750,7 @@ static int preload_ref_object_metadata(const struct object_id *oid, void *data)
 	struct ref_filter_preload_stats *stats = data;
 	struct ref_filter_object_metadata *metadata;
 	struct commit *commit;
+	enum odb_has_object_flags flags = 0;
 	int has_object;
 
 	stats->unique++;
@@ -3763,10 +3767,19 @@ static int preload_ref_object_metadata(const struct object_id *oid, void *data)
 	if (!commit)
 		return 0;
 	stats->graph_hits++;
+	/* Probe neighboring OIDs first, then sample the sorted lookup stream. */
+	if (stats->trace &&
+	    (stats->graph_hits <= REF_FILTER_PRELOAD_PROBE_PREFIX ||
+	     !(stats->graph_hits % REF_FILTER_PRELOAD_PROBE_INTERVAL))) {
+		flags = ODB_HAS_OBJECT_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP;
+		trace2_counter_add(
+			TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_LOOKUP_SELECTED_CHECKS,
+			1);
+	}
 	if (stats->trace)
 		trace2_timer_start(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_OBJECT_EXISTS);
-	has_object = odb_has_object(the_repository->objects, oid, 0);
+	has_object = odb_has_object(the_repository->objects, oid, flags);
 	if (stats->trace)
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_OBJECT_EXISTS);

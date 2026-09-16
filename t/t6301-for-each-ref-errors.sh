@@ -67,11 +67,15 @@ test_expect_success 'date sort verifies objects found in a stale commit graph' '
 		git commit-graph write --reachable &&
 		oid=$(git rev-parse HEAD) &&
 		rm .git/objects/"$(test_oid_to_path "$oid")" &&
-		test_must_fail git for-each-ref --sort=committerdate \
+		GIT_TRACE2_EVENT="$PWD/stale.trace" \
+			test_must_fail git for-each-ref --sort=committerdate \
 			--format="%(refname)" refs/heads refs/tags \
 			>out 2>err &&
 		test_must_be_empty out &&
-		test_grep "missing object $oid for refs/" err
+		test_grep "missing object $oid for refs/" err &&
+		test_trace2_data ref-filter \
+			object_metadata/preload/packed-lookup-selected-checks-total \
+			"[1-9][0-9]*" <stale.trace
 	)
 '
 

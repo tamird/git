@@ -391,6 +391,58 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "cache_tree",
 		.name = "validate/oid-order/packed-invalid-total",
 	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_LOOKUP_SELECTED_CHECKS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-lookup-selected-checks-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_ATTEMPTS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_ATTEMPT_NS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-attempt-ns-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_PREPARES] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-prepares-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_PREPARE_NS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-prepare-ns-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_MIDX_SEARCHES] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-midx-searches-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_MIDX_SEARCH_NS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-midx-search-ns-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_MIDX_RESOLVES] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-midx-resolves-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_MIDX_RESOLVE_NS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-midx-resolve-ns-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_FALLBACKS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-fallbacks-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_FALLBACK_NS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-fallback-ns-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_FALLBACK_PACK_ATTEMPTS] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-fallback-pack-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_INVALID] = {
+		.category = "ref-filter",
+		.name = "object_metadata/preload/packed-invalid-total",
+	},
 
 	/* Add additional metadata before here. */
 };
@@ -529,8 +581,9 @@ void tr2_emit_per_thread_counters(tr2_tgt_evt_counter_t *fn_apply)
 				 0);
 }
 
-static void emit_cache_tree_snapshot(enum trace2_counter_id first,
-				     enum trace2_counter_id last)
+static void emit_counter_snapshot(const char *category,
+				  enum trace2_counter_id first,
+				  enum trace2_counter_id last)
 {
 	struct strbuf us_name = STRBUF_INIT;
 	enum trace2_counter_id cid;
@@ -549,7 +602,7 @@ static void emit_cache_tree_snapshot(enum trace2_counter_id first,
 			value /= 1000;
 		}
 		if (value <= INTMAX_MAX)
-			trace2_data_intmax("cache_tree", NULL, name, value);
+			trace2_data_intmax(category, NULL, name, value);
 	}
 	strbuf_release(&us_name);
 	errno = saved_errno;
@@ -760,11 +813,16 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 
 	/* Include zero stages for completed updates and selected probes. */
 	if (final_counter_block.counter[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS].value)
-		emit_cache_tree_snapshot(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS,
-					 TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID);
+		emit_counter_snapshot("cache_tree",
+				      TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS,
+				      TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID);
 	if (final_counter_block.counter[
 		TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS].value)
-		emit_cache_tree_snapshot(
-			TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS,
-			TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID);
+		emit_counter_snapshot("cache_tree",
+				      TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_LOOKUP_SELECTED_CHECKS,
+				      TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID);
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_LOOKUP_SELECTED_CHECKS].value)
+		emit_counter_snapshot("ref-filter",
+				      TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_LOOKUP_SELECTED_CHECKS,
+				      TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_INVALID);
 }

@@ -550,8 +550,9 @@ enum object_info_flags {
 
 	/* Measure packed lookup stages for an existence-only read (oi == NULL). */
 	OBJECT_INFO_TRACE_PACKED_LOOKUP = (1 << 5),
-	/* Distinct from OBJECT_INFO_TRACE_PACKED_LOOKUP; do not combine them. */
+	/* These three diagnostic selectors are mutually exclusive. */
 	OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP = (1 << 6),
+	OBJECT_INFO_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP = (1 << 7),
 
 	/*
 	 * This is meant for bulk prefetching of missing blobs in a partial
@@ -595,8 +596,9 @@ enum odb_has_object_flags {
 	ODB_HAS_OBJECT_FETCH_PROMISOR = (1 << 1),
 	/* Measure packed lookup stages for this existence check. */
 	ODB_HAS_OBJECT_TRACE_PACKED_LOOKUP = (1 << 2),
-	/* Distinct from ODB_HAS_OBJECT_TRACE_PACKED_LOOKUP; do not combine them. */
+	/* These three diagnostic selectors are mutually exclusive. */
 	ODB_HAS_OBJECT_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP = (1 << 3),
+	ODB_HAS_OBJECT_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP = (1 << 4),
 };
 
 /*
