@@ -2931,24 +2931,69 @@ static size_t fwrite_http_pack(char *ptr, size_t size, size_t nmemb, void *data)
 	return written;
 }
 
+struct http_pack_write_trace {
+	struct http_pack_request *request;
+	uint64_t callback_ns;
+	int invalid;
+};
+
+static size_t fwrite_http_pack_trace(char *ptr, size_t size, size_t nmemb,
+				    void *data)
+{
+	struct http_pack_write_trace *trace = data;
+	uint64_t started, finished;
+	size_t written;
+	int saved_errno = errno;
+	int timed = !trace->invalid && (started = getmonotonicnanotime());
+
+	errno = saved_errno;
+	written = fwrite_http_pack(ptr, size, nmemb, trace->request);
+	saved_errno = errno;
+	if (!timed || !(finished = getmonotonicnanotime()) ||
+	    finished < started ||
+	    finished - started > UINT64_MAX - trace->callback_ns)
+		trace->invalid = 1;
+	else
+		trace->callback_ns += finished - started;
+	errno = saved_errno;
+	return written;
+}
+
 int run_http_pack_request(struct http_pack_request *preq)
 {
 	off_t offset = ftello(preq->packfile);
 	int attempts = 3;
-	int ret;
+	int ret, trace_response, saved_errno;
 
 	if (offset < 0)
 		return HTTP_START_FAILED;
+	saved_errno = errno;
+	trace_response = trace2_is_enabled();
+	errno = saved_errno;
 
 	for (;;) {
 		struct slot_results results = { .retry_after = -1 };
+		struct http_pack_write_trace write_trace = { .request = preq };
 
 		preq->headers = http_append_auth_header(&http_auth, preq->headers);
 		curl_easy_setopt(preq->slot->curl, CURLOPT_HTTPHEADER, preq->headers);
 		curl_easy_setopt(preq->slot->curl, CURLOPT_HEADERFUNCTION, fwrite_wwwauth);
 		curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEHEADER, NULL);
-		curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEDATA, preq);
-		curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEFUNCTION, fwrite_http_pack);
+		if (trace_response) {
+			saved_errno = errno;
+			if (!getmonotonicnanotime())
+				write_trace.invalid = 1;
+			errno = saved_errno;
+			curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEDATA,
+					 &write_trace);
+			curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEFUNCTION,
+					 fwrite_http_pack_trace);
+		} else {
+			curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEDATA,
+					 preq);
+			curl_easy_setopt(preq->slot->curl, CURLOPT_WRITEFUNCTION,
+					 fwrite_http_pack);
+		}
 		/* Older curl versions omit challenge headers with FAILONERROR. */
 		curl_easy_setopt(preq->slot->curl, CURLOPT_FAILONERROR, 0L);
 		if (http_follow_config == HTTP_FOLLOW_INITIAL)
@@ -2959,6 +3004,17 @@ int run_http_pack_request(struct http_pack_request *preq)
 		preq->slot->results = NULL;
 		preq->slot->callback_func = NULL;
 		preq->slot->callback_data = NULL;
+		if (trace_response && ret == HTTP_OK &&
+		    results.http_code >= 200 && results.http_code < 300) {
+			intmax_t callback_us = write_trace.invalid ? -1 :
+				(intmax_t)(write_trace.callback_ns / 1000);
+
+			saved_errno = errno;
+			trace2_data_intmax("http", the_repository,
+					   "response/pack-write-callback-us",
+					   callback_us);
+			errno = saved_errno;
+		}
 
 		if (ret != HTTP_START_FAILED && results.http_code == 416) {
 			ret = HTTP_OK;
