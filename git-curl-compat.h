@@ -67,4 +67,12 @@
 #define GIT_CURL_HAVE_CURLOPT_TCP_KEEPCNT
 #endif
 
+/**
+ * CURLINFO_POSTTRANSFER_TIME_T was added in 8.10.0, released in September
+ * 2024. It measures time until libcurl sends the last request byte.
+ */
+#if LIBCURL_VERSION_NUM >= 0x080a00
+#define GIT_CURL_HAVE_CURLINFO_POSTTRANSFER_TIME_T
+#endif
+
 #endif

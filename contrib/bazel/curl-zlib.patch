@@ -1,16 +1,16 @@
 diff --git a/BUILD.bazel b/BUILD.bazel
 --- a/BUILD.bazel
 +++ b/BUILD.bazel
-@@ -291,3 +291,3 @@ cc_library(
-     }),
--    local_defines = select({
-+    local_defines = ["HAVE_LIBZ=1"] + select({
-         "@platforms//os:macos": [
-@@ -324,3 +324,3 @@ cc_library(
-     visibility = ["//visibility:public"],
--    deps = select({
-+    deps = ["@zlib//:zlib"] + select({
-         ":use_boringssl": ["@boringssl//:ssl", "@boringssl//:crypto"],
+@@ -338,3 +338,3 @@
+         linkstatic = True,
+-        local_defines = select({
++        local_defines = ["HAVE_LIBZ=1"] + select({
+             "@platforms//os:macos": [
+@@ -374,3 +374,3 @@
+         visibility = ["//visibility:public"],
+-        deps = select({
++        deps = ["@zlib//:zlib"] + select({
+             ":use_boringssl": [
 diff --git a/MODULE.bazel b/MODULE.bazel
 --- a/MODULE.bazel
 +++ b/MODULE.bazel

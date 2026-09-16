@@ -366,6 +366,13 @@ static void trace_active_slot(struct active_request_slot *slot)
 					   timings[i].key, value);
 	}
 #endif
+#ifdef GIT_CURL_HAVE_CURLINFO_POSTTRANSFER_TIME_T
+	/* Zero means libcurl never recorded a completed request send. */
+	if (curl_easy_getinfo(slot->curl, CURLINFO_POSTTRANSFER_TIME_T,
+			      &value) == CURLE_OK && value > 0)
+		trace2_data_intmax("http", the_repository,
+				   "timing/last-request-byte-us", value);
+#endif
 #if LIBCURL_VERSION_NUM >= 0x073700
 	if (curl_easy_getinfo(slot->curl, CURLINFO_SIZE_DOWNLOAD_T,
 			      &value) == CURLE_OK && value >= 0)
