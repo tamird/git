@@ -185,7 +185,8 @@ test_cache_tree_update_metrics () {
 		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
 	test_trace2_data cache_tree update/entry-object-checks-total \
 		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
-	for update_key in entry-object-check-us reuse-object-checks \
+	for update_key in entry-object-check-us reused-child-parent-checks \
+		reused-child-parent-check-us reuse-object-checks \
 		reuse-object-check-us repair-tree-checks repair-tree-check-us hash-only-us
 	do
 		test_trace2_data cache_tree "update/$update_key-total" \
@@ -193,9 +194,9 @@ test_cache_tree_update_metrics () {
 	done &&
 	grep '"event":"data".*"category":"cache_tree","key":"update/' \
 		"$update_trace" >"$update_trace.data" &&
-	test_line_count = 18 "$update_trace.data" &&
+	test_line_count = 20 "$update_trace.data" &&
 	grep '"nesting":1,' "$update_trace.data" >"$update_trace.depth" &&
-	test_line_count = 18 "$update_trace.depth" &&
+	test_line_count = 20 "$update_trace.depth" &&
 	update_writes=$(cache_tree_update_value "$update_trace" object-write-calls) &&
 	update_commits=$(cache_tree_update_value "$update_trace" owned-odb-commit-calls) &&
 	test_cache_tree_update_time "$update_trace" object-write "$update_writes" &&
@@ -891,6 +892,7 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 		test_cache_tree_update_metrics .git/update.trace 1 0 3 1 0 0 2 1 &&
 		test_trace2_data cache_tree update/entries-visited-total 3 <.git/update.trace &&
 		test_trace2_data cache_tree update/entry-object-checks-total 3 <.git/update.trace &&
+		test_trace2_data cache_tree update/reused-child-parent-checks-total 1 <.git/update.trace &&
 		test_trace2_data cache_tree update/reuse-object-checks-total 1 <.git/update.trace &&
 		test_trace2_data cache_tree update/repair-tree-checks-total 0 <.git/update.trace
 	)
@@ -1012,7 +1014,8 @@ test_expect_success 'cache-tree update counts sparse-directory shortcuts separat
 		test_cmp .git/expect .git/actual &&
 		test_cmp .git/expect.err .git/actual.err &&
 		test_cmp .git/expect.index .git/index &&
-		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 1 0 2 1
+		test_cache_tree_update_metrics .git/update.trace 1 0 3 0 1 0 2 1 &&
+		test_trace2_data cache_tree update/reused-child-parent-checks-total 0 <.git/update.trace
 	)
 '
 

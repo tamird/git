@@ -5,11 +5,17 @@
 #include "tree-walk.h"
 
 struct cache_tree;
+enum cache_tree_sub_use {
+	CACHE_TREE_SUB_UNUSED,
+	CACHE_TREE_SUB_USED,
+	CACHE_TREE_SUB_REUSED_OBJECT_VERIFIED,
+};
+
 struct cache_tree_sub {
 	struct cache_tree *cache_tree;
 	int count;		/* internally used by update_one() */
 	int namelen;
-	int used;
+	enum cache_tree_sub_use used; /* transient during update_one() */
 	char name[FLEX_ARRAY];
 };
 

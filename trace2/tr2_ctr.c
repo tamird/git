@@ -242,6 +242,14 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "cache_tree",
 		.name = "update/entry-object-check-ns-total",
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECKS] = {
+		.category = "cache_tree",
+		.name = "update/reused-child-parent-checks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECK_NS] = {
+		.category = "cache_tree",
+		.name = "update/reused-child-parent-check-ns-total",
+	},
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECKS] = {
 		.category = "cache_tree",
 		.name = "update/reuse-object-checks-total",
@@ -623,6 +631,9 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 
 			if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS) {
 				name = "update/entry-object-check-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECK_NS) {
+				name = "update/reused-child-parent-check-us-total";
 				value /= 1000;
 			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS) {
 				name = "update/reuse-object-check-us-total";

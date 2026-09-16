@@ -518,6 +518,7 @@ static int must_check_existence(const struct cache_entry *ce)
 struct cache_tree_update_stats {
 	uint64_t nodes, reused, sparse, hash_only;
 	uint64_t entries_visited, entry_object_checks, entry_object_check_ns;
+	uint64_t reused_child_parent_checks, reused_child_parent_check_ns;
 	uint64_t reuse_object_checks, reuse_object_check_ns;
 	uint64_t repair_tree_checks, repair_tree_check_ns, hash_only_ns;
 	uint64_t object_write_calls, object_write_ns;
@@ -553,6 +554,10 @@ static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
 			   stats->entry_object_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_ENTRY_OBJECT_CHECK_NS,
 			   stats->entry_object_check_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECKS,
+			   stats->reused_child_parent_checks);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSED_CHILD_PARENT_CHECK_NS,
+			   stats->reused_child_parent_check_ns);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECKS,
 			   stats->reuse_object_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS,
@@ -621,7 +626,8 @@ static int update_one(struct cache_tree *it,
 		      int baselen,
 		      int *skip_count,
 		      int flags,
-		      struct cache_tree_update_stats *stats)
+		      struct cache_tree_update_stats *stats,
+		      int *reused_object)
 {
 	struct strbuf buffer;
 	int missing_ok = flags & WRITE_TREE_MISSING_OK;
@@ -635,6 +641,8 @@ static int update_one(struct cache_tree *it,
 	if (stats)
 		stats->nodes++;
 	*skip_count = 0;
+	if (reused_object)
+		*reused_object = 0;
 
 	/*
 	 * If the first entry of this region is a sparse directory
@@ -665,6 +673,8 @@ static int update_one(struct cache_tree *it,
 				      stats ? &stats->reuse_object_check_ns : NULL)) {
 			if (stats)
 				stats->reused++;
+			if (reused_object)
+				*reused_object = 1;
 			return it->entry_count;
 		}
 	}
@@ -675,7 +685,7 @@ static int update_one(struct cache_tree *it,
 	 * should not be in the result.
 	 */
 	for (i = 0; i < it->subtree_nr; i++)
-		it->down[i]->used = 0;
+		it->down[i]->used = CACHE_TREE_SUB_UNUSED;
 
 	/*
 	 * Find the subtrees and update them.
@@ -685,7 +695,7 @@ static int update_one(struct cache_tree *it,
 		const struct cache_entry *ce = cache[i];
 		struct cache_tree_sub *sub;
 		const char *path, *slash;
-		int pathlen, sublen, subcnt, subskip;
+		int pathlen, sublen, subcnt, subskip, sub_reused;
 
 		path = ce->name;
 		pathlen = ce_namelen(ce);
@@ -711,7 +721,7 @@ static int update_one(struct cache_tree *it,
 				    path,
 				    baselen + sublen + 1,
 				    &subskip,
-				    flags, stats);
+				    flags, stats, &sub_reused);
 		if (subcnt < 0)
 			return subcnt;
 		if (!subcnt)
@@ -719,7 +729,8 @@ static int update_one(struct cache_tree *it,
 		i += subcnt;
 		sub->count = subcnt; /* to be used in the next loop */
 		*skip_count += subskip;
-		sub->used = 1;
+		sub->used = sub_reused ? CACHE_TREE_SUB_REUSED_OBJECT_VERIFIED :
+					 CACHE_TREE_SUB_USED;
 	}
 
 	discard_unused_subtrees(it);
@@ -739,7 +750,8 @@ static int update_one(struct cache_tree *it,
 		unsigned mode;
 		int expected_missing = 0;
 		int contains_ita = 0;
-		int ce_missing_ok, oid_is_null;
+		int ce_missing_ok, oid_is_null, object_exists = 1;
+		uint64_t object_check_ns = 0;
 
 		path = ce->name;
 		pathlen = ce_namelen(ce);
@@ -774,14 +786,24 @@ static int update_one(struct cache_tree *it,
 		ce_missing_ok = mode == S_IFGITLINK || missing_ok ||
 			!must_check_existence(ce);
 		oid_is_null = is_null_oid(oid);
-		if (stats && !oid_is_null && !ce_missing_ok)
-			stats->entry_object_checks++;
-		if (oid_is_null ||
-		    (!ce_missing_ok &&
-		     !update_has_object(oid,
-					ODB_HAS_OBJECT_RECHECK_PACKED |
-						ODB_HAS_OBJECT_FETCH_PROMISOR,
-					stats ? &stats->entry_object_check_ns : NULL))) {
+		if (!oid_is_null && !ce_missing_ok) {
+			if (stats)
+				stats->entry_object_checks++;
+			object_exists = update_has_object(oid,
+							  ODB_HAS_OBJECT_RECHECK_PACKED |
+								  ODB_HAS_OBJECT_FETCH_PROMISOR,
+							  stats ? &object_check_ns : NULL);
+			if (stats) {
+				stats->entry_object_check_ns += object_check_ns;
+				if (sub && sub->used ==
+						   CACHE_TREE_SUB_REUSED_OBJECT_VERIFIED) {
+					stats->reused_child_parent_checks++;
+					stats->reused_child_parent_check_ns +=
+						object_check_ns;
+				}
+			}
+		}
+		if (oid_is_null || !object_exists) {
 			strbuf_release(&buffer);
 			if (expected_missing)
 				return -1;
@@ -907,7 +929,7 @@ int cache_tree_update(struct index_state *istate, int flags)
 	if (!inflight)
 		odb_transaction_begin_or_die(the_repository->objects, &transaction, 0);
 	i = update_one(root, istate->cache, istate->cache_nr,
-		       "", 0, &skip, flags, trace);
+		       "", 0, &skip, flags, trace, NULL);
 	if (!inflight) {
 		if (trace) {
 			int saved_errno = errno;
