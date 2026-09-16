@@ -290,9 +290,10 @@ struct odb_source *odb_add_to_alternates_memory(struct object_database *odb,
  * messages themselves.
  */
 /*
- * Optional results from one content read. Nonzero leaf-source attempts are
- * not winners. Recursive reads use their own object_info and do not update
- * these results; a hash-algorithm conversion of this read keeps them.
+ * Optional results from one content read or an opted-in size-only read.
+ * Nonzero leaf-source attempts are not winners. Recursive reads use their
+ * own object_info and do not update these results; a hash-algorithm
+ * conversion of this read keeps them.
  */
 enum odb_read_result_kind {
 	ODB_READ_RESULT_UNKNOWN,
@@ -311,7 +312,7 @@ enum odb_packed_lookup_phase {
 };
 
 /*
- * Disjoint parts of find_pack_entry for one optional content-read result.
+ * Disjoint parts of find_pack_entry for one content or sampled size read.
  * MIDX resolution includes pack preparation, validation, bad-object checking
  * and offset decoding; it is not open-only time. Fallback includes the whole
  * non-MIDX loop. Store preparation and other residual work remain in the
@@ -328,6 +329,15 @@ struct odb_read_result {
 	enum odb_read_result_kind kind;
 	uint64_t inmemory_nonzero, loose_nonzero, packed_nonzero;
 	int invalid;
+	/* A packed size-only winner leaves kind UNKNOWN; source_infop names it. */
+	int size_info_enabled;
+	/* Disjoint, sampled packed size-read work; each phase validates itself. */
+	uint64_t packed_size_header_count, packed_size_header_ns;
+	uint64_t packed_size_base_count, packed_size_base_ns;
+	uint64_t packed_size_decode_count, packed_size_decode_ns;
+	uint64_t packed_size_cache_hits;
+	int packed_size_header_invalid, packed_size_base_invalid;
+	int packed_size_decode_invalid;
 	/*
 	 * Inclusive cache_or_unpack_entry calls, including nonzero-source
 	 * outcomes before a later winner. This is not inflate-only time.
@@ -362,7 +372,7 @@ struct odb_read_result {
 	uint64_t packed_base_descent_one_pushed_delta_count;
 	uint64_t packed_base_descent_one_pushed_delta_ns;
 	/*
-	 * Inclusive find_pack_entry calls for this content read, including
+	 * Inclusive find_pack_entry calls for this content or sampled size read,
 	 * misses before a later source wins. Explicit second-read cache
 	 * refresh precedes this interval; packed-content decoding follows it.
 	 */
@@ -493,7 +503,7 @@ struct object_info {
 	 */
 	struct odb_source_info *source_infop;
 
-	/* Optional, caller-owned diagnostics for this content read only. */
+	/* Optional, caller-owned diagnostics for this read. */
 	struct odb_read_result *read_resultp;
 
 	/*

@@ -48,7 +48,8 @@ void odb_source_record_read_result(struct odb_source *source,
 		break;
 	case ODB_SOURCE_PACKED:
 		nonzero = &result->packed_nonzero;
-		if (!ret && result->kind != ODB_READ_RESULT_PACKED_CACHE_COPY &&
+		if (!ret && !result->size_info_enabled &&
+		    result->kind != ODB_READ_RESULT_PACKED_CACHE_COPY &&
 		    result->kind != ODB_READ_RESULT_PACKED_UNPACK)
 			result->invalid = 1;
 		break;

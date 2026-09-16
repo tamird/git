@@ -9,6 +9,8 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "object-file.h"
+#include "odb/source.h"
+#include "parse.h"
 #include "hashmap.h"
 #include "mem-pool.h"
 #include "oid-array.h"
@@ -103,6 +105,189 @@ struct inexact_rename_stats {
 	uint64_t score_bound_floor_ready, score_bound_rejectable;
 	uint64_t score_bound_rejectable_bytes;
 };
+
+struct inexact_size_read_stats {
+	uint64_t selected, packed, loose, inmemory, packed_misses;
+	uint64_t location_count, location_ns;
+	uint64_t lookup_count[ODB_PACKED_LOOKUP_PHASE_NR];
+	uint64_t lookup_ns[ODB_PACKED_LOOKUP_PHASE_NR];
+	uint64_t header_ns, base_ns, decode_ns;
+	uint64_t header_count, base_count, decode_count, cache_hits;
+	int counts_invalid, location_invalid, lookup_invalid;
+	int header_invalid, base_invalid, decode_invalid;
+};
+
+static void size_sample_add(uint64_t *sum, uint64_t value, int *invalid)
+{
+	if (*invalid)
+		return;
+	if (value > (uint64_t)INTMAX_MAX - *sum)
+		*invalid = 1;
+	else
+		*sum += value;
+}
+
+static void record_size_read_sample(const struct odb_read_result *result,
+				    const struct odb_source *source, void *data)
+{
+	struct inexact_size_read_stats *stats = data;
+	int i;
+
+	if (stats->selected == (uint64_t)INTMAX_MAX)
+		stats->counts_invalid = 1;
+	else
+		stats->selected++;
+	if (result->invalid || !source)
+		stats->counts_invalid = 1;
+	if (source) {
+		switch (source->type) {
+		case ODB_SOURCE_PACKED:
+			size_sample_add(&stats->packed, 1, &stats->counts_invalid);
+			break;
+		case ODB_SOURCE_LOOSE:
+			size_sample_add(&stats->loose, 1, &stats->counts_invalid);
+			break;
+		case ODB_SOURCE_INMEMORY:
+			size_sample_add(&stats->inmemory, 1, &stats->counts_invalid);
+			break;
+		default:
+			stats->counts_invalid = 1;
+			break;
+		}
+	}
+	size_sample_add(&stats->packed_misses, result->packed_nonzero,
+			&stats->counts_invalid);
+	if (result->packed_entry_location_invalid)
+		stats->location_invalid = 1;
+	size_sample_add(&stats->location_ns, result->packed_entry_location_ns,
+			&stats->location_invalid);
+	size_sample_add(&stats->location_count,
+			result->packed_entry_location_attempt_count,
+			&stats->location_invalid);
+	if (result->packed_lookup.invalid)
+		stats->lookup_invalid = 1;
+	for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++)
+		size_sample_add(&stats->lookup_count[i],
+				result->packed_lookup.count[i],
+				&stats->lookup_invalid);
+	for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++)
+		size_sample_add(&stats->lookup_ns[i], result->packed_lookup.ns[i],
+				&stats->lookup_invalid);
+	if (result->packed_size_header_invalid)
+		stats->header_invalid = 1;
+	if (result->packed_size_base_invalid)
+		stats->base_invalid = 1;
+	if (result->packed_size_decode_invalid)
+		stats->decode_invalid = 1;
+	size_sample_add(&stats->header_ns, result->packed_size_header_ns,
+			&stats->header_invalid);
+	size_sample_add(&stats->base_ns, result->packed_size_base_ns,
+			&stats->base_invalid);
+	size_sample_add(&stats->decode_ns, result->packed_size_decode_ns,
+			&stats->decode_invalid);
+	size_sample_add(&stats->header_count, result->packed_size_header_count,
+			&stats->header_invalid);
+	size_sample_add(&stats->base_count, result->packed_size_base_count,
+			&stats->base_invalid);
+	size_sample_add(&stats->decode_count, result->packed_size_decode_count,
+			&stats->decode_invalid);
+	size_sample_add(&stats->cache_hits, result->packed_size_cache_hits,
+			&stats->base_invalid);
+}
+
+static int size_sample_estimate(uint64_t ns, uint64_t eligible,
+				uint64_t selected, uint64_t *estimated)
+{
+	if (!selected || ns > UINT64_MAX / eligible)
+		return 0;
+	*estimated = ns * eligible / selected / 1000;
+	return *estimated <= (uint64_t)INTMAX_MAX;
+}
+
+static int trace_sample_estimate(struct repository *repo, const char *key,
+				 uint64_t ns, uint64_t eligible, uint64_t selected,
+				 int invalid)
+{
+	uint64_t estimated;
+
+	if (invalid || !size_sample_estimate(ns, eligible, selected, &estimated))
+		return 0;
+	trace2_data_intmax("diff", repo, key, estimated);
+	return 1;
+}
+
+static void trace_size_read_sample(struct repository *repo,
+				   const struct diff_size_read_sample *sample,
+				   const struct inexact_size_read_stats *stats)
+{
+	int saved_errno = errno;
+	int lookup_valid;
+	int i;
+	uint64_t lookup_estimated[ODB_PACKED_LOOKUP_PHASE_NR];
+
+	if (!stats->selected)
+		return;
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/stride", 64);
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/eligible", sample->eligible);
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/selected", stats->selected);
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/counts-valid", !stats->counts_invalid);
+	if (!stats->counts_invalid) {
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-packed", stats->packed);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-loose", stats->loose);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-inmemory", stats->inmemory);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/packed-misses", stats->packed_misses);
+	}
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/location-valid",
+			   trace_sample_estimate(repo, "rename/inexact/size-odb-sample/estimated-location-us",
+						 stats->location_ns, sample->eligible,
+						 stats->selected, stats->location_invalid));
+	if (!stats->location_invalid)
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/location-attempts",
+				   stats->location_count);
+	lookup_valid = !stats->lookup_invalid;
+	for (i = 0; lookup_valid && i < ODB_PACKED_LOOKUP_PHASE_NR; i++)
+		lookup_valid = size_sample_estimate(stats->lookup_ns[i],
+						    sample->eligible, stats->selected,
+						    &lookup_estimated[i]);
+	if (lookup_valid) {
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/estimated-midx-search-us",
+				   lookup_estimated[ODB_PACKED_LOOKUP_MIDX_SEARCH]);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/estimated-midx-resolve-us",
+				   lookup_estimated[ODB_PACKED_LOOKUP_MIDX_RESOLVE]);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/estimated-fallback-us",
+				   lookup_estimated[ODB_PACKED_LOOKUP_FALLBACK]);
+	}
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/midx-valid",
+			   lookup_valid);
+	if (lookup_valid)
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/midx-search-attempts",
+				   stats->lookup_count[ODB_PACKED_LOOKUP_MIDX_SEARCH]);
+	if (!stats->counts_invalid && !stats->header_invalid)
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/header-attempts",
+				   stats->header_count);
+	if (!stats->counts_invalid && !stats->base_invalid) {
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/base-attempts",
+				   stats->base_count);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/delta-cache-hits",
+				   stats->cache_hits);
+	}
+	if (!stats->counts_invalid && !stats->decode_invalid)
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/decode-attempts",
+				   stats->decode_count);
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/header-valid",
+			   trace_sample_estimate(repo, "rename/inexact/size-odb-sample/estimated-header-us",
+						 stats->header_ns, sample->eligible,
+						 stats->selected, stats->header_invalid));
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/base-valid",
+			   trace_sample_estimate(repo, "rename/inexact/size-odb-sample/estimated-base-cache-us",
+						 stats->base_ns, sample->eligible,
+						 stats->selected, stats->base_invalid));
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/decode-valid",
+			   trace_sample_estimate(repo, "rename/inexact/size-odb-sample/estimated-decode-us",
+						 stats->decode_ns, sample->eligible,
+						 stats->selected, stats->decode_invalid));
+	errno = saved_errno;
+}
 
 struct similarity_score_bound {
 	unsigned long src_size, dst_size;
@@ -1568,6 +1753,11 @@ void diffcore_rename_extended(struct diff_options *options,
 	int num_sources, want_copies, limit_result;
 	struct inexact_rename_stats inexact_stats;
 	struct inexact_rename_stats *stats = NULL;
+	struct inexact_size_read_stats size_read_stats;
+	struct diff_size_read_sample size_read_sample = {
+		.report = record_size_read_sample,
+		.data = &size_read_stats,
+	};
 	struct progress *progress = NULL;
 	struct mem_pool local_pool;
 	struct dir_rename_info info;
@@ -1766,6 +1956,10 @@ void diffcore_rename_extended(struct diff_options *options,
 		dpf_options.missing_object_cb = inexact_prefetch;
 		dpf_options.missing_object_data = &prefetch_options;
 	}
+	if (stats && git_env_bool("GIT_TRACE2_RENAME_SIZE_SAMPLE", 1)) {
+		memset(&size_read_stats, 0, sizeof(size_read_stats));
+		dpf_options.size_read_sample = &size_read_sample;
+	}
 
 	CALLOC_ARRAY(mx, st_mult(NUM_CANDIDATE_PER_DST, num_destinations));
 	for (dst_cnt = i = 0; i < rename_dst_nr; i++) {
@@ -1828,6 +2022,9 @@ void diffcore_rename_extended(struct diff_options *options,
 					     &info, dirs_removed);
 	free(mx);
 	trace_inexact_rename(options->repo, stats);
+	if (dpf_options.size_read_sample)
+		trace_size_read_sample(options->repo, &size_read_sample,
+				       &size_read_stats);
 	trace2_region_leave("diff", "inexact renames", options->repo);
 
  cleanup:

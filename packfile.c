@@ -1467,6 +1467,23 @@ static int packed_content_time(uint64_t *now)
 #endif
 }
 
+static void packed_size_phase_end(uint64_t *count, uint64_t *ns,
+				  int *invalid, uint64_t started, int timed)
+{
+	uint64_t finished;
+
+	if (*invalid)
+		return;
+	if (!timed || packed_content_time(&finished) || finished < started ||
+	    *count == (uint64_t)INTMAX_MAX ||
+	    finished - started > UINT64_MAX - *ns) {
+		*invalid = 1;
+		return;
+	}
+	(*count)++;
+	*ns += finished - started;
+}
+
 static void packed_base_descent_end(struct odb_read_result *result, uint64_t started,
 				    int delta_stack_nr)
 {
@@ -1531,7 +1548,12 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 	off_t curpos = obj_offset;
 	enum object_type type = OBJ_NONE;
 	uint32_t pack_pos;
+	struct odb_read_result *size_result = oi->read_resultp;
 	int ret;
+
+	if (size_result &&
+	    (!size_result->size_info_enabled || oi->contentp || !oi->sizep))
+		size_result = NULL;
 
 	/*
 	 * We always get the representation type, but only convert it to
@@ -1569,22 +1591,55 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 		if (!*oi->contentp)
 			type = OBJ_BAD;
 	} else if (oi->sizep || oi->typep || oi->delta_base_oid) {
+		uint64_t started = 0;
+		int timed = size_result &&
+			    !size_result->packed_size_header_invalid &&
+			    !packed_content_time(&started);
+
 		type = unpack_object_header(p, &w_curs, &curpos, &size);
+		if (size_result)
+			packed_size_phase_end(&size_result->packed_size_header_count,
+					      &size_result->packed_size_header_ns,
+					      &size_result->packed_size_header_invalid,
+					      started, timed);
 	}
 
 	if (!oi->contentp && oi->sizep) {
 		if (type == OBJ_OFS_DELTA || type == OBJ_REF_DELTA) {
 			off_t tmp_pos = curpos;
-			off_t base_offset = get_delta_base(p, &w_curs, &tmp_pos,
-							   type, obj_offset);
+			off_t base_offset;
+			int cached;
+			uint64_t started = 0;
+			int timed = size_result &&
+				    !size_result->packed_size_base_invalid &&
+				    !packed_content_time(&started);
+
+			base_offset = get_delta_base(p, &w_curs, &tmp_pos,
+						     type, obj_offset);
 			if (!base_offset) {
+				if (size_result)
+					packed_size_phase_end(
+						&size_result->packed_size_base_count,
+						&size_result->packed_size_base_ns,
+						&size_result->packed_size_base_invalid,
+						started, timed);
 				ret = -1;
 				goto out;
 			}
 			/* Installed packs are immutable; validate the header and base first. */
-			if (!get_cached_delta_size(p, obj_offset, &size)) {
+			cached = get_cached_delta_size(p, obj_offset, &size);
+			if (size_result)
+				packed_size_phase_end(&size_result->packed_size_base_count,
+						      &size_result->packed_size_base_ns,
+						      &size_result->packed_size_base_invalid,
+						      started, timed);
+			if (!cached) {
 				int traced = trace2_is_enabled();
 				int saved_errno = errno;
+				uint64_t decode_started = 0;
+				int decode_timed = size_result &&
+						   !size_result->packed_size_decode_invalid &&
+						   !packed_content_time(&decode_started);
 
 				if (traced) {
 					trace2_timer_start(
@@ -1598,11 +1653,23 @@ int packed_object_info_with_index_pos(struct odb_source_packed *source,
 						TRACE2_TIMER_ID_PACK_DELTA_SIZE_CACHE_MISS_DECODE);
 					errno = saved_errno;
 				}
+				if (size_result)
+					packed_size_phase_end(
+						&size_result->packed_size_decode_count,
+						&size_result->packed_size_decode_ns,
+						&size_result->packed_size_decode_invalid,
+						decode_started, decode_timed);
 				if (size == 0) {
 					ret = -1;
 					goto out;
 				}
 				cache_delta_size(p, obj_offset, size);
+			} else if (size_result) {
+				if (size_result->packed_size_cache_hits ==
+				    (uint64_t)INTMAX_MAX)
+					size_result->packed_size_base_invalid = 1;
+				else
+					size_result->packed_size_cache_hits++;
 			}
 		}
 		*oi->sizep = size;

@@ -4715,6 +4715,7 @@ retry:
 	} else {
 		size_t size_st = 0;
 		int saved_errno;
+		struct odb_read_result size_read_result;
 		struct odb_source_info source_info = { 0 };
 		struct object_info info = {
 			.sizep = &size_st,
@@ -4727,6 +4728,15 @@ retry:
 			 * the size is sufficient.
 			 */
 			info.contentp = &s->data;
+		if (size_only && options && options->size_read_sample &&
+		    (!s->oid.algo ||
+		     s->oid.algo == hash_algo_by_ptr(r->hash_algo)) &&
+		    options->size_read_sample->eligible != UINT64_MAX &&
+		    !(++options->size_read_sample->eligible & 63)) {
+			memset(&size_read_result, 0, sizeof(size_read_result));
+			size_read_result.size_info_enabled = 1;
+			info.read_resultp = &size_read_result;
+		}
 
 		if (options && options->missing_object_cb) {
 			if (!odb_read_object_info_extended(r->objects, &s->oid, &info,
@@ -4740,6 +4750,13 @@ retry:
 			die("unable to read %s", oid_to_hex(&s->oid));
 
 object_read:
+	if (info.read_resultp) {
+		saved_errno = errno;
+		options->size_read_sample->report(info.read_resultp,
+						  source_info.source,
+						  options->size_read_sample->data);
+		errno = saved_errno;
+	}
 		s->size = cast_size_t_to_ulong(size_st);
 		s->zero_size_known = size_only && !s->size;
 		if (size_only || check_binary) {

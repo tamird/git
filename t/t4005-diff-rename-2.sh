@@ -300,4 +300,87 @@ test_expect_success 'empty ODB destination size is populated once' '
 	)
 '
 
+test_expect_success 'inexact size sampling keeps packed misses and loose winners' '
+	test_create_repo sampled-size &&
+	(
+		cd sampled-size &&
+		test_seq -f "source-%03g" 1 130 >sources &&
+		while read name
+		do
+			test_seq 1 1200 >"$name" &&
+			printf "%s\n" "$name" >>"$name" || return 1
+		done <sources &&
+		git add source-* &&
+		git commit -qm base &&
+		git repack -ad --window=250 --depth=50 &&
+		git multi-pack-index write &&
+		printf "loose source\n" >>source-064 &&
+		git add source-064 &&
+		git commit -qm loose &&
+		old=$(git rev-parse HEAD) &&
+		selected_oid=$(git rev-parse "$old:source-128") &&
+		git verify-pack -v .git/objects/pack/*.idx >pack-info &&
+		awk -v oid="$selected_oid" \
+			"\$1 == oid { found++; delta = (\$2 == \"blob\" && NF == 7 && \$6 >= 1) }
+			 END { exit !(found == 1 && delta) }" pack-info &&
+		git rm -fq -- source-* &&
+		test_seq 1 4000 >destination &&
+		git add destination &&
+		git commit -qm destination &&
+		printf "A\tdestination\n" >expect &&
+		while read name
+		do
+			printf "D\t%s\n" "$name" >>expect || return 1
+		done <sources &&
+		git diff-tree -r -M --name-status "$old" HEAD >plain &&
+		test_cmp expect plain &&
+		GIT_TRACE2_EVENT="$PWD/size-sample.trace" \
+			git diff-tree -r -M --name-status "$old" HEAD >sampled &&
+		GIT_TRACE2_EVENT="$PWD/size-disabled.trace" \
+		GIT_TRACE2_RENAME_SIZE_SAMPLE=0 \
+			git diff-tree -r -M --name-status "$old" HEAD >disabled &&
+		test_cmp plain sampled &&
+		test_cmp plain disabled &&
+		test_trace2_data diff rename/inexact/size-odb-sample/stride 64 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/eligible 130 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/selected 2 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/counts-valid 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/winner-loose 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/winner-packed 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/packed-misses 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/location-valid 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/location-attempts 2 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/estimated-location-us \
+			"[0-9][0-9]*" <size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/midx-valid 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/midx-search-attempts 2 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/estimated-midx-search-us \
+			"[0-9][0-9]*" <size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/header-valid 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/header-attempts 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/base-attempts \
+			1 <size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/decode-attempts \
+			1 <size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/delta-cache-hits 0 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/estimated-header-us \
+			"[0-9][0-9]*" <size-sample.trace &&
+		test_grep ! "size-odb-sample" size-disabled.trace
+	)
+'
+
 test_done

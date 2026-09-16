@@ -9,6 +9,8 @@
 struct diff_options;
 struct mem_pool;
 struct oid_array;
+struct odb_read_result;
+struct odb_source;
 struct repository;
 struct strintmap;
 struct strmap;
@@ -90,6 +92,13 @@ void fill_filespec(struct diff_filespec *, const struct object_id *,
  */
 void diff_queued_diff_prefetch(void *repository);
 
+/* Borrowed for one inexact-rename operation. Sampling starts at an ODB read. */
+struct diff_size_read_sample {
+	uint64_t eligible;
+	void (*report)(const struct odb_read_result *, const struct odb_source *, void *);
+	void *data;
+};
+
 struct diff_populate_filespec_options {
 	unsigned check_size_only : 1;
 	unsigned check_binary : 1;
@@ -100,6 +109,7 @@ struct diff_populate_filespec_options {
 	 */
 	void (*missing_object_cb)(void *);
 	void *missing_object_data;
+	struct diff_size_read_sample *size_read_sample;
 };
 int diff_populate_filespec(struct repository *, struct diff_filespec *,
 			   const struct diff_populate_filespec_options *);

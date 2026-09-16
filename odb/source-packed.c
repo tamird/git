@@ -124,11 +124,14 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 {
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 	struct packed_git *bad_pack = NULL;
-	struct odb_read_result *result =
-		oi && oi->contentp ? oi->read_resultp : NULL;
+	struct odb_read_result *result = oi ? oi->read_resultp : NULL;
 	struct pack_entry e;
 	uint64_t started = 0, finished;
 	int ret, found, timed = 0;
+
+	if (result && !oi->contentp &&
+	    (!oi->sizep || !result->size_info_enabled))
+		result = NULL;
 
 	/*
 	 * In case the first read didn't surface the object, we have to reload
