@@ -13,20 +13,63 @@
 #include "packfile.h"
 #include "pack-bitmap.h"
 #include "strbuf.h"
+#include "trace2.h"
+
+/* Only cache-tree reuse existence checks request this diagnostic. */
+struct packed_lookup_probe {
+	struct odb_packed_lookup lookup;
+	uint64_t started, attempt_ns;
+	uint64_t prepare_count, prepare_ns;
+	int invalid;
+};
+
+static int packed_entry_location_time(uint64_t *now);
+
+static void packed_probe_prepare(struct odb_source_packed *store,
+				 enum odb_prepare_flags flags,
+				 struct packed_lookup_probe *probe)
+{
+	uint64_t started, finished;
+	int timed = 0;
+
+	if (!probe->invalid &&
+	    (!store->initialized || (flags & ODB_PREPARE_FLUSH_CACHES))) {
+		if (packed_entry_location_time(&started))
+			probe->invalid = 1;
+		else
+			timed = 1;
+	}
+
+	odb_source_prepare(&store->base, flags);
+	if (!timed || probe->invalid)
+		return;
+	if (packed_entry_location_time(&finished) || finished < started ||
+	    probe->prepare_count == (uint64_t)INTMAX_MAX ||
+	    finished - started > UINT64_MAX - probe->prepare_ns) {
+		probe->invalid = 1;
+		return;
+	}
+	probe->prepare_count++;
+	probe->prepare_ns += finished - started;
+}
 
 static int find_pack_entry(struct odb_source_packed *store,
 			   const struct object_id *oid,
 			   struct pack_entry *e,
 			   enum object_info_flags flags,
 			   struct packed_git **bad_pack,
-			   struct odb_packed_lookup *lookup)
+			   struct odb_packed_lookup *lookup,
+			   struct packed_lookup_probe *probe)
 {
 	struct packfile_list_entry *l;
 	enum midx_fill_result midx_result = MIDX_FILL_MISS;
 	uint64_t started;
 	int found = 0;
 
-	odb_source_prepare(&store->base, 0);
+	if (probe)
+		packed_probe_prepare(store, 0, probe);
+	else
+		odb_source_prepare(&store->base, 0);
 	if (store->midx) {
 		midx_result = midx_fill_entry_with_lookup(store->midx, oid, e,
 						      bad_pack, lookup);
@@ -125,6 +168,10 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 	struct packed_git *bad_pack = NULL;
 	struct odb_read_result *result = oi ? oi->read_resultp : NULL;
+	struct odb_packed_lookup *lookup;
+	struct packed_lookup_probe probe;
+	struct packed_lookup_probe *diagnostic =
+		!oi && (flags & OBJECT_INFO_TRACE_PACKED_LOOKUP) ? &probe : NULL;
 	struct pack_entry e;
 	uint64_t started = 0, finished;
 	int ret, found, timed = 0;
@@ -132,19 +179,41 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	if (result && !oi->contentp &&
 	    (!oi->sizep || !result->size_info_enabled))
 		result = NULL;
+	lookup = result ? &result->packed_lookup : NULL;
+	if (diagnostic)
+		lookup = &diagnostic->lookup;
+	if (diagnostic) {
+		memset(diagnostic, 0, sizeof(*diagnostic));
+		if (packed_entry_location_time(&diagnostic->started)) {
+			diagnostic->invalid = 1;
+			diagnostic->lookup.invalid = 1;
+		}
+	}
 
 	/*
 	 * In case the first read didn't surface the object, we have to reload
 	 * packfiles. This may cause us to discover new packfiles that have
 	 * been added since the last time we have prepared the packfile store.
 	 */
-	if (flags & OBJECT_INFO_SECOND_READ)
-		odb_source_prepare(source, ODB_PREPARE_FLUSH_CACHES);
+	if (flags & OBJECT_INFO_SECOND_READ) {
+		if (diagnostic)
+			packed_probe_prepare(packed, ODB_PREPARE_FLUSH_CACHES,
+					     diagnostic);
+		else
+			odb_source_prepare(source, ODB_PREPARE_FLUSH_CACHES);
+	}
 
 	if (result && !result->packed_entry_location_invalid)
 		timed = !packed_entry_location_time(&started);
 	found = find_pack_entry(packed, oid, &e, flags, &bad_pack,
-				result ? &result->packed_lookup : NULL);
+				lookup, diagnostic);
+	if (diagnostic && !diagnostic->invalid) {
+		if (packed_entry_location_time(&finished) ||
+		    finished < diagnostic->started)
+			diagnostic->invalid = 1;
+		else
+			diagnostic->attempt_ns = finished - diagnostic->started;
+	}
 	if (result && !result->packed_entry_location_invalid) {
 		if (!timed || packed_entry_location_time(&finished) ||
 		    finished < started ||
@@ -186,6 +255,32 @@ out:
 	if (ret < 0 && bad_pack && errmsg)
 		strbuf_addf(errmsg, _("packed object %s (stored in %s) is corrupt"),
 			    oid_to_hex(oid), bad_pack->pack_name);
+	if (diagnostic) {
+		int saved_errno = errno;
+
+		/* An invalid attempt contributes no partial stage measurements. */
+		if (diagnostic->invalid || lookup->invalid) {
+			trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID, 1);
+		} else {
+			/* Keep these values in the Trace2 counter ID order. */
+			const uint64_t values[] = {
+				1,
+				diagnostic->attempt_ns,
+				diagnostic->prepare_count,
+				diagnostic->prepare_ns,
+				lookup->count[ODB_PACKED_LOOKUP_MIDX_SEARCH],
+				lookup->ns[ODB_PACKED_LOOKUP_MIDX_SEARCH],
+				lookup->count[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
+				lookup->ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
+				lookup->count[ODB_PACKED_LOOKUP_FALLBACK],
+				lookup->ns[ODB_PACKED_LOOKUP_FALLBACK],
+			};
+
+			trace2_counter_add_many(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS,
+						values, ARRAY_SIZE(values));
+		}
+		errno = saved_errno;
+	}
 
 	return ret;
 }
@@ -197,7 +292,7 @@ static int odb_source_packed_read_object_stream(struct odb_stream **out,
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 	struct pack_entry e;
 
-	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL))
+	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL, NULL))
 		return -1;
 
 	return packfile_read_object_stream(out, oid, e.p, e.offset);
@@ -703,7 +798,7 @@ static int odb_source_packed_freshen_object(struct odb_source *source,
 		timesp = &times;
 	}
 
-	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL))
+	if (!find_pack_entry(packed, oid, &e, 0, NULL, NULL, NULL))
 		return 0;
 	if (e.p->is_cruft)
 		return 0;

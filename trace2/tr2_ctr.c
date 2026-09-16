@@ -258,6 +258,10 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "cache_tree",
 		.name = "update/reuse-object-check-ns-total",
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_PROBED_CHECKS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-object-probed-checks-total",
+	},
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECKS] = {
 		.category = "cache_tree",
 		.name = "update/repair-tree-checks-total",
@@ -290,6 +294,50 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "update/owned-odb-commit-ns-total",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPT_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-attempt-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_PREPARES] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-prepares-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_PREPARE_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-prepare-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_SEARCHES] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-midx-searches-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_SEARCH_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-midx-search-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_RESOLVES] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-midx-resolves-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_RESOLVE_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-midx-resolve-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_FALLBACKS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-fallbacks-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_FALLBACK_NS] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-fallback-ns-total",
+	},
+	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID] = {
+		.category = "cache_tree",
+		.name = "update/reuse-packed-invalid-total",
+	},
 
 	/* Add additional metadata before here. */
 };
@@ -313,9 +361,10 @@ static void add_checked_counter(struct tr2_counter_block *block,
 	}
 }
 
-void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
+static inline void tr2_counter_increment_for_ctx(struct tr2tls_thread_ctx *ctx,
+						 enum trace2_counter_id cid,
+						 uint64_t value)
 {
-	struct tr2tls_thread_ctx *ctx = tr2tls_get_self();
 	struct tr2_counter *c = &ctx->counter_block.counter[cid];
 
 	if (cid >= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID &&
@@ -343,6 +392,21 @@ void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
 	ctx->used_any_counter = 1;
 	if (tr2_counter_metadata[cid].want_per_thread_events)
 		ctx->used_any_per_thread_counter = 1;
+}
+
+void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value)
+{
+	tr2_counter_increment_for_ctx(tr2tls_get_self(), cid, value);
+}
+
+void tr2_counter_increment_many(enum trace2_counter_id first,
+				const uint64_t *values, size_t nr)
+{
+	struct tr2tls_thread_ctx *ctx = tr2tls_get_self();
+	size_t i;
+
+	for (i = 0; i < nr; i++)
+		tr2_counter_increment_for_ctx(ctx, first + i, values[i]);
 }
 
 void tr2_update_final_counters(void)
@@ -624,7 +688,7 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		int saved_errno = errno;
 
 		for (cid = TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS;
-		     cid <= TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS;
+		     cid <= TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID;
 		     cid++) {
 			const char *name = tr2_counter_metadata[cid].name;
 			uint64_t value = final_counter_block.counter[cid].value;
@@ -649,6 +713,21 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 				value /= 1000;
 			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_OWNED_ODB_COMMIT_NS) {
 				name = "update/owned-odb-commit-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPT_NS) {
+				name = "update/reuse-packed-attempt-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_PREPARE_NS) {
+				name = "update/reuse-packed-prepare-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_SEARCH_NS) {
+				name = "update/reuse-packed-midx-search-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_MIDX_RESOLVE_NS) {
+				name = "update/reuse-packed-midx-resolve-us-total";
+				value /= 1000;
+			} else if (cid == TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_FALLBACK_NS) {
+				name = "update/reuse-packed-fallback-us-total";
 				value /= 1000;
 			}
 			if (value <= INTMAX_MAX)

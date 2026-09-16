@@ -78,6 +78,8 @@ struct tr2_counter_block {
  * current thread.
  */
 void tr2_counter_increment(enum trace2_counter_id cid, uint64_t value);
+void tr2_counter_increment_many(enum trace2_counter_id first,
+				const uint64_t *values, size_t nr);
 
 /*
  * Add the current thread's counter data to the global totals.

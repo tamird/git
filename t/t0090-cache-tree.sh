@@ -8,6 +8,10 @@ cache-tree extension.
 
  . ./test-lib.sh
 
+test_lazy_prereq ODB_MONOTONIC_CLOCK '
+	test-tool trace2 012monotonic_clock
+'
+
 cmp_cache_tree () {
 	test-tool dump-cache-tree | sed -e '/#(ref)/d' >actual &&
 	sed "s/$OID_REGEX/SHA/" <actual >filtered &&
@@ -187,16 +191,22 @@ test_cache_tree_update_metrics () {
 		'[0-9][0-9]*' <"$update_trace" >/dev/null &&
 	for update_key in entry-object-check-us reused-child-parent-checks \
 		reused-child-parent-check-us reuse-object-checks \
-		reuse-object-check-us repair-tree-checks repair-tree-check-us hash-only-us
+		reuse-object-check-us reuse-object-probed-checks repair-tree-checks \
+		repair-tree-check-us hash-only-us \
+		reuse-packed-attempts reuse-packed-attempt-us reuse-packed-prepares \
+		reuse-packed-prepare-us reuse-packed-midx-searches \
+		reuse-packed-midx-search-us reuse-packed-midx-resolves \
+		reuse-packed-midx-resolve-us reuse-packed-fallbacks \
+		reuse-packed-fallback-us reuse-packed-invalid
 	do
 		test_trace2_data cache_tree "update/$update_key-total" \
 			'[0-9][0-9]*' <"$update_trace" >/dev/null || return 1
 	done &&
 	grep '"event":"data".*"category":"cache_tree","key":"update/' \
 		"$update_trace" >"$update_trace.data" &&
-	test_line_count = 20 "$update_trace.data" &&
+	test_line_count = 32 "$update_trace.data" &&
 	grep '"nesting":1,' "$update_trace.data" >"$update_trace.depth" &&
-	test_line_count = 20 "$update_trace.depth" &&
+	test_line_count = 32 "$update_trace.depth" &&
 	update_writes=$(cache_tree_update_value "$update_trace" object-write-calls) &&
 	update_commits=$(cache_tree_update_value "$update_trace" owned-odb-commit-calls) &&
 	test_cache_tree_update_time "$update_trace" object-write "$update_writes" &&
@@ -875,6 +885,11 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 	(
 		cd update-reuse &&
 		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		git repack -ad &&
+		git multi-pack-index write &&
+		b_tree=$(git rev-parse HEAD:b) &&
+		test_path_is_file .git/objects/pack/multi-pack-index &&
+		test_path_is_missing ".git/objects/$(test_oid_to_path "$b_tree")" &&
 		echo changed >a/file &&
 		git add a/file &&
 		cp .git/index .git/invalid.index &&
@@ -894,7 +909,50 @@ test_expect_success 'cache-tree update reports rebuilding and subtree reuse' '
 		test_trace2_data cache_tree update/entry-object-checks-total 3 <.git/update.trace &&
 		test_trace2_data cache_tree update/reused-child-parent-checks-total 1 <.git/update.trace &&
 		test_trace2_data cache_tree update/reuse-object-checks-total 1 <.git/update.trace &&
+		test_trace2_data cache_tree update/reuse-object-probed-checks-total 1 <.git/update.trace &&
+		if test_have_prereq ODB_MONOTONIC_CLOCK
+		then
+			test_trace2_data cache_tree update/reuse-packed-attempts-total 1 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-midx-searches-total 1 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-midx-resolves-total 1 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-fallbacks-total 0 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-invalid-total 0 <.git/update.trace
+		else
+			test_trace2_data cache_tree update/reuse-packed-attempts-total 0 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-invalid-total 1 <.git/update.trace
+		fi &&
 		test_trace2_data cache_tree update/repair-tree-checks-total 0 <.git/update.trace
+	)
+'
+
+test_expect_success 'cache-tree update samples large reuse checks' '
+	test_when_finished "rm -rf update-probes" &&
+	setup_cache_tree_update_repo update-probes &&
+	(
+		cd update-probes &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
+		blob=$(git rev-parse HEAD:b/file) &&
+		test_seq -f "d%04d/file" 1 1100 |
+			sed "s|^|100644 $blob	|" |
+			git update-index --index-info &&
+		git commit -m many-directories &&
+		git repack -ad &&
+		git multi-pack-index write &&
+		echo changed >a/file &&
+		git add a/file &&
+		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
+			git write-tree &&
+		git cat-file -e "$(cat .git/actual)^{tree}" &&
+		test_trace2_data cache_tree update/reuse-object-checks-total 1101 <.git/update.trace &&
+		test_trace2_data cache_tree update/reuse-object-probed-checks-total 1026 <.git/update.trace &&
+		if test_have_prereq ODB_MONOTONIC_CLOCK
+		then
+			test_trace2_data cache_tree update/reuse-packed-attempts-total 1026 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-invalid-total 0 <.git/update.trace
+		else
+			test_trace2_data cache_tree update/reuse-packed-attempts-total 0 <.git/update.trace &&
+			test_trace2_data cache_tree update/reuse-packed-invalid-total 1026 <.git/update.trace
+		fi
 	)
 '
 

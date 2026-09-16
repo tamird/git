@@ -548,6 +548,9 @@ enum object_info_flags {
 	 */
 	OBJECT_INFO_SECOND_READ = (1 << 4),
 
+	/* Measure packed lookup stages for an existence-only read (oi == NULL). */
+	OBJECT_INFO_TRACE_PACKED_LOOKUP = (1 << 5),
+
 	/*
 	 * This is meant for bulk prefetching of missing blobs in a partial
 	 * clone. Implies OBJECT_INFO_SKIP_FETCH_OBJECT and OBJECT_INFO_QUICK.
@@ -588,6 +591,8 @@ enum odb_has_object_flags {
 	ODB_HAS_OBJECT_RECHECK_PACKED = (1 << 0),
 	/* Allow fetching the object in case the repository has a promisor remote. */
 	ODB_HAS_OBJECT_FETCH_PROMISOR = (1 << 1),
+	/* Measure packed lookup stages for this existence check. */
+	ODB_HAS_OBJECT_TRACE_PACKED_LOOKUP = (1 << 2),
 };
 
 /*

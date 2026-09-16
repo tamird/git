@@ -520,10 +520,15 @@ struct cache_tree_update_stats {
 	uint64_t entries_visited, entry_object_checks, entry_object_check_ns;
 	uint64_t reused_child_parent_checks, reused_child_parent_check_ns;
 	uint64_t reuse_object_checks, reuse_object_check_ns;
+	uint64_t reuse_object_probed_checks;
 	uint64_t repair_tree_checks, repair_tree_check_ns, hash_only_ns;
 	uint64_t object_write_calls, object_write_ns;
 	uint64_t owned_odb_commit_calls, owned_odb_commit_ns;
 };
+
+/* Packed stage totals describe the probed checks, not all reuse checks. */
+#define CACHE_TREE_REUSE_PROBE_PREFIX	1024
+#define CACHE_TREE_REUSE_PROBE_INTERVAL 64
 
 /*
  * Accumulate returning update regions across index states and threads.
@@ -562,6 +567,8 @@ static void trace_cache_tree_update(const struct cache_tree_update_stats *stats,
 			   stats->reuse_object_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_CHECK_NS,
 			   stats->reuse_object_check_ns);
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_OBJECT_PROBED_CHECKS,
+			   stats->reuse_object_probed_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECKS,
 			   stats->repair_tree_checks);
 	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REPAIR_TREE_CHECK_NS,
@@ -665,11 +672,23 @@ static int update_one(struct cache_tree *it,
 	}
 
 	if (0 <= it->entry_count) {
-		if (stats)
-			stats->reuse_object_checks++;
+		enum odb_has_object_flags check_flags =
+			ODB_HAS_OBJECT_RECHECK_PACKED |
+			ODB_HAS_OBJECT_FETCH_PROMISOR;
+
+		if (stats) {
+			uint64_t ordinal = stats->reuse_object_checks++;
+
+			/* Cover small updates, then sample periodically. */
+			if (ordinal < CACHE_TREE_REUSE_PROBE_PREFIX ||
+			    !((ordinal - CACHE_TREE_REUSE_PROBE_PREFIX) %
+			      CACHE_TREE_REUSE_PROBE_INTERVAL)) {
+				check_flags |= ODB_HAS_OBJECT_TRACE_PACKED_LOOKUP;
+				stats->reuse_object_probed_checks++;
+			}
+		}
 		if (update_has_object(&it->oid,
-				      ODB_HAS_OBJECT_RECHECK_PACKED |
-					      ODB_HAS_OBJECT_FETCH_PROMISOR,
+				      check_flags,
 				      stats ? &stats->reuse_object_check_ns : NULL)) {
 			if (stats)
 				stats->reused++;

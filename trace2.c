@@ -1146,6 +1146,18 @@ void trace2_counter_add(enum trace2_counter_id cid, uint64_t value)
 	tr2_counter_increment(cid, value);
 }
 
+void trace2_counter_add_many(enum trace2_counter_id first,
+			     const uint64_t *values, size_t nr)
+{
+	if (!trace2_enabled)
+		return;
+	if (first < 0 || first >= TRACE2_NUMBER_OF_COUNTERS ||
+	    nr > TRACE2_NUMBER_OF_COUNTERS - first || (nr && !values))
+		BUG("trace2_counter_add_many: invalid counter range");
+	if (nr)
+		tr2_counter_increment_many(first, values, nr);
+}
+
 const char *trace2_session_id(void)
 {
 	return tr2_sid_get();
