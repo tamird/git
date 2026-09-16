@@ -153,7 +153,7 @@ test_expect_success 'MIDX interpolation preserves prefixes and loose abbreviatio
 	packed_oid=$(sed -n "1p" obj-list) &&
 	GIT_TEST_MIDX_INTERPOLATE=0 git cat-file -e "$packed_oid" &&
 	GIT_TEST_MIDX_INTERPOLATE=1 git cat-file -e "$packed_oid" &&
-	missing_oid=$(printf "%0*d" $((HASH_LEN * 2)) 0) &&
+	missing_oid=$(printf "missing-midx-interpolation-oid\n" | git hash-object --stdin) &&
 	test_must_fail env GIT_TEST_MIDX_INTERPOLATE=0 \
 		git cat-file -e "$missing_oid" 2>expect &&
 	test_must_fail env GIT_TEST_MIDX_INTERPOLATE=1 \
