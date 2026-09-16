@@ -2513,7 +2513,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_directories 0 <tree-no-batch.trace &&
 	test_trace2_data grep content_index_tree_walk_us "[0-9][0-9]*" <tree-no-batch.trace &&
 	test_trace2_data grep content_index_tree_object_read_us 0 <tree-no-batch.trace &&
-	test "$(grep -c "\"key\":\"content_index_tree_" tree-no-batch.trace)" = 4 &&
+	flat_tree_pageins=$(grep -c \
+		"\"key\":\"content_index_tree_walk_process_pageins\"" \
+		tree-no-batch.trace || :) &&
+	test "$flat_tree_pageins" -le 1 &&
+	test "$(grep -c "\"key\":\"content_index_tree_" tree-no-batch.trace)" = \
+		"$((4 + flat_tree_pageins))" &&
 	test_trace2_data grep content_index_tree_objects 2 \
 		<tree-attributes.trace &&
 	test_trace2_data grep content_index_tree_queried 1 \
