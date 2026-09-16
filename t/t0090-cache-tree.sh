@@ -598,12 +598,21 @@ test_expect_success 'as-is commit times cache-tree preparation' '
 		test_trace2_data commit as-is/cache-tree-valid 1 <.git/valid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/nodes 2 <.git/valid.trace &&
 		test_trace2_data commit as-is/cache-tree-validate/object-checks 2 <.git/valid.trace &&
+		test_grep ! '"key":"validate/oid-order/probes"' .git/valid.trace &&
 		(test_have_prereq MINGW ||
 		 test_trace2_data commit as-is/cache-tree-validate/major-faults "[0-9][0-9]*" <.git/valid.trace) &&
 		test_grep ! "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"validate/object-check\"" .git/valid.trace &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-validate 1 &&
 		test_commit_as_is_timer .git/valid.trace cache-tree-update absent &&
 		test_commit_as_is_timer .git/valid.trace write-index 1 &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
+			git commit --allow-empty -m ordered &&
+		test_trace2_data cache_tree validate/oid-order/probes 2 <.git/ordered.trace &&
+		GIT_TEST_CACHE_TREE_OID_ORDER=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/dfs.trace" \
+			git commit --allow-empty -m dfs &&
+		test_grep ! '"key":"validate/oid-order/probes"' .git/dfs.trace &&
 		current_branch=$(git symbolic-ref --short HEAD) &&
 		GIT_TRACE2_EVENT="$PWD/.git/checkout.trace" git switch "$current_branch" &&
 		test_trace2_data checkout cache-tree-validate/nodes 2 <.git/checkout.trace &&

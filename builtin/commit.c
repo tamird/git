@@ -492,6 +492,10 @@ static const char *prepare_index(const char **argv, const char *prefix,
 		cache_tree = cache_tree_get(the_repository->index);
 		if (!the_repository->index->cache_changed) {
 			int trace_validation = trace2_is_enabled();
+			/* Index size is a cheap proxy for cache-tree sort cost. */
+			int prefer_oid_order = cache_tree &&
+				cache_tree->entry_count >= 0 &&
+				the_repository->index->cache_nr >= 1000000;
 			uintmax_t nodes = 0, object_checks = 0;
 			int saved_errno = errno;
 #ifndef GIT_WINDOWS_NATIVE
@@ -505,12 +509,10 @@ static const char *prepare_index(const char **argv, const char *prefix,
 			trace2_timer_start(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);
 			errno = saved_errno;
-			if (trace_validation) {
-				cache_tree_valid = cache_tree_fully_valid_with_counts(
-					cache_tree, &nodes, &object_checks);
-			} else {
-				cache_tree_valid = cache_tree_fully_valid(cache_tree);
-			}
+			cache_tree_valid = cache_tree_fully_valid_with_order(
+				cache_tree, prefer_oid_order,
+				trace_validation ? &nodes : NULL,
+				trace_validation ? &object_checks : NULL);
 			saved_errno = errno;
 			trace2_timer_stop(
 				TRACE2_TIMER_ID_COMMIT_AS_IS_CACHE_TREE_VALIDATE);

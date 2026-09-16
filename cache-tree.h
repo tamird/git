@@ -42,6 +42,8 @@ struct cache_tree *cache_tree_read(const char *buffer, unsigned long size);
 int cache_tree_fully_valid(struct cache_tree *);
 int cache_tree_fully_valid_with_counts(struct cache_tree *, uintmax_t *nodes,
 				       uintmax_t *object_checks);
+int cache_tree_fully_valid_with_order(struct cache_tree *, int prefer_oid_order,
+				      uintmax_t *nodes, uintmax_t *object_checks);
 int cache_tree_update(struct index_state *, int);
 int cache_tree_verify(struct repository *, struct index_state *);
 
