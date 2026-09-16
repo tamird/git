@@ -89,6 +89,26 @@ test_expect_success 'quickfetch should not leave a corrupted repository' '
 
 '
 
+test_expect_success 'existing fetch tip skips excluded tree expansion' '
+	file_oid=$(git -C cloned rev-parse origin/main:file) &&
+	old_tree=$(printf "100644 blob %s\\tunrelated\\n" "$file_oid" |
+		git -C cloned mktree) &&
+	git -C cloned update-ref refs/tags/unrelated-tree "$old_tree" &&
+	git -C cloned rev-parse origin/main >existing-tip &&
+	GIT_TRACE2_EVENT="$PWD/unoptimized.trace" git -C cloned rev-list \
+		--objects --stdin --not --all --quiet --alternate-refs \
+		<existing-tip &&
+	test_trace2_data revision pending-negative-tree/trees-expanded \
+		"[1-9][0-9]*" <unoptimized.trace &&
+	GIT_TRACE2_EVENT="$PWD/already-connected.trace" git -C cloned fetch &&
+	test_trace2_data rev-list connectivity/skip-excluded-trees 1 \
+		<already-connected.trace &&
+	! test_trace2_data revision pending-negative-tree/roots \
+		"[1-9][0-9]*" \
+		<already-connected.trace &&
+	git -C cloned update-ref -d refs/tags/unrelated-tree
+'
+
 test_expect_success 'quickfetch should not copy from alternate' '
 
 	(

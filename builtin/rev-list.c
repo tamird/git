@@ -38,6 +38,31 @@ struct rev_list_info {
 	const char *header_prefix;
 };
 
+static int only_excluded_connectivity_tips(struct rev_info *revs)
+{
+	int positive_tips = 0;
+
+	for (unsigned int i = 0; i < revs->cmdline.nr; i++) {
+		const struct rev_cmdline_entry *entry = &revs->cmdline.rev[i];
+
+		if (entry->flags & UNINTERESTING)
+			continue;
+		if (entry->whence != REV_CMD_REV ||
+		    entry->item->type != OBJ_COMMIT ||
+		    !(entry->item->flags & UNINTERESTING))
+			return 0;
+		positive_tips++;
+	}
+
+	if (!positive_tips)
+		return 0;
+	for (unsigned int i = 0; i < revs->pending.nr; i++)
+		if (!(revs->pending.objects[i].item->flags & UNINTERESTING))
+			return 0;
+
+	return 1;
+}
+
 static const char rev_list_usage[] =
 "git rev-list [<options>] <commit>... [--] [<path>...]\n"
 "\n"
@@ -708,6 +733,8 @@ int cmd_rev_list(int argc,
 	int use_bitmap_index = 0;
 	int filter_provided_objects = 0;
 	int trace_connectivity = 0;
+	int connectivity_check = 0;
+	int skip_excluded_trees = 0;
 	const char *show_progress = NULL;
 	int ret = 0;
 
@@ -821,6 +848,10 @@ int cmd_rev_list(int argc,
 		}
 		if (!strcmp(arg, "--filter-print-omitted")) {
 			arg_print_omitted = 1;
+			continue;
+		}
+		if (!strcmp(arg, "--connectivity-check")) {
+			connectivity_check = 1;
 			continue;
 		}
 
@@ -958,9 +989,26 @@ int cmd_rev_list(int argc,
 				   "positive-input/preexcluded", preexcluded_inputs);
 		errno = saved_errno;
 	}
+	if (connectivity_check && revs.diffopt.flags.quick &&
+	    revs.read_from_stdin && revs.tag_objects &&
+	    revs.tree_objects && revs.blob_objects &&
+	    !revs.edge_hint && !revs.edge_hint_aggressive &&
+	    !revs.exclude_promisor_objects && !revs.do_not_die_on_missing_objects &&
+	    !revs.verify_objects && !revs.prune && !revs.count &&
+	    !revs.filter.choice && !arg_print_omitted && !show_disk_usage)
+		skip_excluded_trees = only_excluded_connectivity_tips(&revs);
+	if (trace_connectivity)
+		trace2_data_intmax("rev-list", the_repository,
+				   "connectivity/skip-excluded-trees",
+				   skip_excluded_trees);
 
+	/* Still parse commits and tags, but skip known excluded tree contents. */
 	trace2_region_enter("rev-list", "prepare_revision_walk", the_repository);
+	if (skip_excluded_trees)
+		revs.tree_objects = 0;
 	ret = prepare_revision_walk(&revs);
+	if (skip_excluded_trees)
+		revs.tree_objects = 1;
 	trace2_region_leave("rev-list", "prepare_revision_walk", the_repository);
 	if (ret)
 		die("revision walk setup failed");
@@ -974,11 +1022,13 @@ int cmd_rev_list(int argc,
 		};
 		trace2_region_enter("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		if (trace_connectivity)
-			mark_edges_uninteresting_with_stats(&revs, show_edge,
-							   &stats);
-		else
-			mark_edges_uninteresting(&revs, show_edge, 0);
+		if (!skip_excluded_trees) {
+			if (trace_connectivity)
+				mark_edges_uninteresting_with_stats(&revs, show_edge,
+								    &stats);
+			else
+				mark_edges_uninteresting(&revs, show_edge, 0);
+		}
 		trace2_region_leave("rev-list", "mark_edges_uninteresting",
 				    the_repository);
 		if (trace_connectivity) {

@@ -119,6 +119,9 @@ int check_connected(oid_iterate_fn fn, void *cb_data,
 	strvec_push(&rev_list.args,"rev-list");
 	strvec_push(&rev_list.args, "--objects");
 	strvec_push(&rev_list.args, "--stdin");
+	if (!opt->shallow_file && !opt->is_deepening_fetch &&
+	    !repo_has_promisor_remote(the_repository))
+		strvec_push(&rev_list.args, "--connectivity-check");
 	if (repo_has_promisor_remote(the_repository))
 		strvec_push(&rev_list.args, "--exclude-promisor-objects");
 	if (!opt->is_deepening_fetch) {
