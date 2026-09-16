@@ -308,6 +308,16 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "queue-entries/prepare-entry/existing-match-remove",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_STAT] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/prepare-entry/existing-match-stat",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_UNLINK] = {
+		.category = "unpack_trees",
+		.name = "queue-entries/prepare-entry/existing-unlink",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_UNPACK_TREES_CREATE_DIRECTORIES] = {
 		.category = "unpack_trees",
 		/* The helper also checks existing leading directories. */

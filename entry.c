@@ -572,8 +572,12 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 
 		checkout_entry_trace_timer(active_phase,
 			   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_REMOVE, 1);
+		checkout_entry_trace_timer(active_phase,
+					   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_STAT, 1);
 		changed = ie_match_stat(state->istate, ce, &st,
 					CE_MATCH_IGNORE_VALID | CE_MATCH_IGNORE_SKIP_WORKTREE);
+		checkout_entry_trace_timer(active_phase,
+					   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_MATCH_STAT, 0);
 		if (state->queue_trace) {
 			if (changed)
 				state->queue_trace->match_changed++;
@@ -643,7 +647,14 @@ static int checkout_entry_ca_internal(struct cache_entry *ce,
 				return checkout_existing_return(active_phase, 0);
 			remove_subtree(&path);
 		} else {
-			if (unlink(path.buf))
+			int unlink_error;
+
+			checkout_entry_trace_timer(active_phase,
+						   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_UNLINK, 1);
+			unlink_error = unlink(path.buf);
+			checkout_entry_trace_timer(active_phase,
+						   TRACE2_TIMER_ID_UNPACK_TREES_EXISTING_UNLINK, 0);
+			if (unlink_error)
 				return checkout_existing_return(active_phase,
 					error_errno("unable to unlink old '%s'", path.buf));
 			if (state->queue_trace)

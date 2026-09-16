@@ -548,6 +548,10 @@ test_expect_success 'checkout queue traces existing and absent paths' '
 	test_unpack_timer "$root_trace" queue-entries/prepare-entry/check-path 2 &&
 	test_unpack_timer "$root_trace" \
 		queue-entries/prepare-entry/existing-match-remove 1 &&
+	test_unpack_timer "$root_trace" \
+		queue-entries/prepare-entry/existing-match-stat 1 &&
+	test_unpack_timer "$root_trace" \
+		queue-entries/prepare-entry/existing-unlink 1 &&
 	git -C queue-outcomes-traced ls-files --stage >traced.index &&
 	git -C queue-outcomes-plain ls-files --stage >plain.index &&
 	test_cmp traced.index plain.index &&
