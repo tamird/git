@@ -2288,18 +2288,84 @@ static void http_opt_request_remainder(CURL *curl, off_t pos)
 #define HTTP_REQUEST_STRBUF	0
 #define HTTP_REQUEST_FILE	1
 
+struct http_response_write_trace {
+	void *result;
+	int target;
+	uint64_t callback_ns;
+	int invalid;
+};
+
+static int http_response_write_time(uint64_t *now)
+{
+#if defined(HAVE_CLOCK_GETTIME) && defined(HAVE_CLOCK_MONOTONIC)
+	struct timespec timestamp;
+	int saved_errno = errno;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &timestamp);
+
+	errno = saved_errno;
+	if (ret || timestamp.tv_sec < 0 || timestamp.tv_nsec < 0 ||
+	    timestamp.tv_nsec >= 1000000000)
+		return -1;
+	if ((uint64_t)timestamp.tv_sec >
+	    (UINT64_MAX - (uint64_t)timestamp.tv_nsec) / 1000000000ULL)
+		return -1;
+	*now = (uint64_t)timestamp.tv_sec * 1000000000ULL +
+	       (uint64_t)timestamp.tv_nsec;
+	return 0;
+#else
+	(void)now;
+	return -1;
+#endif
+}
+
+static size_t fwrite_http_response_trace(char *ptr, size_t eltsize,
+					 size_t nmemb, void *context)
+{
+	struct http_response_write_trace *trace = context;
+	uint64_t started, finished;
+	size_t written;
+	int saved_errno = errno;
+	int timed = !trace->invalid && !http_response_write_time(&started);
+
+	errno = saved_errno;
+	if (trace->target == HTTP_REQUEST_FILE)
+		written = fwrite(ptr, eltsize, nmemb, trace->result);
+	else
+		written = fwrite_buffer(ptr, eltsize, nmemb, trace->result);
+	saved_errno = errno;
+	if (!timed || http_response_write_time(&finished) ||
+	    finished < started ||
+	    finished - started > UINT64_MAX - trace->callback_ns)
+		trace->invalid = 1;
+	else
+		trace->callback_ns += finished - started;
+	errno = saved_errno;
+	return written;
+}
+
 static int http_request(const char *url,
 			void *result, int target,
 			struct http_get_options *options)
 {
 	struct active_request_slot *slot;
+	struct http_response_write_trace write_trace = {
+		.result = result,
+		.target = target,
+	};
 	struct slot_results results = { .retry_after = -1 };
 	struct curl_slist *headers = http_copy_default_headers();
 	struct strbuf buf = STRBUF_INIT;
 	const char *accept_language;
-	int ret;
+	int ret, trace_response, saved_errno;
 
 	slot = get_active_slot();
+	saved_errno = errno;
+	trace_response = trace2_is_enabled();
+	errno = saved_errno;
+#if !defined(HAVE_CLOCK_GETTIME) || !defined(HAVE_CLOCK_MONOTONIC)
+	if (result)
+		write_trace.invalid = 1;
+#endif
 	curl_easy_setopt(slot->curl, CURLOPT_HTTPGET, 1L);
 
 	if (!result) {
@@ -2317,6 +2383,11 @@ static int http_request(const char *url,
 		} else
 			curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION,
 					 fwrite_buffer);
+		if (trace_response && !write_trace.invalid) {
+			curl_easy_setopt(slot->curl, CURLOPT_WRITEDATA, &write_trace);
+			curl_easy_setopt(slot->curl, CURLOPT_WRITEFUNCTION,
+					 fwrite_http_response_trace);
+		}
 	}
 
 	curl_easy_setopt(slot->curl, CURLOPT_HEADERFUNCTION, fwrite_wwwauth);
@@ -2350,6 +2421,21 @@ static int http_request(const char *url,
 	curl_easy_setopt(slot->curl, CURLOPT_FAILONERROR, 0L);
 
 	ret = run_one_slot(slot, &results);
+	if (trace_response) {
+		intmax_t callback_us;
+
+		saved_errno = errno;
+		if (write_trace.invalid)
+			callback_us = -1;
+		else
+			callback_us = (intmax_t)(write_trace.callback_ns / 1000);
+		trace2_data_intmax("http", the_repository,
+				   "response/write-callback-us", callback_us);
+		trace2_data_intmax("http", the_repository,
+				   "response/write-target",
+				   result ? target : -1);
+		errno = saved_errno;
+	}
 
 #ifdef GIT_CURL_HAVE_CURLINFO_RETRY_AFTER
 	if (ret == HTTP_RATE_LIMITED) {
