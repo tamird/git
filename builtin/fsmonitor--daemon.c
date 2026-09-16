@@ -1050,8 +1050,11 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 		goto cleanup;
 	}
 
-	if (do_flush)
+	if (do_flush) {
 		with_lock__do_force_resync(state);
+		trace2_data_string("fsmonitor", the_repository,
+				   "resync/reason", "explicit-flush");
+	}
 
 	/*
 	 * We mark the current head of the batch list as "pinned" so

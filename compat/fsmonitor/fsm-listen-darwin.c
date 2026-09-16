@@ -33,6 +33,7 @@
 #include "simple-ipc.h"
 #include "string-list.h"
 #include "trace.h"
+#include "trace2.h"
 
 struct fsm_listen_data
 {
@@ -265,10 +266,23 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		     (path_type == IS_OUTSIDE_CONE ||
 		      (path_type == IS_WORKDIR_PATH && !*worktree_rel) ||
 		      dir_inside_of(state->path_cookie_prefix.buf, path_k) >= 0))) {
+			const char *reason;
+
 			if (trace_pass_fl(&trace_fsmonitor))
 				log_flags_set(path_k, event_flags[k]);
 
+			if (event_flags[k] & kFSEventStreamEventFlagKernelDropped)
+				reason = "kernel-dropped";
+			else if (event_flags[k] & kFSEventStreamEventFlagUserDropped)
+				reason = "user-dropped";
+			else if (path_type == IS_OUTSIDE_CONE)
+				reason = "outside-cone";
+			else if (path_type == IS_WORKDIR_PATH && !*worktree_rel)
+				reason = "worktree-root";
+			else
+				reason = "cookie-prefix";
 			fsmonitor_force_resync(state);
+			trace2_data_string("fsmonitor", NULL, "resync/reason", reason);
 			fsmonitor_batch__free_list(batch);
 			string_list_clear(&cookie_list, 0);
 			batch = NULL;

@@ -990,7 +990,8 @@ test_expect_success 'flush cached data' '
 
 	git init test_flush &&
 
-	start_daemon -C test_flush --tf "$PWD/.git/trace_daemon" --tk true &&
+	GIT_TRACE2_EVENT="$PWD/.git/resync.trace" \
+		start_daemon -C test_flush --tf "$PWD/.git/trace_daemon" --tk true &&
 
 	# The daemon should have an initial token with no events in _0 and
 	# then a few (probably platform-specific number of) events in _1.
@@ -1022,6 +1023,7 @@ test_expect_success 'flush cached data' '
 	test-tool -C test_flush fsmonitor-client flush >flush_0 &&
 	nul_to_q <flush_0 >flush_q0 &&
 	test_grep "^builtin:test_00000002:0Q/Q$" flush_q0 &&
+	test_trace2_data fsmonitor resync/reason explicit-flush <.git/resync.trace &&
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000002:0" >actual_2 &&
 	nul_to_q <actual_2 >actual_q2 &&
