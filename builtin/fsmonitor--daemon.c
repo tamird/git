@@ -758,13 +758,23 @@ static int fsmonitor_handle_untracked_cache(
 	struct strbuf response = STRBUF_INIT;
 	struct object_id oid;
 	const char *p, *end, *hex_payload = NULL;
+	const char *miss_reason = "invalid-request";
 	size_t hex_len, saved_len = 0;
-	int save = 0, ret;
+	int save = 0, explain_miss = 0, ret;
+
+	if (!strcmp(command, "supports-reason"))
+		return reply(reply_data, "yes", 3);
 
 	strbuf_addstr(&response, "miss");
 	if (skip_prefix(command, "get ", &p))
 		save = 0;
-	else if (skip_prefix(command, "put-if-absent ", &p))
+	else if (skip_prefix(command, "put-if-absent-with-reason ", &p)) {
+		save = 2;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "put-with-reason ", &p)) {
+		save = 1;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "put-if-absent ", &p))
 		save = 2;
 	else if (skip_prefix(command, "put ", &p))
 		save = 1;
@@ -805,26 +815,37 @@ static int fsmonitor_handle_untracked_cache(
 	}
 
 	pthread_mutex_lock(&state->main_lock);
-	if (!state->current_token_data ||
-	    (!save && (!state->untracked_cache_data.len ||
-		       strcmp(index_oid.buf,
-			      state->untracked_cache_oid.buf) ||
-		       strcmp(token.buf,
-			      state->untracked_cache_token.buf))))
+	if (!state->current_token_data) {
+		miss_reason = "no-current-token";
+		goto unlock;
+	}
+	if (!save && (!state->untracked_cache_data.len ||
+		      strcmp(index_oid.buf,
+			     state->untracked_cache_oid.buf) ||
+		      strcmp(token.buf,
+			     state->untracked_cache_token.buf)))
 		goto unlock;
 
-	if (with_lock__wait_for_cookie(state) != FCIR_SEEN ||
-	    !state->current_token_data)
+	if (with_lock__wait_for_cookie(state) != FCIR_SEEN) {
+		miss_reason = "cookie-unseen";
 		goto unlock;
+	}
+	if (!state->current_token_data) {
+		miss_reason = "no-current-token";
+		goto unlock;
+	}
 
 	with_lock__format_response_token(
 		&current_token, &state->current_token_data->token_id,
 		state->current_token_data->batch_head);
-	if (strcmp(token.buf, current_token.buf) ||
-	    (!save && (strcmp(index_oid.buf,
-			      state->untracked_cache_oid.buf) ||
-		       strcmp(token.buf,
-			      state->untracked_cache_token.buf))))
+	if (strcmp(token.buf, current_token.buf)) {
+		miss_reason = "token-changed";
+		goto unlock;
+	}
+	if (!save && (strcmp(index_oid.buf,
+			     state->untracked_cache_oid.buf) ||
+		      strcmp(token.buf,
+			     state->untracked_cache_token.buf)))
 		goto unlock;
 
 	strbuf_reset(&response);
@@ -850,6 +871,9 @@ unlock:
 	pthread_mutex_unlock(&state->main_lock);
 
 done:
+	if (explain_miss && response.len == 4 &&
+	    !memcmp(response.buf, "miss", 4))
+		strbuf_addf(&response, ":%s", miss_reason);
 	ret = reply(reply_data, response.buf, response.len);
 	trace2_data_intmax("fsmonitor", the_repository,
 			   save ? "untracked-cache/saved" :

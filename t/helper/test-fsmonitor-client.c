@@ -202,7 +202,8 @@ done:
 	return ret;
 }
 
-static int do_poison_untracked_cache(const char *token)
+static int do_send_untracked_cache_raw(const char *token,
+				       const char *expected_reply)
 {
 	struct index_state *istate = the_repository->index;
 	struct strbuf identity = STRBUF_INIT;
@@ -227,7 +228,8 @@ static int do_poison_untracked_cache(const char *token)
 		    "put %s %s 00", oid_to_hex(&istate->oid), token);
 	if (fsmonitor_ipc__send_command(command.buf, &answer))
 		goto done;
-	ret = answer.len != 2 || memcmp(answer.buf, "ok", 2);
+	ret = answer.len != strlen(expected_reply) ||
+	      memcmp(answer.buf, expected_reply, answer.len);
 
 done:
 	strbuf_release(&answer);
@@ -423,6 +425,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client save-overdeep-untracked-cache",
 		"test-tool fsmonitor-client test-untracked-snapshot-dir-bound",
 		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
+		"test-tool fsmonitor-client legacy-untracked-cache-save-miss --token=<token>",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
 	};
@@ -472,7 +475,9 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		return test_untracked_snapshot_dir_bound();
 
 	if (!strcmp(subcmd, "poison-untracked-cache"))
-		return do_poison_untracked_cache(token);
+		return do_send_untracked_cache_raw(token, "ok");
+	if (!strcmp(subcmd, "legacy-untracked-cache-save-miss"))
+		return do_send_untracked_cache_raw(token, "miss");
 
 	if (!strcmp(subcmd, "hammer"))
 		return !!do_hammer(token, nr_threads, nr_requests);

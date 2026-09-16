@@ -715,16 +715,27 @@ void fsmonitor_ipc__save_untracked_cache(
 	struct index_state *istate, enum fsmonitor_untracked_cache_save_mode mode)
 {
 	static const char hex[] = "0123456789abcdef";
+	static const char *const miss_reasons[] = {
+		"invalid-request",
+		"no-current-token",
+		"cookie-unseen",
+		"token-changed",
+	};
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
 	struct object_id generated_index_oid;
 	const struct object_id *index_oid;
+	const char *verb = mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
+				   "put-if-absent" :
+				   "put";
+	const char *miss_reason = NULL;
 	enum fsmonitor_untracked_cache_save_outcome outcome =
 		FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE;
 	enum untracked_cache_encoding encoding;
 	enum untracked_snapshot_bound bound;
 	size_t start;
+	int supports_reason = 0;
 
 	trace2_region_enter("fsmonitor", "untracked-cache/save", istate->repo);
 	if (!istate->untracked || !istate->untracked->root ||
@@ -785,10 +796,17 @@ void fsmonitor_ipc__save_untracked_cache(
 				   "untracked-cache/compressed", 1);
 	}
 
-	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "%s %s %s ",
-		    mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
-			    "put-if-absent" :
-			    "put",
+	if (trace2_is_enabled() &&
+	    !fsmonitor_ipc__send_untracked_cache_command(
+		    FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "supports-reason",
+		    strlen(FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "supports-reason"),
+		    &answer) &&
+	    answer.len == 3 && !memcmp(answer.buf, "yes", 3))
+		supports_reason = 1;
+	strbuf_reset(&answer);
+
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "%s%s %s %s ", verb,
+		    supports_reason ? "-with-reason" : "",
 		    oid_to_hex(index_oid),
 		    istate->fsmonitor_last_update);
 	start = command.len;
@@ -805,6 +823,34 @@ void fsmonitor_ipc__save_untracked_cache(
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR;
 		goto done;
 	}
+	if (supports_reason && answer.len == 4 &&
+	    !memcmp(answer.buf, "miss", 4)) {
+		/* The daemon was replaced between the probe and the save. */
+		strbuf_splice(&command,
+			      strlen(FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX) +
+				      strlen(verb),
+			      strlen("-with-reason"), "", 0);
+		strbuf_reset(&answer);
+		if (fsmonitor_ipc__send_untracked_cache_command(
+			    command.buf, command.len, &answer)) {
+			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR;
+			goto done;
+		}
+	}
+	if (answer.len == 4 && !memcmp(answer.buf, "miss", 4))
+		miss_reason = "unknown";
+	else if (answer.len > 5 && !memcmp(answer.buf, "miss:", 5)) {
+		miss_reason = "unknown";
+		for (size_t i = 0; i < ARRAY_SIZE(miss_reasons); i++) {
+			size_t len = strlen(miss_reasons[i]);
+
+			if (answer.len == 5 + len &&
+			    !memcmp(answer.buf + 5, miss_reasons[i], len)) {
+				miss_reason = miss_reasons[i];
+				break;
+			}
+		}
+	}
 	if (answer.len != 2 || memcmp(answer.buf, "ok", 2)) {
 		outcome = answer.len == 6 &&
 					  !memcmp(answer.buf, "exists", 6) &&
@@ -816,9 +862,17 @@ void fsmonitor_ipc__save_untracked_cache(
 			enum fsmonitor_untracked_cache_save_reply reply =
 				FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER;
 
-			if (answer.len == 4 && !memcmp(answer.buf, "miss", 4))
+			if (miss_reason &&
+			    ((answer.len == 4 &&
+			      !memcmp(answer.buf, "miss", 4)) ||
+			     (answer.len > 5 &&
+			      !memcmp(answer.buf, "miss:", 5)))) {
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS;
-			else if (answer.len == 7 && !memcmp(answer.buf, "missing", 7))
+				trace2_data_string("fsmonitor", istate->repo,
+						   "untracked-cache/save-miss-reason",
+						   miss_reason);
+			} else if (answer.len == 7 &&
+				   !memcmp(answer.buf, "missing", 7))
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISSING;
 			else if (answer.len == 6 && !memcmp(answer.buf, "exists", 6))
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_EXISTS;

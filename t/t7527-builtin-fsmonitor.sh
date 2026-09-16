@@ -1899,6 +1899,40 @@ test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
 	test_grep -q " M dir1/dir2/dir4/FILE-4-A" "$PWD/file_case_wrong-try3.out"
 '
 
+test_expect_success 'untracked cache save reports stale token without changing legacy replies' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_save_reason" &&
+	git init test_untracked_save_reason &&
+	(
+		cd test_untracked_save_reason &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true
+	) &&
+	start_daemon -C test_untracked_save_reason &&
+	(
+		cd test_untracked_save_reason &&
+		git status --porcelain >/dev/null &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-save-stale.trace" \
+			test-tool fsmonitor-client save-untracked-cache \
+			--token=builtin:never-current:0 &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 6 \
+			<../untracked-save-stale.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-reply 1 \
+			<../untracked-save-stale.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-miss-reason \
+			token-changed <../untracked-save-stale.trace &&
+		test-tool fsmonitor-client legacy-untracked-cache-save-miss \
+			--token=builtin:never-current:0 &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-save-current.trace" \
+			test-tool fsmonitor-client save-untracked-cache \
+			--current-token &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../untracked-save-current.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-miss-reason \
+			<../untracked-save-current.trace
+	)
+'
+
 test_expect_success 'lock-free status reuses current untracked snapshot' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot" &&
 	git init test_untracked_snapshot &&
