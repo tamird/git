@@ -9,6 +9,7 @@
 #include "gettext.h"
 #include "hex.h"
 #include "revision.h"
+#include "shallow.h"
 #include "list-objects.h"
 #include "list-objects-filter-options.h"
 #include "object.h"
@@ -394,6 +395,9 @@ static int finish_object(struct object *obj, const char *name, void *cb_data)
 	struct rev_list_info *info = cb_data;
 	if (odb_read_object_info_extended(the_repository->objects,
 					  &obj->oid, NULL, 0) < 0) {
+		mark_connectivity_negative_trees(info->revs);
+		if (obj->flags & UNINTERESTING)
+			return 1;
 		finish_object__ma(obj, name);
 		return 1;
 	}
@@ -735,6 +739,8 @@ int cmd_rev_list(int argc,
 	int trace_connectivity = 0;
 	int connectivity_check = 0;
 	int skip_excluded_trees = 0;
+	int sparse_excluded_trees = 0;
+	struct oidset connectivity_negative_trees = OIDSET_INIT;
 	const char *show_progress = NULL;
 	int ret = 0;
 
@@ -995,17 +1001,26 @@ int cmd_rev_list(int argc,
 	    !revs.edge_hint && !revs.edge_hint_aggressive &&
 	    !revs.exclude_promisor_objects && !revs.do_not_die_on_missing_objects &&
 	    !revs.verify_objects && !revs.prune && !revs.count &&
-	    !revs.filter.choice && !arg_print_omitted && !show_disk_usage)
+	    !revs.filter.choice && !arg_print_omitted && !show_disk_usage) {
 		skip_excluded_trees = only_excluded_connectivity_tips(&revs);
+		sparse_excluded_trees = !skip_excluded_trees &&
+					!is_repository_shallow(the_repository);
+	}
 	if (trace_connectivity)
 		trace2_data_intmax("rev-list", the_repository,
 				   "connectivity/skip-excluded-trees",
 				   skip_excluded_trees);
+	if (trace_connectivity)
+		trace2_data_intmax("rev-list", the_repository,
+				   "connectivity/sparse-excluded-trees",
+				   sparse_excluded_trees);
 
 	/* Still parse commits and tags, but skip known excluded tree contents. */
 	trace2_region_enter("rev-list", "prepare_revision_walk", the_repository);
 	if (skip_excluded_trees)
 		revs.tree_objects = 0;
+	if (sparse_excluded_trees)
+		revs.connectivity_negative_trees = &connectivity_negative_trees;
 	ret = prepare_revision_walk(&revs);
 	if (skip_excluded_trees)
 		revs.tree_objects = 1;
@@ -1022,7 +1037,9 @@ int cmd_rev_list(int argc,
 		};
 		trace2_region_enter("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		if (!skip_excluded_trees) {
+		if (sparse_excluded_trees)
+			mark_edges_uninteresting(&revs, show_edge, 1);
+		else if (!skip_excluded_trees) {
 			if (trace_connectivity)
 				mark_edges_uninteresting_with_stats(&revs, show_edge,
 								    &stats);
@@ -1031,7 +1048,7 @@ int cmd_rev_list(int argc,
 		}
 		trace2_region_leave("rev-list", "mark_edges_uninteresting",
 				    the_repository);
-		if (trace_connectivity) {
+		if (trace_connectivity && !sparse_excluded_trees) {
 			int saved_errno;
 
 			trace2_data_intmax("rev-list", the_repository,
@@ -1168,6 +1185,7 @@ int cmd_rev_list(int argc,
 cleanup:
 	trace2_region_enter("rev-list", "release_revisions", the_repository);
 	release_revisions(&revs);
+	oidset_clear(&connectivity_negative_trees);
 	trace2_region_leave("rev-list", "release_revisions", the_repository);
 	return ret;
 }

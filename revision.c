@@ -337,6 +337,54 @@ void mark_tree_uninteresting_with_stats(struct repository *r, struct tree *tree,
 	mark_tree_uninteresting_1(r, tree, stats);
 }
 
+/* Sparse marking may already have set UNINTERESTING without visiting children. */
+static void mark_connectivity_tree(struct repository *r, struct tree *tree,
+				   struct oidset *visited)
+{
+	struct tree_desc desc;
+	struct name_entry entry;
+
+	if (!tree || oidset_insert(visited, &tree->object.oid))
+		return;
+	tree->object.flags |= UNINTERESTING;
+	if (repo_parse_tree_gently(r, tree, 1) < 0)
+		return;
+
+	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
+	while (tree_entry(&desc, &entry)) {
+		switch (object_type(entry.mode)) {
+		case OBJ_TREE:
+			mark_connectivity_tree(r, lookup_tree(r, &entry.oid),
+					       visited);
+			break;
+		case OBJ_BLOB:
+			mark_blob_uninteresting(lookup_blob(r, &entry.oid));
+			break;
+		default:
+			break;
+		}
+	}
+	free_tree_buffer(tree);
+}
+
+void mark_connectivity_negative_trees(struct rev_info *revs)
+{
+	struct oidset visited = OIDSET_INIT;
+	struct oidset_iter iter;
+	struct object_id *oid;
+
+	if (!revs->connectivity_negative_trees || revs->connectivity_dense_checked)
+		return;
+	revs->connectivity_dense_checked = 1;
+	trace2_region_enter("revision", "connectivity_dense_fallback", revs->repo);
+	oidset_iter_init(revs->connectivity_negative_trees, &iter);
+	while ((oid = oidset_iter_next(&iter)))
+		mark_connectivity_tree(revs->repo, lookup_tree(revs->repo, oid),
+				       &visited);
+	oidset_clear(&visited);
+	trace2_region_leave("revision", "connectivity_dense_fallback", revs->repo);
+}
+
 struct path_and_oids_entry {
 	struct hashmap_entry ent;
 	char *path;
@@ -695,6 +743,11 @@ static struct commit *handle_commit(struct rev_info *revs,
 		if (!revs->tree_objects)
 			return NULL;
 		if (flags & UNINTERESTING) {
+			if (revs->connectivity_negative_trees) {
+				oidset_insert(revs->connectivity_negative_trees,
+					      &tree->object.oid);
+				return NULL;
+			}
 			if (tree_stats) {
 				int saved_errno = errno;
 

@@ -278,6 +278,9 @@ static void process_tree(struct traversal_context *ctx,
 
 	failed_parse = parse_tree_for_traversal(ctx, tree);
 	if (failed_parse) {
+		mark_connectivity_negative_trees(revs);
+		if (obj->flags & UNINTERESTING)
+			return;
 		if (revs->ignore_missing_links)
 			return;
 
@@ -391,6 +394,9 @@ static void add_edge_parents(struct commit *commit,
 		if (!(parent->object.flags & UNINTERESTING))
 			continue;
 		tree->object.flags |= UNINTERESTING;
+		if (revs->connectivity_negative_trees)
+			oidset_insert(revs->connectivity_negative_trees,
+				      &tree->object.oid);
 
 		if (revs->edge_hint && !(parent->object.flags & SHOWN)) {
 			parent->object.flags |= SHOWN;
@@ -408,14 +414,21 @@ static void mark_edges_uninteresting_1(struct rev_info *revs,
 	if (sparse) {
 		struct oidset set;
 		oidset_init(&set, 16);
+		if (revs->connectivity_negative_trees)
+			oidset_insert_from_set(&set,
+					       revs->connectivity_negative_trees);
 
 		for (list = revs->commits; list; list = list->next) {
 			struct commit *commit = list->item;
 			struct tree *tree = repo_get_commit_tree(the_repository,
 								 commit);
 
-			if (commit->object.flags & UNINTERESTING)
+			if (commit->object.flags & UNINTERESTING) {
 				tree->object.flags |= UNINTERESTING;
+				if (revs->connectivity_negative_trees)
+					oidset_insert(revs->connectivity_negative_trees,
+						      &tree->object.oid);
+			}
 
 			oidset_insert(&set, &tree->object.oid);
 			add_edge_parents(commit, revs, show_edge, &set);

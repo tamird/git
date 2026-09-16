@@ -193,6 +193,10 @@ struct rev_info {
 	 */
 	int read_from_stdin;
 
+	/* Only the fetch connectivity walk borrows this set of excluded trees. */
+	struct oidset *connectivity_negative_trees;
+	unsigned int connectivity_dense_checked:1;
+
 	/* topo-sort */
 	enum rev_sort_order sort_order;
 
@@ -627,6 +631,7 @@ struct tree_mark_stats {
 void mark_tree_uninteresting(struct repository *r, struct tree *tree);
 void mark_tree_uninteresting_with_stats(struct repository *r, struct tree *tree,
 					struct tree_mark_stats *stats);
+void mark_connectivity_negative_trees(struct rev_info *revs);
 void mark_trees_uninteresting_sparse(struct repository *r, struct oidset *trees);
 
 /**
