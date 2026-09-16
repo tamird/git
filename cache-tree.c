@@ -339,6 +339,7 @@ static int cache_tree_fully_valid_internal(struct cache_tree *it,
 	return 1;
 }
 
+#define CACHE_TREE_OID_ORDER_MIN_ENTRIES 1000000
 #define CACHE_TREE_OID_ORDER_MAX_NODES 1000000
 
 struct cache_tree_oid_order {
@@ -442,11 +443,14 @@ fallback:
 
 static int cache_tree_fully_valid_maybe_oid_order(struct cache_tree *it,
 						  struct cache_tree_validation_stats *stats,
-						  int prefer_oid_order)
+						  int allow_oid_order)
 {
 	int saved_errno;
 
-	if (!git_env_bool("GIT_TEST_CACHE_TREE_OID_ORDER", prefer_oid_order))
+	/* Root entry count is a cheap proxy for the cost of sorting nodes. */
+	if (!git_env_bool("GIT_TEST_CACHE_TREE_OID_ORDER",
+			  allow_oid_order && it &&
+				  it->entry_count >= CACHE_TREE_OID_ORDER_MIN_ENTRIES))
 		return cache_tree_fully_valid_internal(it, stats);
 	if (repo_has_promisor_remote(the_repository)) {
 		saved_errno = errno;
@@ -463,13 +467,13 @@ int cache_tree_fully_valid(struct cache_tree *it)
 	return cache_tree_fully_valid_maybe_oid_order(it, NULL, 0);
 }
 
-int cache_tree_fully_valid_with_order(struct cache_tree *it, int prefer_oid_order,
+int cache_tree_fully_valid_with_order(struct cache_tree *it, int allow_oid_order,
 				      uintmax_t *nodes, uintmax_t *object_checks)
 {
 	struct cache_tree_validation_stats stats = { 0 };
 	int valid = cache_tree_fully_valid_maybe_oid_order(it,
-					  nodes || object_checks ? &stats : NULL,
-					  prefer_oid_order);
+							   nodes || object_checks ? &stats : NULL,
+							   allow_oid_order);
 
 	if (nodes)
 		*nodes = stats.nodes;
@@ -1289,7 +1293,7 @@ int write_index_as_tree(struct object_id *oid, struct index_state *index_state, 
 	was_valid = !(flags & WRITE_TREE_IGNORE_CACHE_TREE) &&
 		    cache_tree_fully_valid_maybe_oid_order(cache_tree_get(index_state),
 							   trace_validation ? &validation : NULL,
-							   0);
+							   1);
 	trace2_region_leave("cache_tree", "validate", index_state->repo);
 	if (trace_validation)
 		trace_cache_tree_validation(&validation, was_valid,

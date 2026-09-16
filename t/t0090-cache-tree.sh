@@ -784,6 +784,7 @@ test_expect_success 'cache-tree is used by write-tree when valid' '
 	test_trace2_data cache_tree validate/skipped-total 0 <.git/cache-tree-validate.trace &&
 	test_trace2_data cache_tree validate/nodes-total "$nodes" <.git/cache-tree-validate.trace &&
 	test_trace2_data cache_tree validate/object-checks-total "$nodes" <.git/cache-tree-validate.trace &&
+	test_grep ! '"key":"validate/oid-order/probes"' .git/cache-tree-validate.trace &&
 	test_cache_tree_object_check_time .git/cache-tree-validate.trace "$nodes" &&
 
 	GIT_TEST_CACHE_TREE_OID_ORDER=1 \
