@@ -711,15 +711,28 @@ enum fsmonitor_untracked_cache_save_reply {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_EXISTS = 4,
 };
 
+/* Keep these private Trace2 reason values stable; NONE is not emitted. */
+enum fsmonitor_untracked_cache_save_miss_reason {
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_NONE = 0,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_UNKNOWN = 1,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_INVALID_REQUEST = 2,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_NO_CURRENT_TOKEN = 3,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_COOKIE_UNSEEN = 4,
+	FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_TOKEN_CHANGED = 5,
+};
+
 void fsmonitor_ipc__save_untracked_cache(
 	struct index_state *istate, enum fsmonitor_untracked_cache_save_mode mode)
 {
 	static const char hex[] = "0123456789abcdef";
-	static const char *const miss_reasons[] = {
-		"invalid-request",
-		"no-current-token",
-		"cookie-unseen",
-		"token-changed",
+	static const struct {
+		const char *name;
+		enum fsmonitor_untracked_cache_save_miss_reason code;
+	} miss_reasons[] = {
+		{ "invalid-request", FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_INVALID_REQUEST },
+		{ "no-current-token", FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_NO_CURRENT_TOKEN },
+		{ "cookie-unseen", FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_COOKIE_UNSEEN },
+		{ "token-changed", FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_TOKEN_CHANGED },
 	};
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
@@ -729,7 +742,8 @@ void fsmonitor_ipc__save_untracked_cache(
 	const char *verb = mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
 				   "put-if-absent" :
 				   "put";
-	const char *miss_reason = NULL;
+	enum fsmonitor_untracked_cache_save_miss_reason miss_reason =
+		FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_NONE;
 	enum fsmonitor_untracked_cache_save_outcome outcome =
 		FSMONITOR_UNTRACKED_CACHE_SAVE_INELIGIBLE;
 	enum untracked_cache_encoding encoding;
@@ -838,15 +852,15 @@ void fsmonitor_ipc__save_untracked_cache(
 		}
 	}
 	if (answer.len == 4 && !memcmp(answer.buf, "miss", 4))
-		miss_reason = "unknown";
+		miss_reason = FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_UNKNOWN;
 	else if (answer.len > 5 && !memcmp(answer.buf, "miss:", 5)) {
-		miss_reason = "unknown";
+		miss_reason = FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_UNKNOWN;
 		for (size_t i = 0; i < ARRAY_SIZE(miss_reasons); i++) {
-			size_t len = strlen(miss_reasons[i]);
+			size_t len = strlen(miss_reasons[i].name);
 
 			if (answer.len == 5 + len &&
-			    !memcmp(answer.buf + 5, miss_reasons[i], len)) {
-				miss_reason = miss_reasons[i];
+			    !memcmp(answer.buf + 5, miss_reasons[i].name, len)) {
+				miss_reason = miss_reasons[i].code;
 				break;
 			}
 		}
@@ -862,13 +876,13 @@ void fsmonitor_ipc__save_untracked_cache(
 			enum fsmonitor_untracked_cache_save_reply reply =
 				FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_OTHER;
 
-			if (miss_reason &&
+			if (miss_reason != FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_NONE &&
 			    ((answer.len == 4 &&
 			      !memcmp(answer.buf, "miss", 4)) ||
 			     (answer.len > 5 &&
 			      !memcmp(answer.buf, "miss:", 5)))) {
 				reply = FSMONITOR_UNTRACKED_CACHE_SAVE_REPLY_MISS;
-				trace2_data_string("fsmonitor", istate->repo,
+				trace2_data_intmax("fsmonitor", istate->repo,
 						   "untracked-cache/save-miss-reason",
 						   miss_reason);
 			} else if (answer.len == 7 &&

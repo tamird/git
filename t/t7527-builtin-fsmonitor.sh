@@ -1920,7 +1920,7 @@ test_expect_success 'untracked cache save reports stale token without changing l
 		test_trace2_data fsmonitor untracked-cache/save-reply 1 \
 			<../untracked-save-stale.trace &&
 		test_trace2_data fsmonitor untracked-cache/save-miss-reason \
-			token-changed <../untracked-save-stale.trace &&
+			5 <../untracked-save-stale.trace &&
 		test-tool fsmonitor-client legacy-untracked-cache-save-miss \
 			--token=builtin:never-current:0 &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-save-current.trace" \
