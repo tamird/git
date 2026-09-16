@@ -107,7 +107,7 @@ struct inexact_rename_stats {
 };
 
 struct inexact_size_read_stats {
-	uint64_t selected, packed, loose, inmemory, packed_misses;
+	uint64_t selected, packed, loose, inmemory, packed_nonzero_attempts;
 	uint64_t location_count, location_ns;
 	uint64_t lookup_count[ODB_PACKED_LOOKUP_PHASE_NR];
 	uint64_t lookup_ns[ODB_PACKED_LOOKUP_PHASE_NR];
@@ -155,7 +155,7 @@ static void record_size_read_sample(const struct odb_read_result *result,
 			break;
 		}
 	}
-	size_sample_add(&stats->packed_misses, result->packed_nonzero,
+	size_sample_add(&stats->packed_nonzero_attempts, result->packed_nonzero,
 			&stats->counts_invalid);
 	if (result->packed_entry_location_invalid)
 		stats->location_invalid = 1;
@@ -235,7 +235,7 @@ static void trace_size_read_sample(struct repository *repo,
 		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-packed", stats->packed);
 		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-loose", stats->loose);
 		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-inmemory", stats->inmemory);
-		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/packed-misses", stats->packed_misses);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/packed-nonzero-attempts", stats->packed_nonzero_attempts);
 	}
 	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/location-valid",
 			   trace_sample_estimate(repo, "rename/inexact/size-odb-sample/estimated-location-us",

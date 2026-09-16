@@ -300,7 +300,7 @@ test_expect_success 'empty ODB destination size is populated once' '
 	)
 '
 
-test_expect_success 'inexact size sampling keeps packed misses and loose winners' '
+test_expect_success 'inexact size sampling records packed nonzero attempts and loose winners' '
 	test_create_repo sampled-size &&
 	(
 		cd sampled-size &&
@@ -353,7 +353,7 @@ test_expect_success 'inexact size sampling keeps packed misses and loose winners
 			<size-sample.trace &&
 		test_trace2_data diff rename/inexact/size-odb-sample/winner-packed 1 \
 			<size-sample.trace &&
-		test_trace2_data diff rename/inexact/size-odb-sample/packed-misses 1 \
+		test_trace2_data diff rename/inexact/size-odb-sample/packed-nonzero-attempts 1 \
 			<size-sample.trace &&
 		test_trace2_data diff rename/inexact/size-odb-sample/location-valid 1 \
 			<size-sample.trace &&
