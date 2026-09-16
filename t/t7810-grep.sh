@@ -5242,6 +5242,72 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 '
 
 test_expect_success NO_FORCED_SPLIT_INDEX \
+	'grep without optional locks invalidates contradictory equality' '
+	test_when_finished "rm -rf grep-worktree-no-optional-negative" &&
+	(
+		sane_unset GIT_TEST_SPLIT_INDEX &&
+		sane_unset GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES &&
+		git init grep-worktree-no-optional-negative &&
+		cd grep-worktree-no-optional-negative &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 &&
+		export GIT_TEST_GREP_LITERAL_PATHS &&
+		echo "original target" >target &&
+		echo "original other" >other &&
+		test-tool chmtime =-5 target other &&
+		git add target other &&
+		test_hook --setup fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+		EOF
+		fsmonitor_hook="\"$PWD/.git/hooks/fsmonitor-test\"" &&
+		git config core.fsmonitor "$fsmonitor_hook" &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --fsmonitor &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep --no-content-index \
+			"absent target" -- target &&
+		test_path_is_file .git/index.grep-worktree &&
+		cp .git/index .git/index.before-other &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before-negative &&
+
+		echo "changed other" >other &&
+		other_oid=$(git hash-object -w --stdin <other) &&
+		git update-index --cacheinfo 100644,$other_oid,other &&
+		echo "changed target" >target &&
+		git update-index --fsmonitor-valid target &&
+		echo "target:changed target" >expected &&
+		GIT_TRACE2_EVENT="$PWD/no-optional.trace" \
+			git --no-optional-locks grep --no-content-index \
+				"changed target" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<no-optional.trace &&
+		test_trace2_data grep worktree_blob/write_outcome 1 \
+			<no-optional.trace &&
+		! test_cmp .git/index.grep-worktree-generation.before-negative \
+			.git/index.grep-worktree-generation &&
+
+		cp .git/index.before-other .git/index &&
+		GIT_TRACE2_EVENT="$PWD/after-negative.trace" \
+			git grep --no-content-index \
+				"changed target" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<after-negative.trace &&
+		cp .git/index.grep-worktree-generation \
+			.git/index.grep-worktree-generation.before-repeat &&
+		GIT_TRACE2_EVENT="$PWD/repeated-negative.trace" \
+			git --no-optional-locks grep --no-content-index \
+				"changed target" -- target >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/recorded_different 1 \
+			<repeated-negative.trace &&
+		test_cmp .git/index.grep-worktree-generation.before-repeat \
+			.git/index.grep-worktree-generation
+	)
+'
+
+test_expect_success NO_FORCED_SPLIT_INDEX \
 	'worktree cache accepts empty split-index base' '
 	test_when_finished "rm -rf grep-worktree-empty-split" &&
 	(
@@ -5318,20 +5384,6 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 			git grep "absent split base" -- cycle target other &&
 		test_trace2_data grep worktree_blob/recorded_equal 3 \
 			<trace-initial &&
-
-		mkdir other-worktree &&
-		echo "split scope worktree" >other-worktree/target &&
-		echo "target:split scope worktree" >expected &&
-		GIT_TRACE2_EVENT="$PWD/trace-other-worktree" \
-			git --no-optional-locks \
-				--work-tree="$PWD/other-worktree" \
-				grep "split scope worktree" -- target >actual &&
-		test_cmp expected actual &&
-		test_trace2_data grep worktree_blob/hits 0 \
-			<trace-other-worktree &&
-		test_trace2_data grep \
-			worktree_blob/recovered_split_base 0 \
-			<trace-other-worktree &&
 
 		echo "split overlay addition" >added &&
 		test-tool chmtime =-5 added &&
@@ -5421,7 +5473,26 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 			worktree_blob/recovered_split_base 0 \
 			<trace-new-base &&
 		test_trace2_data grep worktree_blob/recorded_equal 1 \
-			<trace-new-base
+			<trace-new-base &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-new-base-reused" \
+			git grep "absent split base" -- other &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<trace-new-base-reused &&
+
+		mkdir other-worktree &&
+		echo "split scope worktree" >other-worktree/other &&
+		echo "other:split scope worktree" >expected &&
+		GIT_TRACE2_EVENT="$PWD/trace-other-worktree" \
+			git --no-optional-locks \
+				--work-tree="$PWD/other-worktree" \
+				grep "split scope worktree" -- other >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep worktree_blob/hits 0 \
+			<trace-other-worktree &&
+		test_trace2_data grep \
+			worktree_blob/recovered_split_base 0 \
+			<trace-other-worktree
 	)
 '
 

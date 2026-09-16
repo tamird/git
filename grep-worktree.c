@@ -1261,6 +1261,12 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 	if (!use_optional_locks()) {
 		cache->write_outcome =
 			GREP_WORKTREE_WRITE_OPTIONAL_LOCKS_DISABLED;
+		/* Unchanged negative bits were already persisted. */
+		if (cache->recorded_different &&
+		    (cache->exact_changed || cache->split_base_changed) &&
+		    invalidate_observation_generation(cache) &&
+		    write_invalidation_marker(cache))
+			die_errno(_("unable to invalidate grep worktree cache"));
 		return;
 	}
 	update_recovery =
