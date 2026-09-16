@@ -3569,7 +3569,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'selected OID unknowns skip preparation for 42 objects' '
+	'selected OID unknowns skip preparation for 82 objects' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git rm -f --ignore-unmatch -- \
 				literal-candidate-direct-present \
@@ -3585,7 +3585,7 @@ test_expect_success FSMONITOR_DAEMON \
 		>literal-candidate-direct-present &&
 	echo "literal fallback unrelated contents" \
 		>literal-candidate-direct-absent &&
-	test_seq -f "literal-candidate-direct-extra-%02g" 1 40 |
+	test_seq -f "literal-candidate-direct-extra-%02g" 1 80 |
 	while read path
 	do
 		printf "literal fallback unknown %s\n" "$path" >"$path" ||
@@ -3604,7 +3604,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-present.trace 82 82 1 42 40 0 &&
+	test_content_index_ipc_query literal-direct-present.trace 122 122 1 82 40 0 &&
 	test_region grep load_content_index literal-direct-present.trace &&
 	test_region ! grep prepare_content_index literal-direct-present.trace &&
 	GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
@@ -3614,7 +3614,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-prepared.trace 82 82 1 42 40 0 &&
+	test_content_index_ipc_query literal-direct-prepared.trace 122 122 1 82 40 0 &&
 	test_region grep load_content_index literal-direct-prepared.trace &&
 	test_region grep prepare_content_index literal-direct-prepared.trace &&
 	test_must_fail git grep --no-content-index -F \
@@ -3626,7 +3626,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-absent.trace 82 82 1 42 -1 -1 &&
+	test_content_index_ipc_query literal-direct-absent.trace 122 122 1 82 -1 -1 &&
 	test_region grep load_content_index literal-direct-absent.trace &&
 	test_region ! grep prepare_content_index literal-direct-absent.trace &&
 	test_must_fail env GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
@@ -3637,7 +3637,7 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expect actual &&
 	test_must_be_empty err &&
 	test_content_index_ipc_query literal-direct-absent-prepared.trace \
-		82 82 1 42 -1 -1 &&
+		122 122 1 82 -1 -1 &&
 	test_region grep load_content_index literal-direct-absent-prepared.trace &&
 	test_region grep prepare_content_index literal-direct-absent-prepared.trace
 '
