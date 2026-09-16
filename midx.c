@@ -142,6 +142,7 @@ static struct multi_pack_index *load_multi_pack_index_one(struct odb_source_pack
 	m->data = midx_map;
 	m->data_len = midx_size;
 	m->source = source;
+	m->interpolate_lookup = git_env_bool("GIT_TEST_MIDX_INTERPOLATE", 1);
 
 	m->signature = get_be32(m->data);
 	if (m->signature != MIDX_SIGNATURE)
@@ -518,13 +519,117 @@ int nth_bitmapped_pack(struct multi_pack_index *m,
 	return 0;
 }
 
+#define MIDX_INTERPOLATE_MAX_PROBES 12
+
+static int cmp_midx_oid_at(const struct object_id *oid,
+			   struct multi_pack_index *m, uint32_t pos)
+{
+	return hashcmp(m->chunk_oid_lookup + (size_t)pos * m->hash_len,
+		       oid->hash, m->source->base.odb->repo->hash_algo);
+}
+
+static int bsearch_one_midx_interpolated(const struct object_id *oid,
+					 struct multi_pack_index *m,
+					 uint32_t *result)
+{
+	uint32_t hi = ntohl(m->chunk_oid_fanout[oid->hash[0]]);
+	uint32_t lo = 0, guess, step, prefix;
+	unsigned probes;
+	int cmp;
+
+	if (oid->hash[0])
+		lo = ntohl(m->chunk_oid_fanout[oid->hash[0] - 1]);
+
+	if (lo == hi)
+		goto missing;
+
+	/* Estimate the position from the next three hash bytes. */
+	prefix = (oid->hash[1] << 16) | (oid->hash[2] << 8) | oid->hash[3];
+	guess = lo + ((uint64_t)(hi - lo) * prefix >> 24);
+	cmp = cmp_midx_oid_at(oid, m, guess);
+	if (!cmp)
+		goto found;
+
+	if (cmp < 0) {
+		lo = guess + 1;
+		for (step = 1, probes = 0;
+		     lo < hi && probes < MIDX_INTERPOLATE_MAX_PROBES;
+		     step <<= 1, probes++) {
+			uint32_t pos = guess + MIN(step, hi - guess - 1);
+
+			cmp = cmp_midx_oid_at(oid, m, pos);
+			if (!cmp) {
+				guess = pos;
+				goto found;
+			}
+			if (cmp > 0) {
+				hi = pos;
+				break;
+			}
+			lo = pos + 1;
+		}
+	} else {
+		hi = guess;
+		for (step = 1, probes = 0;
+		     lo < hi && probes < MIDX_INTERPOLATE_MAX_PROBES;
+		     step <<= 1, probes++) {
+			uint32_t pos = guess - MIN(step, guess - lo);
+
+			cmp = cmp_midx_oid_at(oid, m, pos);
+			if (!cmp) {
+				guess = pos;
+				goto found;
+			}
+			if (cmp < 0) {
+				lo = pos + 1;
+				break;
+			}
+			hi = pos;
+		}
+	}
+
+	/* A skewed bucket must not cost more than a bounded extra probe set. */
+	if (lo < hi && probes == MIDX_INTERPOLATE_MAX_PROBES)
+		return bsearch_hash(oid->hash, m->chunk_oid_fanout,
+				    m->chunk_oid_lookup, m->hash_len, result);
+
+	while (lo < hi) {
+		uint32_t pos = lo + (hi - lo) / 2;
+
+		cmp = cmp_midx_oid_at(oid, m, pos);
+		if (!cmp) {
+			guess = pos;
+			goto found;
+		}
+		if (cmp > 0)
+			hi = pos;
+		else
+			lo = pos + 1;
+	}
+
+missing:
+	if (result)
+		*result = lo;
+	return 0;
+
+found:
+	if (result)
+		*result = guess;
+	return 1;
+}
+
 int bsearch_one_midx(const struct object_id *oid, struct multi_pack_index *m,
 		     uint32_t *result)
 {
-	int ret = bsearch_hash(oid->hash, m->chunk_oid_fanout,
-			       m->chunk_oid_lookup,
-			       m->source->base.odb->repo->hash_algo->rawsz,
-			       result);
+	int ret;
+
+	if (m->interpolate_lookup)
+		ret = bsearch_one_midx_interpolated(oid, m, result);
+	else
+		ret = bsearch_hash(oid->hash, m->chunk_oid_fanout,
+				   m->chunk_oid_lookup,
+				   m->source->base.odb->repo->hash_algo->rawsz,
+				   result);
 	if (result)
 		*result += m->num_objects_in_base;
 	return ret;

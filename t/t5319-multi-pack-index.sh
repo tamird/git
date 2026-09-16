@@ -149,6 +149,31 @@ test_expect_success 'write midx with two packs' '
 
 compare_results_with_midx "two packs"
 
+test_expect_success 'MIDX interpolation preserves prefixes and loose abbreviation' '
+	packed_oid=$(sed -n "1p" obj-list) &&
+	GIT_TEST_MIDX_INTERPOLATE=0 git cat-file -e "$packed_oid" &&
+	GIT_TEST_MIDX_INTERPOLATE=1 git cat-file -e "$packed_oid" &&
+	missing_oid=$(printf "%0*d" $((HASH_LEN * 2)) 0) &&
+	test_must_fail env GIT_TEST_MIDX_INTERPOLATE=0 \
+		git cat-file -e "$missing_oid" 2>expect &&
+	test_must_fail env GIT_TEST_MIDX_INTERPOLATE=1 \
+		git cat-file -e "$missing_oid" 2>actual &&
+	test_cmp expect actual &&
+	prefix=$(printf "%s\n" "$packed_oid" | cut -c1-7) &&
+	GIT_TEST_MIDX_INTERPOLATE=0 \
+		git rev-parse --disambiguate="$prefix" >expect &&
+	GIT_TEST_MIDX_INTERPOLATE=1 \
+		git rev-parse --disambiguate="$prefix" >actual &&
+	test_file_not_empty expect &&
+	test_cmp expect actual &&
+	loose_oid=$(echo outside-midx | git hash-object -w --stdin) &&
+	GIT_TEST_MIDX_INTERPOLATE=0 \
+		git rev-parse --short=4 "$loose_oid" >expect &&
+	GIT_TEST_MIDX_INTERPOLATE=1 \
+		git rev-parse --short=4 "$loose_oid" >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'write midx with --stdin-packs' '
 	rm -fr $objdir/pack/multi-pack-index &&
 

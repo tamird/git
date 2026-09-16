@@ -38,6 +38,7 @@ struct strvec;
 
 struct multi_pack_index {
 	struct odb_source_packed *source;
+	int interpolate_lookup;
 
 	const unsigned char *data;
 	size_t data_len;

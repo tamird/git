@@ -368,7 +368,21 @@ test_expect_success 'rev-parse --disambiguate' '
 test_expect_success 'rev-parse --disambiguate drops duplicates' '
 	git rev-parse --disambiguate=000000000 >expect &&
 	git pack-objects .git/objects/pack/pack <expect &&
-	git rev-parse --disambiguate=000000000 >actual &&
+	git multi-pack-index write &&
+	GIT_TEST_MIDX_INTERPOLATE=0 \
+		git rev-parse --disambiguate=000000000 >actual &&
+	test_cmp expect actual &&
+	GIT_TEST_MIDX_INTERPOLATE=1 \
+		git rev-parse --disambiguate=000000000 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'MIDX interpolation preserves loose abbreviation' '
+	loose_oid=$(echo outside-midx | git hash-object -w --stdin) &&
+	GIT_TEST_MIDX_INTERPOLATE=0 \
+		git rev-parse --short=8 "$loose_oid" >expect &&
+	GIT_TEST_MIDX_INTERPOLATE=1 \
+		git rev-parse --short=8 "$loose_oid" >actual &&
 	test_cmp expect actual
 '
 
