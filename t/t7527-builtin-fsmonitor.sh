@@ -513,6 +513,12 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 	(
 		cd test_diff_snapshot &&
 		git status --porcelain >../diff-snapshot.initial &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-healthy-uno.trace" \
+			git --no-optional-locks status --porcelain -uno \
+			>../diff-snapshot-healthy-uno.out &&
+		test_must_be_empty ../diff-snapshot-healthy-uno.out &&
+		test_trace2_data status untracked-cache/restore-attempted 0 \
+			<../diff-snapshot-healthy-uno.trace &&
 		test-tool fsmonitor-client flush >/dev/null &&
 		git status --porcelain -uno >../diff-snapshot.pending &&
 		test_must_be_empty ../diff-snapshot.pending &&
@@ -569,6 +575,19 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 			<../diff-snapshot-status.trace &&
 		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
 			<../diff-snapshot-status.trace &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-pending-uno.trace" \
+			git --no-optional-locks status --porcelain -uno \
+			>../diff-snapshot-pending-uno.out &&
+		test_must_be_empty ../diff-snapshot-pending-uno.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../diff-snapshot-pending-uno.trace &&
+		test_trace2_data fsmonitor tracked-cache/restored 2 \
+			<../diff-snapshot-pending-uno.trace &&
+		! have_t2_data_event index preload/sum_lstat \
+			<../diff-snapshot-pending-uno.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../diff-snapshot-pending-uno.trace &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-preserve.trace" \
 			test-tool fsmonitor-client save-untracked-cache \
 			--current-token --if-absent &&
@@ -592,6 +611,22 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 			>../diff-snapshot.token-advanced &&
 		! cmp -s ../diff-snapshot.token-before \
 			../diff-snapshot.token-advanced &&
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-stale-uno.trace" \
+			git --no-optional-locks status --porcelain -uno \
+			>../diff-snapshot-stale-uno.out &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -uno \
+			>../diff-snapshot-stale-uno.expect &&
+		test_cmp ../diff-snapshot-stale-uno.expect \
+			../diff-snapshot-stale-uno.out &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../diff-snapshot-stale-uno.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-miss-reason \
+			3 <../diff-snapshot-stale-uno.trace &&
+		! have_t2_data_event fsmonitor tracked-cache/restored \
+			<../diff-snapshot-stale-uno.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../diff-snapshot-stale-uno.trace &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-new-token.trace" \
 			git --no-optional-locks diff --name-only \
 			>../diff-snapshot-new-token.out &&

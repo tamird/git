@@ -1659,6 +1659,7 @@ struct repository *repo UNUSED)
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 	const char *cache_untracked_reason = NULL;
 	int cache_untracked_attempted = 0;
+	int collect_untracked, pending_untracked_cache;
 	int fd;
 	int optional_locks;
 	struct object_id oid;
@@ -1735,6 +1736,8 @@ struct repository *repo UNUSED)
 	if (s.show_ignored_mode == SHOW_MATCHING_IGNORED &&
 	    s.show_untracked_files == SHOW_NO_UNTRACKED_FILES)
 		die(_("Unsupported combination of ignored and untracked-files arguments"));
+	collect_untracked = s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
+			    s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES;
 
 	parse_pathspec(&s.pathspec, 0,
 		       PATHSPEC_PREFER_FULL,
@@ -1745,15 +1748,15 @@ struct repository *repo UNUSED)
 	    status_format != STATUS_FORMAT_PORCELAIN_V2)
 		progress_flag = REFRESH_PROGRESS;
 	repo_read_index(the_repository);
+	pending_untracked_cache = the_repository->index->untracked &&
+				  (!the_repository->index->untracked->root ||
+				   the_repository->index->untracked->fsmonitor_resync);
 	/* Restore missing or pending trees early to reuse their tracked bitmaps. */
-	if ((!optional_locks ||
-	     (the_repository->index->untracked &&
-	      (!the_repository->index->untracked->root ||
-	       the_repository->index->untracked->fsmonitor_resync))) &&
-	    !s.pathspec.nr &&
-	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
-	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
-	    s.show_ignored_mode == SHOW_NO_IGNORED) {
+	if (!s.pathspec.nr && s.show_ignored_mode == SHOW_NO_IGNORED &&
+	    ((collect_untracked &&
+	      (!optional_locks || pending_untracked_cache)) ||
+	     (s.show_untracked_files == SHOW_NO_UNTRACKED_FILES &&
+	      pending_untracked_cache))) {
 		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
 			the_repository->index, &cache_untracked_reason);
@@ -1777,9 +1780,7 @@ struct repository *repo UNUSED)
 		fd = -1;
 
 	if (optional_locks && fd < 0 && !cache_untracked_attempted &&
-	    !s.pathspec.nr &&
-	    (s.show_untracked_files == SHOW_NORMAL_UNTRACKED_FILES ||
-	     s.show_untracked_files == SHOW_ALL_UNTRACKED_FILES) &&
+	    !s.pathspec.nr && collect_untracked &&
 	    s.show_ignored_mode == SHOW_NO_IGNORED) {
 		cache_untracked_attempted = 1;
 		cache_untracked = fsmonitor_ipc__restore_untracked_cache(
@@ -1824,7 +1825,7 @@ struct repository *repo UNUSED)
 					   "untracked-cache/restore-reason",
 					   cache_untracked_reason);
 	}
-	if (fd < 0 &&
+	if (fd < 0 && collect_untracked &&
 	    (cache_untracked == FSMONITOR_UNTRACKED_CACHE_MISS ||
 	     (cache_untracked == FSMONITOR_UNTRACKED_CACHE_HIT &&
 	      the_repository->index->untracked &&
@@ -1835,7 +1836,7 @@ struct repository *repo UNUSED)
 			the_repository->index,
 			FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
 	/* A full scan may have rebuilt the cache after incompatible flags. */
-	if (fd < 0 &&
+	if (fd < 0 && collect_untracked &&
 	    cache_untracked == FSMONITOR_UNTRACKED_CACHE_INVALID_SNAPSHOT &&
 	    the_repository->index->untracked &&
 	    the_repository->index->untracked->root &&
