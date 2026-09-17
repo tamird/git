@@ -1572,6 +1572,7 @@ filegroup(
     name = "frankengit_runtime",
     srcs = [
         ":git",
+        ":git-http-fetch",
         ":git-remote-http",
         ":git-shell",
         ":git_receive_pack",
