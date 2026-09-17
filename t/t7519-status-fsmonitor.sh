@@ -305,10 +305,10 @@ test_expect_success UNTRACKED_CACHE \
 	)
 '
 
-test_expect_success PTHREADS 'git diff respects fsmonitor refresh write settings' '
+test_expect_success PTHREADS 'git diff limits fsmonitor-only index writes' '
 	test_when_finished "rm -rf diff-fsmonitor-optional-locks \
-		diff-fsmonitor-auto-refresh" &&
-	for mode in optional-locks auto-refresh
+		diff-fsmonitor-auto-refresh diff-fsmonitor-quick" &&
+	for mode in optional-locks auto-refresh quick
 	do
 		repo=diff-fsmonitor-$mode &&
 		test_create_repo "$repo" &&
@@ -332,6 +332,7 @@ test_expect_success PTHREADS 'git diff respects fsmonitor refresh write settings
 			echo modified >dirty &&
 			: >.git/fsmonitor-trivial &&
 			cp .git/index .git/index.before &&
+			echo dirty >.git/expect &&
 			case "$mode" in
 			optional-locks)
 				GIT_TEST_PRELOAD_INDEX=true \
@@ -342,8 +343,13 @@ test_expect_success PTHREADS 'git diff respects fsmonitor refresh write settings
 					git -c diff.autoRefreshIndex=false \
 					diff --name-only >.git/actual
 				;;
+			quick)
+				echo modified >clean &&
+				>.git/expect &&
+				test_must_fail git -c core.preloadIndex=false \
+					diff --quiet >.git/actual
+				;;
 			esac &&
-			echo dirty >.git/expect &&
 			test_cmp .git/expect .git/actual &&
 			test_path_is_missing .git/fsmonitor-trivial &&
 			test_cmp_bin .git/index.before .git/index

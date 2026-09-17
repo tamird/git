@@ -143,13 +143,19 @@ static void builtin_diff_blobs(struct rev_info *revs,
 	diff_flush(&revs->diffopt);
 }
 
+static int diff_scope_is_full(const struct rev_info *revs,
+			      int sparse_validation_scoped)
+{
+	return !revs->prune_data.nr && !revs->diffopt.pathspec.nr &&
+	       !revs->diffopt.prefix_length && !sparse_validation_scoped;
+}
+
 static int diff_snapshot_eligible(const struct rev_info *revs,
 				  int sparse_validation_scoped)
 {
 	const struct index_state *istate = the_repository->index;
 
-	return !revs->prune_data.nr && !revs->diffopt.pathspec.nr &&
-	       !revs->diffopt.prefix_length && !sparse_validation_scoped &&
+	return diff_scope_is_full(revs, sparse_validation_scoped) &&
 	       !istate->split_index && istate->untracked &&
 	       istate->untracked->root && istate->untracked->fsmonitor_resync &&
 	       fsm_settings__get_mode(the_repository) == FSMONITOR_MODE_IPC;
@@ -809,7 +815,9 @@ int cmd_diff(int argc,
 		index_written = refresh_index_quietly(
 			&rev.prune_data,
 			!ent.nr && !blobs && !sparse_validation_scoped);
-	else if (!sparse_validation_scoped && worktree_diff &&
+	else if (worktree_diff &&
+		 diff_scope_is_full(&rev, sparse_validation_scoped) &&
+		 !rev.diffopt.flags.quick &&
 		 rev.diffopt.skip_stat_unmatch &&
 		 (the_repository->index->cache_changed & FSMONITOR_CHANGED) &&
 		 use_optional_locks()) {

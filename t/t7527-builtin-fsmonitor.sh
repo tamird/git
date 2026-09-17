@@ -532,9 +532,12 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 		test-tool fsmonitor-client flush >/dev/null &&
 		git hash-object .git/index >../diff-snapshot.index-before &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-scoped.trace" \
-			git --no-optional-locks diff --name-only -- tracked \
+			git diff --name-only -- tracked \
 			>../diff-snapshot-scoped.out &&
 		test_must_be_empty ../diff-snapshot-scoped.out &&
+		git hash-object .git/index >../diff-snapshot.index-after &&
+		test_cmp ../diff-snapshot.index-before \
+			../diff-snapshot.index-after &&
 		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
 			<../diff-snapshot-scoped.trace &&
 		GIT_TEST_PRELOAD_INDEX=true \
