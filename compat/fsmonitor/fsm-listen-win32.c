@@ -567,7 +567,7 @@ static int process_worktree_events(struct fsmonitor_daemon_state *state)
 	if (!watch->count) {
 		trace2_data_string("fsmonitor", NULL, "fsm-listen/kernel",
 				   "overflow");
-		fsmonitor_force_resync(state);
+		fsmonitor_force_resync(state, FSMONITOR_GENERATION_WINDOWS_OVERFLOW);
 		return LISTENER_HAVE_DATA_WORKTREE;
 	}
 
@@ -679,7 +679,7 @@ static int process_gitdir_events(struct fsmonitor_daemon_state *state)
 	if (!watch->count) {
 		trace2_data_string("fsmonitor", NULL, "fsm-listen/kernel",
 				   "overflow");
-		fsmonitor_force_resync(state);
+		fsmonitor_force_resync(state, FSMONITOR_GENERATION_WINDOWS_OVERFLOW);
 		return LISTENER_HAVE_DATA_GITDIR;
 	}
 

@@ -414,6 +414,7 @@ static void with_lock__abort_all_cookies(struct fsmonitor_daemon_state *state)
  */
 struct fsmonitor_token_data {
 	struct strbuf token_id;
+	enum fsmonitor_generation_cause cause;
 	struct fsmonitor_batch *batch_head;
 	struct fsmonitor_batch *batch_tail;
 	uint64_t client_ref_count;
@@ -427,7 +428,8 @@ struct fsmonitor_batch {
 	time_t pinned_time;
 };
 
-static struct fsmonitor_token_data *fsmonitor_new_token_data(void)
+static struct fsmonitor_token_data *fsmonitor_new_token_data(
+	enum fsmonitor_generation_cause cause)
 {
 	static int test_env_value = -1;
 	static uint64_t flush_count = 0;
@@ -441,6 +443,7 @@ static struct fsmonitor_token_data *fsmonitor_new_token_data(void)
 	batch = fsmonitor_batch__new();
 
 	strbuf_init(&token->token_id, 0);
+	token->cause = cause;
 	token->batch_head = batch;
 	token->batch_tail = batch;
 	token->client_ref_count = 0;
@@ -654,14 +657,15 @@ static void fsmonitor_free_token_data(struct fsmonitor_token_data *token)
  * Either way, the old token data series is no longer associated with
  * our state data.
  */
-static void with_lock__do_force_resync(struct fsmonitor_daemon_state *state)
+static void with_lock__do_force_resync(struct fsmonitor_daemon_state *state,
+				       enum fsmonitor_generation_cause cause)
 {
 	/* assert current thread holding state->main_lock */
 
 	struct fsmonitor_token_data *free_me = NULL;
 	struct fsmonitor_token_data *new_one = NULL;
 
-	new_one = fsmonitor_new_token_data();
+	new_one = fsmonitor_new_token_data(cause);
 
 	if (state->current_token_data->client_ref_count == 0)
 		free_me = state->current_token_data;
@@ -675,10 +679,11 @@ static void with_lock__do_force_resync(struct fsmonitor_daemon_state *state)
 	with_lock__abort_all_cookies(state);
 }
 
-void fsmonitor_force_resync(struct fsmonitor_daemon_state *state)
+void fsmonitor_force_resync(struct fsmonitor_daemon_state *state,
+			    enum fsmonitor_generation_cause cause)
 {
 	pthread_mutex_lock(&state->main_lock);
-	with_lock__do_force_resync(state);
+	with_lock__do_force_resync(state, cause);
 	pthread_mutex_unlock(&state->main_lock);
 }
 
@@ -906,6 +911,8 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	intmax_t count = 0, duplicates = 0;
 	struct strset shown = STRSET_INIT;
 	int do_trivial = 0;
+	int send_generation_cause = 0;
+	int requested_token_valid = 0;
 	int do_flush = 0;
 	int do_cookie = 0;
 	int invalid_binding = 0;
@@ -1007,6 +1014,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 			 * We have a V2 valid token:
 			 *     "builtin:<token_id>:<seq_nr>"
 			 */
+			requested_token_valid = 1;
 			do_cookie = 1;
 		}
 	}
@@ -1051,7 +1059,8 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	}
 
 	if (do_flush) {
-		with_lock__do_force_resync(state);
+		with_lock__do_force_resync(state,
+					   FSMONITOR_GENERATION_EXPLICIT_FLUSH);
 		trace2_data_string("fsmonitor", the_repository,
 				   "resync/reason", "explicit-flush");
 	}
@@ -1084,19 +1093,19 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	trace_printf_key(&trace_fsmonitor, "response token: %s",
 			 response_token.buf);
 
-	if (!do_trivial) {
-		if (strcmp(requested_token_id.buf, token_data->token_id.buf)) {
-			/*
-			 * The client last spoke to a different daemon
-			 * instance -OR- the daemon had to resync with
-			 * the filesystem (and lost events), so reject.
-			 */
-			trace2_data_string("fsmonitor", the_repository,
-					   "response/token", "different");
-			do_trivial = 1;
-
-		} else if (requested_oldest_seq_nr >
-			   batch_head->batch_seq_nr) {
+	if (requested_token_valid &&
+	    strcmp(requested_token_id.buf, token_data->token_id.buf)) {
+		/*
+		 * A resync can also abort the cookie wait above, setting
+		 * do_trivial before we compare the two token IDs.
+		 */
+		trace2_data_string("fsmonitor", the_repository,
+				   "response/token", "different");
+		do_trivial = 1;
+		send_generation_cause = 1;
+	} else if (!do_trivial) {
+		if (requested_oldest_seq_nr >
+		    batch_head->batch_seq_nr) {
 			/*
 			 * The client requested a batch that has not been
 			 * created, so it cannot be treated as up to date.
@@ -1121,9 +1130,17 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	}
 
 	if (do_trivial) {
+		enum fsmonitor_generation_cause cause = token_data->cause;
+		struct strbuf cause_reply = STRBUF_INIT;
+
 		pthread_mutex_unlock(&state->main_lock);
 
 		reply(reply_data, "/", 2);
+		if (send_generation_cause) {
+			strbuf_addf(&cause_reply, "%d", cause);
+			reply(reply_data, cause_reply.buf, cause_reply.len + 1);
+			strbuf_release(&cause_reply);
+		}
 
 		trace2_data_intmax("fsmonitor", the_repository,
 				   "response/trivial", 1);
@@ -1594,7 +1611,8 @@ static int fsmonitor_state_init(
 	pthread_mutex_init(&state->ready_lock, NULL);
 	pthread_cond_init(&state->cookies_cond, NULL);
 	pthread_cond_init(&state->ready_cond, NULL);
-	state->current_token_data = fsmonitor_new_token_data();
+	state->current_token_data = fsmonitor_new_token_data(
+		FSMONITOR_GENERATION_WATCH_START);
 	strbuf_init(&state->untracked_cache_oid, 0);
 	strbuf_init(&state->untracked_cache_token, 0);
 	strbuf_init(&state->untracked_cache_data, 0);
@@ -1952,7 +1970,8 @@ static int fsmonitor_run_daemon(void)
 	pthread_cond_init(&state.cookies_cond, NULL);
 	state.listen_error_code = 0;
 	state.health_error_code = 0;
-	state.current_token_data = fsmonitor_new_token_data();
+	state.current_token_data = fsmonitor_new_token_data(
+		FSMONITOR_GENERATION_WATCH_START);
 	strbuf_init(&state.untracked_cache_oid, 0);
 	strbuf_init(&state.untracked_cache_token, 0);
 	strbuf_init(&state.untracked_cache_data, 0);

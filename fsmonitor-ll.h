@@ -57,6 +57,10 @@ struct fsmonitor_trivial_result {
 struct fsmonitor_trivial_result fsmonitor_classify_trivial_response(
 	const char *requested, const char *response);
 
+/* The optional cause after a trivial IPC reply; zero for older daemons. */
+int fsmonitor_trivial_generation_cause(const struct strbuf *query_result,
+				       size_t response_offset);
+
 /*
  * Does the received result contain the "trivial" response?
  */

@@ -1,6 +1,8 @@
 #ifndef FSMONITOR_DAEMON_H
 #define FSMONITOR_DAEMON_H
 
+#include "fsmonitor-ipc.h"
+
 #ifdef HAVE_FSMONITOR_DAEMON_BACKEND
 
 #include "hashmap.h"
@@ -189,7 +191,8 @@ void fsmonitor_publish(struct fsmonitor_daemon_state *state,
  * it should call this to invalidate cached data and abort waiting
  * threads.
  */
-void fsmonitor_force_resync(struct fsmonitor_daemon_state *state);
+void fsmonitor_force_resync(struct fsmonitor_daemon_state *state,
+			    enum fsmonitor_generation_cause cause);
 
 #endif /* HAVE_FSMONITOR_DAEMON_BACKEND */
 #endif /* FSMONITOR_DAEMON_H */

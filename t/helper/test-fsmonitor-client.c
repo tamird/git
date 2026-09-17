@@ -334,6 +334,18 @@ static int do_hammer(const char *token, int nr_threads, int nr_requests)
 
 static int test_trivial_response(void)
 {
+	struct strbuf reply = STRBUF_INIT;
+	static const struct {
+		const char *suffix;
+		size_t len;
+		int expected;
+	} cause_cases[] = {
+		{ "/\0", sizeof("/\0") - 1, 0 },
+		{ "/\0002\0", sizeof("/\0002\0") - 1, 2 },
+		{ "/\0x\0", sizeof("/\0x\0") - 1, 0 },
+		{ "/\0009\0", sizeof("/\0009\0") - 1, 0 },
+		{ "/\0002\0extra", sizeof("/\0002\0extra") - 1, 0 },
+	};
 	static const struct {
 		const char *requested;
 		const char *response;
@@ -404,6 +416,22 @@ static int test_trivial_response(void)
 			die("trivial response classification failed at case %"PRIuMAX,
 			    (uintmax_t)i);
 	}
+	for (size_t i = 0; i < ARRAY_SIZE(cause_cases); i++) {
+		int actual;
+
+		strbuf_reset(&reply);
+		strbuf_addstr(&reply, "builtin:g:2");
+		strbuf_addch(&reply, '\0');
+		strbuf_add(&reply, cause_cases[i].suffix, cause_cases[i].len);
+		actual = fsmonitor_trivial_generation_cause(&reply,
+							    strlen(reply.buf) + 1);
+		if (actual != cause_cases[i].expected)
+			die("trivial response cause failed at case %" PRIuMAX
+			    ": expected %d, got %d",
+			    (uintmax_t)i,
+			    cause_cases[i].expected, actual);
+	}
+	strbuf_release(&reply);
 
 	return 0;
 }

@@ -267,21 +267,28 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 		      (path_type == IS_WORKDIR_PATH && !*worktree_rel) ||
 		      dir_inside_of(state->path_cookie_prefix.buf, path_k) >= 0))) {
 			const char *reason;
+			enum fsmonitor_generation_cause cause;
 
 			if (trace_pass_fl(&trace_fsmonitor))
 				log_flags_set(path_k, event_flags[k]);
 
-			if (event_flags[k] & kFSEventStreamEventFlagKernelDropped)
+			if (event_flags[k] & kFSEventStreamEventFlagKernelDropped) {
 				reason = "kernel-dropped";
-			else if (event_flags[k] & kFSEventStreamEventFlagUserDropped)
+				cause = FSMONITOR_GENERATION_DARWIN_KERNEL_DROPPED;
+			} else if (event_flags[k] & kFSEventStreamEventFlagUserDropped) {
 				reason = "user-dropped";
-			else if (path_type == IS_OUTSIDE_CONE)
+				cause = FSMONITOR_GENERATION_DARWIN_USER_DROPPED;
+			} else if (path_type == IS_OUTSIDE_CONE) {
 				reason = "outside-cone";
-			else if (path_type == IS_WORKDIR_PATH && !*worktree_rel)
+				cause = FSMONITOR_GENERATION_DARWIN_OUTSIDE_CONE;
+			} else if (path_type == IS_WORKDIR_PATH && !*worktree_rel) {
 				reason = "worktree-root";
-			else
+				cause = FSMONITOR_GENERATION_DARWIN_WORKTREE_ROOT;
+			} else {
 				reason = "cookie-prefix";
-			fsmonitor_force_resync(state);
+				cause = FSMONITOR_GENERATION_DARWIN_COOKIE_PREFIX;
+			}
+			fsmonitor_force_resync(state, cause);
 			trace2_data_string("fsmonitor", NULL, "resync/reason", reason);
 			fsmonitor_batch__free_list(batch);
 			string_list_clear(&cookie_list, 0);

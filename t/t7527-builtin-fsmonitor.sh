@@ -999,6 +999,9 @@ test_expect_success 'flush cached data' '
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_0 &&
 	nul_to_q <actual_0 >actual_q0 &&
+	test-tool -C test_flush fsmonitor-client query --token "builtin:old:0" >actual_old &&
+	nul_to_q <actual_old >actual_old_q &&
+	test_grep "^builtin:test_00000001:[0-9][0-9]*Q/Q1Q$" actual_old_q &&
 
 	test-tool -C test_flush fsmonitor-client query \
 		--token "builtin:test_00000001:18446744073709551615" >actual_future &&
@@ -1024,6 +1027,9 @@ test_expect_success 'flush cached data' '
 	nul_to_q <flush_0 >flush_q0 &&
 	test_grep "^builtin:test_00000002:0Q/Q$" flush_q0 &&
 	test_trace2_data fsmonitor resync/reason explicit-flush <.git/resync.trace &&
+	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000001:0" >actual_stale &&
+	nul_to_q <actual_stale >actual_stale_q &&
+	test_grep "^builtin:test_00000002:[0-9][0-9]*Q/Q2Q$" actual_stale_q &&
 
 	test-tool -C test_flush fsmonitor-client query --token "builtin:test_00000002:0" >actual_2 &&
 	nul_to_q <actual_2 >actual_q2 &&
@@ -2448,6 +2454,8 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 			<../untracked-restart-first.trace &&
 		test_trace2_data fsm_client query/trivial-reason \
 			token-generation-changed <../untracked-restart-first.trace &&
+		have_t2_data_event fsm_client query/generation-cause-code \
+			<../untracked-restart-first.trace &&
 		test_trace2_data fsm_client query/invalid-token-mask 0 \
 			<../untracked-restart-first.trace &&
 		test_trace2_data status untracked-cache/restore miss \

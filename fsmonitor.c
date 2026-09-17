@@ -831,6 +831,31 @@ struct fsmonitor_trivial_result fsmonitor_classify_trivial_response(
 	return result;
 }
 
+int fsmonitor_trivial_generation_cause(const struct strbuf *query_result,
+				       size_t response_offset)
+{
+	const char *buf = query_result->buf;
+	size_t i;
+	int code = 0;
+
+	/* A newer daemon appends a NUL-terminated decimal code after "/\0". */
+	if (response_offset > query_result->len ||
+	    query_result->len - response_offset < 4 ||
+	    buf[response_offset] != '/' || buf[response_offset + 1] ||
+	    buf[query_result->len - 1])
+		return FSMONITOR_GENERATION_UNKNOWN;
+
+	for (i = response_offset + 2; i < query_result->len - 1; i++) {
+		if (buf[i] < '0' || buf[i] > '9')
+			return FSMONITOR_GENERATION_UNKNOWN;
+		code = code * 10 + buf[i] - '0';
+		if (code >= FSMONITOR_GENERATION_CAUSE_NR)
+			return FSMONITOR_GENERATION_UNKNOWN;
+	}
+
+	return code;
+}
+
 void refresh_fsmonitor(struct index_state *istate)
 {
 	static int warn_once = 0;
@@ -903,6 +928,13 @@ void refresh_fsmonitor(struct index_state *istate)
 				trace2_data_string("fsm_client", NULL,
 						   "query/trivial-reason", result.reason);
 				saved_errno = errno;
+				if (!strcmp(result.reason,
+					    "token-generation-changed"))
+					trace2_data_intmax(
+						"fsm_client", NULL,
+						"query/generation-cause-code",
+						fsmonitor_trivial_generation_cause(
+							&query_result, bol));
 				trace2_data_intmax("fsm_client", NULL,
 						   "query/invalid-token-mask",
 						   result.invalid_token_mask);
