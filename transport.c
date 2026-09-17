@@ -882,10 +882,12 @@ int transport_summary_width(const struct ref *refs)
 {
 	int maxw = -1;
 
+	trace2_region_enter("transport_push", "summary_width", the_repository);
 	for (; refs; refs = refs->next) {
 		maxw = measure_abbrev(&refs->old_oid, maxw);
 		maxw = measure_abbrev(&refs->new_oid, maxw);
 	}
+	trace2_region_leave("transport_push", "summary_width", the_repository);
 	if (maxw < 0)
 		maxw = FALLBACK_DEFAULT_ABBREV;
 	return (2 * maxw + 3);
@@ -899,6 +901,7 @@ void transport_print_push_status(const char *dest, struct ref *refs,
 	char *head;
 	int summary_width = transport_summary_width(refs);
 
+	trace2_region_enter("transport_push", "print_status", the_repository);
 	if (transport_color_config() < 0)
 		warning(_("could not parse transport.color.* config"));
 
@@ -940,6 +943,7 @@ void transport_print_push_status(const char *dest, struct ref *refs,
 		}
 	}
 	free(head);
+	trace2_region_leave("transport_push", "print_status", the_repository);
 }
 
 static int git_transport_push(struct transport *transport, struct ref *remote_refs, int flags)
