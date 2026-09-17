@@ -4706,7 +4706,100 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 		test_trace2_data grep worktree_blob/recovery_prepare/outcome 0 \
 			<publisher.trace &&
 		test_trace2_data grep worktree_blob/write_abort_reason 8 \
-			<promotion.trace
+			<promotion.trace &&
+
+		for concurrent in positive negative
+		do
+			rm -f .git/index.grep-worktree \
+				.git/index.grep-worktree-recovery \
+				.git/index.grep-worktree-recovery-next &&
+			echo "refresh a" >refresh-a &&
+			echo "refresh b" >refresh-b &&
+			echo "refresh c" >refresh-c &&
+			test-tool chmtime =-5 refresh-a refresh-b refresh-c &&
+			git add refresh-a refresh-b refresh-c &&
+			git status --porcelain >/dev/null &&
+			test_expect_code 1 env \
+				GIT_TEST_GREP_WORKTREE_RECOVERY_MIN_ENTRIES=1 \
+				git grep "absent refresh" -- refresh-a &&
+			cp .git/index .git/index.before-refresh &&
+			hold="$PWD/.git/refresh-hold" &&
+			ready="$PWD/.git/refresh-ready" &&
+			rm -f "$ready" &&
+			>"$hold" &&
+			{
+				env \
+					GIT_TEST_GREP_WORKTREE_RECOVERY_REFRESH_MIN_ENTRIES=1 \
+					GIT_TEST_GREP_WORKTREE_WRITE_HOLD="$hold" \
+					GIT_TEST_GREP_WORKTREE_WRITE_PHASE=prelock \
+					GIT_TEST_GREP_WORKTREE_WRITE_READY="$ready" \
+					GIT_TRACE2_EVENT="$PWD/refresh-$concurrent.trace" \
+					git grep "absent refresh" -- refresh-a refresh-b \
+					>refresh.out 2>refresh.err &
+			} &&
+			grep_pid=$! &&
+			trap "kill $grep_pid 2>/dev/null || :" 0 &&
+			attempts=0 &&
+			while test ! -f "$ready" && test "$attempts" -lt 30
+			do
+				sleep 1 &&
+				attempts=$(($attempts + 1)) || exit 1
+			done &&
+			test_path_is_file "$ready" &&
+			if test "$concurrent" = positive
+			then
+				concurrent_path=refresh-c
+			else
+				echo "changed refresh" >refresh-b &&
+				concurrent_path=refresh-b
+			fi &&
+			test_expect_code 1 env \
+				GIT_TRACE2_EVENT="$PWD/concurrent-$concurrent.trace" \
+				git grep "absent refresh" -- "$concurrent_path" &&
+			test_trace2_data grep worktree_blob/write_outcome 8 \
+				<concurrent-$concurrent.trace &&
+			test_cmp .git/index.before-refresh .git/index &&
+			rm "$hold" &&
+			test_expect_code 1 wait "$grep_pid" &&
+			trap - 0 &&
+			test_must_be_empty refresh.out &&
+			test_must_be_empty refresh.err &&
+			if test "$concurrent" = positive
+			then
+				test_trace2_data grep worktree_blob/direct_write 1 \
+					<refresh-$concurrent.trace &&
+				test_trace2_data grep worktree_blob/recovery_write_outcome 5 \
+					<refresh-$concurrent.trace &&
+				test_expect_code 1 env \
+					GIT_TRACE2_EVENT="$PWD/concurrent-retained.trace" \
+					git grep "absent refresh" -- refresh-c &&
+				test_trace2_data grep worktree_blob/hits 1 \
+					<concurrent-retained.trace
+			else
+				test_trace2_data grep worktree_blob/recorded_different 1 \
+					<concurrent-$concurrent.trace &&
+				test_trace2_data grep worktree_blob/recovery_write_outcome 2 \
+					<refresh-$concurrent.trace
+			fi &&
+			echo "unrelated index change" >refresh-shift-$concurrent &&
+			git add refresh-shift-$concurrent &&
+			git status --porcelain >/dev/null &&
+			if test "$concurrent" = positive
+			then
+				test_expect_code 1 env \
+					GIT_TRACE2_EVENT="$PWD/after-refresh.trace" \
+					git grep "absent refresh" -- refresh-a refresh-b &&
+				test_trace2_data grep worktree_blob/recovered_identity 2 \
+					<after-refresh.trace
+			else
+				echo "refresh-b:changed refresh" >expected &&
+				GIT_TRACE2_EVENT="$PWD/after-negative.trace" \
+					git grep "changed refresh" -- refresh-b >actual &&
+				test_cmp expected actual &&
+				test_trace2_data grep worktree_blob/recovered_identity 0 \
+					<after-negative.trace
+			fi || return 1
+		done
 	)
 '
 

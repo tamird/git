@@ -68,10 +68,8 @@ enum grep_worktree_recovery_write_outcome {
 enum grep_worktree_prepare_outcome {
 	GREP_WORKTREE_PREPARE_PREPARED = 0,
 	GREP_WORKTREE_PREPARE_SLOT_LOCK_FAILED,
-	GREP_WORKTREE_PREPARE_COMPACT_MAP_FAILED,
-	GREP_WORKTREE_PREPARE_COMPACT_TOO_SMALL,
-	GREP_WORKTREE_PREPARE_COMPACT_CHANGED,
-	GREP_WORKTREE_PREPARE_RECOVERY_LOAD_FAILED,
+	/* Preserve Trace2 values after removing the compact-source precheck. */
+	GREP_WORKTREE_PREPARE_RECOVERY_LOAD_FAILED = 5,
 	GREP_WORKTREE_PREPARE_RECOVERY_CHECKSUM_FAILED,
 	GREP_WORKTREE_PREPARE_ENTRY_IDENTITY_FAILED,
 	GREP_WORKTREE_PREPARE_ENTRY_LIMIT_EXCEEDED,
@@ -1050,15 +1048,12 @@ static enum grep_worktree_prepare_outcome prepare_recovery(
 	unsigned char *included = NULL;
 	struct object_id entry_oid;
 	struct oid_array entries = OID_ARRAY_INIT;
-	const unsigned char *compact_map = NULL;
 	uint32_t *fanout = NULL;
 	struct hashfile *f = NULL;
-	struct strbuf compact_path = STRBUF_INIT;
 	struct strbuf path = STRBUF_INIT;
 	enum trace2_timer_id active_timer = TRACE2_NUMBER_OF_TIMERS;
 	enum grep_worktree_prepare_outcome result =
 		GREP_WORKTREE_PREPARE_SLOT_LOCK_FAILED;
-	size_t compact_size = 0;
 	uint64_t identity_hashes = 0;
 	uint64_t recovery_lookups = 0;
 	int trace_enabled = trace2_is_enabled();
@@ -1072,28 +1067,6 @@ static enum grep_worktree_prepare_outcome prepare_recovery(
 	if (fd < 0) {
 		lock_errno = errno;
 		goto done;
-	}
-	if (!is_null_oid(&cache->recovery_checksum)) {
-		size_t rawsz = cache->repo->hash_algo->rawsz;
-
-		grep_worktree_cache_path(cache->repo, &compact_path);
-		compact_map = map_file(compact_path.buf, &compact_size);
-		if (!compact_map) {
-			result = GREP_WORKTREE_PREPARE_COMPACT_MAP_FAILED;
-			goto done;
-		}
-		if (compact_size < rawsz) {
-			result = GREP_WORKTREE_PREPARE_COMPACT_TOO_SMALL;
-			goto done;
-		}
-		if (!hasheq(compact_map + compact_size - rawsz,
-			    cache->compact_checksum.hash,
-			    cache->repo->hash_algo)) {
-			result = GREP_WORKTREE_PREPARE_COMPACT_CHANGED;
-			goto done;
-		}
-		munmap((void *)compact_map, compact_size);
-		compact_map = NULL;
 	}
 	CALLOC_ARRAY(included, cache->bitmap_size);
 	CALLOC_ARRAY(fanout, GREP_WORKTREE_RECOVERY_FANOUT_ENTRIES);
@@ -1202,8 +1175,6 @@ done:
 				   "worktree_blob/recovery_prepare/entries",
 				   entries.nr);
 	}
-	if (compact_map)
-		munmap((void *)compact_map, compact_size);
 	if (f)
 		free_hashfile(f);
 	if (result != GREP_WORKTREE_PREPARE_PREPARED)
@@ -1211,7 +1182,6 @@ done:
 	free(fanout);
 	free(included);
 	oid_array_clear(&entries);
-	strbuf_release(&compact_path);
 	strbuf_release(&path);
 	return result;
 }
@@ -1408,6 +1378,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 			GREP_WORKTREE_WRITE_GENERATION_REJECTED;
 		goto done;
 	}
+	wait_for_test_write_phase("locked");
 	if (cache->istate->index_file_stat_valid) {
 		const unsigned char *map = NULL;
 		const struct stat *old = &cache->istate->index_file_stat;
@@ -1451,7 +1422,7 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 		cache->write_outcome = GREP_WORKTREE_WRITE_NO_CHANGES;
 		goto done;
 	}
-	if (same_index && !update_recovery) {
+	if (same_index) {
 		current.repo = cache->repo;
 		current.istate = cache->istate;
 		current.entry_identity = cache->entry_identity;
@@ -1568,7 +1539,6 @@ read_current_index:
 		oid_array_append(&cache->negative_entries, &entry_oid);
 	}
 	oid_array_sort(&cache->negative_entries);
-	wait_for_test_write_phase("locked");
 	istate.lazy_cache_tree = 1;
 	index_result = read_index_from(
 		&istate, repo_get_index_file(cache->repo),
