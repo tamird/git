@@ -1520,7 +1520,7 @@ static int grep_cache(struct grep_opt *opt,
 	int used_index_ipc = 0;
 	int handled_selected_oid_query = 0;
 	int worktree_sidecar_loaded = 0;
-	int index_identity_valid = 0;
+	int oid_sequence_valid = 0;
 	unsigned int index_identity_computations = 0;
 	int prepare_index_query;
 	int full_worktree = !pathspec->nr &&
@@ -1998,7 +1998,7 @@ static int grep_cache(struct grep_opt *opt,
 				&worktree_sidecar_loaded);
 			if (worktree_cache) {
 				index_identity_computations++;
-				index_identity_valid = 1;
+				oid_sequence_valid = 1;
 			}
 			trace2_region_leave("grep", "load_worktree_cache", repo);
 		}
@@ -2041,7 +2041,14 @@ static int grep_cache(struct grep_opt *opt,
 					fsmonitor_ipc__restore_untracked_cache(
 						repo->index, &reason);
 				}
-				index_identity_valid = 0;
+				/*
+				 * Refresh changes stats and flags, not the OID sequence
+				 * used by the content-index query. Sparse index writes
+				 * may rebuild entries while changing representation.
+				 */
+				if (cfg->apply_sparse_checkout ||
+				    repo->index->sparse_index != INDEX_EXPANDED)
+					oid_sequence_valid = 0;
 				refresh_index(repo->index,
 					      REFRESH_QUIET | REFRESH_UNMERGED |
 						      REFRESH_IGNORE_SUBMODULES |
@@ -2123,12 +2130,12 @@ static int grep_cache(struct grep_opt *opt,
 		CALLOC_ARRAY(maybe, bitmap_size);
 		CALLOC_ARRAY(unresolved, bitmap_size);
 		trace2_region_enter("grep", "query_content_index_ipc", repo);
-		if (!index_identity_valid) {
+		if (!oid_sequence_valid) {
 			index_identity_computations++;
-			index_identity_valid = !grep_index_identity_get(
+			oid_sequence_valid = !grep_index_identity_get(
 				repo, repo->index, &index_identity);
 		}
-		if (index_identity_valid)
+		if (oid_sequence_valid)
 			index_query_result = grep_index_ipc_query_index(
 				repo, content_index_query,
 				&index_identity.oid_sequence,

@@ -4513,7 +4513,7 @@ test_expect_success FSMONITOR_DAEMON \
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'grep keeps the disk token after a RAM-only entry refresh' '
+	'grep reuses the OID sequence after an entry refresh' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 		git checkout -- ordinary &&
 		rm -f .git/index.grep-token \
@@ -4558,12 +4558,22 @@ test_expect_success FSMONITOR_DAEMON \
 		git --no-optional-locks grep "ordinary contents" \
 		-- "ord*" >actual &&
 	test_cmp expect actual &&
-	test_trace2_data grep index_identity/token_read_outcome 4 \
+	test_region index refresh ram-token-refreshed.trace &&
+	test_region grep query_content_index_ipc ram-token-refreshed.trace &&
+	test_trace2_data grep index_identity/computations 1 \
 		<ram-token-refreshed.trace &&
-	test_region grep index-identity/compute ram-token-refreshed.trace &&
-	test_trace2_data grep index_identity/token_write_outcome 5 \
-		<ram-token-refreshed.trace &&
-	test_cmp ram-token.before .git/index.grep-token
+	test_region ! grep index-identity/compute ram-token-refreshed.trace &&
+	test_cmp ram-token.before .git/index.grep-token &&
+	GIT_TEST_GREP_LITERAL_PATHS=0 \
+	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+	GIT_TRACE2_EVENT_NESTING=10 \
+	GIT_TRACE2_EVENT="$PWD/ram-token-written.trace" \
+		git grep "ordinary contents" -- "ord*" >actual &&
+	test_cmp expect actual &&
+	test_region index do_write_index ram-token-written.trace &&
+	test_region grep query_content_index_ipc ram-token-written.trace &&
+	test_trace2_data grep index_identity/computations 1 \
+		<ram-token-written.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \
