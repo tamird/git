@@ -843,11 +843,18 @@ static void mark_complete_and_common_ref(struct fetch_negotiator *negotiator,
 			.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
 		};
 
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_REFS);
 		refs_for_each_ref_ext(get_main_ref_store(the_repository),
 				      mark_complete_oid, NULL, &opts);
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_REFS);
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_ALTERNATES);
 		for_each_cached_alternate(NULL, mark_alternate_complete);
-		if (cutoff)
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_ALTERNATES);
+		if (cutoff) {
+			trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_RECENT);
 			mark_recent_complete_commits(args, cutoff);
+			trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_RECENT);
+		}
 	}
 	trace2_region_leave("fetch-pack", "mark_complete_local_refs", NULL);
 
