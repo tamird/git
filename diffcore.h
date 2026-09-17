@@ -10,7 +10,7 @@ struct diff_options;
 struct mem_pool;
 struct oid_array;
 struct odb_read_result;
-struct odb_source;
+struct odb_source_info;
 struct repository;
 struct strintmap;
 struct strmap;
@@ -95,7 +95,8 @@ void diff_queued_diff_prefetch(void *repository);
 /* Borrowed for one inexact-rename operation. Sampling starts at an ODB read. */
 struct diff_size_read_sample {
 	uint64_t eligible;
-	void (*report)(const struct odb_read_result *, const struct odb_source *, void *);
+	/* A NULL result reports the read immediately following a timed sample. */
+	void (*report)(const struct odb_read_result *, const struct odb_source_info *, void *);
 	void *data;
 };
 

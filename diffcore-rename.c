@@ -10,6 +10,7 @@
 #include "diffcore.h"
 #include "object-file.h"
 #include "odb/source.h"
+#include "packfile.h"
 #include "parse.h"
 #include "hashmap.h"
 #include "mem-pool.h"
@@ -108,6 +109,10 @@ struct inexact_rename_stats {
 
 struct inexact_size_read_stats {
 	uint64_t selected, packed, loose, inmemory, packed_nonzero_attempts;
+	uint64_t locality_pairs, locality_nonpacked, locality_unknown;
+	uint64_t locality_pack_switch, locality_same_pack, locality_exact;
+	uint64_t locality_ge_4k, locality_ge_64k, locality_ge_1m;
+	uint64_t locality_backward;
 	uint64_t location_count, location_ns;
 	uint64_t lookup_count[ODB_PACKED_LOOKUP_PHASE_NR];
 	uint64_t lookup_ns[ODB_PACKED_LOOKUP_PHASE_NR];
@@ -115,6 +120,11 @@ struct inexact_size_read_stats {
 	uint64_t header_count, base_count, decode_count, cache_hits;
 	int counts_invalid, location_invalid, lookup_invalid;
 	int header_invalid, base_invalid, decode_invalid;
+	int locality_invalid, locality_pending, previous_packed;
+	const struct odb_source *previous_source;
+	unsigned char previous_pack_hash[GIT_MAX_RAWSZ];
+	size_t hash_len;
+	off_t previous_offset;
 };
 
 static void size_sample_add(uint64_t *sum, uint64_t value, int *invalid)
@@ -128,10 +138,78 @@ static void size_sample_add(uint64_t *sum, uint64_t value, int *invalid)
 }
 
 static void record_size_read_sample(const struct odb_read_result *result,
-				    const struct odb_source *source, void *data)
+				    const struct odb_source_info *source_info,
+				    void *data)
 {
+	static const unsigned char null_hash[GIT_MAX_RAWSZ];
 	struct inexact_size_read_stats *stats = data;
+	const struct odb_source *source = source_info->source;
+	const struct packed_git *pack;
 	int i;
+
+	if (!result) {
+		uint64_t gap;
+		off_t offset;
+
+		if (!stats->locality_pending) {
+			stats->locality_invalid = 1;
+			return;
+		}
+		stats->locality_pending = 0;
+		size_sample_add(&stats->locality_pairs, 1,
+				&stats->locality_invalid);
+		if (!stats->previous_packed || !source ||
+		    source->type != ODB_SOURCE_PACKED) {
+			size_sample_add(&stats->locality_nonpacked, 1,
+					&stats->locality_invalid);
+			return;
+		}
+		pack = source_info->u.packed.pack;
+		if (!memcmp(stats->previous_pack_hash, null_hash,
+			    stats->hash_len) ||
+		    !memcmp(pack->hash, null_hash, stats->hash_len)) {
+			size_sample_add(&stats->locality_unknown, 1,
+					&stats->locality_invalid);
+			return;
+		}
+		if (source != stats->previous_source ||
+		    memcmp(stats->previous_pack_hash, pack->hash, stats->hash_len)) {
+			size_sample_add(&stats->locality_pack_switch, 1,
+					&stats->locality_invalid);
+			return;
+		}
+		size_sample_add(&stats->locality_same_pack, 1,
+				&stats->locality_invalid);
+		offset = source_info->u.packed.offset;
+		if (offset < stats->previous_offset) {
+			size_sample_add(&stats->locality_backward, 1,
+					&stats->locality_invalid);
+			gap = (uint64_t)stats->previous_offset - (uint64_t)offset;
+		} else {
+			gap = (uint64_t)offset - (uint64_t)stats->previous_offset;
+		}
+		if (!gap)
+			size_sample_add(&stats->locality_exact, 1,
+					&stats->locality_invalid);
+		if (gap >= 4 * 1024)
+			size_sample_add(&stats->locality_ge_4k, 1,
+					&stats->locality_invalid);
+		if (gap >= 64 * 1024)
+			size_sample_add(&stats->locality_ge_64k, 1,
+					&stats->locality_invalid);
+		if (gap >= 1024 * 1024)
+			size_sample_add(&stats->locality_ge_1m, 1,
+					&stats->locality_invalid);
+		return;
+	}
+	stats->locality_pending = 1;
+	stats->previous_packed = source && source->type == ODB_SOURCE_PACKED;
+	if (stats->previous_packed) {
+		pack = source_info->u.packed.pack;
+		stats->previous_source = source;
+		memcpy(stats->previous_pack_hash, pack->hash, stats->hash_len);
+		stats->previous_offset = source_info->u.packed.offset;
+	}
 
 	if (stats->selected == (uint64_t)INTMAX_MAX)
 		stats->counts_invalid = 1;
@@ -231,6 +309,19 @@ static void trace_size_read_sample(struct repository *repo,
 	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/eligible", sample->eligible);
 	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/selected", stats->selected);
 	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/counts-valid", !stats->counts_invalid);
+	trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-valid", !stats->locality_invalid);
+	if (!stats->locality_invalid) {
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-pairs", stats->locality_pairs);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-nonpacked", stats->locality_nonpacked);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-unknown-pack", stats->locality_unknown);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-pack-switch", stats->locality_pack_switch);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-same-pack", stats->locality_same_pack);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-exact-offset", stats->locality_exact);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-gap-ge-4k", stats->locality_ge_4k);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-gap-ge-64k", stats->locality_ge_64k);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-gap-ge-1m", stats->locality_ge_1m);
+		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/locality-backward", stats->locality_backward);
+	}
 	if (!stats->counts_invalid) {
 		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-packed", stats->packed);
 		trace2_data_intmax("diff", repo, "rename/inexact/size-odb-sample/winner-loose", stats->loose);
@@ -1958,6 +2049,7 @@ void diffcore_rename_extended(struct diff_options *options,
 	}
 	if (stats && git_env_bool("GIT_TRACE2_RENAME_SIZE_SAMPLE", 1)) {
 		memset(&size_read_stats, 0, sizeof(size_read_stats));
+		size_read_stats.hash_len = options->repo->hash_algo->rawsz;
 		dpf_options.size_read_sample = &size_read_sample;
 	}
 

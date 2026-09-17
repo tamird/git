@@ -4714,7 +4714,7 @@ retry:
 		return -1;
 	} else {
 		size_t size_st = 0;
-		int saved_errno;
+		int saved_errno, sample_neighbor = 0;
 		struct odb_read_result size_read_result;
 		struct odb_source_info source_info = { 0 };
 		struct object_info info = {
@@ -4731,11 +4731,16 @@ retry:
 		if (size_only && options && options->size_read_sample &&
 		    (!s->oid.algo ||
 		     s->oid.algo == hash_algo_by_ptr(r->hash_algo)) &&
-		    options->size_read_sample->eligible != UINT64_MAX &&
-		    !(++options->size_read_sample->eligible & 63)) {
-			memset(&size_read_result, 0, sizeof(size_read_result));
-			size_read_result.size_info_enabled = 1;
-			info.read_resultp = &size_read_result;
+		    options->size_read_sample->eligible != UINT64_MAX) {
+			uint64_t ordinal = ++options->size_read_sample->eligible;
+
+			if (!(ordinal & 63)) {
+				memset(&size_read_result, 0, sizeof(size_read_result));
+				size_read_result.size_info_enabled = 1;
+				info.read_resultp = &size_read_result;
+			} else if (ordinal > 64 && (ordinal & 63) == 1) {
+				sample_neighbor = 1;
+			}
 		}
 
 		if (options && options->missing_object_cb) {
@@ -4750,10 +4755,10 @@ retry:
 			die("unable to read %s", oid_to_hex(&s->oid));
 
 object_read:
-	if (info.read_resultp) {
+	if (info.read_resultp || sample_neighbor) {
 		saved_errno = errno;
 		options->size_read_sample->report(info.read_resultp,
-						  source_info.source,
+						  &source_info,
 						  options->size_read_sample->data);
 		errno = saved_errno;
 	}

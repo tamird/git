@@ -347,6 +347,20 @@ test_expect_success 'inexact size sampling records packed nonzero attempts and l
 			<size-sample.trace &&
 		test_trace2_data diff rename/inexact/size-odb-sample/selected 2 \
 			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-valid 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-pairs 2 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-nonpacked 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-unknown-pack 0 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-same-pack 1 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-pack-switch 0 \
+			<size-sample.trace &&
+		test_trace2_data diff rename/inexact/size-odb-sample/locality-exact-offset 0 \
+			<size-sample.trace &&
 		test_trace2_data diff rename/inexact/size-odb-sample/counts-valid 1 \
 			<size-sample.trace &&
 		test_trace2_data diff rename/inexact/size-odb-sample/winner-loose 1 \
