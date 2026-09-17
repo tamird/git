@@ -583,6 +583,19 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.category = "fetch-pack",
 		.name = "mark-complete/refs",
 	},
+	/* Dereferencing local and alternate tips includes the two timers below. */
+	[TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_DEREF] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/deref",
+	},
+	[TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_GRAPH_LOOKUP] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/graph-lookup",
+	},
+	[TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_OBJECT_CHECK] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/object-check",
+	},
 	[TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_ALTERNATES] = {
 		.category = "fetch-pack",
 		.name = "mark-complete/alternates",

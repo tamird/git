@@ -142,12 +142,28 @@ static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 	enum object_type type;
 	struct object_info info = { .typep = &type };
 	struct commit *commit;
+	int saved_errno = errno;
 
+	if (mark_tags_complete_and_check_obj_db)
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_GRAPH_LOOKUP);
+	errno = saved_errno;
 	commit = lookup_commit_in_graph(the_repository, oid);
+	saved_errno = errno;
+	if (mark_tags_complete_and_check_obj_db)
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_GRAPH_LOOKUP);
+	errno = saved_errno;
 	if (commit) {
 		if (mark_tags_complete_and_check_obj_db) {
-			if (!odb_has_object(the_repository->objects, oid,
-					    ODB_HAS_OBJECT_RECHECK_PACKED))
+			int has_object;
+
+			trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_OBJECT_CHECK);
+			errno = saved_errno;
+			has_object = odb_has_object(the_repository->objects, oid,
+						    ODB_HAS_OBJECT_RECHECK_PACKED);
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_OBJECT_CHECK);
+			errno = saved_errno;
+			if (!has_object)
 				die_in_commit_graph_only(oid);
 		}
 		return commit;
@@ -650,7 +666,15 @@ static struct prio_queue complete = { compare_commits_by_commit_date };
 
 static int mark_complete(const struct object_id *oid)
 {
-	struct commit *commit = deref_without_lazy_fetch(oid, 1);
+	struct commit *commit;
+	int saved_errno = errno;
+
+	trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_DEREF);
+	errno = saved_errno;
+	commit = deref_without_lazy_fetch(oid, 1);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_DEREF);
+	errno = saved_errno;
 
 	if (commit && !(commit->object.flags & COMPLETE)) {
 		commit->object.flags |= COMPLETE;
