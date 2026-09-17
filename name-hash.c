@@ -595,6 +595,7 @@ static void lazy_init_name_hash(struct index_state *istate)
 		return;
 	trace_performance_enter();
 	trace2_region_enter("index", "name-hash-init", istate->repo);
+	trace2_timer_start(TRACE2_TIMER_ID_INDEX_NAME_HASH_INIT);
 	hashmap_init(&istate->name_hash, cache_entry_cmp, NULL, istate->cache_nr);
 	hashmap_init(&istate->dir_hash, dir_entry_cmp, NULL, istate->cache_nr);
 
@@ -615,6 +616,7 @@ static void lazy_init_name_hash(struct index_state *istate)
 	}
 
 	istate->name_hash_initialized = 1;
+	trace2_timer_stop(TRACE2_TIMER_ID_INDEX_NAME_HASH_INIT);
 	trace2_region_leave("index", "name-hash-init", istate->repo);
 	trace_performance_leave("initialize name hash");
 }
