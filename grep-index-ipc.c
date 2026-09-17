@@ -259,12 +259,15 @@ struct grep_index_ipc_server {
 	int repo_initialized;
 	int legacy_manifest_stat_valid;
 	int transposed_manifest_stat_valid;
+	int safety_manifest_stat_valid;
 	char *path;
 	char *worker_path;
 	char *legacy_manifest_path;
 	char *transposed_manifest_path;
+	char *safety_manifest_path;
 	struct stat legacy_manifest_stat;
 	struct stat transposed_manifest_stat;
+	struct stat safety_manifest_stat;
 };
 
 struct grep_index_ipc_query_stats {
@@ -938,12 +941,15 @@ static int grep_index_ipc_manifest_stat_equal(
 static int grep_index_ipc_generation_changed(
 	struct grep_index_ipc_server *server,
 	struct stat *legacy_stat, int *legacy_valid,
-	struct stat *transposed_stat, int *transposed_valid)
+	struct stat *transposed_stat, int *transposed_valid,
+	struct stat *safety_stat, int *safety_valid)
 {
 	*legacy_valid = grep_index_ipc_stat_manifest(
 		server->legacy_manifest_path, legacy_stat);
 	*transposed_valid = grep_index_ipc_stat_manifest(
 		server->transposed_manifest_path, transposed_stat);
+	*safety_valid = grep_index_ipc_stat_manifest(
+		server->safety_manifest_path, safety_stat);
 	return !grep_index_ipc_manifest_stat_equal(
 		       server->legacy_manifest_stat_valid,
 		       &server->legacy_manifest_stat,
@@ -951,7 +957,11 @@ static int grep_index_ipc_generation_changed(
 	       !grep_index_ipc_manifest_stat_equal(
 		       server->transposed_manifest_stat_valid,
 		       &server->transposed_manifest_stat,
-		       *transposed_valid, transposed_stat);
+		       *transposed_valid, transposed_stat) ||
+	       !grep_index_ipc_manifest_stat_equal(
+		       server->safety_manifest_stat_valid,
+		       &server->safety_manifest_stat,
+		       *safety_valid, safety_stat);
 }
 
 static void grep_index_ipc_refresh_generation(
@@ -960,14 +970,15 @@ static void grep_index_ipc_refresh_generation(
 	struct grep_index_memory *old_index;
 	struct grep_index *old_persistent;
 	struct grep_index *persistent;
-	struct stat legacy_stat, transposed_stat;
-	int legacy_valid, transposed_valid;
+	struct stat legacy_stat, transposed_stat, safety_stat;
+	int legacy_valid, transposed_valid, safety_valid;
 	int changed;
 
 	pthread_rwlock_rdlock(&server->generation_lock);
 	changed = grep_index_ipc_generation_changed(
 		server, &legacy_stat, &legacy_valid,
-		&transposed_stat, &transposed_valid);
+		&transposed_stat, &transposed_valid,
+		&safety_stat, &safety_valid);
 	pthread_rwlock_unlock(&server->generation_lock);
 	if (!changed)
 		return;
@@ -975,7 +986,8 @@ static void grep_index_ipc_refresh_generation(
 	pthread_rwlock_wrlock(&server->generation_lock);
 	if (!grep_index_ipc_generation_changed(
 		    server, &legacy_stat, &legacy_valid,
-		    &transposed_stat, &transposed_valid))
+		    &transposed_stat, &transposed_valid,
+		    &safety_stat, &safety_valid))
 		goto unlock;
 
 	persistent = grep_index_load(&server->repo);
@@ -988,6 +1000,8 @@ static void grep_index_ipc_refresh_generation(
 	server->legacy_manifest_stat_valid = legacy_valid;
 	server->transposed_manifest_stat = transposed_stat;
 	server->transposed_manifest_stat_valid = transposed_valid;
+	server->safety_manifest_stat = safety_stat;
+	server->safety_manifest_stat_valid = safety_valid;
 
 	pthread_mutex_lock(&server->index_mutex);
 	grep_index_ipc_clear_cached_indexes(server);
@@ -1713,6 +1727,8 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 		&server->repo, "objects/info/grep-index/chain");
 	server->transposed_manifest_path = repo_common_path(
 		&server->repo, "objects/info/grep-index/chain-transposed");
+	server->safety_manifest_path = repo_common_path(
+		&server->repo, "objects/info/grep-index/chain-safety");
 	pthread_mutex_init(&server->request_mutex, NULL);
 	pthread_mutex_init(&server->index_mutex, NULL);
 	pthread_mutex_init(&server->worker_mutex, NULL);
@@ -1763,6 +1779,10 @@ int grep_index_ipc_server_init(struct grep_index_ipc_server **server_out,
 		grep_index_ipc_stat_manifest(
 			server->transposed_manifest_path,
 			&server->transposed_manifest_stat);
+	server->safety_manifest_stat_valid =
+		grep_index_ipc_stat_manifest(
+			server->safety_manifest_path,
+			&server->safety_manifest_stat);
 	server->persistent = grep_index_load(&server->repo);
 	server->index = grep_index_memory_new(
 		&server->repo, server->persistent);
@@ -1850,6 +1870,7 @@ void grep_index_ipc_server_free(struct grep_index_ipc_server *server)
 	if (server->repo_initialized)
 		repo_clear(&server->repo);
 	free(server->transposed_manifest_path);
+	free(server->safety_manifest_path);
 	free(server->legacy_manifest_path);
 	free(server->worker_path);
 	free(server->path);

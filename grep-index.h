@@ -159,6 +159,7 @@ int write_grep_index(struct repository *repo, int show_progress,
 int write_grep_index_oids(struct repository *repo, int show_progress,
 			  struct oid_array *oids, int transpose_existing);
 int write_transposed_grep_index(struct repository *repo);
+int write_grep_index_safety(struct repository *repo, int show_progress);
 int append_grep_index_chain_entry(struct repository *repo,
 				  const char *chain_name,
 				  const char *entry);

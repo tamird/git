@@ -27,6 +27,31 @@ test_lazy_prereq PCRE2_UTF8_LOCALE '
 		"non-ascii k contents" -- non-ascii
 '
 
+test_lazy_prereq GREP_UTF8_C_COLLATE '
+	(
+		unset LC_ALL &&
+		LC_CTYPE=en_US.UTF-8 LC_COLLATE=C &&
+		export LC_CTYPE LC_COLLATE &&
+		case "$(locale charmap)" in
+		UTF-8|UTF8|utf-8|utf8) true ;;
+		*) false ;;
+		esac &&
+		if GIT_TRACE2_EVENT="$PWD/locale-capability.trace" \
+			git -C "$TRASH_DIRECTORY" grep --cached -i -E \
+			"present[ ]needle" -- present >/dev/null &&
+			test_trace2_data grep \
+				content_index/icase_regex_locale_eligible 1 \
+				<locale-capability.trace
+		then
+			result=0
+		else
+			result=1
+		fi &&
+		rm -f locale-capability.trace &&
+		test "$result" -eq 0
+	)
+'
+
 test_lazy_prereq REGEX_MATCH_ERROR '
 	invalid=$(printf "\\377foo") &&
 	LC_ALL=C test-tool regex --silent "foo|bar" "$invalid" EXTENDED &&
@@ -1425,6 +1450,151 @@ test_expect_success 'write shared content index' '
 	test_line_count = 1 .git/objects/info/grep-index/chain &&
 	segment=$(cat .git/objects/info/grep-index/chain) &&
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
+'
+
+test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
+	'locale regexes use only verified ASCII-clean index entries' '
+	test_create_repo locale-safety &&
+	test_when_finished "rm -rf locale-safety" &&
+	(
+		cd locale-safety &&
+		unset LC_ALL &&
+		LC_CTYPE=en_US.UTF-8 LC_COLLATE=C &&
+		export LC_CTYPE LC_COLLATE &&
+		printf "ordinary ASCII\n" >clean &&
+		printf "MISSING one TARGET\n" >match &&
+		printf "\\033" >esc-tail &&
+		printf "\\377" >highbit-tail &&
+		git add clean match esc-tail highbit-tail &&
+		git grep-index --no-progress &&
+		clean_oid=$(git rev-parse :clean) &&
+		clean_object=.git/objects/$(test_oid_to_path "$clean_oid") &&
+		mv "$clean_object" "$clean_object.save" &&
+		test_must_fail env LC_CTYPE=C LC_COLLATE=C \
+			git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-c &&
+		test_must_be_empty err-c &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-old &&
+		test_grep "unable to read" err-old &&
+		test_must_fail git grep --cached -i \
+			"missing.*target" -- clean 2>err-bre-old &&
+		test_grep "unable to read" err-bre-old &&
+		mv "$clean_object.save" "$clean_object" &&
+		git grep-index --compute-locale-safety --no-progress &&
+		transposed=$(awk "NR == 1 { print \$2 }" \
+			.git/objects/info/grep-index/chain-transposed) &&
+		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
+		test_path_is_file "$safety" &&
+		env GIT_TRACE2_EVENT="$PWD/locale-mask.trace" \
+			git grep --cached -i -E \
+			"missing.*(target|other)" -- match >actual &&
+		test_trace2_data grep \
+			content_index/icase_regex_global_c_locale_mask 2 \
+			<locale-mask.trace &&
+		test_trace2_data grep content_index/icase_regex_locale_eligible 1 \
+			<locale-mask.trace &&
+		echo "match:MISSING one TARGET" >expect &&
+		test_cmp expect actual &&
+		git -c grep.useContentIndex=false grep --cached -i -E \
+			"missing.*(target|other)" -- match >without-index &&
+		test_cmp actual without-index &&
+		mv "$clean_object" "$clean_object.save" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-clean &&
+		test_must_be_empty err-clean &&
+		test_must_fail git grep --cached -i \
+			"missing.*target" -- clean 2>err-bre-clean &&
+		test_must_be_empty err-bre-clean &&
+		cp "$safety" "$safety.save" &&
+		chmod +w "$safety" &&
+		: >"$safety" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-invalid &&
+		test_grep "unable to read" err-invalid &&
+		mv "$safety.save" "$safety" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-restored &&
+		test_must_be_empty err-restored &&
+		mv "$clean_object.save" "$clean_object" &&
+		for path in esc-tail highbit-tail
+		do
+			oid=$(git rev-parse :"$path") &&
+			object=.git/objects/$(test_oid_to_path "$oid") &&
+			mv "$object" "$object.save" &&
+			test_must_fail git grep --cached -i -E \
+				"missing.*(target|other)" -- "$path" 2>err-unsafe &&
+			test_grep "unable to read" err-unsafe &&
+			mv "$object.save" "$object" ||
+				return 1
+		done &&
+		printf "missing new target\n" >clean &&
+		git grep -i -E \
+			"missing.*(target|other)" -- clean >actual-worktree &&
+		echo "clean:missing new target" >expect-worktree &&
+		test_cmp expect-worktree actual-worktree
+	)
+'
+
+test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE,FSMONITOR_DAEMON \
+	'daemon reloads safety proof after a segment migration' '
+	test_create_repo locale-safety-daemon &&
+	test_when_finished "test_might_fail git -C locale-safety-daemon \
+				fsmonitor--daemon stop &&
+			    rm -rf locale-safety-daemon" &&
+	(
+		cd locale-safety-daemon &&
+		unset LC_ALL &&
+		LC_CTYPE=en_US.UTF-8 LC_COLLATE=C &&
+		export LC_CTYPE LC_COLLATE &&
+		if ! test_have_prereq WINDOWS
+		then
+			git config fsmonitor.socketDir "$grep_index_socket_dir"
+		fi &&
+		printf "ASCII without a match\n" >clean &&
+		git add clean &&
+		git grep-index --no-progress &&
+		git config core.fsmonitor true &&
+		git fsmonitor--daemon start &&
+		oid=$(git rev-parse :clean) &&
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-before &&
+		test_grep "unable to read" err-before &&
+		mv "$object.save" "$object" &&
+		git grep-index --compute-locale-safety --no-progress &&
+		mv "$object" "$object.save" &&
+		test_must_fail env GIT_TRACE2_EVENT="$PWD/reload.trace" \
+			git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-after &&
+		test_must_be_empty err-after &&
+		test_trace2_data grep content_index_ipc_candidates 0 \
+			<reload.trace &&
+		mv "$object.save" "$object" &&
+		transposed=$(awk "NR == 1 { print \$2 }" \
+			.git/objects/info/grep-index/chain-transposed) &&
+		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
+		git fsmonitor--daemon stop &&
+		chmod +w "$safety" &&
+		: >"$safety" &&
+		git fsmonitor--daemon start &&
+		mv "$object" "$object.save" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-corrupt &&
+		test_grep "unable to read" err-corrupt &&
+		mv "$object.save" "$object" &&
+		git grep-index --compute-locale-safety --no-progress &&
+		mv "$object" "$object.save" &&
+		test_must_fail env GIT_TRACE2_EVENT="$PWD/repaired.trace" \
+			git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-repaired &&
+		test_must_be_empty err-repaired &&
+		test_trace2_data grep content_index_ipc_candidates 0 \
+			<repaired.trace &&
+		mv "$object.save" "$object" &&
+		git fsmonitor--daemon stop
+	)
 '
 
 test_expect_success 'queries ignore legacy-only content indexes' '
@@ -5000,9 +5170,6 @@ test_expect_success 'unsupported searches use normal blob reads' '
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-	test_must_fail git grep --cached -i -E \
-		"ABSENT[ ]PATTERN" -- short 2>err &&
-	test_grep "unable to read" err &&
 	test_must_fail git grep --cached -E "^|absent needle" -- short 2>err &&
 	test_grep "unable to read" err &&
 	test_must_fail git grep --cached -E "^(a\\.|b\\*)$" -- short 2>err &&

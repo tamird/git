@@ -10,6 +10,7 @@ SYNOPSIS
 --------
 [verse]
 'git grep-index' [--[no-]progress] [--reachable [<revision>...] [-- [<path>...]]]
+'git grep-index' [--[no-]progress] --compute-locale-safety
 
 DESCRIPTION
 -----------
@@ -19,9 +20,11 @@ object directory, so all of those worktrees and concurrent `git grep`
 processes share it.
 
 The content index contains Bloom filters for blob trigrams. For supported
-case-sensitive literal searches, linkgit:git-grep[1] uses the filters to
-avoid reading blobs that cannot contain the pattern. Blobs not present in
-the content index are searched normally.
+searches, linkgit:git-grep[1] uses the filters to avoid reading blobs that
+cannot contain the pattern. Blobs not present in the content index are
+searched normally. Some case-insensitive regular expressions need an
+additional per-blob safety record before their filters can exclude a blob;
+without that record, the blob is searched normally.
 
 By default, blobs are selected from the indexes of all worktrees. With
 `--reachable`, blobs are instead selected by a revision walk. If no revision
@@ -40,6 +43,17 @@ OPTIONS
 	Index blobs reachable from the given revisions, optionally restricted
 	by a pathspec. With a pathspec and no revision, specify `--all`
 	explicitly.
+
+--compute-locale-safety::
+	Check the blobs in existing content indexes and record which have
+	verified content containing only ASCII bytes and no ESC byte.
+	Supported case-insensitive basic and extended regular expressions can
+	then use these records when the effective collation is C and the
+	character encoding is UTF-8. Blobs with other bytes, missing or
+	unreadable blobs, and indexes without a valid safety record are searched
+	normally. This explicit operation may read and verify every indexed
+	blob up to 64 MiB, so its running time and disk reads scale with the
+	total size of those blobs. It does not rewrite existing Bloom filters.
 
 GIT
 ---

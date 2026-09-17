@@ -8,13 +8,14 @@
 #include "replace-object.h"
 #include "revision.h"
 
-static const char * const builtin_grep_index_usage[] = {
+static const char *const builtin_grep_index_usage[] = {
 	N_("git grep-index [--[no-]progress]"),
 	N_("git grep-index [--[no-]progress] --reachable "
 	   "[<revision>...] [-- [<path>...]]"),
 	N_("git grep-index [--[no-]progress] --commit-edges "
 	   "[<revision>...] [-- [<path>...]]"),
 	N_("git grep-index --transpose-existing"),
+	N_("git grep-index [--[no-]progress] --compute-locale-safety"),
 	NULL
 };
 
@@ -25,6 +26,7 @@ int cmd_grep_index(int argc, const char **argv, const char *prefix,
 	int commit_edges = 0;
 	int reachable = 0;
 	int transpose_existing = 0;
+	int compute_locale_safety = 0;
 	int result;
 	struct rev_info revs = REV_INFO_INIT;
 	struct option options[] = {
@@ -34,6 +36,8 @@ int cmd_grep_index(int argc, const char **argv, const char *prefix,
 			 N_("force progress reporting")),
 		OPT_BOOL(0, "transpose-existing", &transpose_existing,
 			 N_("transpose existing content indexes")),
+		OPT_BOOL(0, "compute-locale-safety", &compute_locale_safety,
+			 N_("prove ASCII-only blobs in existing content indexes")),
 		OPT_BOOL(0, "reachable", &reachable,
 			 N_("index blobs reachable from revisions")),
 		OPT_END(),
@@ -54,8 +58,14 @@ int cmd_grep_index(int argc, const char **argv, const char *prefix,
 	if (reachable && commit_edges)
 		die(_("options '%s' and '%s' cannot be used together"),
 		    "--reachable", "--commit-edges");
+	if (compute_locale_safety &&
+	    (transpose_existing || reachable || commit_edges))
+		die(_("option '%s' cannot be combined with another mode"),
+		    "--compute-locale-safety");
 	if (!reachable && !commit_edges && argc > 1)
 		usage_with_options(builtin_grep_index_usage, options);
+	if (compute_locale_safety)
+		return write_grep_index_safety(repo, show_progress);
 	if (transpose_existing)
 		return write_transposed_grep_index(repo);
 	if (reachable || commit_edges) {

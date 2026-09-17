@@ -2,6 +2,11 @@
 
 #include "git-compat-util.h"
 #include <locale.h>
+#if !defined(GIT_WINDOWS_NATIVE) && !defined(HAVE_LIBCHARSET_H) && \
+	(!defined(NO_GETTEXT) || defined(__APPLE__) || defined(__linux__))
+# define GREP_INDEX_TRUST_LANGINFO
+# include <langinfo.h>
+#endif
 #include "grep-index.h"
 #include "csum-file.h"
 #include "environment.h"
@@ -10,6 +15,7 @@
 #include "hash-lookup.h"
 #include "hex.h"
 #include "lockfile.h"
+#include "object-file.h"
 #include "odb.h"
 #include "odb/source.h"
 #include "oid-array.h"
@@ -27,6 +33,7 @@
 #include "tempfile.h"
 #include "thread-utils.h"
 #include "trace2.h"
+#include "utf8.h"
 #include "worktree.h"
 #include "write-or-die.h"
 #include "wrapper.h"
@@ -34,6 +41,8 @@
 #define GREP_INDEX_SIGNATURE 0x47494458
 #define GREP_INDEX_VERSION 6
 #define GREP_INDEX_TRANSPOSED_VERSION 7
+#define GREP_INDEX_SAFETY_SIGNATURE	   0x47495346
+#define GREP_INDEX_SAFETY_VERSION	   1
 #define GREP_INDEX_HEADER_SIZE 16
 #define GREP_INDEX_TRANSPOSED_HEADER_SIZE 32
 #define GREP_INDEX_FANOUT_SIZE (256 * sizeof(uint32_t))
@@ -68,6 +77,8 @@ struct grep_index_segment {
 	const unsigned char *classes;
 	const unsigned char *block_hashes;
 	const unsigned char *data;
+	unsigned char *unsafe_rows;
+	size_t unsafe_offsets[GREP_INDEX_MEMORY_FILTER_CLASSES];
 	size_t data_len;
 	size_t block_size;
 	size_t blocks_nr;
@@ -99,6 +110,7 @@ struct grep_index_memory_entry {
 	enum grep_index_memory_entry_state state[2];
 	unsigned char *filter[2];
 	size_t filter_size[2];
+	unsigned char unsafe[2];
 	int cond_initialized;
 };
 
@@ -173,6 +185,7 @@ struct grep_index_query {
 	size_t cache_patternlen;
 	int cache_pattern_alternation;
 	int ignore_case;
+	int locale_sensitive_case;
 	int cacheable;
 };
 
@@ -206,6 +219,62 @@ static void grep_index_path(struct repository *repo, struct strbuf *buf,
 {
 	strbuf_addf(buf, "%s/info/grep-index/%s",
 		    repo_get_object_directory(repo), name);
+}
+
+/* Missing or invalid safety evidence makes every blob in the segment unknown. */
+static void grep_index_load_safety(struct repository *repo,
+				   struct grep_index_segment *segment)
+{
+	struct strbuf path = STRBUF_INIT;
+	struct strbuf contents = STRBUF_INIT;
+	struct stat st;
+	size_t rows_size = 0;
+	size_t header_size = 4 * sizeof(uint32_t) + segment->rawsz;
+	size_t expected_size;
+	char extra;
+	char hex[GIT_MAX_HEXSZ + 1];
+	int fd = -1;
+
+	for (size_t i = 0; i < GREP_INDEX_MEMORY_FILTER_CLASSES; i++) {
+		uint32_t nr = get_be32(segment->classes +
+				       i * GREP_INDEX_TRANSPOSED_CLASS_SIZE + sizeof(uint32_t));
+
+		segment->unsafe_offsets[i] = rows_size;
+		rows_size += DIV_ROUND_UP(nr, 8);
+	}
+	/* Validated class counts add up to segment->nr. */
+	if (rows_size > SIZE_MAX - header_size - segment->rawsz)
+		goto done;
+	expected_size = header_size + rows_size + segment->rawsz;
+	hash_to_hex_algop_r(hex, segment->checksum.hash, repo->hash_algo);
+	grep_index_path(repo, &path, "");
+	strbuf_addf(&path, "safety-%s.idx", hex);
+	fd = git_open(path.buf);
+	if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+	    st.st_size < 0 || (uintmax_t)st.st_size != expected_size)
+		goto done;
+	strbuf_grow(&contents, expected_size);
+	if (read_in_full(fd, contents.buf, expected_size) != expected_size ||
+	    xread(fd, &extra, 1))
+		goto done;
+	strbuf_setlen(&contents, expected_size);
+	if (get_be32(contents.buf) != GREP_INDEX_SAFETY_SIGNATURE ||
+	    get_be32(contents.buf + 4) != GREP_INDEX_SAFETY_VERSION ||
+	    get_be32(contents.buf + 8) != repo->hash_algo->format_id ||
+	    get_be32(contents.buf + 12) != segment->nr ||
+	    memcmp(contents.buf + 16, segment->checksum.hash,
+		   segment->rawsz) ||
+	    !hashfile_checksum_valid(repo->hash_algo,
+				     (const unsigned char *)contents.buf,
+				     contents.len))
+		goto done;
+	segment->unsafe_rows = xmemdupz(contents.buf + header_size,
+					rows_size);
+done:
+	if (fd >= 0)
+		close(fd);
+	strbuf_release(&contents);
+	strbuf_release(&path);
 }
 
 static int add_grep_index_segment(struct grep_index *index, const char *hex)
@@ -525,6 +594,7 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 		     DIV_ROUND_UP(segment.blocks_nr, 8));
 	pthread_mutex_init(&segment.verify_mutex, NULL);
 	segment.verify_mutex_initialized = 1;
+	grep_index_load_safety(index->repo, &segment);
 	ALLOC_GROW(index->segments, index->segments_nr + 1,
 		   index->segments_alloc);
 	index->segments[index->segments_nr++] = segment;
@@ -702,6 +772,7 @@ void grep_index_free(struct grep_index *index)
 	for (size_t i = 0; i < index->segments_nr; i++) {
 		free(index->segments[i].blocks_valid);
 		free(index->segments[i].blocks_invalid);
+		free(index->segments[i].unsafe_rows);
 		if (index->segments[i].verify_mutex_initialized)
 			pthread_mutex_destroy(
 				&index->segments[i].verify_mutex);
@@ -909,7 +980,9 @@ void grep_index_query_free(struct grep_index_query *query)
 #define GREP_INDEX_QUERY_SIGNATURE 0x47495158
 #define GREP_INDEX_QUERY_VERSION_1 1
 #define GREP_INDEX_QUERY_VERSION_2 2
+#define GREP_INDEX_QUERY_VERSION_3	       3
 #define GREP_INDEX_QUERY_IGNORE_CASE (1u << 0)
+#define GREP_INDEX_QUERY_LOCALE_SENSITIVE_CASE (1u << 1)
 
 static void grep_index_query_put_u32(struct strbuf *buf, uint32_t value)
 {
@@ -939,11 +1012,15 @@ int grep_index_query_serialize(const struct grep_index_query *query,
 
 	grep_index_query_put_u32(buf, GREP_INDEX_QUERY_SIGNATURE);
 	grep_index_query_put_u32(
-		buf, query->ignore_case ? GREP_INDEX_QUERY_VERSION_2 :
-					 GREP_INDEX_QUERY_VERSION_1);
+		buf, query->locale_sensitive_case ? GREP_INDEX_QUERY_VERSION_3 :
+		     query->ignore_case		  ? GREP_INDEX_QUERY_VERSION_2 :
+						    GREP_INDEX_QUERY_VERSION_1);
 	if (query->ignore_case)
 		grep_index_query_put_u32(
-			buf, GREP_INDEX_QUERY_IGNORE_CASE);
+			buf, GREP_INDEX_QUERY_IGNORE_CASE |
+				     (query->locale_sensitive_case ?
+					      GREP_INDEX_QUERY_LOCALE_SENSITIVE_CASE :
+					      0));
 	grep_index_query_put_u32(buf, query->clauses_nr);
 	for (size_t i = 0; i < query->clauses_nr; i++)
 		if (grep_index_query_serialize_clause(&query->clauses[i], buf))
@@ -1025,14 +1102,22 @@ struct grep_index_query *grep_index_query_deserialize(const char *data,
 	    grep_index_query_get_u32(&reader, &version) ||
 	    signature != GREP_INDEX_QUERY_SIGNATURE ||
 	    (version != GREP_INDEX_QUERY_VERSION_1 &&
-	     version != GREP_INDEX_QUERY_VERSION_2))
+	     version != GREP_INDEX_QUERY_VERSION_2 &&
+	     version != GREP_INDEX_QUERY_VERSION_3))
 		goto invalid;
-	if (version == GREP_INDEX_QUERY_VERSION_2) {
+	if (version >= GREP_INDEX_QUERY_VERSION_2) {
 		if (grep_index_query_get_u32(&reader, &flags) ||
-		    flags & ~GREP_INDEX_QUERY_IGNORE_CASE)
+		    flags & ~(GREP_INDEX_QUERY_IGNORE_CASE |
+			      (version == GREP_INDEX_QUERY_VERSION_3 ?
+				       GREP_INDEX_QUERY_LOCALE_SENSITIVE_CASE :
+				       0)) ||
+		    ((flags & GREP_INDEX_QUERY_LOCALE_SENSITIVE_CASE) &&
+		     !(flags & GREP_INDEX_QUERY_IGNORE_CASE)))
 			goto invalid;
 		query->ignore_case =
 			!!(flags & GREP_INDEX_QUERY_IGNORE_CASE);
+		query->locale_sensitive_case =
+			!!(flags & GREP_INDEX_QUERY_LOCALE_SENSITIVE_CASE);
 	}
 	if (grep_index_query_get_u32(&reader, &nr) ||
 	    nr > GREP_INDEX_MAX_QUERY_ALTERNATIVES)
@@ -1340,6 +1425,10 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 	struct strbuf required_literal = STRBUF_INIT;
 	int required_literal_valid = 1;
 	int cacheable_options;
+	int locale_checked = 0;
+	int c_ctype = 0;
+	int c_collate = 0;
+	int utf8_ctype = 0;
 	size_t patterns_nr = 0;
 	struct grep_index_query *query;
 	enum grep_pattern_type pattern_type = opt->pattern_type_option;
@@ -1383,25 +1472,46 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				if (pattern_type != GREP_PATTERN_TYPE_FIXED &&
 				    pattern_type != GREP_PATTERN_TYPE_PCRE &&
 				    is_regex_special(p->pattern[i])) {
-					if (trace2_is_enabled()) {
-						const char *locale;
-						int c_locale_mask = 0;
+					if (!locale_checked) {
+						const char *locale =
+							setlocale(LC_CTYPE, NULL);
 
-						/* Bit 0: LC_CTYPE; bit 1: LC_COLLATE. */
-						locale = setlocale(LC_CTYPE, NULL);
-						if (locale && (!strcmp(locale, "C") ||
-							       !strcmp(locale, "POSIX")))
-							c_locale_mask |= 1;
+						/* setlocale may replace the last result. */
+						c_ctype = locale &&
+							  (!strcmp(locale, "C") ||
+							   !strcmp(locale, "POSIX"));
 						locale = setlocale(LC_COLLATE, NULL);
-						if (locale && (!strcmp(locale, "C") ||
-							       !strcmp(locale, "POSIX")))
-							c_locale_mask |= 2;
-						trace2_data_intmax(
-							"grep", opt->repo,
-							"content_index/icase_regex_global_c_locale_mask",
-							c_locale_mask);
+						c_collate = locale &&
+							    (!strcmp(locale, "C") ||
+							     !strcmp(locale, "POSIX"));
+						/* Query the codeset used by regcomp now. */
+#ifdef GREP_INDEX_TRUST_LANGINFO
+						locale = nl_langinfo(CODESET);
+						utf8_ctype = locale && is_encoding_utf8(locale);
+#endif
+						if (trace2_is_enabled()) {
+							/* Bit 0: LC_CTYPE; bit 1: LC_COLLATE. */
+							trace2_data_intmax(
+								"grep", opt->repo,
+								"content_index/icase_regex_global_c_locale_mask",
+								c_ctype + 2 * c_collate);
+							trace2_data_intmax(
+								"grep", opt->repo,
+								"content_index/icase_regex_locale_eligible",
+								c_collate &&
+									(c_ctype || utf8_ctype));
+						}
+						locale_checked = 1;
 					}
-					goto unsupported;
+					/*
+					 * With C collation, UTF-8 case folding of an
+					 * ASCII pattern can differ from ASCII byte folding
+					 * only when the blob contains a non-ASCII or ESC byte.
+					 * The per-blob safety proof handles those cases.
+					 */
+					if (!c_collate || (!c_ctype && !utf8_ctype))
+						goto unsupported;
+					query->locale_sensitive_case |= !c_ctype;
 				}
 			}
 		}
@@ -2848,6 +2958,11 @@ static int grep_index_transposed_location_maybe_contains(
 
 	class_entry = segment->classes +
 		      (size_t)class_nr * GREP_INDEX_TRANSPOSED_CLASS_SIZE;
+	if (query->locale_sensitive_case &&
+	    (!segment->unsafe_rows ||
+	     segment->unsafe_rows[segment->unsafe_offsets[class_nr] + pos / 8] &
+		     (1u << (pos & 7))))
+		return 1;
 	nr = get_be32(class_entry + sizeof(uint32_t));
 	offset = get_be64(class_entry + 2 * sizeof(uint32_t));
 	filter_class.filter_size = get_be32(class_entry);
@@ -2991,6 +3106,13 @@ static unsigned char *grep_index_prepare_class(
 			grep_index_bitmap_and(branch, group, bytes);
 		}
 		grep_index_bitmap_or(result, branch, bytes);
+	}
+	if (query->locale_sensitive_case) {
+		if (!segment->unsafe_rows)
+			goto unknown;
+		grep_index_bitmap_or(result,
+				     segment->unsafe_rows + segment->unsafe_offsets[class_nr],
+				     bytes);
 	}
 	goto cleanup;
 
@@ -3176,6 +3298,8 @@ int grep_index_maybe_contains(struct grep_index *index,
 		}
 	}
 	filter = grep_index_find_filter(index, repo, oid, &filter_size);
+	if (query->locale_sensitive_case)
+		return 1;
 	return !filter || grep_index_filter_maybe_contains(
 				  filter, filter_size, query, 1);
 }
@@ -3190,16 +3314,27 @@ static uint32_t filter_size_for_blob(unsigned long blob_size)
 	return size;
 }
 
-static void fill_filter(unsigned char *exact_filter,
-			unsigned char *folded_filter,
-			uint32_t filter_size,
-			const void *content, unsigned long size)
+static int grep_index_blob_unsafe(const void *content, unsigned long size)
+{
+	const unsigned char *data = content;
+
+	for (size_t i = 0; i < size; i++)
+		if (data[i] & 0x80 || data[i] == 0x1b)
+			return 1;
+	return 0;
+}
+
+static int fill_filter(unsigned char *exact_filter,
+		       unsigned char *folded_filter,
+		       uint32_t filter_size,
+		       const void *content, unsigned long size)
 {
 	const unsigned char *data = content;
 	unsigned char folded[3];
 	unsigned char special[3];
 	size_t folded_nr = 0;
 	int non_ascii = 0;
+	int unsafe = 0;
 
 	if (exact_filter)
 		memset(exact_filter, 0, filter_size);
@@ -3212,6 +3347,7 @@ static void fill_filter(unsigned char *exact_filter,
 		if (exact_filter)
 			exact_filter[bit / 8] |= 1u << (bit & 7);
 		if (folded_filter) {
+			unsafe |= !!(data[i] & 0x80) || data[i] == 0x1b;
 			if ((data[i] >= 'A' && data[i] <= 'Z') ||
 			    (data[i + 1] >= 'A' && data[i + 1] <= 'Z') ||
 			    (data[i + 2] >= 'A' && data[i + 2] <= 'Z'))
@@ -3223,8 +3359,11 @@ static void fill_filter(unsigned char *exact_filter,
 				0x80;
 		}
 	}
+	if (folded_filter)
+		for (size_t i = size > 2 ? size - 2 : 0; i < size; i++)
+			unsafe |= !!(data[i] & 0x80) || data[i] == 0x1b;
 	if (!folded_filter || !non_ascii)
-		return;
+		return unsafe;
 
 	/*
 	 * Under PCRE2's Unicode caseless matching, K and S also match the
@@ -3277,6 +3416,7 @@ static void fill_filter(unsigned char *exact_filter,
 			folded_filter[bit / 8] |= 1u << (bit & 7);
 		}
 	}
+	return unsafe;
 }
 
 struct grep_index_memory *grep_index_memory_new(
@@ -3393,6 +3533,7 @@ int grep_index_memory_maybe_contains_with_outcome(
 	int reserved = 0;
 	int cache_saturated = 0;
 	int result;
+	int unsafe = 0;
 
 	if (outcome) {
 		outcome->origin = GREP_INDEX_MEMORY_QUERY_UNAVAILABLE_PREBUILD;
@@ -3431,9 +3572,12 @@ int grep_index_memory_maybe_contains_with_outcome(
 					GREP_INDEX_MEMORY_QUERY_READY_REUSED;
 			filter = entry->filter[mode];
 			filter_size = entry->filter_size[mode];
+			unsafe = entry->unsafe[mode];
 			pthread_mutex_unlock(&index->mutex);
-			return grep_index_filter_maybe_contains(
-				filter, filter_size, query, 0);
+			if (query->locale_sensitive_case && unsafe)
+				return 1;
+			return grep_index_filter_maybe_contains(filter, filter_size,
+								query, 0);
 		}
 		if (entry->state[mode] == GREP_INDEX_MEMORY_FAILED) {
 			pthread_mutex_unlock(&index->mutex);
@@ -3495,8 +3639,9 @@ int grep_index_memory_maybe_contains_with_outcome(
 	}
 	if (!result && content) {
 		CALLOC_ARRAY(filter, filter_size);
-		fill_filter(mode ? NULL : filter, mode ? filter : NULL,
-			    filter_size, content, size);
+		unsafe = fill_filter(mode ? NULL : filter,
+				     mode ? filter : NULL,
+				     filter_size, content, size);
 	}
 	free(content);
 
@@ -3515,6 +3660,7 @@ int grep_index_memory_maybe_contains_with_outcome(
 	if (filter) {
 		entry->filter[mode] = filter;
 		entry->filter_size[mode] = filter_size;
+		entry->unsafe[mode] = unsafe;
 		entry->state[mode] = GREP_INDEX_MEMORY_READY;
 	} else {
 		if (reserved)
@@ -3525,9 +3671,11 @@ int grep_index_memory_maybe_contains_with_outcome(
 	}
 	pthread_cond_broadcast(&entry->cond);
 	pthread_mutex_unlock(&index->mutex);
-	return filter ? grep_index_filter_maybe_contains(
-				filter, filter_size, query, 0) :
-			-1;
+	if (!filter)
+		return -1;
+	if (query->locale_sensitive_case && unsafe)
+		return 1;
+	return grep_index_filter_maybe_contains(filter, filter_size, query, 0);
 }
 
 int grep_index_memory_maybe_contains(struct grep_index_memory *index,
@@ -4140,6 +4288,185 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 int write_transposed_grep_index(struct repository *repo)
 {
 	return write_transposed_grep_index_segment(repo, NULL);
+}
+
+static int grep_index_publish_safety_generation(struct repository *repo,
+						const char *hex, int replaced)
+{
+	struct lock_file lock = LOCK_INIT;
+	struct strbuf path = STRBUF_INIT;
+	struct strbuf manifest = STRBUF_INIT;
+	size_t hexsz = repo->hash_algo->hexsz;
+	int found = 0;
+	int result = -1;
+
+	grep_index_path(repo, &path, "chain-safety");
+	hold_lock_file_for_update_timeout_mode(&lock, path.buf,
+					       LOCK_DIE_ON_ERROR,
+					       GREP_INDEX_CHAIN_LOCK_TIMEOUT_MS, 0444);
+	if (strbuf_read_file(&manifest, path.buf, 0) < 0 && errno != ENOENT)
+		goto cleanup;
+	for (size_t pos = 0; pos < manifest.len;) {
+		const char *line = manifest.buf + pos;
+		const char *end = memchr(line, '\n', manifest.len - pos);
+		size_t len = end ? (size_t)(end - line) :
+				   manifest.len - pos;
+
+		if (len == hexsz && !memcmp(line, hex, hexsz))
+			found = 1;
+		pos += len + !!end;
+	}
+	if (!found) {
+		strbuf_complete_line(&manifest);
+		strbuf_addf(&manifest, "%s\n", hex);
+	}
+	if (found && !replaced) {
+		result = 0;
+		goto cleanup;
+	}
+	/* Replace even an unchanged manifest when repairing a corrupt sidecar. */
+	if (write_in_full(get_lock_file_fd(&lock), manifest.buf,
+			  manifest.len) < 0 ||
+	    commit_lock_file(&lock) < 0)
+		goto cleanup;
+	result = 0;
+cleanup:
+	rollback_lock_file(&lock);
+	strbuf_release(&manifest);
+	strbuf_release(&path);
+	return result;
+}
+
+/*
+ * A safety sidecar is bound to the transposed segment's authenticated
+ * metadata. One bit per class position means unknown/unsafe; only a proven
+ * clean blob can clear its bit. Publish the complete file before notifying
+ * long-lived readers through chain-safety.
+ */
+int write_grep_index_safety(struct repository *repo, int show_progress)
+{
+	struct grep_index *index = grep_index_load_transposed(repo, NULL);
+	struct progress *progress = NULL;
+	size_t total = 0;
+	size_t scanned = 0;
+	int result = -1;
+
+	if (!index)
+		return error(_("unable to load transposed grep index"));
+	for (size_t i = 0; i < index->segments_nr; i++)
+		if (!index->segments[i].unsafe_rows)
+			total += index->segments[i].nr;
+	if (show_progress)
+		progress = start_delayed_progress(repo, _("Checking blob safety"),
+						  total);
+	for (size_t i = 0; i < index->segments_nr; i++) {
+		struct grep_index_segment *segment = &index->segments[i];
+		struct tempfile *temp = NULL;
+		struct hashfile *file = NULL;
+		struct strbuf temp_path = STRBUF_INIT;
+		struct strbuf final_path = STRBUF_INIT;
+		unsigned char *unsafe = NULL;
+		unsigned char checksum[GIT_MAX_RAWSZ];
+		char hex[GIT_MAX_HEXSZ + 1];
+		size_t rows_size = 0;
+
+		hash_to_hex_algop_r(hex, segment->checksum.hash, repo->hash_algo);
+		if (segment->unsafe_rows) {
+			if (grep_index_publish_safety_generation(repo, hex, 0))
+				goto cleanup_segment;
+			strbuf_release(&temp_path);
+			strbuf_release(&final_path);
+			continue;
+		}
+		for (size_t class_nr = 0;
+		     class_nr < GREP_INDEX_MEMORY_FILTER_CLASSES; class_nr++) {
+			const unsigned char *entry = segment->classes +
+						     class_nr * GREP_INDEX_TRANSPOSED_CLASS_SIZE;
+
+			rows_size += DIV_ROUND_UP(
+				get_be32(entry + sizeof(uint32_t)), 8);
+		}
+		ALLOC_ARRAY(unsafe, rows_size);
+		memset(unsafe, 0xff, rows_size);
+		for (size_t j = 0; j < segment->nr; j++) {
+			struct object_info oi = OBJECT_INFO_INIT;
+			struct object_id oid;
+			struct object_id verified;
+			const unsigned char *locator = segment->locators +
+						       j * GREP_INDEX_TRANSPOSED_LOCATOR_SIZE;
+			enum object_type type;
+			unsigned long size;
+			void *content = NULL;
+			uint32_t class_nr = get_be32(locator);
+			uint32_t pos = get_be32(locator + sizeof(uint32_t));
+			size_t offset = segment->unsafe_offsets[class_nr] + pos / 8;
+
+			display_progress(progress, ++scanned);
+			oidread(&oid, segment->oids + j * segment->rawsz,
+				repo->hash_algo);
+			oi.typep = &type;
+			oi.sizep = &size;
+			if (odb_read_object_info_extended(repo->objects, &oid, &oi,
+							  OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK) ||
+			    type != OBJ_BLOB ||
+			    size > GREP_INDEX_MEMORY_MAX_BLOB_SIZE)
+				continue;
+			oi.contentp = &content;
+			if (odb_read_object_info_extended(repo->objects, &oid, &oi,
+							  OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK) ||
+			    !content || type != OBJ_BLOB ||
+			    grep_index_blob_unsafe(content, size)) {
+				free(content);
+				continue;
+			}
+			hash_object_file(repo->hash_algo, content, size,
+					 OBJ_BLOB, &verified);
+			free(content);
+			if (oideq(&oid, &verified))
+				unsafe[offset] &= ~(1u << (pos & 7));
+		}
+		grep_index_path(repo, &temp_path, "tmp_grep_safety_XXXXXX");
+		temp = mks_tempfile_m(temp_path.buf, 0444);
+		if (!temp)
+			die_errno(_("unable to create temporary grep safety index"));
+		if (adjust_shared_perm(repo, get_tempfile_path(temp)))
+			die_errno(_("unable to adjust grep safety permissions"));
+		file = hashfd(repo->hash_algo, get_tempfile_fd(temp),
+			      get_tempfile_path(temp));
+		hashwrite_be32(file, GREP_INDEX_SAFETY_SIGNATURE);
+		hashwrite_be32(file, GREP_INDEX_SAFETY_VERSION);
+		hashwrite_be32(file, repo->hash_algo->format_id);
+		hashwrite_be32(file, segment->nr);
+		hashwrite(file, segment->checksum.hash, segment->rawsz);
+		hashwrite(file, unsafe, rows_size);
+		finalize_hashfile(file, checksum, FSYNC_COMPONENT_PACK_METADATA,
+				  CSUM_HASH_IN_STREAM | CSUM_FSYNC);
+		file = NULL;
+		grep_index_path(repo, &final_path, "");
+		strbuf_addf(&final_path, "safety-%s.idx", hex);
+		if (rename_tempfile(&temp, final_path.buf) < 0)
+			die_errno(_("unable to publish grep safety index"));
+		if (grep_index_publish_safety_generation(repo, hex, 1))
+			goto cleanup_segment;
+		free(unsafe);
+		strbuf_release(&temp_path);
+		strbuf_release(&final_path);
+		continue;
+
+	cleanup_segment:
+		if (file)
+			free_hashfile(file);
+		delete_tempfile(&temp);
+		free(unsafe);
+		strbuf_release(&temp_path);
+		strbuf_release(&final_path);
+		goto cleanup;
+	}
+	result = 0;
+cleanup:
+	stop_progress(&progress);
+	grep_index_free(index);
+	return result;
 }
 
 int write_grep_index_oids(struct repository *repo, int show_progress,
