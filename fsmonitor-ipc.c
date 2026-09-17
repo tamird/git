@@ -558,10 +558,42 @@ static int decompress_untracked_cache(const char *data, size_t len,
 	return 0;
 }
 
+/* Keep these private Trace2 values stable. */
+enum fsmonitor_untracked_cache_restore_miss_reason {
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NONE = 0,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NO_SNAPSHOT = 1,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INDEX_MISMATCH = 2,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_SAVED_TOKEN_MISMATCH = 3,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INDEX_AND_TOKEN_MISMATCH = 4,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_LIVE_TOKEN_CHANGED = 5,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_COOKIE_UNSEEN = 6,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NO_CURRENT_TOKEN = 7,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INVALID_REQUEST = 8,
+	FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_LEGACY = 9,
+};
+
 enum fsmonitor_untracked_cache_result
 fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 				       const char **restore_reason)
 {
+	static const struct {
+		const char *name;
+		enum fsmonitor_untracked_cache_restore_miss_reason code;
+	} miss_reasons[] = {
+		{ "no-snapshot", FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NO_SNAPSHOT },
+		{ "index-mismatch", FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INDEX_MISMATCH },
+		{ "saved-token-mismatch",
+		  FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_SAVED_TOKEN_MISMATCH },
+		{ "index-and-token-mismatch",
+		  FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INDEX_AND_TOKEN_MISMATCH },
+		{ "token-changed",
+		  FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_LIVE_TOKEN_CHANGED },
+		{ "cookie-unseen", FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_COOKIE_UNSEEN },
+		{ "no-current-token",
+		  FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NO_CURRENT_TOKEN },
+		{ "invalid-request",
+		  FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_INVALID_REQUEST },
+	};
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
@@ -572,6 +604,8 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	const unsigned char *tracked_bitmap;
 	size_t snapshot_len;
 	const char *reason = "ineligible";
+	enum fsmonitor_untracked_cache_restore_miss_reason miss_reason =
+		FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NONE;
 	enum fsmonitor_untracked_cache_result result =
 		FSMONITOR_UNTRACKED_CACHE_UNSUPPORTED;
 
@@ -595,8 +629,7 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		goto done;
 	}
 
-	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
-		    "get %s %s", oid_to_hex(index_oid),
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "get-with-reason %s %s", oid_to_hex(index_oid),
 		    istate->fsmonitor_last_update);
 	if (fsmonitor_ipc__send_untracked_cache_command(
 		    command.buf, command.len, &answer)) {
@@ -604,7 +637,33 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		goto done;
 	}
 	if (answer.len == 4 && !memcmp(answer.buf, "miss", 4)) {
-		result = FSMONITOR_UNTRACKED_CACHE_MISS;
+		/* An older daemon does not recognize get-with-reason. */
+		strbuf_reset(&command);
+		strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "get %s %s", oid_to_hex(index_oid),
+			    istate->fsmonitor_last_update);
+		if (fsmonitor_ipc__send_untracked_cache_command(
+			    command.buf, command.len, &answer)) {
+			reason = "ipc-error";
+			goto done;
+		}
+		if (answer.len == 4 && !memcmp(answer.buf, "miss", 4)) {
+			miss_reason = FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_LEGACY;
+			result = FSMONITOR_UNTRACKED_CACHE_MISS;
+			goto done;
+		}
+	}
+	if (answer.len > 5 && !memcmp(answer.buf, "miss:", 5)) {
+		for (size_t i = 0; i < ARRAY_SIZE(miss_reasons); i++) {
+			size_t len = strlen(miss_reasons[i].name);
+
+			if (answer.len == 5 + len &&
+			    !memcmp(answer.buf + 5, miss_reasons[i].name, len)) {
+				miss_reason = miss_reasons[i].code;
+				result = FSMONITOR_UNTRACKED_CACHE_MISS;
+				goto done;
+			}
+		}
+		reason = "invalid-response";
 		goto done;
 	}
 	if (answer.len <= 4) {
@@ -672,6 +731,10 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 			   "untracked-cache/hit", 1);
 
 done:
+	if (result == FSMONITOR_UNTRACKED_CACHE_MISS)
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/restore-miss-reason",
+				   miss_reason);
 	trace2_data_string("fsmonitor", istate->repo,
 			   "untracked-cache/restore",
 			   result == FSMONITOR_UNTRACKED_CACHE_HIT ? "hit" :

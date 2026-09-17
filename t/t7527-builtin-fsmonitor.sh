@@ -600,6 +600,8 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 			../diff-snapshot-new-token.out &&
 		test_trace2_data fsmonitor untracked-cache/restore miss \
 			<../diff-snapshot-new-token.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-miss-reason \
+			3 <../diff-snapshot-new-token.trace &&
 		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
 			<../diff-snapshot-new-token.trace &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-new-token-status.trace" \
@@ -1931,11 +1933,14 @@ test_expect_success 'untracked cache save reports stale token without changing l
 			5 <../untracked-save-stale.trace &&
 		test-tool fsmonitor-client legacy-untracked-cache-save-miss \
 			--token=builtin:never-current:0 &&
+		test-tool fsmonitor-client legacy-untracked-cache-get-miss \
+			--token=builtin:never-current:0 &&
 		GIT_TRACE2_EVENT="$PWD/../untracked-save-current.trace" \
 			test-tool fsmonitor-client save-untracked-cache \
 			--current-token &&
 		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
 			<../untracked-save-current.trace &&
+		test-tool fsmonitor-client legacy-untracked-cache-get-hit &&
 		! have_t2_data_event fsmonitor untracked-cache/save-miss-reason \
 			<../untracked-save-current.trace
 	)
@@ -1969,6 +1974,10 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			disabled <../untracked-snapshot-cold.trace &&
 		test_trace2_data status untracked-cache/restore \
 			miss <../untracked-snapshot-cold.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-miss-reason \
+			1 <../untracked-snapshot-cold.trace &&
+		test_grep -q "untracked-cache/hit:0$" \
+			../untracked-snapshot-daemon.trace &&
 		test_trace2_data status untracked/cache-root-present \
 			0 <../untracked-snapshot-cold.trace &&
 		have_t2_data_event fsmonitor untracked-cache/saved \
@@ -1986,6 +1995,8 @@ test_expect_success 'lock-free status reuses current untracked snapshot' '
 			1 <../untracked-snapshot-locked.trace &&
 		test_trace2_data status untracked-cache/restore \
 			hit <../untracked-snapshot-locked.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/restore-miss-reason \
+			<../untracked-snapshot-locked.trace &&
 		test_trace2_data status untracked/cache-root-present \
 			1 <../untracked-snapshot-locked.trace &&
 		test_trace2_data status untracked/directories-visited \
@@ -2356,6 +2367,8 @@ test_expect_success 'lock-free status repairs a malformed untracked snapshot' '
 		test_cmp ../snapshot-repair.expect ../snapshot-repair.new-index &&
 		test_trace2_data status untracked-cache/restore miss \
 			<../snapshot-repair.new-index.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-miss-reason \
+			2 <../snapshot-repair.new-index.trace &&
 		git hash-object .git/index >../snapshot-repair.changed-index.after &&
 		test_cmp ../snapshot-repair.changed-index.before \
 			../snapshot-repair.changed-index.after

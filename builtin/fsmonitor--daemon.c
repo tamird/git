@@ -752,6 +752,25 @@ static void fsmonitor_start_grep_index_server(
 	pthread_mutex_unlock(&state->grep_index_mutex);
 }
 
+static const char *untracked_cache_lookup_miss(
+	const struct fsmonitor_daemon_state *state,
+	const struct strbuf *index_oid, const struct strbuf *token)
+{
+	int index_mismatch, token_mismatch;
+
+	if (!state->untracked_cache_data.len)
+		return "no-snapshot";
+	index_mismatch = strcmp(index_oid->buf, state->untracked_cache_oid.buf);
+	token_mismatch = strcmp(token->buf, state->untracked_cache_token.buf);
+	if (index_mismatch && token_mismatch)
+		return "index-and-token-mismatch";
+	if (index_mismatch)
+		return "index-mismatch";
+	if (token_mismatch)
+		return "saved-token-mismatch";
+	return NULL;
+}
+
 static int fsmonitor_handle_untracked_cache(
 	struct fsmonitor_daemon_state *state, const char *command,
 	ipc_server_reply_cb *reply, struct ipc_server_reply_data *reply_data)
@@ -771,7 +790,10 @@ static int fsmonitor_handle_untracked_cache(
 		return reply(reply_data, "yes", 3);
 
 	strbuf_addstr(&response, "miss");
-	if (skip_prefix(command, "get ", &p))
+	if (skip_prefix(command, "get-with-reason ", &p)) {
+		save = 0;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "get ", &p))
 		save = 0;
 	else if (skip_prefix(command, "put-if-absent-with-reason ", &p)) {
 		save = 2;
@@ -824,12 +846,15 @@ static int fsmonitor_handle_untracked_cache(
 		miss_reason = "no-current-token";
 		goto unlock;
 	}
-	if (!save && (!state->untracked_cache_data.len ||
-		      strcmp(index_oid.buf,
-			     state->untracked_cache_oid.buf) ||
-		      strcmp(token.buf,
-			     state->untracked_cache_token.buf)))
-		goto unlock;
+	if (!save) {
+		const char *mismatch = untracked_cache_lookup_miss(
+			state, &index_oid, &token);
+
+		if (mismatch) {
+			miss_reason = mismatch;
+			goto unlock;
+		}
+	}
 
 	if (with_lock__wait_for_cookie(state) != FCIR_SEEN) {
 		miss_reason = "cookie-unseen";
@@ -847,11 +872,15 @@ static int fsmonitor_handle_untracked_cache(
 		miss_reason = "token-changed";
 		goto unlock;
 	}
-	if (!save && (strcmp(index_oid.buf,
-			     state->untracked_cache_oid.buf) ||
-		      strcmp(token.buf,
-			     state->untracked_cache_token.buf)))
-		goto unlock;
+	if (!save) {
+		const char *mismatch = untracked_cache_lookup_miss(
+			state, &index_oid, &token);
+
+		if (mismatch) {
+			miss_reason = mismatch;
+			goto unlock;
+		}
+	}
 
 	strbuf_reset(&response);
 	if (save) {
@@ -884,7 +913,8 @@ done:
 			   save ? "untracked-cache/saved" :
 				  "untracked-cache/hit",
 			   save ? saved_len :
-				  response.len > 4);
+				  response.len > 4 &&
+					   !memcmp(response.buf, "hit", 4));
 	strbuf_release(&response);
 	strbuf_release(&snapshot);
 	strbuf_release(&current_token);

@@ -202,7 +202,7 @@ done:
 	return ret;
 }
 
-static int do_send_untracked_cache_raw(const char *token,
+static int do_send_untracked_cache_raw(const char *token, const char *verb,
 				       const char *expected_reply)
 {
 	struct index_state *istate = the_repository->index;
@@ -224,12 +224,15 @@ static int do_send_untracked_cache_raw(const char *token,
 	strbuf_addstr(&command, FSMONITOR_IPC_QUERY_PREFIX);
 	strbuf_addbuf(&command, &identity);
 	strbuf_addch(&command, '\n');
-	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX
-		    "put %s %s 00", oid_to_hex(&istate->oid), token);
+	strbuf_addf(&command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "%s %s %s%s", verb, oid_to_hex(&istate->oid), token,
+		    !strcmp(verb, "get") ? "" : " 00");
 	if (fsmonitor_ipc__send_command(command.buf, &answer))
 		goto done;
-	ret = answer.len != strlen(expected_reply) ||
-	      memcmp(answer.buf, expected_reply, answer.len);
+	if (!strcmp(expected_reply, "hit"))
+		ret = answer.len <= 4 || memcmp(answer.buf, "hit", 4);
+	else
+		ret = answer.len != strlen(expected_reply) ||
+		      memcmp(answer.buf, expected_reply, answer.len);
 
 done:
 	strbuf_release(&answer);
@@ -454,6 +457,8 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client test-untracked-snapshot-dir-bound",
 		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client legacy-untracked-cache-save-miss --token=<token>",
+		"test-tool fsmonitor-client legacy-untracked-cache-get-miss --token=<token>",
+		"test-tool fsmonitor-client legacy-untracked-cache-get-hit",
 		"test-tool fsmonitor-client hammer [<token>] [<threads>] [<requests>]",
 		NULL,
 	};
@@ -503,9 +508,13 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		return test_untracked_snapshot_dir_bound();
 
 	if (!strcmp(subcmd, "poison-untracked-cache"))
-		return do_send_untracked_cache_raw(token, "ok");
+		return do_send_untracked_cache_raw(token, "put", "ok");
 	if (!strcmp(subcmd, "legacy-untracked-cache-save-miss"))
-		return do_send_untracked_cache_raw(token, "miss");
+		return do_send_untracked_cache_raw(token, "put", "miss");
+	if (!strcmp(subcmd, "legacy-untracked-cache-get-miss"))
+		return do_send_untracked_cache_raw(token, "get", "miss");
+	if (!strcmp(subcmd, "legacy-untracked-cache-get-hit"))
+		return do_send_untracked_cache_raw(token, "get", "hit");
 
 	if (!strcmp(subcmd, "hammer"))
 		return !!do_hammer(token, nr_threads, nr_requests);
