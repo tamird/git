@@ -1412,7 +1412,7 @@ static int grep_index_ere_outer_group(const char *pattern, size_t len,
 	return 0;
 }
 
-struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
+static struct grep_index_query *grep_index_query_compile(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
 	struct grep_index_query_boundary *boundaries = NULL;
@@ -2748,6 +2748,35 @@ unsupported:
 	free(boundaries);
 	free(clause.trigrams);
 	grep_index_query_free(query);
+	return NULL;
+}
+
+struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
+{
+	struct grep_index_query *query = grep_index_query_compile(opt);
+
+	if (query || !opt->all_match || opt->no_body_match)
+		return query;
+	for (const struct grep_pat *p = opt->pattern_list; p; p = p->next)
+		if (p->token != GREP_PATTERN)
+			return NULL;
+
+	/*
+	 * Each plain --all-match pattern must occur somewhere in the blob.
+	 * A supported pattern can reject it even when another pattern cannot
+	 * use the index. Leave the full expression to the normal matcher.
+	 */
+	for (const struct grep_pat *p = opt->pattern_list; p; p = p->next) {
+		struct grep_pat pattern = *p;
+		struct grep_opt required = *opt;
+
+		pattern.next = NULL;
+		required.pattern_list = &pattern;
+		required.all_match = 0;
+		query = grep_index_query_compile(&required);
+		if (query)
+			return query;
+	}
 	return NULL;
 }
 

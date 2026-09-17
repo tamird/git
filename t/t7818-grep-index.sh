@@ -4656,13 +4656,30 @@ test_expect_success 'content index prunes impossible multiple patterns' '
 '
 
 test_expect_success 'content index intersects --all-match patterns' '
+	pattern="present \\(needle\\)" &&
+	echo "present:present needle" >expect &&
+	git grep --cached --all-match -e "$pattern" -e needle \
+		-- present >actual &&
+	test_cmp expect actual &&
+	git grep --cached -e "$pattern" -e "absent alpha" \
+		-- present >actual &&
+	test_cmp expect actual &&
+	git grep --cached --all-match --not -e "absent alpha" \
+		-e "$pattern" -- present >actual &&
+	test_cmp expect actual &&
 	oid=$(git rev-parse :present) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
-	test_must_fail git grep --cached --all-match \
-		-e "present needle" -e "absent alpha" -- present 2>err &&
-	test_must_be_empty err
+	for pattern in "present needle" "present \\(needle\\)"
+	do
+		test_must_fail git grep --cached --all-match \
+			-e "$pattern" -e "absent alpha" -- present 2>err &&
+		test_must_be_empty err &&
+		test_must_fail git grep --cached --all-match \
+			-e "absent alpha" -e "$pattern" -- present 2>err &&
+		test_must_be_empty err || return 1
+	done
 '
 
 test_expect_success ENHANCED_BRE \
