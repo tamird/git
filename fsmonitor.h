@@ -22,6 +22,11 @@ static inline int is_fsmonitor_refreshed(const struct index_state *istate)
 		istate->fsmonitor_has_run_once;
 }
 
+/* Apply a validated, NUL-delimited daemon change list to a restored snapshot. */
+void fsmonitor_apply_snapshot_delta(struct index_state *istate,
+				    char *paths, size_t paths_len,
+				    const char *new_token);
+
 /*
  * Set the given cache entries CE_FSMONITOR_VALID bit. This should be
  * called any time the cache entry has been updated to reflect the

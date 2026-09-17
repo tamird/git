@@ -777,6 +777,7 @@ static int fsmonitor_handle_untracked_cache(
 {
 	struct strbuf index_oid = STRBUF_INIT;
 	struct strbuf token = STRBUF_INIT;
+	struct strbuf token_id = STRBUF_INIT;
 	struct strbuf current_token = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
 	struct strbuf response = STRBUF_INIT;
@@ -784,18 +785,28 @@ static int fsmonitor_handle_untracked_cache(
 	const char *p, *end, *hex_payload = NULL;
 	const char *miss_reason = "invalid-request";
 	size_t hex_len, saved_len = 0;
-	int save = 0, explain_miss = 0, ret;
+	uint64_t token_seq = 0;
+	int save = 0, get_base = 0, explain_miss = 0, ret;
 
 	if (!strcmp(command, "supports-reason"))
 		return reply(reply_data, "yes", 3);
 
 	strbuf_addstr(&response, "miss");
-	if (skip_prefix(command, "get-with-reason ", &p)) {
+	if (skip_prefix(command, "get-with-base ", &p)) {
+		get_base = 1;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "get-with-reason ", &p)) {
 		save = 0;
 		explain_miss = 1;
 	} else if (skip_prefix(command, "get ", &p))
 		save = 0;
-	else if (skip_prefix(command, "put-if-absent-with-reason ", &p)) {
+	else if (skip_prefix(command, "put-if-absent-with-base ", &p)) {
+		save = 4;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "put-with-base ", &p)) {
+		save = 3;
+		explain_miss = 1;
+	} else if (skip_prefix(command, "put-if-absent-with-reason ", &p)) {
 		save = 2;
 		explain_miss = 1;
 	} else if (skip_prefix(command, "put-with-reason ", &p)) {
@@ -808,11 +819,13 @@ static int fsmonitor_handle_untracked_cache(
 	else
 		goto done;
 
-	if (parse_oid_hex(p, &oid, &end) || *end != ' ' ||
+	if (parse_oid_hex(p, &oid, &end) ||
+	    (get_base ? *end : *end != ' ') ||
 	    is_null_oid(&oid))
 		goto done;
 	strbuf_add_oid_hex(&index_oid, &oid);
-	p = end + 1;
+	if (!get_base)
+		p = end + 1;
 
 	if (save) {
 		end = strchr(p, ' ');
@@ -835,7 +848,7 @@ static int fsmonitor_handle_untracked_cache(
 				 hex_payload, hex_len / 2))
 			goto done;
 		strbuf_setlen(&snapshot, hex_len / 2);
-	} else {
+	} else if (!get_base) {
 		if (!*p || strchr(p, ' '))
 			goto done;
 		strbuf_addstr(&token, p);
@@ -844,6 +857,23 @@ static int fsmonitor_handle_untracked_cache(
 	pthread_mutex_lock(&state->main_lock);
 	if (!state->current_token_data) {
 		miss_reason = "no-current-token";
+		goto unlock;
+	}
+	if (get_base) {
+		if (!state->untracked_cache_data.len) {
+			miss_reason = "no-snapshot";
+			goto unlock;
+		}
+		if (strcmp(index_oid.buf, state->untracked_cache_oid.buf)) {
+			miss_reason = "index-mismatch";
+			goto unlock;
+		}
+		/* The following query from this token validates retained history. */
+		strbuf_reset(&response);
+		strbuf_addstr(&response, "base");
+		strbuf_addstr(&response, state->untracked_cache_token.buf);
+		strbuf_addch(&response, '\0');
+		strbuf_addbuf(&response, &state->untracked_cache_data);
 		goto unlock;
 	}
 	if (!save) {
@@ -868,7 +898,18 @@ static int fsmonitor_handle_untracked_cache(
 	with_lock__format_response_token(
 		&current_token, &state->current_token_data->token_id,
 		state->current_token_data->batch_head);
-	if (strcmp(token.buf, current_token.buf)) {
+	if (save >= 3) {
+		struct fsmonitor_token_data *data = state->current_token_data;
+
+		if (fsmonitor_parse_client_token(token.buf, &token_id,
+						 &token_seq) ||
+		    strcmp(token_id.buf, data->token_id.buf) ||
+		    token_seq < data->batch_tail->batch_seq_nr ||
+		    token_seq > data->batch_head->batch_seq_nr) {
+			miss_reason = "token-changed";
+			goto unlock;
+		}
+	} else if (strcmp(token.buf, current_token.buf)) {
 		miss_reason = "token-changed";
 		goto unlock;
 	}
@@ -885,11 +926,30 @@ static int fsmonitor_handle_untracked_cache(
 	strbuf_reset(&response);
 	if (save) {
 		/* A concurrent status may have saved a complete tree. */
-		if (save == 2 && state->untracked_cache_data.len &&
-		    !strcmp(index_oid.buf, state->untracked_cache_oid.buf) &&
-		    !strcmp(token.buf, state->untracked_cache_token.buf)) {
-			strbuf_addstr(&response, "exists");
-			goto unlock;
+		if (state->untracked_cache_data.len &&
+		    !strcmp(index_oid.buf, state->untracked_cache_oid.buf)) {
+			if (save == 2 &&
+			    !strcmp(token.buf, state->untracked_cache_token.buf)) {
+				strbuf_addstr(&response, "exists");
+				goto unlock;
+			}
+			if (save >= 3) {
+				struct strbuf saved_id = STRBUF_INIT;
+				uint64_t saved_seq;
+				int retained = !fsmonitor_parse_client_token(
+						       state->untracked_cache_token.buf,
+						       &saved_id, &saved_seq) &&
+					       !strcmp(saved_id.buf, token_id.buf) &&
+					       saved_seq >=
+						       state->current_token_data->batch_tail->batch_seq_nr;
+
+				strbuf_release(&saved_id);
+				if (retained &&
+				    (save == 4 || saved_seq > token_seq)) {
+					strbuf_addstr(&response, "exists");
+					goto unlock;
+				}
+			}
 		}
 		strbuf_swap(&state->untracked_cache_oid, &index_oid);
 		strbuf_swap(&state->untracked_cache_token, &token);
@@ -918,6 +978,7 @@ done:
 	strbuf_release(&response);
 	strbuf_release(&snapshot);
 	strbuf_release(&current_token);
+	strbuf_release(&token_id);
 	strbuf_release(&token);
 	strbuf_release(&index_oid);
 	return ret;

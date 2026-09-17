@@ -798,6 +798,37 @@ static void fsmonitor_refresh_callback(
  */
 static int fsmonitor_force_update_threshold = 100;
 
+void fsmonitor_apply_snapshot_delta(struct index_state *istate,
+				    char *paths, size_t paths_len,
+				    const char *new_token)
+{
+	struct fsmonitor_refresh_stats stats = {
+		.exact_dirs = STRSET_INIT,
+		.rejected_paths = STRSET_INIT,
+	};
+	int count = 0;
+	size_t start = 0;
+
+	/* The caller validated every NUL-terminated path before restoring. */
+	for (size_t i = 0; i < paths_len; i++) {
+		if (paths[i])
+			continue;
+		fsmonitor_refresh_callback(istate, paths + start, &stats);
+		start = i + 1;
+		count++;
+	}
+	strset_clear(&stats.exact_dirs);
+	strset_clear(&stats.rejected_paths);
+	if (istate->untracked)
+		istate->untracked->use_fsmonitor = 1;
+	if (count > fsmonitor_force_update_threshold)
+		istate->cache_changed |= FSMONITOR_CHANGED;
+	FREE_AND_NULL(istate->fsmonitor_last_update);
+	istate->fsmonitor_last_update = xstrdup(new_token);
+	trace2_data_intmax("fsmonitor", istate->repo,
+			   "untracked-cache/replayed-paths", count);
+}
+
 struct fsmonitor_trivial_result fsmonitor_classify_trivial_response(
 	const char *requested, const char *response)
 {

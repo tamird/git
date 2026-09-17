@@ -3,6 +3,7 @@
 #include "git-compat-util.h"
 #include "abspath.h"
 #include "dir.h"
+#include "fsmonitor.h"
 #include "fsmonitor-ll.h"
 #include "fsmonitor-settings.h"
 #include "gettext.h"
@@ -597,12 +598,16 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf answer = STRBUF_INIT;
 	struct strbuf snapshot = STRBUF_INIT;
+	struct strbuf delta = STRBUF_INIT;
 	struct untracked_cache *candidate;
 	struct object_id generated_index_oid;
+	struct object_id rechecked_index_oid;
 	const struct object_id *index_oid;
 	const char *snapshot_data;
 	const unsigned char *tracked_bitmap;
 	size_t snapshot_len;
+	size_t delta_paths = 0;
+	int replay = 0;
 	const char *reason = "ineligible";
 	enum fsmonitor_untracked_cache_restore_miss_reason miss_reason =
 		FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_NONE;
@@ -660,6 +665,11 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 			    !memcmp(answer.buf + 5, miss_reasons[i].name, len)) {
 				miss_reason = miss_reasons[i].code;
 				result = FSMONITOR_UNTRACKED_CACHE_MISS;
+				if (miss_reason ==
+					    FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_SAVED_TOKEN_MISMATCH ||
+				    miss_reason ==
+					    FSMONITOR_UNTRACKED_CACHE_RESTORE_MISS_LIVE_TOKEN_CHANGED)
+					goto get_base;
 				goto done;
 			}
 		}
@@ -678,9 +688,63 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		reason = "invalid-response";
 		goto done;
 	}
-
 	snapshot_data = answer.buf + 4;
 	snapshot_len = answer.len - 4;
+	goto decode_snapshot;
+
+get_base:
+	strbuf_reset(&command);
+	strbuf_addf(&command,
+		    FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "get-with-base %s",
+		    oid_to_hex(index_oid));
+	if (fsmonitor_ipc__send_untracked_cache_command(
+		    command.buf, command.len, &answer))
+		goto done;
+	if (answer.len <= 5 || memcmp(answer.buf, "base", 4))
+		goto done;
+	{
+		const char *end = memchr(answer.buf + 4, '\0',
+					 answer.len - 4 < 256 ? answer.len - 4 : 256);
+		struct fsmonitor_trivial_result generation;
+		size_t pos;
+
+		if (!end || end == answer.buf + 4)
+			goto done;
+		pos = end - answer.buf + 1;
+		if (answer.len - pos > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
+		    answer.len == pos)
+			goto done;
+		generation = fsmonitor_classify_trivial_response(
+			answer.buf + 4, istate->fsmonitor_last_update);
+		if (strcmp(generation.reason, "same-token-generation"))
+			goto done;
+		if (fsmonitor_ipc__send_query(answer.buf + 4, &delta) ||
+		    !delta.len || delta.len > 32 * 1024 * 1024)
+			goto done;
+		end = memchr(delta.buf, '\0',
+			     delta.len < 256 ? delta.len : 256);
+		if (!end || end == delta.buf)
+			goto done;
+		delta_paths = end - delta.buf + 1;
+		generation = fsmonitor_classify_trivial_response(
+			answer.buf + 4, delta.buf);
+		if (strcmp(generation.reason, "same-token-generation"))
+			goto done;
+		/* A trivial or malformed reply cannot validate the old tree. */
+		for (size_t start = delta_paths; start < delta.len;) {
+			end = memchr(delta.buf + start, '\0',
+				     delta.len - start);
+			if (!end || end == delta.buf + start ||
+			    (end == delta.buf + start + 1 &&
+			     delta.buf[start] == '/'))
+				goto done;
+			start = end - delta.buf + 1;
+		}
+		snapshot_data = answer.buf + pos;
+		snapshot_len = answer.len - pos;
+		replay = 1;
+	}
+decode_snapshot:
 	if (snapshot_len >= FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN &&
 	    !memcmp(snapshot_data, FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC,
 		    FSMONITOR_IPC_COMPRESSED_SNAPSHOT_MAGIC_LEN)) {
@@ -698,6 +762,13 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 				   &tracked_bitmap)) {
 		reason = "invalid-tracked-snapshot";
 		goto done;
+	}
+	if (replay) {
+		const struct object_id *rechecked =
+			untracked_cache_index_oid(istate, &rechecked_index_oid);
+
+		if (!rechecked || !oideq(rechecked, index_oid))
+			goto done;
 	}
 
 	candidate = read_untracked_snapshot(snapshot_data, snapshot_len);
@@ -718,6 +789,8 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		for (size_t i = 0; i < istate->cache_nr; i++) {
 			struct cache_entry *ce = istate->cache[i];
 
+			if (replay)
+				ce->ce_flags &= ~CE_FSMONITOR_VALID;
 			if ((tracked_bitmap[i / 8] & (1u << (i % 8))) &&
 			    tracked_snapshot_entry_is_eligible(ce)) {
 				ce->ce_flags |= CE_FSMONITOR_VALID;
@@ -726,6 +799,17 @@ fsmonitor_ipc__restore_untracked_cache(struct index_state *istate,
 		}
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "tracked-cache/restored", restored);
+	} else if (replay) {
+		for (size_t i = 0; i < istate->cache_nr; i++)
+			istate->cache[i]->ce_flags &= ~CE_FSMONITOR_VALID;
+	}
+	if (replay) {
+		fsmonitor_apply_snapshot_delta(istate,
+					       delta.buf + delta_paths,
+					       delta.len - delta_paths,
+					       delta.buf);
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/replay", 1);
 	}
 	trace2_data_intmax("fsmonitor", istate->repo,
 			   "untracked-cache/hit", 1);
@@ -747,6 +831,7 @@ done:
 				   "untracked-cache/restore-reason", reason);
 	}
 	strbuf_release(&answer);
+	strbuf_release(&delta);
 	strbuf_release(&snapshot);
 	strbuf_release(&command);
 	return result;
@@ -928,10 +1013,29 @@ void fsmonitor_ipc__save_untracked_cache(
 			}
 		}
 	}
+	if ((supports_reason &&
+	     miss_reason == FSMONITOR_UNTRACKED_CACHE_SAVE_MISS_TOKEN_CHANGED) ||
+	    (!supports_reason && answer.len == 4 &&
+	     !memcmp(answer.buf, "miss", 4))) {
+		/* A legacy daemon will reject the new verb without changing data. */
+		strbuf_splice(&command,
+			      strlen(FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX) +
+				      strlen(verb),
+			      supports_reason ? strlen("-with-reason") : 0,
+			      "-with-base",
+			      strlen("-with-base"));
+		strbuf_reset(&answer);
+		if (fsmonitor_ipc__send_untracked_cache_command(
+			    command.buf, command.len, &answer)) {
+			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_IPC_ERROR;
+			goto done;
+		}
+		trace2_data_intmax("fsmonitor", istate->repo,
+				   "untracked-cache/save-base", 1);
+	}
 	if (answer.len != 2 || memcmp(answer.buf, "ok", 2)) {
 		outcome = answer.len == 6 &&
-					  !memcmp(answer.buf, "exists", 6) &&
-					  mode == FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT ?
+					  !memcmp(answer.buf, "exists", 6) ?
 				  FSMONITOR_UNTRACKED_CACHE_SAVE_ALREADY_PRESENT :
 				  FSMONITOR_UNTRACKED_CACHE_SAVE_NON_OK;
 		if (trace2_is_enabled()) {
