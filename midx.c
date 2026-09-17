@@ -143,6 +143,7 @@ static struct multi_pack_index *load_multi_pack_index_one(struct odb_source_pack
 	m->data_len = midx_size;
 	m->source = source;
 	m->interpolate_lookup = git_env_bool("GIT_TEST_MIDX_INTERPOLATE", 1);
+	m->skip_exists_offset = git_env_bool("GIT_TEST_MIDX_EXIST_NO_OFFSET", 1);
 
 	m->signature = get_be32(m->data);
 	if (m->signature != MIDX_SIGNATURE)
@@ -663,7 +664,8 @@ struct object_id *nth_midxed_object_oid(struct object_id *oid,
 	return oid;
 }
 
-off_t nth_midxed_offset(struct multi_pack_index *m, uint32_t pos)
+static void read_nth_midxed_offset(struct multi_pack_index *m, uint32_t pos,
+				   off_t *offset)
 {
 	const unsigned char *offset_data;
 	uint32_t offset32;
@@ -680,10 +682,19 @@ off_t nth_midxed_offset(struct multi_pack_index *m, uint32_t pos)
 		offset32 ^= MIDX_LARGE_OFFSET_NEEDED;
 		if (offset32 >= m->chunk_large_offsets_len / sizeof(uint64_t))
 			die(_("multi-pack-index large offset out of bounds"));
-		return get_be64(m->chunk_large_offsets + sizeof(uint64_t) * offset32);
+		if (offset)
+			*offset = get_be64(m->chunk_large_offsets + sizeof(uint64_t) * offset32);
+	} else if (offset) {
+		*offset = offset32;
 	}
+}
 
-	return offset32;
+off_t nth_midxed_offset(struct multi_pack_index *m, uint32_t pos)
+{
+	off_t offset;
+
+	read_nth_midxed_offset(m, pos, &offset);
+	return offset;
 }
 
 uint32_t nth_midxed_pack_int_id(struct multi_pack_index *m, uint32_t pos)
@@ -698,6 +709,7 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 						  const struct object_id *oid,
 						  struct pack_entry *e,
 						  struct packed_git **bad_pack,
+						  int want_offset,
 						  struct odb_packed_lookup *lookup)
 {
 	uint32_t pos;
@@ -741,7 +753,13 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 		goto out;
 	}
 
-	e->offset = nth_midxed_offset(m, pos);
+	if (want_offset || !m->skip_exists_offset)
+		e->offset = nth_midxed_offset(m, pos);
+	else {
+		e->offset = 0;
+		if (m->chunk_large_offsets)
+			read_nth_midxed_offset(m, pos, NULL);
+	}
 	e->p = p;
 	ret = MIDX_FILL_HIT;
 
@@ -756,7 +774,7 @@ enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
 				      struct pack_entry *e,
 				      struct packed_git **bad_pack)
 {
-	return midx_fill_entry_with_lookup(m, oid, e, bad_pack, NULL);
+	return midx_fill_entry_with_lookup(m, oid, e, bad_pack, 1, NULL);
 }
 
 /* Match "foo.idx" against either "foo.pack" _or_ "foo.idx". */

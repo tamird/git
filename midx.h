@@ -39,6 +39,7 @@ struct strvec;
 struct multi_pack_index {
 	struct odb_source_packed *source;
 	int interpolate_lookup;
+	int skip_exists_offset;
 
 	const unsigned char *data;
 	size_t data_len;
@@ -138,10 +139,12 @@ enum midx_fill_result midx_fill_entry(struct multi_pack_index *m,
 				      const struct object_id *oid,
 				      struct pack_entry *e,
 				      struct packed_git **bad_pack);
+/* When want_offset is false, the caller must not use e->offset. */
 enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 						  const struct object_id *oid,
 						  struct pack_entry *e,
 						  struct packed_git **bad_pack,
+						  int want_offset,
 						  struct odb_packed_lookup *lookup);
 int midx_contains_pack(struct multi_pack_index *m,
 		       const char *idx_or_pack_name);

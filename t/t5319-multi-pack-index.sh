@@ -149,6 +149,35 @@ test_expect_success 'write midx with two packs' '
 
 compare_results_with_midx "two packs"
 
+test_expect_success 'MIDX existence lookup handles packed, loose and missing objects' '
+	test_when_finished "rm -rf exists" &&
+	git init exists &&
+	(
+		cd exists &&
+		test_commit packed &&
+		packed_oid=$(git rev-parse HEAD^{tree}) &&
+		git repack -adq &&
+		git multi-pack-index write &&
+		loose_oid=$(printf "loose-existence-check\n" | git hash-object -w --stdin) &&
+		missing_oid=$(printf "missing-existence-check\n" | git hash-object --stdin) &&
+		for skip_offset in 0 1
+		do
+			GIT_TEST_MIDX_EXIST_NO_OFFSET=$skip_offset \
+				git -c core.multiPackIndex=true cat-file -e "$packed_oid" &&
+			GIT_TEST_MIDX_EXIST_NO_OFFSET=$skip_offset \
+				git -c core.multiPackIndex=true cat-file -e "$loose_oid" &&
+			test_must_fail env GIT_TEST_MIDX_EXIST_NO_OFFSET=$skip_offset \
+				git -c core.multiPackIndex=true cat-file -e "$missing_oid" ||
+				return 1
+		done &&
+		GIT_TEST_MIDX_EXIST_NO_OFFSET=0 \
+			git -c core.multiPackIndex=true cat-file -t "$packed_oid" >expect &&
+		GIT_TEST_MIDX_EXIST_NO_OFFSET=1 \
+			git -c core.multiPackIndex=true cat-file -t "$packed_oid" >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'MIDX interpolation preserves prefixes and loose abbreviation' '
 	packed_oid=$(sed -n "1p" obj-list) &&
 	GIT_TEST_MIDX_INTERPOLATE=0 git cat-file -e "$packed_oid" &&
@@ -1296,6 +1325,9 @@ test_expect_success PERL_TEST_HELPERS 'reader bounds-checks large offset table' 
 		(cd ../objects64 && pwd) >.git/objects/info/alternates &&
 		git multi-pack-index --object-dir=../objects64 write &&
 		midx=../objects64/pack/multi-pack-index &&
+		large_oid=$(test-tool read-midx --show-objects ../objects64 |
+			awk '\''$2 + 0 >= 2147483648 {print $1; exit}'\'') &&
+		test -n "$large_oid" &&
 		corrupt_chunk_file $midx LOFF clear &&
 		# using only %(objectsize) is important here; see the commit
 		# message for more details
@@ -1304,7 +1336,13 @@ test_expect_success PERL_TEST_HELPERS 'reader bounds-checks large offset table' 
 		cat >expect <<-\EOF &&
 		fatal: multi-pack-index large offset out of bounds
 		EOF
-		test_cmp expect err
+		test_cmp expect err &&
+		for skip_offset in 0 1
+		do
+			test_must_fail env GIT_TEST_MIDX_EXIST_NO_OFFSET=$skip_offset \
+				git cat-file -e "$large_oid" 2>err &&
+			test_cmp expect err || return 1
+		done
 	)
 '
 
@@ -1458,6 +1496,8 @@ test_expect_success 'lookup recovers object whose midx-owning pack was removed' 
 		echo blob >expect &&
 		git cat-file -t "$dup_oid" >actual &&
 		test_cmp expect actual &&
+		GIT_TEST_MIDX_EXIST_NO_OFFSET=0 git cat-file -e "$dup_oid" &&
+		GIT_TEST_MIDX_EXIST_NO_OFFSET=1 git cat-file -e "$dup_oid" &&
 		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
 		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
 			git commit --allow-empty -m recovered &&
