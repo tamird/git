@@ -3751,8 +3751,15 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 	case UNTRACKED_CACHE_MODE_SAME:
 		break;
 	case UNTRACKED_CACHE_MODE_NEGATIVE:
-		/* Positive entries depend on the output mode; negative ones do not. */
-		*negative_only = 1;
+		if (!*negative_only && !dir->untracked->root &&
+		    !dir->untracked->fsmonitor_resync) {
+			/* A full scan can initialize an empty cache in its own mode. */
+			dir->untracked->dir_flags = dir->flags;
+			istate->cache_changed |= UNTRACKED_CHANGED;
+		} else {
+			/* Positive entries depend on the output mode; negative ones do not. */
+			*negative_only = 1;
+		}
 		break;
 	case UNTRACKED_CACHE_MODE_RESET:
 		/*

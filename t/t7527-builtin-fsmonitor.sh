@@ -2034,6 +2034,61 @@ test_expect_success 'untracked cache save reports stale token without changing l
 	)
 '
 
+test_expect_success 'cold all-mode status populates an empty normal cache' '
+	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot_all" &&
+	git init test_untracked_snapshot_all &&
+	(
+		cd test_untracked_snapshot_all &&
+		mkdir -p clean/deep visible &&
+		test_commit base clean/deep/tracked &&
+		echo one >visible/one &&
+		echo two >visible/two &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -uall \
+			>../untracked-snapshot-all.expect &&
+		git --no-optional-locks -c core.fsmonitor=false \
+			-c core.untrackedCache=false status --porcelain -unormal \
+			>../untracked-snapshot-normal.expect
+	) &&
+	start_daemon -C test_untracked_snapshot_all &&
+	(
+		cd test_untracked_snapshot_all &&
+		git update-index --untracked-cache &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-all-cold.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-snapshot-all-cold.out &&
+		test_cmp ../untracked-snapshot-all.expect \
+			../untracked-snapshot-all-cold.out &&
+		test_trace2_data status untracked/cache-root-present 0 \
+			<../untracked-snapshot-all-cold.trace &&
+		test_trace2_data status untracked/stored-flags 6 \
+			<../untracked-snapshot-all-cold.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore-miss-reason 1 \
+			<../untracked-snapshot-all-cold.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../untracked-snapshot-all-cold.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-all-warm.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-snapshot-all-warm.out &&
+		test_cmp ../untracked-snapshot-all.expect \
+			../untracked-snapshot-all-warm.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-snapshot-all-warm.trace &&
+		test_trace2_data status untracked/cache-root-present 1 \
+			<../untracked-snapshot-all-warm.trace &&
+		test_trace2_data status untracked/stored-flags 0 \
+			<../untracked-snapshot-all-warm.trace &&
+		test_trace2_data status untracked/subtrees-pruned \
+			"[1-9][0-9]*" <../untracked-snapshot-all-warm.trace &&
+		git --no-optional-locks status --porcelain -unormal \
+			>../untracked-snapshot-normal.out &&
+		test_cmp ../untracked-snapshot-normal.expect \
+			../untracked-snapshot-normal.out
+	)
+'
+
 test_expect_success 'lock-free status reuses current untracked snapshot' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot" &&
 	git init test_untracked_snapshot &&
