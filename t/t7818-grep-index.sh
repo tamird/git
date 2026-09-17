@@ -3631,37 +3631,46 @@ test_expect_success FSMONITOR_DAEMON \
 			    rm -f negative-required-ere-*.trace" &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
-	pattern="(^|[^A-Z])abcdefgh\\(" &&
-	echo "positive-required-ere:abcdefgh(" >expect &&
-	env GIT_TRACE2_EVENT="$PWD/negative-required-ere-learn.trace" \
-		git grep --cached -E "$pattern" -- \
-		negative-required-ere positive-required-ere >actual &&
-	test_cmp expect actual &&
-	test_trace2_data grep content_index_negative_cache_entries 1 \
-		<negative-required-ere-learn.trace &&
-	oid=$(git rev-parse :negative-required-ere) &&
-	object=.git/objects/$(test_oid_to_path "$oid") &&
-	mv "$object" "$object.save" &&
-	test_when_finished "test ! -e \"$object.save\" ||
-			    mv \"$object.save\" \"$object\"" &&
-	test_must_fail env \
-		GIT_TRACE2_EVENT="$PWD/negative-required-ere-hit.trace" \
-		git grep --cached -E "$pattern" -- negative-required-ere \
-		2>err &&
-	test_must_be_empty err &&
-	test_trace2_data grep content_index_negative_cache_hits 1 \
-		<negative-required-ere-hit.trace &&
-	mv "$object.save" "$object" &&
-	test_must_fail git grep --cached -E "$pattern" -- \
-		negative-context-ere &&
-	oid=$(git rev-parse :negative-context-ere) &&
-	object=.git/objects/$(test_oid_to_path "$oid") &&
-	mv "$object" "$object.save" &&
-	test_when_finished "test ! -e \"$object.save\" ||
-			    mv \"$object.save\" \"$object\"" &&
-	test_must_fail git grep --cached -E "$pattern" -- \
-		negative-context-ere 2>err &&
-	test_grep "unable to read" err
+	echo "abcdefgh gap gh(" >negative-required-ere &&
+	printf "abcdefgh(abc\n" >positive-required-ere &&
+	git add negative-required-ere positive-required-ere &&
+	for pattern in \
+		"(^|[^A-Z])abcdefgh\\(" \
+		"abcdefgh\\([^\\n]*(abc|xyz)"
+	do
+		rm -f negative-required-ere-*.trace &&
+		echo "positive-required-ere:abcdefgh(abc" >expect &&
+		env GIT_TRACE2_EVENT="$PWD/negative-required-ere-learn.trace" \
+			git grep --cached -E "$pattern" -- \
+			negative-required-ere positive-required-ere >actual &&
+		test_cmp expect actual &&
+		test_trace2_data grep content_index_negative_cache_entries 1 \
+			<negative-required-ere-learn.trace &&
+		oid=$(git rev-parse :negative-required-ere) &&
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		test_when_finished "test ! -e \"$object.save\" ||
+				    mv \"$object.save\" \"$object\"" &&
+		test_must_fail env \
+			GIT_TRACE2_EVENT="$PWD/negative-required-ere-hit.trace" \
+			git grep --cached -E "$pattern" -- negative-required-ere \
+			2>err &&
+		test_must_be_empty err &&
+		test_trace2_data grep content_index_negative_cache_hits 1 \
+			<negative-required-ere-hit.trace &&
+		mv "$object.save" "$object" &&
+		test_must_fail git grep --cached -E "$pattern" -- \
+			negative-context-ere &&
+		oid=$(git rev-parse :negative-context-ere) &&
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		test_when_finished "test ! -e \"$object.save\" ||
+				    mv \"$object.save\" \"$object\"" &&
+		test_must_fail git grep --cached -E "$pattern" -- \
+			negative-context-ere 2>err &&
+		test_grep "unable to read" err &&
+		mv "$object.save" "$object" || return 1
+	done
 '
 
 test_expect_success FSMONITOR_DAEMON,REGEX_MATCH_ERROR \
@@ -5424,8 +5433,32 @@ test_expect_success LIBPCRE2 'quantified escaped PCRE punctuation reads blob' '
 test_expect_success 'content index prunes escaped ERE classes' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -E \
-		"import[^\\n]*vendor_internal" -- agent-regex >actual &&
+		"import[^\\n]*(vendor_internal|missing)" -- agent-regex >actual &&
 	test_cmp expect actual &&
+	oid=$(git rev-parse :escaped-call-positive) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	for pattern in \
+		"resolve_reference\\([^\\n]*(absent|missing)" \
+		"^(resolve_reference\\([^\\n]*(absent|missing))$"
+	do
+		test_must_fail git grep --cached -E "$pattern" \
+			-- escaped-call-positive 2>err &&
+		test_must_be_empty err || return 1
+	done &&
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\([^\\n]*(absent|missing)?" \
+		-- escaped-call-positive 2>err &&
+	test_grep "unable to read" err &&
+	oid=$(git rev-parse :escaped-call-negative) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E \
+		"resolve_reference\\([^\\n]*(xxx|missing)" \
+		-- escaped-call-negative 2>err &&
+	test_must_be_empty err &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&

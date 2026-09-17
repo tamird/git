@@ -914,6 +914,42 @@ static void grep_index_query_consider_required_literal(
 		strbuf_addch(best, suffix);
 }
 
+static size_t grep_index_escaped_literal_bytes(
+	const char *pattern, size_t pos, size_t end, size_t left_len,
+	enum grep_pattern_type pattern_type, unsigned char escaped_literal,
+	unsigned char text[5])
+{
+	size_t left_nr = left_len < 2 ? left_len : 2;
+	size_t text_nr = left_nr;
+
+	memcpy(text, pattern + pos - left_nr, left_nr);
+	text[text_nr++] = escaped_literal;
+	for (size_t i = pos + 2; i < end && text_nr - left_nr - 1 < 2; i++) {
+		unsigned char right = pattern[i];
+		size_t after = i + 1;
+		int ordinary;
+		int quantified;
+
+		if (pattern_type != GREP_PATTERN_TYPE_BRE)
+			ordinary = !is_regex_special(right) && right != '}';
+		else
+			ordinary = !strchr(".[\\*^$", right);
+		if (!ordinary)
+			break;
+		if (pattern_type != GREP_PATTERN_TYPE_BRE)
+			quantified = after < end &&
+				     !!strchr("*+?{", pattern[after]);
+		else
+			quantified = (after < end && pattern[after] == '*') ||
+				     (after + 1 < end && pattern[after] == '\\' &&
+				      strchr("+?{", pattern[after + 1]));
+		if (quantified)
+			break;
+		text[text_nr++] = right;
+	}
+	return text_nr;
+}
+
 static int grep_index_query_branch_add_clause(
 	struct grep_index_query_branch *branch,
 	struct grep_index_query *query,
@@ -1346,6 +1382,51 @@ static int grep_index_pcre_literal_alternation(const char *pattern, size_t len,
 	return 1;
 }
 
+/*
+ * Find the end of a POSIX bracket expression without interpreting its bytes.
+ * ERE escapes are safe here only when they cannot change bracket boundaries.
+ */
+static int grep_index_posix_class_end(const char *pattern, size_t start,
+				      size_t end,
+				      enum grep_pattern_type pattern_type,
+				      size_t *class_end)
+{
+	size_t i = start + 1;
+
+	if (i < end && pattern[i] == '^')
+		i++;
+	if (i < end && pattern[i] == ']')
+		i++;
+	for (; i < end && pattern[i] != ']'; i++) {
+		if (pattern[i] == '[' && i + 1 < end &&
+		    strchr(".:=", pattern[i + 1])) {
+			unsigned char marker = pattern[i + 1];
+
+			for (i += 2; i + 1 < end &&
+				     !(pattern[i] == marker &&
+				       pattern[i + 1] == ']');
+			     i++)
+				if (pattern[i] == '\\' || pattern[i] == '[')
+					return -1;
+			if (i + 1 >= end)
+				return -1;
+			i++;
+		} else if (pattern[i] == '\\') {
+			if (pattern_type != GREP_PATTERN_TYPE_ERE ||
+			    i + 1 == end || pattern[i + 1] == '[' ||
+			    pattern[i + 1] == ']')
+				return -1;
+			i++;
+		} else if (pattern[i] == '[') {
+			return -1;
+		}
+	}
+	if (i >= end)
+		return -1;
+	*class_end = i;
+	return 0;
+}
+
 /* Only peel parentheses that enclose the entire ERE. */
 static int grep_index_ere_outer_group(const char *pattern, size_t len,
 				      size_t *body_start, size_t *body_end)
@@ -1373,31 +1454,8 @@ static int grep_index_ere_outer_group(const char *pattern, size_t len,
 			if (++i == end)
 				return 0;
 		} else if (ch == '[') {
-			if (++i < end && pattern[i] == '^')
-				i++;
-			if (i < end && pattern[i] == ']')
-				i++;
-			for (; i < end && pattern[i] != ']'; i++) {
-				if (pattern[i] == '[' && i + 1 < end &&
-				    strchr(".:=", pattern[i + 1])) {
-					unsigned char marker = pattern[i + 1];
-
-					for (i += 2; i + 1 < end &&
-						     !(pattern[i] == marker &&
-						       pattern[i + 1] == ']');
-					     i++)
-						if (pattern[i] == '\\' ||
-						    pattern[i] == '[')
-							return 0;
-					if (i + 1 == end)
-						return 0;
-					i++;
-				} else if (pattern[i] == '\\' ||
-					   pattern[i] == '[') {
-					return 0;
-				}
-			}
-			if (i == end)
+			if (grep_index_posix_class_end(pattern, i, end,
+						       GREP_PATTERN_TYPE_ERE, &i))
 				return 0;
 		} else if (ch == '(') {
 			depth++;
@@ -1524,6 +1582,7 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 		if (pattern_type == GREP_PATTERN_TYPE_ERE) {
 			struct grep_index_query_branch branch = { 0 };
 			struct grep_index_query_clause top_clause = { 0 };
+			struct strbuf group_required_literal = STRBUF_INIT;
 			struct grep_index_query *group_query;
 			unsigned char candidate_left[2];
 			size_t candidate_left_nr = 0;
@@ -1536,6 +1595,7 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 			int depth = 0;
 			int pattern_has_group = 0;
 			int valid = 1;
+			int group_required_literal_valid = required_literal_valid;
 
 			CALLOC_ARRAY(group_query, 1);
 			group_query->ignore_case = query->ignore_case;
@@ -1547,12 +1607,24 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						top_literal_start = i;
 					top_literal_run++;
 				} else if (!depth) {
+					unsigned char required_suffix = 0;
+
 					if (ch == '{' ||
 					    (top_literal_run &&
 					     (ch == '*' || ch == '?'))) {
 						valid = 0;
 						break;
 					}
+					if (ch == '\\' && i + 1 < scan_end &&
+					    is_regex_special(p->pattern[i + 1]) &&
+					    (i + 2 == scan_end ||
+					     !strchr("*+?{", p->pattern[i + 2])))
+						required_suffix = p->pattern[i + 1];
+					if (group_required_literal_valid)
+						grep_index_query_consider_required_literal(
+							&group_required_literal,
+							p->pattern + top_literal_start,
+							top_literal_run, required_suffix);
 					if (ch == '(') {
 						candidate_left_nr =
 							top_literal_run < 2 ?
@@ -1574,6 +1646,18 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						valid = 0;
 						break;
 					}
+					if (required_suffix) {
+						unsigned char text[5];
+						size_t text_nr = grep_index_escaped_literal_bytes(
+							p->pattern, i, scan_end, top_literal_run,
+							GREP_PATTERN_TYPE_ERE, required_suffix, text);
+
+						if (grep_index_query_clause_add_literal(
+							    &top_clause, group_query, text, text_nr)) {
+							valid = 0;
+							break;
+						}
+					}
 					top_literal_run = 0;
 				}
 				if (ch == '\\') {
@@ -1588,47 +1672,11 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 					continue;
 				}
 				if (ch == '[') {
-					size_t j = i + 1;
+					size_t j;
 
-					if (j < scan_end &&
-					    p->pattern[j] == '^')
-						j++;
-					if (j < scan_end &&
-					    p->pattern[j] == ']')
-						j++;
-					for (; j < scan_end &&
-					       p->pattern[j] != ']';
-					     j++) {
-						if (p->pattern[j] == '[' &&
-						    j + 1 < scan_end &&
-						    strchr(".:=",
-							   p->pattern[j + 1])) {
-							unsigned char marker =
-								p->pattern[j + 1];
-
-							for (j += 2;
-							     j + 1 < scan_end &&
-							     !(p->pattern[j] == marker &&
-							       p->pattern[j + 1] == ']');
-							     j++) {
-								if (p->pattern[j] == '\\' ||
-								    p->pattern[j] == '[') {
-									valid = 0;
-									break;
-								}
-							}
-							if (!valid || j + 1 == scan_end) {
-								valid = 0;
-								break;
-							}
-							j++;
-						} else if (p->pattern[j] == '\\' ||
-							   p->pattern[j] == '[') {
-							valid = 0;
-							break;
-						}
-					}
-					if (!valid || j == scan_end) {
+					if (grep_index_posix_class_end(
+						    p->pattern, i, scan_end,
+						    GREP_PATTERN_TYPE_ERE, &j)) {
 						valid = 0;
 						break;
 					}
@@ -1911,6 +1959,7 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 					continue;
 				}
 				if (ch == '|' && !depth) {
+					group_required_literal_valid = 0;
 					if (grep_index_query_add_ere_alternative(
 						    &branch, group_query,
 						    &top_clause)) {
@@ -1936,6 +1985,19 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 			    grep_index_query_add_ere_alternative(
 				    &branch, group_query, &top_clause))
 				valid = 0;
+			if (valid) {
+				if (group_required_literal_valid) {
+					grep_index_query_consider_required_literal(
+						&group_required_literal,
+						p->pattern + top_literal_start,
+						top_literal_run, 0);
+					strbuf_swap(&required_literal,
+						    &group_required_literal);
+				} else {
+					required_literal_valid = 0;
+				}
+			}
+			strbuf_release(&group_required_literal);
 			free(top_clause.trigrams);
 			if (valid) {
 				if (query->clauses_nr +
@@ -2063,40 +2125,9 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						if (++j == scan_end)
 							goto unsupported;
 					} else if (group_ch == '[') {
-						if (++j < scan_end &&
-						    p->pattern[j] == '^')
-							j++;
-						if (j < scan_end &&
-						    p->pattern[j] == ']')
-							j++;
-						for (; j < scan_end &&
-						       p->pattern[j] != ']';
-						     j++) {
-							if (p->pattern[j] == '[' &&
-							    j + 1 < scan_end &&
-							    strchr(".:=",
-								   p->pattern[j + 1])) {
-								unsigned char marker =
-									p->pattern[j + 1];
-
-								for (j += 2;
-								     j + 1 < scan_end &&
-								     !(p->pattern[j] == marker &&
-								       p->pattern[j + 1] == ']');
-								     j++) {
-									if (p->pattern[j] == '\\' ||
-									    p->pattern[j] == '[')
-										goto unsupported;
-								}
-								if (j + 1 == scan_end)
-									goto unsupported;
-								j++;
-							} else if (p->pattern[j] == '\\' ||
-								   p->pattern[j] == '[') {
-								goto unsupported;
-							}
-						}
-						if (j == scan_end)
+						if (grep_index_posix_class_end(
+							    p->pattern, j, scan_end,
+							    GREP_PATTERN_TYPE_ERE, &j))
 							goto unsupported;
 					} else if (group_ch == '(') {
 						depth++;
@@ -2179,45 +2210,10 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 			} else if ((pattern_type == GREP_PATTERN_TYPE_BRE ||
 				    pattern_type == GREP_PATTERN_TYPE_ERE) &&
 				   ch == '[') {
-				size_t j = i + 1;
+				size_t j;
 
-				if (j < scan_end && p->pattern[j] == '^')
-					j++;
-				if (j < scan_end && p->pattern[j] == ']')
-					j++;
-				for (; j < scan_end && p->pattern[j] != ']';
-				     j++) {
-					if (p->pattern[j] == '[' &&
-					    j + 1 < scan_end &&
-					    strchr(".:=", p->pattern[j + 1])) {
-						unsigned char marker =
-							p->pattern[j + 1];
-
-						for (j += 2;
-						     j + 1 < scan_end &&
-						     !(p->pattern[j] == marker &&
-						       p->pattern[j + 1] == ']');
-						     j++) {
-							if (p->pattern[j] == '\\' ||
-							    p->pattern[j] == '[')
-								goto unsupported;
-						}
-						if (j + 1 == scan_end)
-							goto unsupported;
-						j++;
-					} else if (p->pattern[j] == '\\') {
-						if (pattern_type !=
-							    GREP_PATTERN_TYPE_ERE ||
-						    j + 1 == scan_end ||
-						    p->pattern[j + 1] == '[' ||
-						    p->pattern[j + 1] == ']')
-							goto unsupported;
-						j++;
-					} else if (p->pattern[j] == '[') {
-						goto unsupported;
-					}
-				}
-				if (j == scan_end)
+				if (grep_index_posix_class_end(
+					    p->pattern, i, scan_end, pattern_type, &j))
 					goto unsupported;
 				separator_len = j - i + 1;
 				if (j + 1 < scan_end &&
@@ -2356,83 +2352,13 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 					struct grep_index_query_enrichment
 						enrichment = { 0 };
 					unsigned char text[5];
-					size_t left_nr = termlen < 2 ?
-								 termlen :
-								 2;
-					size_t escaped_pos = left_nr;
-					size_t text_nr = 0;
+					size_t text_nr = grep_index_escaped_literal_bytes(
+						p->pattern, i, scan_end, termlen,
+						pattern_type, escaped_literal, text);
 
-					memcpy(text,
-					       p->pattern + i - left_nr,
-					       left_nr);
-					text_nr += left_nr;
-					text[text_nr++] = escaped_literal;
-					for (size_t j = i + 2;
-					     j < scan_end &&
-					     text_nr - escaped_pos - 1 < 2;
-					     j++) {
-						unsigned char right =
-							p->pattern[j];
-						size_t after = j + 1;
-						int ordinary;
-						int quantified;
-
-						if (pattern_type !=
-						    GREP_PATTERN_TYPE_BRE)
-							ordinary =
-								!is_regex_special(
-									right) &&
-								right != '}';
-						else
-							ordinary =
-								!strchr(
-									".[\\*^$",
-									right);
-						if (!ordinary)
-							break;
-						if (pattern_type !=
-						    GREP_PATTERN_TYPE_BRE)
-							quantified =
-								after <
-									scan_end &&
-								!!strchr(
-									"*+?{",
-									p->pattern
-										[after]);
-						else
-							quantified =
-								(after <
-									 scan_end &&
-								 p->pattern
-										 [after] ==
-									 '*') ||
-								(after + 1 <
-									 scan_end &&
-								 p->pattern
-										 [after] ==
-									 '\\' &&
-								 strchr(
-									 "+?{",
-									 p->pattern
-										 [after +
-										  1]));
-						if (quantified)
-							break;
-						text[text_nr++] = right;
-					}
-					for (size_t j =
-						     escaped_pos > 1 ?
-							     escaped_pos - 2 :
-							     0;
-					     j <= escaped_pos &&
-					     j + 2 < text_nr;
-					     j++)
-						enrichment.trigrams
-							[enrichment
-								 .trigrams_nr++] =
-							trigram_hash(
-								text + j,
-								query->ignore_case);
+					for (size_t j = 0; j + 2 < text_nr; j++)
+						enrichment.trigrams[enrichment.trigrams_nr++] =
+							trigram_hash(text + j, query->ignore_case);
 					/*
 					 * A bridge-only clause is unusable
 					 * without one of its enrichments.
