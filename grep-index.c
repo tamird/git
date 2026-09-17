@@ -1,6 +1,7 @@
 #define USE_THE_REPOSITORY_VARIABLE
 
 #include "git-compat-util.h"
+#include <locale.h>
 #include "grep-index.h"
 #include "csum-file.h"
 #include "environment.h"
@@ -25,6 +26,7 @@
 #include "string-list.h"
 #include "tempfile.h"
 #include "thread-utils.h"
+#include "trace2.h"
 #include "worktree.h"
 #include "write-or-die.h"
 #include "wrapper.h"
@@ -1380,8 +1382,27 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				 */
 				if (pattern_type != GREP_PATTERN_TYPE_FIXED &&
 				    pattern_type != GREP_PATTERN_TYPE_PCRE &&
-				    is_regex_special(p->pattern[i]))
+				    is_regex_special(p->pattern[i])) {
+					if (trace2_is_enabled()) {
+						const char *locale;
+						int c_locale_mask = 0;
+
+						/* Bit 0: LC_CTYPE; bit 1: LC_COLLATE. */
+						locale = setlocale(LC_CTYPE, NULL);
+						if (locale && (!strcmp(locale, "C") ||
+							       !strcmp(locale, "POSIX")))
+							c_locale_mask |= 1;
+						locale = setlocale(LC_COLLATE, NULL);
+						if (locale && (!strcmp(locale, "C") ||
+							       !strcmp(locale, "POSIX")))
+							c_locale_mask |= 2;
+						trace2_data_intmax(
+							"grep", opt->repo,
+							"content_index/icase_regex_global_c_locale_mask",
+							c_locale_mask);
+					}
 					goto unsupported;
+				}
 			}
 		}
 #ifdef USE_LIBPCRE2
