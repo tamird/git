@@ -682,6 +682,11 @@ test_expect_success 'setup' '
 	echo "name = \"alphabet\"" >ere-short-long &&
 	echo "name = \"unrelated\"" >ere-short-negative &&
 	echo "xy_suffix" >ere-short-right &&
+	echo "alpha" >ere-nested-alpha &&
+	echo "gamma" >ere-nested-gamma &&
+	echo "prefix_alpha_symbol" >ere-nested-prefix &&
+	echo "alpha_symbol_suffix" >ere-nested-suffix &&
+	printf "  beta_symbol\n" >ere-nested-space &&
 	echo "NAME = require_monorepo()" >quantified-ordinary-assignment &&
 	echo "prefixsuffix" >quantified-ordinary-zero &&
 	echo "prefixxsuffix" >quantified-ordinary-one &&
@@ -714,7 +719,9 @@ test_expect_success 'setup' '
 		structured-optional ere-concat ere-concat-test ere-concat-dev \
 		ere-mixed-plain ere-concat-foo ere-concat-bar \
 		ere-concat-repeat ere-short-left ere-short-long \
-		ere-short-negative ere-short-right quantified-ordinary-assignment \
+		ere-short-negative ere-short-right ere-nested-alpha \
+		ere-nested-gamma ere-nested-prefix ere-nested-suffix \
+		ere-nested-space quantified-ordinary-assignment \
 		quantified-ordinary-zero quantified-ordinary-one escaped-ere \
 		literal-candidate-* &&
 	git commit -m initial
@@ -4610,6 +4617,60 @@ test_expect_success 'content index combines ERE literals and groups' '
 	test_cmp expect actual
 '
 
+test_expect_success 'content index accepts an enclosing ERE group' '
+	test_when_finished "rm -f enclosing-ere.trace" &&
+	pattern="^((alpha|beta)|gamma)$" &&
+	git grep --cached --no-content-index -E "$pattern" \
+		-- ere-nested-alpha ere-nested-gamma short >expect &&
+	git grep --cached -E "$pattern" \
+		-- ere-nested-alpha ere-nested-gamma short >actual &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/enclosing-ere.trace" \
+		git grep --cached -E "$pattern" -- short 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_candidates 0 \
+		<enclosing-ere.trace
+'
+
+test_expect_success 'content index uses ERE branches around repeated classes' '
+	test_when_finished "rm -f ere-branches-negative.trace \
+		ere-branches-positive.trace" &&
+	pattern="^(prefix_.*(alpha_symbol|beta_symbol)|alpha_symbol.*_suffix|[[:space:]]{2}.*(alpha_symbol|beta_symbol))$" &&
+	git grep --cached --no-content-index -E "$pattern" \
+		-- ere-nested-prefix ere-nested-suffix ere-nested-space \
+			short >expect &&
+	git grep --cached -E "$pattern" \
+		-- ere-nested-prefix ere-nested-suffix ere-nested-space \
+			short >actual &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/ere-branches-negative.trace" \
+		git grep --cached -E "$pattern" -- short 2>err &&
+	test_must_be_empty err &&
+	test_trace2_data grep content_index_candidates 0 \
+		<ere-branches-negative.trace &&
+	oid=$(git rev-parse :ere-nested-prefix) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail env \
+		GIT_TRACE2_EVENT="$PWD/ere-branches-positive.trace" \
+		git grep --cached -E "$pattern" \
+		-- ere-nested-prefix 2>err &&
+	test_grep "unable to read" err &&
+	test_trace2_data grep content_index_candidates 1 \
+		<ere-branches-positive.trace
+'
+
 test_expect_success 'content index prunes ERE group concatenations' '
 	oid=$(git rev-parse :ere-concat) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -5535,6 +5596,17 @@ test_expect_success 'nested ERE group uses normal blob reads' '
 	test_must_fail git grep --cached -E \
 		"^ordinary[[:space:]]+contents$" \
 		-- ordinary 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'optional enclosing ERE group reads possible matches' '
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E \
+		"^(alpha_symbol|beta_symbol)?$" \
+		-- short 2>err &&
 	test_grep "unable to read" err
 '
 

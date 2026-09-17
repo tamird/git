@@ -1259,6 +1259,72 @@ static int grep_index_pcre_literal_alternation(const char *pattern, size_t len,
 	return 1;
 }
 
+/* Only peel parentheses that enclose the entire ERE. */
+static int grep_index_ere_outer_group(const char *pattern, size_t len,
+				      size_t *body_start, size_t *body_end)
+{
+	size_t start = 0, end = len, i;
+	int depth = 1;
+
+	if (start < end && pattern[start] == '^')
+		start++;
+	if (end > start && pattern[end - 1] == '$') {
+		size_t backslashes = 0;
+
+		for (i = end - 1; i > start && pattern[i - 1] == '\\'; i--)
+			backslashes++;
+		if (!(backslashes & 1))
+			end--;
+	}
+	if (end <= start + 1 || pattern[start] != '(')
+		return 0;
+
+	for (i = start + 1; i < end; i++) {
+		unsigned char ch = pattern[i];
+
+		if (ch == '\\') {
+			if (++i == end)
+				return 0;
+		} else if (ch == '[') {
+			if (++i < end && pattern[i] == '^')
+				i++;
+			if (i < end && pattern[i] == ']')
+				i++;
+			for (; i < end && pattern[i] != ']'; i++) {
+				if (pattern[i] == '[' && i + 1 < end &&
+				    strchr(".:=", pattern[i + 1])) {
+					unsigned char marker = pattern[i + 1];
+
+					for (i += 2; i + 1 < end &&
+						     !(pattern[i] == marker &&
+						       pattern[i + 1] == ']');
+					     i++)
+						if (pattern[i] == '\\' ||
+						    pattern[i] == '[')
+							return 0;
+					if (i + 1 == end)
+						return 0;
+					i++;
+				} else if (pattern[i] == '\\' ||
+					   pattern[i] == '[') {
+					return 0;
+				}
+			}
+			if (i == end)
+				return 0;
+		} else if (ch == '(') {
+			depth++;
+		} else if (ch == ')' && !--depth) {
+			if (i + 1 != end)
+				return 0;
+			*body_start = start + 1;
+			*body_end = i;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 {
 	struct grep_index_query_clause clause = { 0 };
@@ -1297,6 +1363,9 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 
 		if (p->token != GREP_PATTERN)
 			goto unsupported;
+		if (pattern_type == GREP_PATTERN_TYPE_ERE)
+			grep_index_ere_outer_group(p->pattern, p->patternlen,
+						   &scan_start, &scan_end);
 		patterns_nr++;
 		if (patterns_nr > 1)
 			required_literal_valid = 0;
@@ -1338,7 +1407,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			int valid = 1;
 
 			CALLOC_ARRAY(group_query, 1);
-			for (size_t i = 0; i < p->patternlen; i++) {
+			for (size_t i = scan_start; i < scan_end; i++) {
 				unsigned char ch = p->pattern[i];
 
 				if (!depth && !is_regex_special(ch) && ch != '}') {
@@ -1376,7 +1445,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					top_literal_run = 0;
 				}
 				if (ch == '\\') {
-					if (++i == p->patternlen) {
+					if (++i == scan_end) {
 						valid = 0;
 						break;
 					}
@@ -1389,24 +1458,24 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 				if (ch == '[') {
 					size_t j = i + 1;
 
-					if (j < p->patternlen &&
+					if (j < scan_end &&
 					    p->pattern[j] == '^')
 						j++;
-					if (j < p->patternlen &&
+					if (j < scan_end &&
 					    p->pattern[j] == ']')
 						j++;
-					for (; j < p->patternlen &&
+					for (; j < scan_end &&
 					       p->pattern[j] != ']';
 					     j++) {
 						if (p->pattern[j] == '[' &&
-						    j + 1 < p->patternlen &&
+						    j + 1 < scan_end &&
 						    strchr(".:=",
 							   p->pattern[j + 1])) {
 							unsigned char marker =
 								p->pattern[j + 1];
 
 							for (j += 2;
-							     j + 1 < p->patternlen &&
+							     j + 1 < scan_end &&
 							     !(p->pattern[j] == marker &&
 							       p->pattern[j + 1] == ']');
 							     j++) {
@@ -1416,8 +1485,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 									break;
 								}
 							}
-							if (!valid ||
-							    j + 1 == p->patternlen) {
+							if (!valid || j + 1 == scan_end) {
 								valid = 0;
 								break;
 							}
@@ -1428,7 +1496,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 							break;
 						}
 					}
-					if (!valid || j == p->patternlen) {
+					if (!valid || j == scan_end) {
 						valid = 0;
 						break;
 					}
@@ -1437,6 +1505,38 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 					     (!isalnum(p->pattern[i + 1]) &&
 					      p->pattern[i + 1] != '_')))
 						candidate_simple = 0;
+					if (j + 1 < scan_end &&
+					    p->pattern[j + 1] == '{') {
+						size_t quant = j + 2;
+
+						if (quant == scan_end ||
+						    p->pattern[quant] < '0' ||
+						    p->pattern[quant] > '9') {
+							valid = 0;
+							break;
+						}
+						while (quant < scan_end &&
+						       p->pattern[quant] >= '0' &&
+						       p->pattern[quant] <= '9')
+							quant++;
+						if (quant < scan_end &&
+						    p->pattern[quant] == ',') {
+							quant++;
+							while (quant < scan_end &&
+							       p->pattern[quant] >= '0' &&
+							       p->pattern[quant] <= '9')
+								quant++;
+						}
+						if (quant == scan_end ||
+						    p->pattern[quant] != '}') {
+							valid = 0;
+							break;
+						}
+						/* The repeated class supplies no required bytes. */
+						if (candidate)
+							candidate_simple = 0;
+						j = quant;
+					}
 					i = j;
 					continue;
 				}
@@ -1482,17 +1582,17 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 						 * boundary with one alternative.
 						 */
 						int enrich_boundaries =
-							i + 1 == p->patternlen ||
+							i + 1 == scan_end ||
 							!strchr("*+?{",
 								p->pattern[i + 1]);
 
 						if (candidate_simple &&
-						    (i + 1 == p->patternlen ||
+						    (i + 1 == scan_end ||
 						     !strchr("*?{",
 							     p->pattern[i + 1]))) {
 							if (enrich_boundaries)
 								for (size_t j = i + 1;
-								     j < p->patternlen &&
+								     j < scan_end &&
 								     candidate_right_nr <
 									     ARRAY_SIZE(
 										     candidate_right);
@@ -1759,129 +1859,42 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			grep_index_pcre_literal_alternation(p->pattern,
 							    p->patternlen,
 							    &scan_start, &scan_end);
-		if (pattern_type == GREP_PATTERN_TYPE_ERE ||
-		    (pattern_type == GREP_PATTERN_TYPE_PCRE &&
-		     !opt->ignore_case &&
-		     p->patternlen > 4 &&
-		     !memcmp(p->pattern, "^\\s*(", 5))) {
-			size_t outer_start = 0;
-			size_t outer_end = p->patternlen;
-			size_t outer_body;
+		if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
+		    !opt->ignore_case && p->patternlen > 5 &&
+		    !memcmp(p->pattern, "^\\s*(", 5)) {
+			size_t outer_body = 5;
+			size_t i;
+			int depth = 1;
+			int valid = 1;
 
-			if (pattern_type == GREP_PATTERN_TYPE_PCRE) {
-				outer_start = 4;
-			} else {
-				if (outer_start < outer_end &&
-				    p->pattern[outer_start] == '^')
-					outer_start++;
-				if (outer_start < outer_end &&
-				    p->pattern[outer_end - 1] == '$') {
-					size_t backslashes = 0;
+			if (p->pattern[outer_body] == '?') {
+				if (outer_body + 1 == p->patternlen ||
+				    p->pattern[outer_body + 1] != ':')
+					valid = 0;
+				else
+					outer_body += 2;
+			}
+			for (i = outer_body; valid && i < p->patternlen; i++) {
+				unsigned char ch = p->pattern[i];
 
-					for (size_t i = outer_end - 1;
-					     i > outer_start &&
-					     p->pattern[i - 1] == '\\';
-					     i--)
-						backslashes++;
-					if (!(backslashes & 1))
-						outer_end--;
+				if (ch == '\\') {
+					if (++i == p->patternlen ||
+					    p->pattern[i] == 'Q' ||
+					    p->pattern[i] == 'c')
+						valid = 0;
+				} else if (ch == '[') {
+					if (grep_index_pcre_class_end(p->pattern, i,
+								      p->patternlen, &i))
+						valid = 0;
+				} else if (ch == '(') {
+					depth++;
+				} else if (ch == ')' && !--depth) {
+					break;
 				}
 			}
-			if (outer_end > outer_start + 1 &&
-			    p->pattern[outer_start] == '(') {
-				size_t i;
-				int depth = 1;
-				int valid = 1;
-
-				outer_body = outer_start + 1;
-				if (pattern_type == GREP_PATTERN_TYPE_PCRE &&
-				    outer_body < outer_end &&
-				    p->pattern[outer_body] == '?') {
-					if (outer_body + 1 == outer_end ||
-					    p->pattern[outer_body + 1] != ':')
-						valid = 0;
-					else
-						outer_body += 2;
-				}
-				for (i = outer_body; valid && i < outer_end; i++) {
-					unsigned char ch = p->pattern[i];
-
-					if (ch == '\\') {
-						if (++i == outer_end) {
-							valid = 0;
-							break;
-						}
-						if (pattern_type ==
-							    GREP_PATTERN_TYPE_PCRE &&
-						    (p->pattern[i] == 'Q' ||
-						     p->pattern[i] == 'c')) {
-							valid = 0;
-							break;
-						}
-					} else if (ch == '[') {
-						if (pattern_type ==
-						    GREP_PATTERN_TYPE_PCRE) {
-							if (grep_index_pcre_class_end(
-								    p->pattern, i,
-								    outer_end, &i)) {
-								valid = 0;
-								break;
-							}
-							continue;
-						}
-						if (++i < outer_end &&
-						    p->pattern[i] == '^')
-							i++;
-						if (i < outer_end &&
-						    p->pattern[i] == ']')
-							i++;
-						for (; i < outer_end &&
-						       p->pattern[i] != ']';
-						     i++) {
-							if (p->pattern[i] == '[' &&
-							    i + 1 < outer_end &&
-							    strchr(".:=",
-								   p->pattern[i + 1])) {
-								unsigned char marker =
-									p->pattern[i + 1];
-
-								for (i += 2;
-								     i + 1 < outer_end &&
-								     !(p->pattern[i] == marker &&
-								       p->pattern[i + 1] == ']');
-								     i++) {
-									if (p->pattern[i] == '\\' ||
-									    p->pattern[i] == '[') {
-										valid = 0;
-										break;
-									}
-								}
-								if (!valid ||
-								    i + 1 == outer_end) {
-									valid = 0;
-									break;
-								}
-								i++;
-							} else if (p->pattern[i] == '\\' ||
-								   p->pattern[i] == '[') {
-								valid = 0;
-								break;
-							}
-						}
-						if (!valid || i == outer_end) {
-							valid = 0;
-							break;
-						}
-					} else if (ch == '(') {
-						depth++;
-					} else if (ch == ')' && !--depth) {
-						break;
-					}
-				}
-				if (valid && !depth && i + 1 == outer_end) {
-					scan_start = outer_body;
-					scan_end = i;
-				}
+			if (valid && !depth && i + 1 == p->patternlen) {
+				scan_start = outer_body;
+				scan_end = i;
 			}
 		}
 
