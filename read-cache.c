@@ -3485,6 +3485,21 @@ static int do_write_locked_index(struct index_state *istate,
 		ret = close_lock_file_gently(lock);
 	if (!ret && is_null_oid(&istate->oid) &&
 	    (identity.fd >= 0 || identity.hash_valid)) {
+		if (identity.fd >= 0) {
+			struct stat st;
+
+			/* Rename can change ctime without changing the written data. */
+			if (fstat(identity.fd, &st) ||
+			    st.st_dev != identity.stat.st_dev ||
+			    st.st_ino != identity.stat.st_ino ||
+			    st.st_size != identity.stat.st_size ||
+			    st.st_mtime != identity.stat.st_mtime ||
+			    ST_MTIME_NSEC(st) != ST_MTIME_NSEC(identity.stat)) {
+				istate->index_file_stat_valid = 0;
+				goto out;
+			}
+			identity.stat = st;
+		}
 		/* The stat and pin must identify the same file, even after hooks. */
 		istate->index_file_stat = identity.stat;
 		istate->index_file_stat_valid = 1;
@@ -3505,6 +3520,7 @@ static int do_write_locked_index(struct index_state *istate,
 	} else if (!ret) {
 		istate->index_file_stat_valid = 0;
 	}
+out:
 	release_index_write_identity(&identity);
 
 	run_hooks_l(the_repository, "post-index-change",

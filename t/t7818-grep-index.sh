@@ -4526,6 +4526,11 @@ test_expect_success FSMONITOR_DAEMON \
 	git fsmonitor--daemon start &&
 	git checkout -- ordinary &&
 	git status --porcelain >/dev/null &&
+	# Move split additions into the base before seeding the disk token.
+	if test -n "$(git rev-parse --shared-index-path)"
+	then
+		git update-index --split-index
+	fi &&
 	rm -f .git/index.grep-token \
 		.git/index.grep-worktree \
 		.git/index.grep-worktree-generation \
@@ -4564,15 +4569,21 @@ test_expect_success FSMONITOR_DAEMON \
 		<ram-token-refreshed.trace &&
 	test_region ! grep index-identity/compute ram-token-refreshed.trace &&
 	test_cmp ram-token.before .git/index.grep-token &&
+	test_config index.skipHash true &&
+	printf "%s\n" "ordinary:ordinary contents" \
+		"present:present needle" >expect &&
 	GIT_TEST_GREP_LITERAL_PATHS=0 \
 	GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
 	GIT_TRACE2_EVENT_NESTING=10 \
 	GIT_TRACE2_EVENT="$PWD/ram-token-written.trace" \
-		git grep "ordinary contents" -- "ord*" >actual &&
+		git grep -e "ordinary contents" -e "present needle" \
+		-- "ord*" present >actual &&
 	test_cmp expect actual &&
 	test_region index do_write_index ram-token-written.trace &&
 	test_region grep query_content_index_ipc ram-token-written.trace &&
 	test_trace2_data grep index_identity/computations 1 \
+		<ram-token-written.trace &&
+	test_trace2_data grep worktree_blob/direct_write 1 \
 		<ram-token-written.trace
 '
 
