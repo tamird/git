@@ -1538,6 +1538,7 @@ struct grep_index_query *grep_index_query_create(const struct grep_opt *opt)
 			int valid = 1;
 
 			CALLOC_ARRAY(group_query, 1);
+			group_query->ignore_case = query->ignore_case;
 			for (size_t i = scan_start; i < scan_end; i++) {
 				unsigned char ch = p->pattern[i];
 

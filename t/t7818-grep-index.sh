@@ -4021,6 +4021,9 @@ test_expect_success LIBPCRE2 \
 	echo "present:present needle" >expect &&
 	git grep --cached -i "PRESENT NEEDLE" -- present >actual &&
 	test_cmp expect actual &&
+	LC_ALL=C git grep --cached -i -E \
+		"PRESENT (NEEDLE|MISSING)" -- present >actual &&
+	test_cmp expect actual &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
