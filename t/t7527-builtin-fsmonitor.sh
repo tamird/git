@@ -513,6 +513,10 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 	(
 		cd test_diff_snapshot &&
 		git status --porcelain >../diff-snapshot.initial &&
+		git -c grep.worktreeBlobCache=true grep --no-content-index \
+			-e base -e nested \
+			>../diff-snapshot-grep.expect &&
+		test_path_is_file .git/index.grep-worktree &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-healthy-uno.trace" \
 			git --no-optional-locks status --porcelain -uno \
 			>../diff-snapshot-healthy-uno.out &&
@@ -576,6 +580,26 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 		test_trace2_data fsmonitor untracked-cache/save-root-valid 1 \
 			<../diff-snapshot-status.trace &&
 		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-grep.trace" \
+			git --no-optional-locks -c grep.worktreeBlobCache=true \
+				grep -e base -e nested -- "*" \
+				>../diff-snapshot-grep.out &&
+		test_cmp ../diff-snapshot-grep.expect ../diff-snapshot-grep.out &&
+		test_trace2_data fsmonitor tracked-cache/restored 2 \
+			<../diff-snapshot-grep.trace &&
+		test_trace2_data index refresh/sum_lstat 0 \
+			<../diff-snapshot-grep.trace &&
+		echo tracked:base >../diff-snapshot-grep-scoped.expect &&
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-grep-scoped.trace" \
+			git --no-optional-locks -c grep.worktreeBlobCache=true \
+				grep base -- tracked >../diff-snapshot-grep-scoped.out &&
+		test_cmp ../diff-snapshot-grep-scoped.expect \
+			../diff-snapshot-grep-scoped.out &&
+		! have_t2_data_event fsmonitor untracked-cache/restore \
+			<../diff-snapshot-grep-scoped.trace &&
+		GIT_TEST_PRELOAD_INDEX=true \
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-pending-uno.trace" \
 			git --no-optional-locks status --porcelain -uno \
 			>../diff-snapshot-pending-uno.out &&
@@ -611,6 +635,16 @@ test_expect_success 'lock-free diff shares tracked validity without replacing st
 			>../diff-snapshot.token-advanced &&
 		! cmp -s ../diff-snapshot.token-before \
 			../diff-snapshot.token-advanced &&
+		echo tracked:modified >../diff-snapshot-grep-changed.expect &&
+		GIT_TEST_PRELOAD_INDEX=true \
+		GIT_TEST_GREP_WORKTREE_CACHE_MIN_BYTES=1 \
+		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-grep-changed.trace" \
+			git --no-optional-locks -c grep.worktreeBlobCache=true \
+				grep modified -- "*" >../diff-snapshot-grep-changed.out &&
+		test_cmp ../diff-snapshot-grep-changed.expect \
+			../diff-snapshot-grep-changed.out &&
+		test_trace2_data fsmonitor untracked-cache/replay 1 \
+			<../diff-snapshot-grep-changed.trace &&
 		GIT_TRACE2_EVENT="$PWD/../diff-snapshot-stale-uno.trace" \
 			git --no-optional-locks status --porcelain -uno \
 			>../diff-snapshot-stale-uno.out &&

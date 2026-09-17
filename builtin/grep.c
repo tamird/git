@@ -10,6 +10,7 @@
 #include "builtin.h"
 #include "abspath.h"
 #include "environment.h"
+#include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
 #include "gettext.h"
 #include "hex.h"
@@ -2033,6 +2034,13 @@ static int grep_cache(struct grep_opt *opt,
 			if (refresh_bytes >= refresh_min_bytes) {
 				struct lock_file lock_file = LOCK_INIT;
 
+				if (!literal_selected) {
+					const char *reason;
+
+					/* Reuse validity saved by a lock-free status. */
+					fsmonitor_ipc__restore_untracked_cache(
+						repo->index, &reason);
+				}
 				index_identity_valid = 0;
 				refresh_index(repo->index,
 					      REFRESH_QUIET | REFRESH_UNMERGED |
