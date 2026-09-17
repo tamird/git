@@ -571,6 +571,14 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "get-ref-map",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_FETCH_PACK_V2_PREPARE] = {
+		.category = "fetch-pack",
+		.name = "v2/prepare",
+	},
+	[TRACE2_TIMER_ID_FETCH_PACK_V2_SEND_REQUEST] = {
+		.category = "fetch-pack",
+		.name = "v2/send-request",
+	},
 	[TRACE2_TIMER_ID_FETCH_CHECK_EXIST_AND_CONNECTED] = {
 		.category = "fetch",
 		.name = "check-exist-and-connected",

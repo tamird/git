@@ -2018,7 +2018,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 {
 	struct repository *r = the_repository;
 	struct fsck_options fsck_options;
-	struct ref *ref = copy_ref_list(orig_ref);
+	struct ref *ref;
 	enum fetch_state state = FETCH_CHECK_LOCAL;
 	struct oidset common = OIDSET_INIT;
 	struct oidset negotiation_include_oids = OIDSET_INIT;
@@ -2032,11 +2032,14 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	struct object_id common_oid;
 	int received_ready = 0;
 	int no_ref_delta = 0;
+	int done_sent;
 	struct string_list packfile_uris = STRING_LIST_INIT_DUP;
 	int parallel_uri_downloads;
 	struct strvec index_pack_args = STRVEC_INIT;
 	const char *promisor_remote_config;
 
+	trace2_timer_start(TRACE2_TIMER_ID_FETCH_PACK_V2_PREPARE);
+	ref = copy_ref_list(orig_ref);
 	fsck_options_init(&fsck_options, the_repository, FSCK_OPTIONS_MISSING_GITMODULES);
 
 	if (server_feature_v2("promisor-remote", &promisor_remote_config))
@@ -2101,6 +2104,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 					&negotiation_include_oids);
 			for_each_cached_alternate(negotiator,
 						  insert_one_alternate_object);
+			trace2_timer_stop(TRACE2_TIMER_ID_FETCH_PACK_V2_PREPARE);
 			break;
 		case FETCH_SEND_REQUEST:
 			if (!negotiation_started) {
@@ -2113,13 +2117,16 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 			trace2_region_enter_printf("negotiation_v2", "round",
 						   the_repository, "%d",
 						   negotiation_round);
-			if (send_fetch_request(negotiator, fd[1], args, ref,
-					       &common,
-					       &haves_to_send, &in_vain,
-					       reader.use_sideband,
-					       seen_ack,
-					       &negotiation_include_oids,
-					       &no_ref_delta)) {
+			trace2_timer_start(TRACE2_TIMER_ID_FETCH_PACK_V2_SEND_REQUEST);
+			done_sent = send_fetch_request(negotiator, fd[1], args, ref,
+						       &common,
+						       &haves_to_send, &in_vain,
+						       reader.use_sideband,
+						       seen_ack,
+						       &negotiation_include_oids,
+						       &no_ref_delta);
+			trace2_timer_stop(TRACE2_TIMER_ID_FETCH_PACK_V2_SEND_REQUEST);
+			if (done_sent) {
 				trace2_region_leave_printf("negotiation_v2", "round",
 							   the_repository, "%d",
 							   negotiation_round);
