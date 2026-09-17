@@ -1813,6 +1813,9 @@ static int grep_cache(struct grep_opt *opt,
 				size_t name_len = ce_namelen(ce);
 				unsigned char bit = 1u << (nr & 7);
 
+				if (selected_map[nr / 8] & bit)
+					continue;
+
 				if (recursive_basename_pathspec) {
 					int matches = 0;
 
@@ -1877,8 +1880,6 @@ static int grep_cache(struct grep_opt *opt,
 				if (!S_ISREG(ce->ce_mode))
 					continue;
 
-				if (selected_map[nr / 8] & bit)
-					continue;
 				selected_map[nr / 8] |= bit;
 				if (selected_nr &&
 				    selected[selected_nr - 1] > nr)

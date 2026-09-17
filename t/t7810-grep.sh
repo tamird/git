@@ -3192,6 +3192,7 @@ test_expect_success 'grep selects literal pathsets directly' '
 	GIT_TRACE2_EVENT="$PWD/grep-literal-trace-excluded-globs" \
 		git grep "rooted needle" -- \
 			":(glob)grep-literal-root/**/pipeline.yml" \
+			":(glob)grep-literal-root/a*/pipeline.yml" \
 			":(glob)grep-literal-other/**/pipeline.yml" \
 			":(exclude)grep-literal-root/a" >actual &&
 	test_cmp excluded-roots-expected actual &&
