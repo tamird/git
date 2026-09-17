@@ -653,8 +653,7 @@ static void follow_change(struct diff_options *opt,
 
 /* The retained limit includes entries and buckets, per repository. */
 #define FOLLOW_TREE_CACHE_LIMIT	  (128u * 1024u * 1024u)
-#define FOLLOW_TREE_CACHE_ENTRIES (1u << 18)
-#define FOLLOW_TREE_CACHE_BUCKETS (1u << 15)
+#define FOLLOW_TREE_CACHE_BUCKETS (1u << 16)
 
 struct follow_tree_cache_entry {
 	struct follow_tree_cache_entry *next;
@@ -667,7 +666,7 @@ struct follow_tree_cache_entry {
 struct diff_follow_tree_cache {
 	struct follow_tree_cache_entry **buckets;
 	struct list_head lru;
-	size_t entry_bytes, entries;
+	size_t entry_bytes;
 	int replace_mode;
 };
 
@@ -909,9 +908,8 @@ static void follow_tree_cache_insert(struct repository *repo,
 		goto done;
 	}
 	before = follow_tree_cache_bytes(cache);
-	while (cache->entries == FOLLOW_TREE_CACHE_ENTRIES ||
-	       follow_tree_cache_bytes(cache) >
-		       FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) - size - 1) {
+	while (follow_tree_cache_bytes(cache) >
+	       FOLLOW_TREE_CACHE_LIMIT - sizeof(*entry) - size - 1) {
 		struct follow_tree_cache_entry *oldest =
 			list_entry(cache->lru.prev, struct follow_tree_cache_entry, lru);
 		struct follow_tree_cache_entry **slot =
@@ -923,7 +921,6 @@ static void follow_tree_cache_insert(struct repository *repo,
 		*slot = oldest->next;
 		list_del(&oldest->lru);
 		cache->entry_bytes -= sizeof(*oldest) + oldest->size + 1;
-		cache->entries--;
 		free(oldest->buffer);
 		free(oldest);
 		follow_tree_cache_evictions++;
@@ -943,7 +940,6 @@ static void follow_tree_cache_insert(struct repository *repo,
 	cache->buckets[bucket] = entry;
 	list_add(&entry->lru, &cache->lru);
 	cache->entry_bytes += sizeof(*entry) + size + 1;
-	cache->entries++;
 updated:
 	follow_tree_cache_update_retained(before, follow_tree_cache_bytes(cache));
 done:
