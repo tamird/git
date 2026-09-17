@@ -1151,20 +1151,6 @@ static bool midx_needs_update(struct multi_pack_index *midx, struct write_midx_c
 	bool needed = true;
 
 	/*
-	 * Ensure that we have a valid checksum before consulting the
-	 * existing MIDX in order to determine if we can avoid an
-	 * update.
-	 *
-	 * This is necessary because the given MIDX is loaded directly
-	 * from the object store (because we still compare our proposed
-	 * update to any on-disk MIDX regardless of whether or not we
-	 * have assigned "ctx.m") and is thus not guaranteed to have a
-	 * valid checksum.
-	 */
-	if (!midx_checksum_valid(midx))
-		goto out;
-
-	/*
 	 * If the version differs, we need to update.
 	 */
 	if (midx->version != ctx->version)
@@ -1181,6 +1167,18 @@ static bool midx_needs_update(struct multi_pack_index *midx, struct write_midx_c
 	if (ctx->compact)
 		goto out; /* Compaction always requires an update. */
 
+	if (ctx->nr != midx->num_packs + midx->num_packs_in_base)
+		goto out;
+
+	/*
+	 * Validate the checksum before deciding that an update can be skipped.
+	 * The MIDX may have been loaded directly from the object store without
+	 * assigning ctx.m, so its checksum may not have been checked yet.
+	 * Avoid hashing it when the checks above already require an update.
+	 */
+	if (!midx_checksum_valid(midx))
+		goto out;
+
 	/*
 	 * Otherwise, we need to verify that the packs covered by the existing
 	 * MIDX match the packs that we already have. The logic to do so is way
@@ -1196,9 +1194,6 @@ static bool midx_needs_update(struct multi_pack_index *midx, struct write_midx_c
 	 *     packs themselves are tracking the ".pack" files. So we need to
 	 *     strip suffixes.
 	 */
-	if (ctx->nr != midx->num_packs + midx->num_packs_in_base)
-		goto out;
-
 	for (uint32_t i = 0; i < ctx->nr; i++) {
 		strbuf_reset(&buf);
 		strbuf_addstr(&buf, pack_basename(ctx->info[i].p));
