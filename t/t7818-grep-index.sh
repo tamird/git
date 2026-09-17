@@ -2111,6 +2111,10 @@ test_expect_success SHA1 'grep token reuses unchanged v4 entries after an index 
 		then
 			printf "token-v6-entry\0"
 		fi
+		if test -d token-v6-untracked
+		then
+			printf "token-v6-untracked/\0"
+		fi
 	EOF
 	test_config core.fsmonitor .git/hooks/fsmonitor-token-v6 &&
 	test_config core.untrackedCache true &&
