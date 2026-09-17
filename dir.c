@@ -3651,24 +3651,64 @@ enum untracked_cache_mode {
 	UNTRACKED_CACHE_MODE_RESET,
 };
 
+static int compatible_untracked_cache_modes(unsigned requested, unsigned stored)
+{
+	const unsigned normal = DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
+
+	return (requested == 0 || requested == normal) &&
+	       (stored == 0 || stored == normal);
+}
+
+static int has_skip_worktree_excludes(struct dir_struct *dir,
+				      struct index_state *istate)
+{
+	unsigned int i;
+
+	/*
+	 * A missing skip-worktree .gitignore may be read from the index,
+	 * whose changes are not reported by fsmonitor.
+	 */
+	trace2_region_enter("dir", "skip-worktree-scan", istate->repo);
+	for (i = 0; i < istate->cache_nr; i++) {
+		const struct cache_entry *ce = istate->cache[i];
+		size_t name_len, exclude_len;
+
+		if (!ce_skip_worktree(ce))
+			continue;
+		if (S_ISSPARSEDIR(ce->ce_mode) ||
+		    !dir->exclude_per_dir || !*dir->exclude_per_dir)
+			break;
+		name_len = ce_namelen(ce);
+		exclude_len = strlen(dir->exclude_per_dir);
+		if (name_len >= exclude_len &&
+		    (name_len == exclude_len ||
+		     ce->name[name_len - exclude_len - 1] == '/') &&
+		    !fspathcmp(ce->name + name_len - exclude_len,
+			       dir->exclude_per_dir))
+			break;
+	}
+	trace2_region_leave("dir", "skip-worktree-scan", istate->repo);
+	trace2_data_intmax("untracked_cache", istate->repo,
+			   "skip-worktree-found", i < istate->cache_nr);
+	return i < istate->cache_nr;
+}
+
 static enum untracked_cache_mode untracked_cache_mode(
 	const struct dir_struct *dir, struct index_state *istate, int negative_only)
 {
-	const unsigned normal = DIR_SHOW_OTHER_DIRECTORIES | DIR_HIDE_EMPTY_DIRECTORIES;
 	unsigned requested = dir->flags, stored = dir->untracked->dir_flags;
 
 	if (negative_only) {
 		requested &= ~DIR_COLLECT_IGNORED;
-		return (requested == 0 || requested == normal) &&
-			(stored == 0 || stored == normal) ?
-			UNTRACKED_CACHE_MODE_NEGATIVE : UNTRACKED_CACHE_MODE_UNCACHED;
+		return compatible_untracked_cache_modes(requested, stored) ?
+			       UNTRACKED_CACHE_MODE_NEGATIVE :
+			       UNTRACKED_CACHE_MODE_UNCACHED;
 	}
 	if (requested == stored)
 		return UNTRACKED_CACHE_MODE_SAME;
 	if (stored != new_untracked_cache_flags(istate))
 		return UNTRACKED_CACHE_MODE_RESET;
-	if ((requested == 0 || requested == normal) &&
-	    (stored == 0 || stored == normal))
+	if (compatible_untracked_cache_modes(requested, stored))
 		return UNTRACKED_CACHE_MODE_NEGATIVE;
 	return UNTRACKED_CACHE_MODE_UNCACHED;
 }
@@ -3762,6 +3802,26 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 		}
 		break;
 	case UNTRACKED_CACHE_MODE_RESET:
+		if (compatible_untracked_cache_modes(dir->flags,
+						     dir->untracked->dir_flags) &&
+		    dir->untracked->root && dir->untracked->root->can_skip_replay) {
+			struct untracked_cache *uc = dir->untracked;
+
+			/* Reuse an empty result only if this read can prune it. */
+			refresh_fsmonitor(istate);
+			if (untracked_cache_uses_fsmonitor(uc) &&
+			    uc->root->can_skip_replay && uc->root->dirs_nr &&
+			    (has_skippable_subtree(uc->root) || uc->dir_invalidated) &&
+			    oideq(&dir->internal.ss_info_exclude.oid,
+				  &uc->ss_info_exclude.oid) &&
+			    oideq(&dir->internal.ss_excludes_file.oid,
+				  &uc->ss_excludes_file.oid) &&
+			    !has_skip_worktree_excludes(dir, istate)) {
+				*negative_only = 1;
+				dir->internal.can_prune_replay = 1;
+				break;
+			}
+		}
 		/*
 		 * If the untracked structure we received does not have the same flags
 		 * as configured, then we need to reset / create a new "untracked"
@@ -3906,7 +3966,6 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		dir->untracked = NULL;
 	if (untracked) {
 		struct untracked_cache *untracked_cache = dir->untracked;
-		unsigned int i;
 
 		/*
 		 * Negative-only scans must not replay or populate cached
@@ -3916,6 +3975,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		if (negative_only) {
 			untracked = NULL;
 			dir->untracked = NULL;
+		}
+		if (dir->internal.can_prune_replay &&
+		    untracked_cache->root->can_skip_replay) {
+			dir->internal.pruned_subtrees++;
+			goto done;
 		}
 
 		if (untracked_cache->root->dirs_nr) {
@@ -3930,38 +3994,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 						validate_untracked_stats(untracked, istate, NULL);
 			} else if (had_skippable_subtree ||
 				   untracked_cache->dir_invalidated) {
-				/*
-				 * A missing skip-worktree .gitignore may be read from
-				 * the index, whose changes are not reported by
-				 * fsmonitor.
-				 */
-				trace2_region_enter("dir", "skip-worktree-scan",
-						    istate->repo);
-				for (i = 0; i < istate->cache_nr; i++) {
-					const struct cache_entry *ce = istate->cache[i];
-					size_t name_len, exclude_len;
-
-					if (!ce_skip_worktree(ce))
-						continue;
-					if (S_ISSPARSEDIR(ce->ce_mode) ||
-					    !dir->exclude_per_dir ||
-					    !*dir->exclude_per_dir)
-						break;
-					name_len = ce_namelen(ce);
-					exclude_len = strlen(dir->exclude_per_dir);
-					if (name_len >= exclude_len &&
-					    (name_len == exclude_len ||
-					     ce->name[name_len - exclude_len - 1] == '/') &&
-					    !fspathcmp(ce->name + name_len - exclude_len,
-						       dir->exclude_per_dir))
-						break;
-				}
-				trace2_region_leave("dir", "skip-worktree-scan",
-						    istate->repo);
-				trace2_data_intmax("untracked_cache", istate->repo,
-						   "skip-worktree-found",
-						   i < istate->cache_nr);
-				if (i == istate->cache_nr) {
+				if (!has_skip_worktree_excludes(dir, istate)) {
 					if (untracked_cache->root->can_skip_replay) {
 						dir->internal.pruned_subtrees++;
 						goto done;

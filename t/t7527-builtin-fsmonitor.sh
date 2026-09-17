@@ -2119,7 +2119,35 @@ test_expect_success 'cold all-mode status populates an empty normal cache' '
 		git --no-optional-locks status --porcelain -unormal \
 			>../untracked-snapshot-normal.out &&
 		test_cmp ../untracked-snapshot-normal.expect \
-			../untracked-snapshot-normal.out
+			../untracked-snapshot-normal.out &&
+		rm visible/one visible/two &&
+		git -c status.showUntrackedFiles=all status --porcelain \
+			>../untracked-snapshot-empty.out &&
+		test_must_be_empty ../untracked-snapshot-empty.out &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-empty-normal.trace" \
+			git --no-optional-locks status --porcelain -unormal \
+			>../untracked-snapshot-empty-normal.out &&
+		test_must_be_empty ../untracked-snapshot-empty-normal.out &&
+		test_trace2_data status untracked/stored-flags 0 \
+			<../untracked-snapshot-empty-normal.trace &&
+		test_trace2_data status untracked/cache-root-can-skip 1 \
+			<../untracked-snapshot-empty-normal.trace &&
+		test_trace2_data untracked_cache negative-only 1 \
+			<../untracked-snapshot-empty-normal.trace &&
+		test_trace2_data status untracked/directories-visited 0 \
+			<../untracked-snapshot-empty-normal.trace &&
+		echo one >visible/one &&
+		git --no-optional-locks status --porcelain -unormal \
+			>../untracked-snapshot-normal-changed.out &&
+		test_cmp ../untracked-snapshot-normal.expect \
+			../untracked-snapshot-normal-changed.out &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-snapshot-normal-rebuilt.trace" \
+			git --no-optional-locks status --porcelain -unormal \
+			>../untracked-snapshot-normal-rebuilt.out &&
+		test_cmp ../untracked-snapshot-normal.expect \
+			../untracked-snapshot-normal-rebuilt.out &&
+		test_trace2_data status untracked/stored-flags 6 \
+			<../untracked-snapshot-normal-rebuilt.trace
 	)
 '
 
