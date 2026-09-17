@@ -197,7 +197,7 @@ test_grep_main_thread_cpu () {
 
 test_grep_packed_content () {
 	packed_content_trace="$1"
-	packed_content_key=content_index_tree_object_read_packed_content
+	packed_content_key=content_index_tree_object_read_sampled_packed_content
 	test_trace2_data grep "${packed_content_key}_valid" "[01]" \
 		<"$packed_content_trace" || return 1
 	if test_trace2_data grep "${packed_content_key}_valid" 1 \
@@ -234,11 +234,11 @@ test_grep_packed_content () {
 
 test_grep_packed_unpack () {
 	packed_unpack_trace="$1"
-	packed_unpack_key=content_index_tree_object_read_packed_unpack
+	packed_unpack_key=content_index_tree_object_read_sampled_packed_unpack
 	test_trace2_data grep "${packed_unpack_key}_valid" "[01]" \
 		<"$packed_unpack_trace" || return 1
 	# These normal fixtures expect valid detail when the clock is available.
-	if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+	if test_trace2_data grep content_index_tree_object_read_sampled_packed_content_valid 1 \
 		<"$packed_unpack_trace"
 	then
 		packed_unpack_records=5 &&
@@ -260,7 +260,7 @@ test_grep_packed_unpack () {
 			"s/.*\"key\":\"${packed_unpack_key}_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$packed_unpack_trace") &&
 		packed_parent_us=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$packed_unpack_trace") &&
 		test "$packed_inflate_us" -le "$packed_unpack_us" &&
 		test "$packed_unpack_us" -le "$packed_parent_us" || return 1
@@ -283,13 +283,13 @@ test_grep_packed_unpack () {
 test_grep_packed_base_descent () {
 	test "$#" = 4 || return 1
 	base_descent_trace="$1"
-	base_descent_key=content_index_tree_object_read_packed_base_descent
+	base_descent_key=content_index_tree_object_read_sampled_packed_base_descent
 	base_descent_zero_key=${base_descent_key}_zero_pushed_delta
 	base_descent_one_key=${base_descent_key}_one_pushed_delta
 	test_trace2_data grep "${base_descent_key}_valid" "[01]" \
 		<"$base_descent_trace" || return 1
 	# These normal fixtures expect valid detail when the clock is available.
-	if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+	if test_trace2_data grep content_index_tree_object_read_sampled_packed_content_valid 1 \
 		<"$base_descent_trace"
 	then
 		base_descent_records=7 &&
@@ -317,10 +317,10 @@ test_grep_packed_base_descent () {
 			"s/.*\"key\":\"${base_descent_one_key}_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
 		base_descent_unpack_us=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
 		base_descent_inflate_us=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_packed_unpack_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_packed_unpack_inflate_phase_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$base_descent_trace") &&
 		test "$(($3 + $4))" -le "$2" &&
 		test "$((base_descent_zero_us + base_descent_one_us))" \
@@ -363,7 +363,7 @@ test_grep_packed_base_descent () {
 
 test_grep_packed_entry_location () {
 	packed_entry_location_trace="$1"
-	packed_entry_location_key=content_index_tree_object_read_packed_entry_location
+	packed_entry_location_key=content_index_tree_object_read_sampled_packed_entry_location
 	test_trace2_data grep "${packed_entry_location_key}_valid" "[01]" \
 		<"$packed_entry_location_trace" || return 1
 	if test_trace2_data grep "${packed_entry_location_key}_valid" 1 \
@@ -385,11 +385,11 @@ test_grep_packed_entry_location () {
 			"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$packed_entry_location_trace") &&
 		test "$packed_entry_location_us" -le "$packed_entry_location_read_us" || return 1
-		if test_trace2_data grep content_index_tree_object_read_packed_content_valid 1 \
+		if test_trace2_data grep content_index_tree_object_read_sampled_packed_content_valid 1 \
 			<"$packed_entry_location_trace"
 		then
 			packed_entry_location_content_us=$(sed -n \
-				"s/.*\"key\":\"content_index_tree_object_read_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+				"s/.*\"key\":\"content_index_tree_object_read_sampled_packed_content_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 				"$packed_entry_location_trace") &&
 			test "$((packed_entry_location_us + packed_entry_location_content_us))" \
 				-le "$packed_entry_location_read_us" || return 1
@@ -2798,13 +2798,13 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test "$(grep -c "\"key\":\"content_index_tree_$field\"" \
 			tree-no-batch.trace)" = 1 || return 1
 	done &&
-	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 		<tree-no-batch.trace &&
-	test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_valid 1 \
 		<tree-no-batch.trace &&
-	test_trace2_data grep content_index_tree_object_read_lock_acquire_count 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_acquire_count 0 \
 		<tree-no-batch.trace &&
-	test_trace2_data grep content_index_tree_object_read_lock_acquire_us 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_acquire_us 0 \
 		<tree-no-batch.trace &&
 	for kind in inmemory loose packed_cache_copy packed_unpack
 	do
@@ -2812,17 +2812,17 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		loose) tree_read_expected=1 ;;
 		*) tree_read_expected=0 ;;
 		esac &&
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_count" \
 			"$tree_read_expected" <tree-no-batch.trace &&
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_us" \
 			"[0-9][0-9]*" <tree-no-batch.trace || return 1
 	done &&
 	for kind in inmemory packed
 	do
-		test_trace2_data grep "content_index_tree_object_read_${kind}_nonzero_attempts" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_${kind}_nonzero_attempts" \
 			1 <tree-no-batch.trace || return 1
 	done &&
-	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_loose_nonzero_attempts 0 \
 		<tree-no-batch.trace &&
 	test_grep_packed_content tree-no-batch.trace 0 &&
 	test_grep_packed_entry_location tree-no-batch.trace 1 &&
@@ -2879,34 +2879,34 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_grep "\"key\":\"content_index_tree_${phase}_us\",\"value\":\"[0-9][0-9]*\"" \
 			tree-attributes.trace || return 1
 	done &&
-	test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_valid 1 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_lock_acquire_count 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_acquire_count 0 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_lock_acquire_us 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_lock_acquire_us 0 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_winner_loose_count 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_winner_loose_count 1 \
 		<tree-attributes.trace &&
 	read_us=$(sed -n \
 		"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 		tree-attributes.trace) &&
-	test_trace2_data grep content_index_tree_object_read_winner_loose_us "$read_us" \
+	test_trace2_data grep content_index_tree_object_read_sampled_winner_loose_us "$read_us" \
 		<tree-attributes.trace &&
 	for kind in inmemory packed_cache_copy packed_unpack
 	do
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 0 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_count" 0 \
 			<tree-attributes.trace &&
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" 0 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_us" 0 \
 			<tree-attributes.trace || return 1
 	done &&
 	# The packed lookup returned nonzero; the loose source won the child read.
-	test_trace2_data grep content_index_tree_object_read_inmemory_nonzero_attempts 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_inmemory_nonzero_attempts 1 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_packed_nonzero_attempts 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_packed_nonzero_attempts 1 \
 		<tree-attributes.trace &&
-	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_loose_nonzero_attempts 0 \
 		<tree-attributes.trace &&
 	if test_have_prereq PTHREADS
 	then
@@ -2931,15 +2931,15 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 			<tree-positive.trace &&
 		test_trace2_data grep content_index_tree_object_read_bytes \
 			"$((26 + 2 * $(test_oid rawsz)))" <tree-positive.trace &&
-		test_trace2_data grep content_index_tree_object_read_lock_valid 1 \
+		test_trace2_data grep content_index_tree_object_read_sampled_lock_valid 1 \
 			<tree-positive.trace &&
 		lock_count=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_lock_acquire_count\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_lock_acquire_count\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			tree-positive.trace) &&
 		# The loose tree exceeds the header buffer: include both reacquisitions.
 		test "$lock_count" -ge 3 &&
 		lock_us=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_lock_acquire_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_lock_acquire_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			tree-positive.trace) &&
 		read_us=$(sed -n \
 			"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
@@ -2985,36 +2985,36 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 			"present needle" "$backend_root" -- a-delta m-empty z-base >actual-tree-positive &&
 	test_cmp expect-tree-positive actual-tree-positive &&
 	test_trace2_data grep content_index_tree_directories 3 <tree-positive.trace &&
-	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 		<tree-positive.trace &&
 	for kind in inmemory packed_cache_copy packed_unpack
 	do
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 1 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_count" 1 \
 			<tree-positive.trace &&
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" "[0-9][0-9]*" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_us" "[0-9][0-9]*" \
 			<tree-positive.trace || return 1
 	done &&
 	for kind in loose
 	do
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" 0 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_count" 0 \
 			<tree-positive.trace &&
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_us" 0 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_us" 0 \
 			<tree-positive.trace || return 1
 	done &&
-	test_trace2_data grep content_index_tree_object_read_inmemory_nonzero_attempts 2 \
+	test_trace2_data grep content_index_tree_object_read_sampled_inmemory_nonzero_attempts 2 \
 		<tree-positive.trace &&
-	test_trace2_data grep content_index_tree_object_read_packed_nonzero_attempts 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_packed_nonzero_attempts 0 \
 		<tree-positive.trace &&
-	test_trace2_data grep content_index_tree_object_read_loose_nonzero_attempts 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_loose_nonzero_attempts 0 \
 		<tree-positive.trace &&
 	memory_us=$(sed -n \
-		"s/.*\"key\":\"content_index_tree_object_read_winner_inmemory_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		"s/.*\"key\":\"content_index_tree_object_read_sampled_winner_inmemory_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 		tree-positive.trace) &&
 	cache_us=$(sed -n \
-		"s/.*\"key\":\"content_index_tree_object_read_winner_packed_cache_copy_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		"s/.*\"key\":\"content_index_tree_object_read_sampled_winner_packed_cache_copy_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 		tree-positive.trace) &&
 	unpack_us=$(sed -n \
-		"s/.*\"key\":\"content_index_tree_object_read_winner_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+		"s/.*\"key\":\"content_index_tree_object_read_sampled_winner_packed_unpack_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 		tree-positive.trace) &&
 	read_us=$(sed -n \
 		"s/.*\"key\":\"content_index_tree_object_read_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
@@ -3029,14 +3029,14 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_grep_packed_entry_location tree-attributes.trace 1 &&
 	# The unbatched baseline traversed the same delta/cache/in-memory fixture.
 	test_trace2_data grep content_index_tree_directories 3 <tree-no-batch.trace &&
-	test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+	test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 		<tree-no-batch.trace &&
 	for kind in inmemory packed_cache_copy packed_unpack
 	do
-		test_trace2_data grep "content_index_tree_object_read_winner_${kind}_count" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_winner_${kind}_count" \
 			1 <tree-no-batch.trace || return 1
 	done &&
-	test_trace2_data grep content_index_tree_object_read_winner_loose_count 0 \
+	test_trace2_data grep content_index_tree_object_read_sampled_winner_loose_count 0 \
 		<tree-no-batch.trace &&
 	test_grep_packed_content tree-no-batch.trace 2 &&
 	test_grep_packed_entry_location tree-no-batch.trace 2 &&
@@ -3074,11 +3074,11 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_cmp expect-cache-reuse-err actual-cache-reuse-err &&
 		test_trace2_data grep content_index_tree_directories 4 \
 			<"cache-reuse-$cache_reuse_threads.trace" &&
-		test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+		test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 			<"cache-reuse-$cache_reuse_threads.trace" &&
-		test_trace2_data grep content_index_tree_object_read_winner_packed_unpack_count 2 \
+		test_trace2_data grep content_index_tree_object_read_sampled_winner_packed_unpack_count 2 \
 			<"cache-reuse-$cache_reuse_threads.trace" &&
-		test_trace2_data grep content_index_tree_object_read_winner_packed_cache_copy_count 2 \
+		test_trace2_data grep content_index_tree_object_read_sampled_winner_packed_cache_copy_count 2 \
 			<"cache-reuse-$cache_reuse_threads.trace" &&
 		test_grep_packed_content "cache-reuse-$cache_reuse_threads.trace" 4 &&
 		test_grep_packed_entry_location "cache-reuse-$cache_reuse_threads.trace" 4 &&
@@ -3100,9 +3100,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
 			<"$tree_sample_trace" &&
 		test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
-			<"$tree_sample_trace" &&
-		test "$(grep -c "\"key\":\"content_index_tree_object_read_sample" \
-			"$tree_sample_trace")" = 5 || return 1
+			<"$tree_sample_trace" || return 1
 	done &&
 	# Reusing a tree OID still reports each path in full.
 	tree_sample_root=$({
@@ -3153,6 +3151,20 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		test_cmp expect-tree-positive actual-tree-positive &&
 		test_trace2_data grep content_index_tree_directories \
 			"$((4096 + tree_sample_truncated))" <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_us \
+			"[0-9][0-9]*" <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_detail_sample_prefix \
+			64 <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_detail_sample_interval \
+			256 <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_detail_sampled_reads \
+			80 <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sampled_source_valid \
+			1 <tree-no-batch.trace &&
+		test_trace2_data grep content_index_tree_object_read_sampled_winner_inmemory_count \
+			80 <tree-no-batch.trace &&
+		test_grep ! content_index_tree_object_read_winner_ \
+			tree-no-batch.trace &&
 		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
 			<tree-no-batch.trace &&
 		test_trace2_data grep content_index_tree_object_read_sampled_visits 4096 \
@@ -6266,7 +6278,7 @@ test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose re
 test_grep_packed_lookup () {
 	lookup_trace="$1"
 	shift
-	lookup_key=content_index_tree_object_read_packed_lookup
+	lookup_key=content_index_tree_object_read_sampled_packed_lookup
 	test_trace2_data grep "${lookup_key}_valid" "[01]" <"$lookup_trace" || return 1
 	if test_trace2_data grep "${lookup_key}_valid" 1 <"$lookup_trace"
 	then
@@ -6290,10 +6302,10 @@ test_grep_packed_lookup () {
 		done &&
 		test_trace2_data grep "${lookup_key}_fallback_pack_attempts" "$1" \
 			<"$lookup_trace" &&
-		test_trace2_data grep content_index_tree_object_read_packed_entry_location_valid \
+		test_trace2_data grep content_index_tree_object_read_sampled_packed_entry_location_valid \
 			1 <"$lookup_trace" || return 1
 		lookup_parent_us=$(sed -n \
-			"s/.*\"key\":\"content_index_tree_object_read_packed_entry_location_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
+			"s/.*\"key\":\"content_index_tree_object_read_sampled_packed_entry_location_us\",\"value\":\"\([0-9][0-9]*\)\".*/\1/p" \
 			"$lookup_trace") &&
 		test "$lookup_total_us" -le "$lookup_parent_us" || return 1
 	else
@@ -6469,11 +6481,11 @@ test_expect_success 'packed base descent distinguishes cold depth two from a cac
 			test_cmp expect-err actual-err &&
 			test_trace2_data grep content_index_tree_directories 4 \
 				<"depth-$depth_threads.trace" &&
-			test_trace2_data grep content_index_tree_object_read_source_valid 1 \
+			test_trace2_data grep content_index_tree_object_read_sampled_source_valid 1 \
 				<"depth-$depth_threads.trace" &&
-			test_trace2_data grep content_index_tree_object_read_winner_packed_unpack_count 2 \
+			test_trace2_data grep content_index_tree_object_read_sampled_winner_packed_unpack_count 2 \
 				<"depth-$depth_threads.trace" &&
-			test_trace2_data grep content_index_tree_object_read_winner_packed_cache_copy_count 2 \
+			test_trace2_data grep content_index_tree_object_read_sampled_winner_packed_cache_copy_count 2 \
 				<"depth-$depth_threads.trace" &&
 			test_grep_packed_content "depth-$depth_threads.trace" 4 &&
 			test_grep_packed_entry_location "depth-$depth_threads.trace" 4 &&

@@ -244,30 +244,35 @@ def trace_coverage(
         "count/revisions": workload.tree_read_revisions,
     }
     tree_times = ("content_index_tree_walk_us", "content_index_tree_object_read_us")
+    tree_sample_keys = (
+        "content_index_tree_object_read_detail_sample_prefix",
+        "content_index_tree_object_read_detail_sample_interval",
+        "content_index_tree_object_read_detail_sampled_reads",
+    )
     main_cpu_keys = (
         "execution_main_thread_cpu_valid",
         "execution_main_thread_cpu_microseconds",
     )
     tree_packed_families = {
-        "content_index_tree_object_read_packed_base_descent_valid": (
-            "content_index_tree_object_read_packed_base_descent_count",
-            "content_index_tree_object_read_packed_base_descent_us",
+        "content_index_tree_object_read_sampled_packed_base_descent_valid": (
+            "content_index_tree_object_read_sampled_packed_base_descent_count",
+            "content_index_tree_object_read_sampled_packed_base_descent_us",
         ),
-        "content_index_tree_object_read_packed_unpack_valid": (
-            "content_index_tree_object_read_packed_unpack_attempt_count",
-            "content_index_tree_object_read_packed_unpack_us",
-            "content_index_tree_object_read_packed_unpack_inflate_phase_count",
-            "content_index_tree_object_read_packed_unpack_inflate_phase_us",
+        "content_index_tree_object_read_sampled_packed_unpack_valid": (
+            "content_index_tree_object_read_sampled_packed_unpack_attempt_count",
+            "content_index_tree_object_read_sampled_packed_unpack_us",
+            "content_index_tree_object_read_sampled_packed_unpack_inflate_phase_count",
+            "content_index_tree_object_read_sampled_packed_unpack_inflate_phase_us",
         ),
     }
     tree_base_subsets = (
         (
-            "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count",
-            "content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us",
+            "content_index_tree_object_read_sampled_packed_base_descent_zero_pushed_delta_count",
+            "content_index_tree_object_read_sampled_packed_base_descent_zero_pushed_delta_us",
         ),
         (
-            "content_index_tree_object_read_packed_base_descent_one_pushed_delta_count",
-            "content_index_tree_object_read_packed_base_descent_one_pushed_delta_us",
+            "content_index_tree_object_read_sampled_packed_base_descent_one_pushed_delta_count",
+            "content_index_tree_object_read_sampled_packed_base_descent_one_pushed_delta_us",
         ),
     )
     tree_packed_keys = set(tree_packed_families)
@@ -296,7 +301,8 @@ def trace_coverage(
                     raise AssertionError("tree-only grep must exit with no matches")
                 key = event.get("key")
                 if (event["event"] == "data" and event.get("category") == "grep"
-                        and (key in tree_counts or key in tree_times or key in tree_packed_keys
+                        and (key in tree_counts or key in tree_times or key in tree_sample_keys
+                             or key in tree_packed_keys
                              or key in main_cpu_keys or key == "content_index_tree_directories")):
                     if key in tree_values or event.get("thread") != "main":
                         raise AssertionError("tree DATA must occur once on the main thread")
@@ -343,11 +349,11 @@ def trace_coverage(
                 continue
             if not all(present):
                 raise AssertionError("pushed-delta DATA must include both subset fields")
-            if tree_values["content_index_tree_object_read_packed_base_descent_valid"] != 1:
+            if tree_values["content_index_tree_object_read_sampled_packed_base_descent_valid"] != 1:
                 raise AssertionError("pushed-delta DATA requires valid base-descent detail")
             count, elapsed_us = tree_values[count_key], tree_values[time_key]
-            parent_count = tree_values["content_index_tree_object_read_packed_base_descent_count"]
-            parent_us = tree_values["content_index_tree_object_read_packed_base_descent_us"]
+            parent_count = tree_values["content_index_tree_object_read_sampled_packed_base_descent_count"]
+            parent_us = tree_values["content_index_tree_object_read_sampled_packed_base_descent_us"]
             if not 0 <= count <= parent_count or not 0 <= elapsed_us <= parent_us:
                 raise AssertionError("pushed-delta DATA must be a nonnegative base-descent subset")
             if not count and elapsed_us:
@@ -356,8 +362,8 @@ def trace_coverage(
                 raise AssertionError("a complete pushed-delta subset must equal the parent time")
             captured_subsets.append((count, elapsed_us))
         if captured_subsets:
-            parent_count = tree_values["content_index_tree_object_read_packed_base_descent_count"]
-            parent_us = tree_values["content_index_tree_object_read_packed_base_descent_us"]
+            parent_count = tree_values["content_index_tree_object_read_sampled_packed_base_descent_count"]
+            parent_us = tree_values["content_index_tree_object_read_sampled_packed_base_descent_us"]
             subset_count = sum(count for count, _ in captured_subsets)
             subset_us = sum(elapsed_us for _, elapsed_us in captured_subsets)
             if subset_count > parent_count or subset_us > parent_us:
@@ -369,6 +375,13 @@ def trace_coverage(
         directories = tree_values.get("content_index_tree_directories", -1)
         if directories not in workload.allowed_tree_directories:
             raise AssertionError(f"unexpected child-tree count: {tree_values}")
+        if any(key not in tree_values for key in tree_sample_keys):
+            raise AssertionError(f"missing tree detail sampling context: {tree_values}")
+        sample_prefix, sample_interval, sampled_reads = (
+            tree_values[key] for key in tree_sample_keys
+        )
+        if sample_prefix <= 0 or sample_interval <= 0 or not 0 < sampled_reads <= directories:
+            raise AssertionError(f"invalid tree detail sample size: {tree_values}")
         previous = observed_tree_counts.setdefault(workload.name, directories)
         if directories != previous:
             raise AssertionError("child-tree count changed between identical commands")

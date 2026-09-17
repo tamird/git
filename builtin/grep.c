@@ -2666,6 +2666,9 @@ struct grep_tree_batch_item {
 #define GREP_TREE_IPC_TRACE_BATCHES 16
 /* Bound a prefix of child-read visits, not the number of distinct OIDs. */
 #define GREP_TREE_OID_SAMPLE_LIMIT 4096
+/* Unscaled ODB details sample visit order; the exact outer timer runs on all. */
+#define GREP_TREE_READ_DETAIL_PREFIX   64
+#define GREP_TREE_READ_DETAIL_INTERVAL 256
 /* Inclusive slow-call threshold; retain elapsed time, not time above it. */
 #define GREP_TREE_SLOW_OBJECT_READ_NS 1000000
 
@@ -2710,6 +2713,8 @@ struct grep_tree_query_context {
 	uint64_t tree_pageins;
 #endif
 	uint64_t tree_object_read_ns;
+	/* The ODB source and producer-lock subtotals cover selected visits. */
+	uint64_t tree_object_read_detail_sampled;
 	uint64_t tree_object_read_max_ns;
 	uint64_t tree_object_read_slow_count;
 	uint64_t tree_object_read_slow_ns;
@@ -2940,15 +2945,15 @@ static void grep_tree_trace_object_read_lock(void)
 
 	obj_read_lock_trace_snapshot(&lock_stats);
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_lock_valid",
-		lock_stats.valid);
+			   "content_index_tree_object_read_sampled_lock_valid",
+			   lock_stats.valid);
 	if (lock_stats.valid) {
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_lock_acquire_count",
-			lock_stats.acquire_count);
+				   "content_index_tree_object_read_sampled_lock_acquire_count",
+				   lock_stats.acquire_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_lock_acquire_us",
-			lock_stats.acquire_ns / 1000);
+				   "content_index_tree_object_read_sampled_lock_acquire_us",
+				   lock_stats.acquire_ns / 1000);
 	}
 	errno = saved_errno;
 }
@@ -2997,68 +3002,77 @@ static void grep_tree_trace_object_read_sources(
 			query->tree_oid_sample_truncated);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_content_valid",
-		packed_content_valid);
+			   "content_index_tree_object_read_detail_sample_prefix",
+			   GREP_TREE_READ_DETAIL_PREFIX);
+	trace2_data_intmax("grep", the_repository,
+			   "content_index_tree_object_read_detail_sample_interval",
+			   GREP_TREE_READ_DETAIL_INTERVAL);
+	trace2_data_intmax("grep", the_repository,
+			   "content_index_tree_object_read_detail_sampled_reads",
+			   query->tree_object_read_detail_sampled);
+	trace2_data_intmax("grep", the_repository,
+			   "content_index_tree_object_read_sampled_packed_content_valid",
+			   packed_content_valid);
 	if (packed_content_valid) {
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_content_attempt_count",
-			query->tree_object_read_packed_content_attempt_count);
+				   "content_index_tree_object_read_sampled_packed_content_attempt_count",
+				   query->tree_object_read_packed_content_attempt_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_content_us",
-			query->tree_object_read_packed_content_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_content_us",
+				   query->tree_object_read_packed_content_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_unpack_valid", packed_unpack_valid);
+			   "content_index_tree_object_read_sampled_packed_unpack_valid", packed_unpack_valid);
 	if (packed_unpack_valid) {
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_unpack_attempt_count",
-			query->tree_object_read_packed_unpack_attempt_count);
+				   "content_index_tree_object_read_sampled_packed_unpack_attempt_count",
+				   query->tree_object_read_packed_unpack_attempt_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_unpack_us",
-			query->tree_object_read_packed_unpack_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_unpack_us",
+				   query->tree_object_read_packed_unpack_ns / 1000);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_unpack_inflate_phase_count",
-			query->tree_object_read_packed_inflate_phase_count);
+				   "content_index_tree_object_read_sampled_packed_unpack_inflate_phase_count",
+				   query->tree_object_read_packed_inflate_phase_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_unpack_inflate_phase_us",
-			query->tree_object_read_packed_inflate_phase_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_unpack_inflate_phase_us",
+				   query->tree_object_read_packed_inflate_phase_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_base_descent_valid",
-		packed_base_descent_valid);
+			   "content_index_tree_object_read_sampled_packed_base_descent_valid",
+			   packed_base_descent_valid);
 	if (packed_base_descent_valid) {
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_count",
-			query->tree_object_read_packed_base_descent_count);
+				   "content_index_tree_object_read_sampled_packed_base_descent_count",
+				   query->tree_object_read_packed_base_descent_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_us",
-			query->tree_object_read_packed_base_descent_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_base_descent_us",
+				   query->tree_object_read_packed_base_descent_ns / 1000);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_zero_pushed_delta_count",
-			query->tree_object_read_packed_base_descent_zero_pushed_delta_count);
+				   "content_index_tree_object_read_sampled_packed_base_descent_zero_pushed_delta_count",
+				   query->tree_object_read_packed_base_descent_zero_pushed_delta_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_zero_pushed_delta_us",
-			query->tree_object_read_packed_base_descent_zero_pushed_delta_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_base_descent_zero_pushed_delta_us",
+				   query->tree_object_read_packed_base_descent_zero_pushed_delta_ns / 1000);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_one_pushed_delta_count",
-			query->tree_object_read_packed_base_descent_one_pushed_delta_count);
+				   "content_index_tree_object_read_sampled_packed_base_descent_one_pushed_delta_count",
+				   query->tree_object_read_packed_base_descent_one_pushed_delta_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_base_descent_one_pushed_delta_us",
-			query->tree_object_read_packed_base_descent_one_pushed_delta_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_base_descent_one_pushed_delta_us",
+				   query->tree_object_read_packed_base_descent_one_pushed_delta_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_entry_location_valid",
-		packed_entry_location_valid);
+			   "content_index_tree_object_read_sampled_packed_entry_location_valid",
+			   packed_entry_location_valid);
 	if (packed_entry_location_valid) {
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_entry_location_attempt_count",
-			query->tree_object_read_packed_entry_location_attempt_count);
+				   "content_index_tree_object_read_sampled_packed_entry_location_attempt_count",
+				   query->tree_object_read_packed_entry_location_attempt_count);
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_entry_location_us",
-			query->tree_object_read_packed_entry_location_ns / 1000);
+				   "content_index_tree_object_read_sampled_packed_entry_location_us",
+				   query->tree_object_read_packed_entry_location_ns / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_lookup_valid", packed_lookup_valid);
+			   "content_index_tree_object_read_sampled_packed_lookup_valid", packed_lookup_valid);
 	if (packed_lookup_valid) {
 		static const char * const phases[ODB_PACKED_LOOKUP_PHASE_NR] = {
 			"midx_search", "midx_resolve", "fallback"
@@ -3068,39 +3082,39 @@ static void grep_tree_trace_object_read_sources(
 
 		for (i = 0; i < ODB_PACKED_LOOKUP_PHASE_NR; i++) {
 			xsnprintf(key, sizeof(key),
-				  "content_index_tree_object_read_packed_lookup_%s_count", phases[i]);
+				  "content_index_tree_object_read_sampled_packed_lookup_%s_count", phases[i]);
 			trace2_data_intmax("grep", the_repository, key, lookup->count[i]);
 			xsnprintf(key, sizeof(key),
-				  "content_index_tree_object_read_packed_lookup_%s_us", phases[i]);
+				  "content_index_tree_object_read_sampled_packed_lookup_%s_us", phases[i]);
 			trace2_data_intmax("grep", the_repository, key, lookup->ns[i] / 1000);
 		}
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_packed_lookup_fallback_pack_attempts",
-			lookup->fallback_pack_attempts);
+				   "content_index_tree_object_read_sampled_packed_lookup_fallback_pack_attempts",
+				   lookup->fallback_pack_attempts);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_source_valid", valid);
+			   "content_index_tree_object_read_sampled_source_valid", valid);
 	if (!valid)
 		goto out;
 	for (int i = ODB_READ_RESULT_INMEMORY; i < ODB_READ_RESULT_NR; i++) {
 		xsnprintf(key, sizeof(key),
-			  "content_index_tree_object_read_winner_%s_count", names[i]);
+			  "content_index_tree_object_read_sampled_winner_%s_count", names[i]);
 		trace2_data_intmax("grep", the_repository, key,
 				  query->tree_object_read_winner_count[i]);
 		xsnprintf(key, sizeof(key),
-			  "content_index_tree_object_read_winner_%s_us", names[i]);
+			  "content_index_tree_object_read_sampled_winner_%s_us", names[i]);
 		trace2_data_intmax("grep", the_repository, key,
 				  query->tree_object_read_winner_ns[i] / 1000);
 	}
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_inmemory_nonzero_attempts",
-		query->tree_object_read_inmemory_nonzero);
+			   "content_index_tree_object_read_sampled_inmemory_nonzero_attempts",
+			   query->tree_object_read_inmemory_nonzero);
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_loose_nonzero_attempts",
-		query->tree_object_read_loose_nonzero);
+			   "content_index_tree_object_read_sampled_loose_nonzero_attempts",
+			   query->tree_object_read_loose_nonzero);
 	trace2_data_intmax("grep", the_repository,
-		"content_index_tree_object_read_packed_nonzero_attempts",
-		query->tree_object_read_packed_nonzero);
+			   "content_index_tree_object_read_sampled_packed_nonzero_attempts",
+			   query->tree_object_read_packed_nonzero);
 out:
 	errno = saved_errno;
 }
@@ -3678,11 +3692,17 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			unsigned long size;
 			uint64_t object_read_begin = 0;
 			struct odb_read_result object_read_result;
+			int sample_detail = 0;
 
 			if (query && query->trace_enabled) {
 				int saved_errno = errno;
+				uint64_t ordinal = query->tree_directories++;
 
-				query->tree_directories++;
+				sample_detail = ordinal < GREP_TREE_READ_DETAIL_PREFIX ||
+						!((ordinal - GREP_TREE_READ_DETAIL_PREFIX) %
+						  GREP_TREE_READ_DETAIL_INTERVAL);
+				if (sample_detail)
+					query->tree_object_read_detail_sampled++;
 				if (!query->tree_oid_sample_truncated) {
 					if (query->tree_oid_sample_visits ==
 					    GREP_TREE_OID_SAMPLE_LIMIT) {
@@ -3693,20 +3713,23 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						query->tree_oid_sample_visits++;
 					}
 				}
-				obj_read_lock_trace_child_begin();
+				if (sample_detail)
+					obj_read_lock_trace_child_begin();
 				object_read_begin = getnanotime();
 				errno = saved_errno;
 			}
 			data = odb_read_object_with_result(the_repository->objects,
-					       &entry.oid, &type, &size,
-					       query && query->trace_enabled ?
-					       &object_read_result : NULL);
+							   &entry.oid, &type, &size,
+							   sample_detail ?
+								   &object_read_result :
+								   NULL);
 			if (query && query->trace_enabled) {
 				int saved_errno = errno;
 				uint64_t object_read_end = getnanotime();
 
 				errno = saved_errno;
-				obj_read_lock_trace_child_end();
+				if (sample_detail)
+					obj_read_lock_trace_child_end();
 				if (!object_read_begin || !object_read_end ||
 				    object_read_end < object_read_begin ||
 				    object_read_end - object_read_begin >
@@ -3717,8 +3740,9 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						object_read_end - object_read_begin;
 
 					query->tree_object_read_ns += elapsed;
-					grep_tree_record_object_read(query,
-						&object_read_result, elapsed);
+					if (sample_detail)
+						grep_tree_record_object_read(query,
+									     &object_read_result, elapsed);
 					if (elapsed > query->tree_object_read_max_ns)
 						query->tree_object_read_max_ns = elapsed;
 					/* Slow durations are a subset of the checked total. */

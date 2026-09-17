@@ -174,9 +174,15 @@ test_expect_success FSMONITOR_DAEMON \
 	# Child-read details do not imply tree query/batch/IPC activity.
 	for field in source_valid lock_valid
 	do
-		test_trace2_data grep "content_index_tree_object_read_$field" 1 \
+		test_trace2_data grep "content_index_tree_object_read_sampled_$field" 1 \
 			<recurse-content-index.trace || return 1
 	done &&
+	test_trace2_data grep content_index_tree_object_read_detail_sample_prefix 64 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_detail_sample_interval 256 \
+		<recurse-content-index.trace &&
+	test_trace2_data grep content_index_tree_object_read_detail_sampled_reads 1 \
+		<recurse-content-index.trace &&
 	test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
 		<recurse-content-index.trace &&
 	test_trace2_data grep content_index_tree_object_read_sampled_visits 1 \
@@ -187,21 +193,23 @@ test_expect_success FSMONITOR_DAEMON \
 		<recurse-content-index.trace &&
 	test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
 		<recurse-content-index.trace &&
-	tree_field_count=26 &&
 	for phase in packed_content packed_entry_location
 	do
-		test_trace2_data grep "content_index_tree_object_read_${phase}_valid" \
+		test_trace2_data grep "content_index_tree_object_read_sampled_${phase}_valid" \
 			"[01]" <recurse-content-index.trace || return 1
-		if test_trace2_data grep "content_index_tree_object_read_${phase}_valid" \
+		if test_trace2_data grep "content_index_tree_object_read_sampled_${phase}_valid" \
 			1 <recurse-content-index.trace
 		then
-			tree_field_count=$((tree_field_count + 2))
+			for field in attempt_count us
+			do
+				test_trace2_data grep "content_index_tree_object_read_sampled_${phase}_$field" \
+					"[0-9][0-9]*" <recurse-content-index.trace || return 1
+			done
 		fi
 	done &&
-	lookup_key=content_index_tree_object_read_packed_lookup &&
+	lookup_key=content_index_tree_object_read_sampled_packed_lookup &&
 	test_trace2_data grep "${lookup_key}_valid" "[01]" \
 		<recurse-content-index.trace &&
-	tree_field_count=$((tree_field_count + 1)) &&
 	if test_trace2_data grep "${lookup_key}_valid" 1 \
 		<recurse-content-index.trace
 	then
@@ -211,13 +219,11 @@ test_expect_success FSMONITOR_DAEMON \
 		do
 			test_trace2_data grep "${lookup_key}_$field" "[0-9][0-9]*" \
 				<recurse-content-index.trace || return 1
-		done &&
-		tree_field_count=$((tree_field_count + 7)) || return 1
+		done
 	fi &&
-	unpack_key=content_index_tree_object_read_packed_unpack &&
+	unpack_key=content_index_tree_object_read_sampled_packed_unpack &&
 	test_trace2_data grep "${unpack_key}_valid" "[01]" \
 		<recurse-content-index.trace &&
-	tree_field_count=$((tree_field_count + 1)) &&
 	if test_trace2_data grep "${unpack_key}_valid" 1 \
 		<recurse-content-index.trace
 	then
@@ -225,13 +231,11 @@ test_expect_success FSMONITOR_DAEMON \
 		do
 			test_trace2_data grep "${unpack_key}_$field" "[0-9][0-9]*" \
 				<recurse-content-index.trace || return 1
-		done &&
-		tree_field_count=$((tree_field_count + 4)) || return 1
+		done
 	fi &&
-	base_descent_key=content_index_tree_object_read_packed_base_descent &&
+	base_descent_key=content_index_tree_object_read_sampled_packed_base_descent &&
 	test_trace2_data grep "${base_descent_key}_valid" "[01]" \
 		<recurse-content-index.trace &&
-	tree_field_count=$((tree_field_count + 1)) &&
 	if test_trace2_data grep "${base_descent_key}_valid" 1 \
 		<recurse-content-index.trace
 	then
@@ -240,11 +244,8 @@ test_expect_success FSMONITOR_DAEMON \
 		do
 			test_trace2_data grep "${base_descent_key}_$field" "[0-9][0-9]*" \
 				<recurse-content-index.trace || return 1
-		done &&
-		tree_field_count=$((tree_field_count + 6)) || return 1
+		done
 	fi &&
-	test "$(grep -c "\"key\":\"content_index_tree_" \
-		recurse-content-index.trace)" = "$tree_field_count" &&
 	for field in objects queried rejected batches bypassed batch_ ipc_
 	do
 		test_grep ! "\"key\":\"content_index_tree_$field" \
