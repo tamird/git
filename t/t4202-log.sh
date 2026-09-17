@@ -2856,7 +2856,7 @@ test_expect_success 'show defers unrelated decoration object lookups' '
 	)
 '
 
-test_expect_success 'patch log defers unrelated decoration object lookups' '
+test_expect_success 'patch and bounded logs defer unrelated decoration object lookups' '
 	test_when_finished "rm -rf log-decoration-lookups" &&
 	test_create_repo log-decoration-lookups &&
 	(
@@ -2869,6 +2869,7 @@ test_expect_success 'patch log defers unrelated decoration object lookups' '
 		git log -p --decorate=short >expect &&
 		orphan=$(git commit-tree HEAD^{tree} </dev/null) &&
 		{
+			printf "create refs/heads/log-a-graph %s\n" "$orphan" &&
 			for i in $(test_seq 1 256)
 			do
 				printf "create refs/heads/log-noise-%03d %s\n" \
@@ -2899,7 +2900,27 @@ test_expect_success 'patch log defers unrelated decoration object lookups' '
 			log.trace) &&
 		test -n "$lookups" &&
 		echo "decoration object lookups: $lookups" &&
-		test "$lookups" -le 8
+		test "$lookups" -le 8 &&
+		post_graph=$(git commit-tree HEAD^{tree} -p HEAD </dev/null) &&
+		git update-ref refs/heads/log-b-postgraph "$post_graph" &&
+		git update-ref refs/remotes/noise/log-to-tag refs/tags/annotated &&
+		cat >bounded.expect <<-\EOF &&
+		tip (HEAD -> main, tag: lightweight, tag: annotated, tag: noise/log-to-tag)
+		middle
+		EOF
+		GIT_TRACE2_EVENT="$PWD/bounded.trace" \
+			git log -2 --decorate=short --format="%s%d" >bounded.actual &&
+		test_cmp bounded.expect bounded.actual &&
+		test_trace2_data_singular log decorations/defer-requested 1 \
+			<bounded.trace &&
+		test_trace2_data_singular log decorations/graph-miss-prior-object-lookups 1 \
+			<bounded.trace &&
+		test_trace2_data log decorations/object-lookups "[0-8]" \
+			<bounded.trace &&
+		GIT_TEST_COMMIT_GRAPH=0 git -c core.commitGraph=false \
+			log -2 --decorate=short \
+			--format="%s%d" >no-graph.actual &&
+		test_cmp bounded.expect no-graph.actual
 	)
 '
 

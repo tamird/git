@@ -268,10 +268,14 @@ static int collect_ref_decoration(const struct reference *ref, void *cb_data)
 			context->saw_deferrable_ref = 1;
 		} else if (!repo_find_oid_in_commit_graph(the_repository,
 							  ref->oid)) {
-			context->graph_miss_after_deferral = 1;
-			context->graph_miss_prior_object_lookups =
-				context->object_lookups;
-			context->defer_object_lookups = 0;
+			if (!context->graph_miss_after_deferral) {
+				context->graph_miss_after_deferral = 1;
+				context->graph_miss_prior_object_lookups =
+					context->object_lookups;
+			}
+			if (!the_repository->objects->commit_graph ||
+			    the_repository->commit_graph_disabled)
+				context->defer_object_lookups = 0;
 		} else {
 			struct commit *commit = lookup_commit(the_repository,
 							      ref->oid);
