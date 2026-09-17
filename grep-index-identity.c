@@ -383,11 +383,11 @@ static enum grep_index_token_read_outcome load_token(
 		 get_be32(map + 76) == istate->version &&
 		 get_be64(map + 80) == istate->index_file_entries_end &&
 		 istate->index_file_entries_end_valid &&
-		 index_entry_checksum(repo, istate, &entry_checksum) == 0 &&
-		 hasheq(map + header_size + 4 * rawsz,
-			entry_checksum.hash, repo->hash_algo)) {
+		 index_entry_checksum(repo, istate, &entry_checksum) == 0) {
 		oidcpy(entry_checksum_out, &entry_checksum);
-		result = GREP_INDEX_TOKEN_READ_ENTRY_MATCH;
+		if (hasheq(map + header_size + 4 * rawsz,
+			   entry_checksum.hash, repo->hash_algo))
+			result = GREP_INDEX_TOKEN_READ_ENTRY_MATCH;
 	}
 	if (result == GREP_INDEX_TOKEN_READ_INVALID)
 		goto unmap;
@@ -532,9 +532,8 @@ int grep_index_identity_get(struct repository *repo,
 
 write:
 	write_outcome = write_token(repo, istate, &scope_oid, identity,
-				    read_outcome == GREP_INDEX_TOKEN_READ_ENTRY_MATCH ?
-					    &entry_checksum :
-					    NULL,
+				    is_null_oid(&entry_checksum) ? NULL :
+								   &entry_checksum,
 				    &write_errno);
 	trace2_data_intmax("grep", repo, "index_identity/token_write_outcome",
 			   write_outcome);

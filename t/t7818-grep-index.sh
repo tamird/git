@@ -2184,12 +2184,24 @@ test_expect_success SHA1 'grep token reuses unchanged v4 entries after an index 
 	test_trace2_data grep index_identity/token_read_outcome 4 \
 		<token-v6-decoder.trace &&
 	git update-index --chmod=+x token-v6-entry &&
+	GIT_TRACE2_EVENT_NESTING=10 \
 	GIT_TRACE2_EVENT="$PWD/token-v6-mode.trace" \
-		git --no-optional-locks grep \
+		git grep \
 		"token original contents" -- token-v6-entry >actual &&
 	test_cmp expect actual &&
 	test_trace2_data grep index_identity/token_read_outcome 4 \
 		<token-v6-mode.trace &&
+	test_trace2_data grep index_identity/token_write_outcome 0 \
+		<token-v6-mode.trace &&
+	grep "\"region_enter\".*\"label\":\"index-identity/entry-checksum\"" \
+		token-v6-mode.trace >token-v6-checksums.trace &&
+	test_line_count = 1 token-v6-checksums.trace &&
+	GIT_TRACE2_EVENT="$PWD/token-v6-mode-hit.trace" \
+		git --no-optional-locks grep \
+		"token original contents" -- token-v6-entry >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep index_identity/token_read_outcome 0 \
+		<token-v6-mode-hit.trace &&
 	echo "before token" >token-v6-0-before &&
 	test-tool chmtime =-5 token-v6-0-before &&
 	git add token-v6-0-before &&
