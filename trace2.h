@@ -681,7 +681,7 @@ enum trace2_counter_id {
 	 * for permanent analysis code.
 	 */
 	TRACE2_COUNTER_ID_TEST1 = 0, /* emits summary event only */
-	TRACE2_COUNTER_ID_TEST2,     /* emits summary and thread events */
+	TRACE2_COUNTER_ID_TEST2, /* emits summary and thread events */
 
 	TRACE2_COUNTER_ID_PACKED_REFS_JUMPS, /* counts number of jumps */
 	TRACE2_COUNTER_ID_REFTABLE_RESEEKS, /* counts number of re-seeks */
@@ -810,6 +810,8 @@ enum trace2_counter_id {
 	/* Invalidates only the checked DATA snapshot; raw counters still wrap. */
 	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID,
 	TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_SAME_ROOT,
+	TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED,
+	TRACE2_COUNTER_ID_GREP_SOURCE_SELECTED,
 
 	/* Add additional counter definitions before here. */
 	TRACE2_NUMBER_OF_COUNTERS

@@ -90,115 +90,152 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.want_per_thread_events = 0,
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/invalid",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/invalid",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/read-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/read-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INMEMORY] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-inmemory-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/source-inmemory-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOOSE] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-loose-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/source-loose-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_COPY] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-packed-copy-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/source-packed-copy-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_UNPACK] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/source-packed-unpack-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/source-packed-unpack-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/entry-location-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/entry-location-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/entry-location-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/entry-location-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-content-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-content-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-content-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-content-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/cache-copy-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/cache-copy-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/cache-copy-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/invalid",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/invalid",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_LOCATION_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/covered-entry-location-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/covered-entry-location-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_SEARCH_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/midx-search-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/midx-search-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_SEARCH_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/midx-search-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/midx-search-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_RESOLVE_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/midx-resolve-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/midx-resolve-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_MIDX_RESOLVE_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/midx-resolve-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/midx-resolve-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_COUNT] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_NS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-ns",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_FALLBACK_PACK_ATTEMPTS] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-pack-attempt-count",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/odb/packed-lookup/fallback-pack-attempt-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/invalid",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/invalid",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_COVERED] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/covered-reads",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/covered-reads",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SELECTED] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/selected-reads",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/selected-reads",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_FIRST] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/first-reads",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/first-reads",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_SAME_SCAN] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/same-search-repeats",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/same-search-repeats",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_CROSS_SCAN] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_64] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-64",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-64",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_4096] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-4096",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-4096",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_LE_65536] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-65536",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/gap-le-65536",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_GAP_GT_65536] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/gap-gt-65536",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/gap-gt-65536",
 	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED] = {
-		.category = "diff", .name = "follow-full-tree/tree-read/requested-oid-sample/truncated",
+		.category = "diff",
+		.name = "follow-full-tree/tree-read/requested-oid-sample/truncated",
 	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT] = {
-		.category = "diff", .name = "rename/populate/size-only-count",
+		.category = "diff",
+		.name = "rename/populate/size-only-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_NS] = {
-		.category = "diff", .name = "rename/populate/size-only-ns",
+		.category = "diff",
+		.name = "rename/populate/size-only-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_COUNT] = {
-		.category = "diff", .name = "rename/populate/full-count",
+		.category = "diff",
+		.name = "rename/populate/full-count",
 	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS] = {
-		.category = "diff", .name = "rename/populate/full-ns",
+		.category = "diff",
+		.name = "rename/populate/full-ns",
 	},
 	[TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID] = {
-		.category = "diff", .name = "rename/populate/summary-invalid",
+		.category = "diff",
+		.name = "rename/populate/summary-invalid",
 	},
 
 	[TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_CALLS] = {
@@ -442,6 +479,15 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 	[TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_INVALID] = {
 		.category = "ref-filter",
 		.name = "object_metadata/preload/packed-invalid-total",
+	},
+
+	[TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED] = {
+		.category = "grep",
+		.name = "source/processed",
+	},
+	[TRACE2_COUNTER_ID_GREP_SOURCE_SELECTED] = {
+		.category = "grep",
+		.name = "source/selected",
 	},
 
 	/* Add additional metadata before here. */

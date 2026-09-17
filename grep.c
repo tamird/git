@@ -2397,8 +2397,13 @@ int grep_source(struct grep_opt *opt, struct grep_source *gs)
 				gs->match_error = 1;
 				break;
 			}
-	if (trace_source)
+	if (trace_source) {
+		const uint64_t counts[] = { 1, !!result };
+
 		trace2_timer_stop(TRACE2_TIMER_ID_GREP_SOURCE_PROCESS);
+		trace2_counter_add_many(TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED,
+					counts, ARRAY_SIZE(counts));
+	}
 	return result;
 }
 
