@@ -506,13 +506,15 @@ static int add_work(struct grep_opt *opt, struct grep_source *gs,
 		    size_t worktree_blob_pos)
 {
 	/*
-	 * A worktree source with default binary handling needs its diff
+	 * A source with default binary handling needs its diff
 	 * driver only if the worker finds a match to print. Keep -I's
-	 * early rejection and revision-object lookups in path order.
+	 * early rejection and textconv lookups in path order. Recursive
+	 * revision greps also retain that order because the attribute cache
+	 * is shared across repositories.
 	 */
 	if (opt->binary != GREP_BINARY_TEXT &&
 	    (opt->binary == GREP_BINARY_NOMATCH || opt->allow_textconv ||
-	     gs->type == GREP_SOURCE_OID)) {
+	     (recurse_submodules && gs->type == GREP_SOURCE_OID))) {
 		uint64_t started = 0;
 		int timed = grep_producer_begin(GREP_PRODUCER_DRIVER_LOOKUP,
 					       &started);
@@ -1090,6 +1092,9 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 	} else {
 		int hit;
 
+		if (recurse_submodules && gs.type == GREP_SOURCE_OID &&
+		    opt->binary != GREP_BINARY_TEXT)
+			grep_source_load_driver(&gs, opt->repo->index);
 		hit = grep_source(opt, &gs);
 		content_index_record_negative(&gs, pos, !hit && gs.buf);
 		if (!hit && gs.buf && !gs.match_error)

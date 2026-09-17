@@ -128,23 +128,31 @@ test_expect_success 'grep respects not-binary diff attribute' '
 	test_cmp expect actual
 '
 
-test_expect_success PTHREADS 'threaded worktree grep resolves drivers for matches' '
-	test_when_finished "rm -f lazy-driver.trace" &&
+test_expect_success PTHREADS 'threaded grep resolves drivers for matches' '
+	test_when_finished "rm -f lazy-driver-*.trace" &&
 	printf "a -diff\nb diff\nt -diff\n" >.gitattributes &&
 	git add t &&
-	printf "Binary file a matches\nb:1:binQary\n" >expect &&
-	GIT_TRACE2_EVENT="$PWD/lazy-driver.trace" \
-		git -c core.fsmonitor=false grep --threads=2 \
-			--no-content-index -n -F -e binary -e bin \
-			-- a b t >actual.raw &&
-	nul_to_q <actual.raw >actual &&
-	test_cmp expect actual &&
-	test_trace2_data grep producer_driver_lookup_count 0 \
-		<lazy-driver.trace &&
-	test_grep "\"event\":\"counter\".*\"category\":\"grep\",\"name\":\"source/processed\",\"count\":3}" \
-		lazy-driver.trace &&
-	test_grep "\"event\":\"counter\".*\"category\":\"grep\",\"name\":\"source/selected\",\"count\":2}" \
-		lazy-driver.trace
+	git commit -m drivers &&
+	test_when_finished "git reset --soft HEAD^" &&
+	for rev in "" HEAD
+	do
+		prefix=${rev:+$rev:} &&
+		trace="lazy-driver-${rev:-worktree}.trace" &&
+		printf "Binary file %sa matches\n%sb:1:binQary\n" \
+			"$prefix" "$prefix" >expect &&
+		GIT_TRACE2_EVENT="$PWD/$trace" \
+			git -c core.fsmonitor=false grep --threads=2 \
+				--no-content-index -n -F -e binary -e bin \
+				$rev -- a b t >actual.raw &&
+		nul_to_q <actual.raw >actual &&
+		test_cmp expect actual &&
+		test_trace2_data grep producer_driver_lookup_count 0 \
+			<"$trace" &&
+		test_grep "\"event\":\"counter\".*\"category\":\"grep\",\"name\":\"source/processed\",\"count\":3}" \
+			"$trace" &&
+		test_grep "\"event\":\"counter\".*\"category\":\"grep\",\"name\":\"source/selected\",\"count\":2}" \
+			"$trace" || return 1
+	done
 '
 
 test_expect_success 'setup textconv filters' '

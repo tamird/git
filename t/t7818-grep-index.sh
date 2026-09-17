@@ -758,7 +758,7 @@ test_expect_success PTHREADS 'worker object lock trace excludes producer attribu
 	present_oid=$(git rev-parse :present) &&
 	test_path_is_file ".git/objects/$(test_oid_to_path "$ordinary_oid")" &&
 	test_path_is_file ".git/objects/$(test_oid_to_path "$present_oid")" &&
-	attributes_oid=$(printf "ordinary -diff\npresent diff\n" |
+	attributes_oid=$(printf "ordinary diff\npresent diff\n" |
 		git hash-object -w --stdin) &&
 	lock_tree=$({
 		printf "100644 blob %s\t.gitattributes\n" "$attributes_oid" &&
@@ -766,7 +766,7 @@ test_expect_success PTHREADS 'worker object lock trace excludes producer attribu
 		printf "100644 blob %s\tpresent\n" "$present_oid"
 	} | git mktree) &&
 	lock_commit=$(git commit-tree -m object-lock "$lock_tree") &&
-	printf "Binary file %s:ordinary matches\n%s:present:present needle\n" \
+	printf "%s:ordinary:ordinary contents\n%s:present:present needle\n" \
 		"$lock_commit" "$lock_commit" >expect &&
 	for backend in loose packed
 	do
@@ -784,7 +784,7 @@ test_expect_success PTHREADS 'worker object lock trace excludes producer attribu
 			trace="$PWD/object-lock-$backend-$threads.trace" &&
 			GIT_TRACE2=0 GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 \
 				git --attr-source="$lock_tree" grep --no-content-index \
-					--threads="$threads" -F \
+					--threads="$threads" -I -F \
 					-e "ordinary contents" -e "present needle" \
 					"$lock_commit" -- ordinary present >actual 2>err &&
 			test_cmp expect actual &&
@@ -792,7 +792,7 @@ test_expect_success PTHREADS 'worker object lock trace excludes producer attribu
 			env GIT_TRACE2=0 GIT_TRACE2_PERF=0 \
 				GIT_TRACE2_EVENT="$trace" GIT_TRACE2_EVENT_NESTING=1 \
 				git --attr-source="$lock_tree" grep --no-content-index \
-					--threads="$threads" -F \
+					--threads="$threads" -I -F \
 					-e "ordinary contents" -e "present needle" \
 					"$lock_commit" -- ordinary present >actual 2>err &&
 			test_cmp expect actual &&
@@ -1271,7 +1271,7 @@ test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in me
 	test_grep_timer explicit-thread.trace dispatch/producer-lock 2 &&
 	test_grep_timer explicit-thread.trace dispatch/producer-wait 0 &&
 	test_grep_timer explicit-thread.trace dispatch/worker-drain 1 &&
-	test_grep_producer_stats explicit-thread.trace 0 0 2 &&
+	test_grep_producer_stats explicit-thread.trace 0 0 0 &&
 	test_when_finished "rm -f name-only-thread.trace" &&
 	GIT_TRACE2_EVENT="$PWD/name-only-thread.trace" \
 		git grep --cached --no-content-index --threads=3 -l \

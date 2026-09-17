@@ -2128,7 +2128,7 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	if (!textconv) {
 		switch (opt->binary) {
 		case GREP_BINARY_DEFAULT:
-			if (opt->allow_textconv || gs->type == GREP_SOURCE_OID) {
+			if (opt->allow_textconv) {
 				binary_match_only =
 					grep_source_is_binary(gs, opt->repo->index);
 				binary_checked = 1;

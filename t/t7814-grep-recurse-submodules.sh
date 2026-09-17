@@ -635,6 +635,35 @@ test_expect_success 'grep --recurse-submodules with --cached ignores worktree mo
 	test_must_be_empty actual
 '
 
+test_expect_success PTHREADS 'recursive grep keeps binary attributes in path order' '
+	reset_and_clean &&
+	test_when_finished "reset_and_clean" &&
+	echo absent >a &&
+	echo needle >z &&
+	echo needle >submodule/a &&
+	echo "z -diff" >.gitattributes &&
+	printf "a -diff\nz diff\n" >submodule/.gitattributes &&
+	git add a z .gitattributes &&
+	git -C submodule add a .gitattributes &&
+	# Index attribute reads still use the superproject object store.
+	git hash-object -w --stdin <submodule/.gitattributes >/dev/null &&
+	rm .gitattributes submodule/.gitattributes &&
+	cat >expect <<-\EOF &&
+	submodule/a:needle
+	Binary file z matches
+	EOF
+	for threads in 1 2
+	do
+		git grep --threads=$threads --recurse-submodules --cached \
+			needle -- a z submodule/a >actual &&
+		test_cmp expect actual || return 1
+	done &&
+	echo "Binary file submodule/a matches" >expect &&
+	git grep --threads=2 --recurse-submodules --cached \
+		needle -- submodule/a >actual &&
+	test_cmp expect actual
+'
+
 test_expect_failure 'grep --textconv: superproject .gitattributes does not affect submodules' '
 	reset_and_clean &&
 	test_config_global diff.d2x.textconv "sed -e \"s/d/x/\"" &&
