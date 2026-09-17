@@ -702,8 +702,14 @@ cc_library(
 
 cc_library(
     name = "hash",
-    hdrs = ["hash.h"],
-    deps = [":sha1dc_git"],
+    hdrs = [
+        "hash.h",
+        "sha1/openssl.h",
+    ],
+    deps = [
+        ":sha1dc_git",
+        "@openssl//:crypto",
+    ],
 )
 
 cc_library(
@@ -1348,6 +1354,7 @@ cc_library(
     copts = GIT_COPTS,
     deps = [
         ":gitcore_rust",
+        ":hash",
         "//:generated",
         "//compat",
         "//compat/simple-ipc",
