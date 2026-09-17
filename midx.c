@@ -556,7 +556,7 @@ static int bsearch_one_midx_interpolated(const struct object_id *oid,
 		for (step = 1, probes = 0;
 		     lo < hi && probes < MIDX_INTERPOLATE_MAX_PROBES;
 		     step <<= 1, probes++) {
-			uint32_t pos = guess + MIN(step, hi - guess - 1);
+			uint32_t pos = step < hi - guess ? guess + step : hi - 1;
 
 			cmp = cmp_midx_oid_at(oid, m, pos);
 			if (!cmp) {
@@ -574,7 +574,7 @@ static int bsearch_one_midx_interpolated(const struct object_id *oid,
 		for (step = 1, probes = 0;
 		     lo < hi && probes < MIDX_INTERPOLATE_MAX_PROBES;
 		     step <<= 1, probes++) {
-			uint32_t pos = guess - MIN(step, guess - lo);
+			uint32_t pos = step < guess - lo ? guess - step : lo;
 
 			cmp = cmp_midx_oid_at(oid, m, pos);
 			if (!cmp) {
