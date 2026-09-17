@@ -628,6 +628,8 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 		istate->untracked->fsmonitor_resync;
 	unsigned int pending_dir_flags = pending_resync ?
 		istate->untracked->dir_flags : 0;
+	int full_untracked_status = s->show_untracked_files &&
+				    !s->show_ignored_mode && !s->pathspec.nr;
 
 	if (s->relative_paths)
 		s->prefix = prefix;
@@ -646,7 +648,27 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 	s->status_format = status_format;
 	s->ignore_submodule_arg = ignore_submodule_arg;
 
+	if (commit_style == COMMIT_AS_IS && !pending_resync &&
+	    istate->untracked &&
+	    (!istate->untracked->root || !istate->untracked->root->valid) &&
+	    full_untracked_status) {
+		const char *restore_reason;
+
+		fsmonitor_ipc__restore_untracked_cache(istate, &restore_reason);
+	}
+
 	wt_status_collect(s);
+	if (commit_style == COMMIT_AS_IS && !pending_resync &&
+	    full_untracked_status &&
+	    istate->untracked && istate->untracked->root &&
+	    istate->untracked->root->valid &&
+	    !istate->untracked->fsmonitor_resync &&
+	    (istate->untracked->dir_opened ||
+	     istate->untracked->gitignore_invalidated ||
+	     istate->untracked->dir_invalidated))
+		fsmonitor_ipc__save_untracked_cache(
+			istate, FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
+
 	/* As-is preparation wrote the index before this cache recovery. */
 	if (commit_style == COMMIT_AS_IS && pending_resync &&
 	    istate->untracked && !istate->untracked->fsmonitor_resync &&

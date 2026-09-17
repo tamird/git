@@ -3151,4 +3151,56 @@ test_expect_success MACOS 'worktree binding rejects same-gitdir aliases' '
 	git -C binding-a fsmonitor--daemon stop
 '
 
+test_expect_success 'failed edit commit reuses an untracked snapshot' '
+	test_when_finished "stop_daemon_delete_repo test_commit_snapshot" &&
+	git init test_commit_snapshot &&
+	(
+		cd test_commit_snapshot &&
+		printf "# initial\n" >.gitignore &&
+		echo tracked >tracked &&
+		git add .gitignore tracked &&
+		git commit -m base &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true
+	) &&
+	start_daemon -C test_commit_snapshot &&
+	(
+		cd test_commit_snapshot &&
+		git status --porcelain >/dev/null &&
+		mkdir -p nested/deep &&
+		echo loose >nested/deep/loose &&
+		echo changed >>tracked &&
+		git add tracked &&
+		test_hook --setup prepare-commit-msg <<-\EOF &&
+			grep -F "nested/" "$1" >/dev/null
+		EOF
+		git rev-parse HEAD >../commit-snapshot.head &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-first.trace" \
+			test_must_fail git -c core.editor=true \
+			-c gpg.format=openpgp -c gpg.program=false \
+			commit --edit -S -m first &&
+		test_trace2_data status untracked/cache-root-valid 0 \
+			<../commit-snapshot-first.trace &&
+		test_trace2_data status untracked/cache-opendir "[1-9][0-9]*" \
+			<../commit-snapshot-first.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../commit-snapshot-first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-second.trace" \
+			test_must_fail git -c core.editor=true \
+			-c gpg.format=openpgp -c gpg.program=false \
+			commit --edit -S -m second &&
+		test_trace2_data fsmonitor untracked-cache/restore hit \
+			<../commit-snapshot-second.trace &&
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<../commit-snapshot-second.trace &&
+		test_trace2_data status untracked/cache-opendir 0 \
+			<../commit-snapshot-second.trace &&
+		git rev-parse HEAD >../commit-snapshot-after.head &&
+		test_cmp ../commit-snapshot.head ../commit-snapshot-after.head &&
+		git status --porcelain >../commit-snapshot.actual &&
+		test_grep "^M  tracked$" ../commit-snapshot.actual &&
+		test_grep "^?? nested/$" ../commit-snapshot.actual
+	)
+'
+
 test_done
