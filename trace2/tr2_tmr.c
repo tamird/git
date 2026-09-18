@@ -195,6 +195,19 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "get-revision",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_REVISION_COMMIT_MATCH] = {
+		.category = "revision",
+		.name = "commit-match",
+	},
+	/* Includes loading and reencoding the commit message. */
+	[TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_MESSAGE] = {
+		.category = "revision",
+		.name = "commit-match/message",
+	},
+	[TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_GREP] = {
+		.category = "revision",
+		.name = "commit-match/grep",
+	},
 	[TRACE2_TIMER_ID_LOG_GET_REVISION_PRUNE_TREE_READ] = {
 		.category = "log",
 		.name = "get-revision/prune/tree-read",

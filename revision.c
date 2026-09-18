@@ -5021,6 +5021,8 @@ static int commit_match(struct commit *commit, struct rev_info *opt)
 	if (!opt->grep_filter.pattern_list && !opt->grep_filter.header_list)
 		return 1;
 
+	trace2_timer_start(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH);
+
 	/* Prepend "fake" headers as needed */
 	if (opt->grep_filter.use_reflog_filter) {
 		strbuf_addstr(&buf, "reflog ");
@@ -5036,7 +5038,9 @@ static int commit_match(struct commit *commit, struct rev_info *opt)
 	 * in it.
 	 */
 	encoding = get_log_output_encoding();
+	trace2_timer_start(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_MESSAGE);
 	message = repo_logmsg_reencode(the_repository, commit, NULL, encoding);
+	trace2_timer_stop(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_MESSAGE);
 
 	/* Copy the commit to temporary if we are using "fake" headers */
 	if (buf.len)
@@ -5066,13 +5070,16 @@ static int commit_match(struct commit *commit, struct rev_info *opt)
 	 * grep_buffer may modify it for speed, it will restore any
 	 * changes before returning.
 	 */
+	trace2_timer_start(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_GREP);
 	if (buf.len)
 		retval = grep_buffer(&opt->grep_filter, buf.buf, buf.len);
 	else
 		retval = grep_buffer(&opt->grep_filter,
 				     (char *)message, strlen(message));
+	trace2_timer_stop(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH_GREP);
 	strbuf_release(&buf);
 	repo_unuse_commit_buffer(the_repository, commit, message);
+	trace2_timer_stop(TRACE2_TIMER_ID_REVISION_COMMIT_MATCH);
 	return retval;
 }
 
