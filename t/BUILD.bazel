@@ -16,6 +16,7 @@ py_test(
     ],
     data = ["//:git"],
     main = "trace2-overhead-benchmark.py",
+    stamp = -1,
     tags = [
         "exclusive",
         "manual",

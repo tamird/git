@@ -828,7 +828,8 @@ def make_follow_fixture(git: Git, root: Path, sources: int, *, additions: int = 
     imported = git.run(repo, ("fast-import", "--quiet", "--done"), input_data=bytes(stream))
     if imported.stdout or imported.stderr:
         raise AssertionError("follow fixture import produced unexpected output")
-    git.run(repo, ("repack", "-a", "-d", "-f", "--window=0", "--depth=0", "--threads=1"))
+    git.run(repo, ("repack", "-a", "-d", "-f", "--window=0", "--depth=0", "--threads=1",
+                   "--no-write-bitmap-index"))
     revisions: dict[str, str] = {}
     trees: dict[str, str] = {}
     for kind in ("base", *FOLLOW_KINDS):
