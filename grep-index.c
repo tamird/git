@@ -46,6 +46,7 @@
 #define GREP_INDEX_HEADER_SIZE 16
 #define GREP_INDEX_TRANSPOSED_HEADER_SIZE 32
 #define GREP_INDEX_FANOUT_SIZE (256 * sizeof(uint32_t))
+#define GREP_INDEX_FANOUT16_ENTRIES	   65536
 #define GREP_INDEX_TRANSPOSED_LOCATOR_SIZE (2 * sizeof(uint32_t))
 #define GREP_INDEX_TRANSPOSED_CLASS_SIZE \
 	(2 * sizeof(uint32_t) + 2 * sizeof(uint64_t))
@@ -70,6 +71,7 @@ struct grep_index_segment {
 	uint32_t version;
 	uint32_t nr;
 	const unsigned char *fanout;
+	uint32_t *fanout16;
 	const unsigned char *oids;
 	const unsigned char *sizes;
 	const unsigned char *offsets;
@@ -562,6 +564,9 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 
 	seen_size = (size_t)segment.nr / 8 + !!(segment.nr % 8);
 	CALLOC_ARRAY(seen, seen_size);
+	/* Keep the wider fanout smaller than the OID table it accelerates. */
+	if (segment.nr >= GREP_INDEX_FANOUT16_ENTRIES)
+		CALLOC_ARRAY(segment.fanout16, GREP_INDEX_FANOUT16_ENTRIES);
 	for (size_t i = 0; i < segment.nr; i++) {
 		const unsigned char *locator =
 			segment.locators +
@@ -586,7 +591,13 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 		if (seen[global_pos >> 3] & mask)
 			goto unmap;
 		seen[global_pos >> 3] |= mask;
+		if (segment.fanout16)
+			segment.fanout16[get_be16(segment.oids +
+						  i * rawsz)]++;
 	}
+	if (segment.fanout16)
+		for (size_t i = 1; i < GREP_INDEX_FANOUT16_ENTRIES; i++)
+			segment.fanout16[i] += segment.fanout16[i - 1];
 
 	CALLOC_ARRAY(segment.blocks_valid,
 		     DIV_ROUND_UP(segment.blocks_nr, 8));
@@ -604,6 +615,7 @@ static int add_transposed_grep_index_segment(struct grep_index *index,
 
 unmap:
 	free(seen);
+	free(segment.fanout16);
 	free(segment.blocks_valid);
 	free(segment.blocks_invalid);
 	if (segment.verify_mutex_initialized)
@@ -770,6 +782,7 @@ void grep_index_free(struct grep_index *index)
 	if (!index)
 		return;
 	for (size_t i = 0; i < index->segments_nr; i++) {
+		free(index->segments[i].fanout16);
 		free(index->segments[i].blocks_valid);
 		free(index->segments[i].blocks_invalid);
 		free(index->segments[i].unsafe_rows);
@@ -785,8 +798,32 @@ void grep_index_free(struct grep_index *index)
 static int segment_oid_pos(struct grep_index_segment *segment,
 			   const struct object_id *oid, uint32_t *pos)
 {
-	return bsearch_hash(oid->hash, (const uint32_t *)segment->fanout,
-			    segment->oids, segment->rawsz, pos);
+	uint32_t hi, lo;
+	uint16_t prefix;
+
+	if (!segment->fanout16)
+		return bsearch_hash(oid->hash,
+				    (const uint32_t *)segment->fanout,
+				    segment->oids, segment->rawsz, pos);
+	prefix = get_be16(oid->hash);
+	hi = segment->fanout16[prefix];
+	lo = prefix ? segment->fanout16[prefix - 1] : 0;
+	while (lo < hi) {
+		uint32_t mi = lo + (hi - lo) / 2;
+		int cmp = hashcmp(segment->oids + mi * segment->rawsz,
+				  oid->hash, segment->hash_algo);
+
+		if (!cmp) {
+			*pos = mi;
+			return 1;
+		}
+		if (cmp > 0)
+			hi = mi;
+		else
+			lo = mi + 1;
+	}
+	*pos = lo;
+	return 0;
 }
 
 static const unsigned char *segment_filter(struct grep_index_segment *segment,
