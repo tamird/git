@@ -609,7 +609,7 @@ static uint64_t obj_read_lock_trace_clock(void)
 	return now;
 }
 
-void obj_read_lock_with_trace(void)
+static void obj_read_lock_trace_acquire(void)
 {
 	int saved_errno = errno;
 	int owner = pthread_equal(pthread_self(), obj_read_lock_trace_owner);
@@ -647,6 +647,25 @@ void obj_read_lock_with_trace(void)
 		obj_read_lock_trace.stats.acquire_count++;
 		obj_read_lock_trace.stats.acquire_ns += end - begin;
 	}
+}
+
+void obj_read_lock_with_trace(void)
+{
+	int saved_errno;
+
+	obj_read_lock_trace_acquire();
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_GREP_OBJECT_LOCK_HELD);
+	errno = saved_errno;
+}
+
+void obj_read_unlock_with_trace(void)
+{
+	int saved_errno = errno;
+
+	trace2_timer_stop(TRACE2_TIMER_ID_GREP_OBJECT_LOCK_HELD);
+	errno = saved_errno;
+	pthread_mutex_unlock(&obj_read_mutex);
 }
 #endif
 

@@ -506,6 +506,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "worker/object-lock-acquire",
 		.want_per_thread_events = 0,
 	},
+	/* Outermost held intervals, across both producer and worker threads. */
+	[TRACE2_TIMER_ID_GREP_OBJECT_LOCK_HELD] = {
+		.category = "grep",
+		.name = "object-lock-held",
+	},
 	[TRACE2_TIMER_ID_GREP_PRODUCER_LOCK] = {
 		.category = "grep",
 		.name = "dispatch/producer-lock",

@@ -3448,7 +3448,9 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		test_trace2_data grep worktree_blob/hits 1 \
 			<grep-worktree-trace-threaded &&
 		test_trace2_data grep worker/object-lock-acquire/count \
-			"[1-9][0-9]*" <grep-worktree-trace-threaded || return 1
+			"[1-9][0-9]*" <grep-worktree-trace-threaded &&
+		test_grep "\"event\":\"timer\".*\"category\":\"grep\".*\"name\":\"object-lock-held\".*\"intervals\":[1-9]" \
+			grep-worktree-trace-threaded || return 1
 	fi &&
 	cp .git/index.grep-worktree \
 		.git/index.grep-worktree.no-optional-locks-save &&

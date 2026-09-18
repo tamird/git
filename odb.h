@@ -641,6 +641,8 @@ void disable_obj_read_lock(void);
  * Other readers report a separate Trace2 stopwatch aggregate. It excludes
  * all producer reads, including attribute reads, but includes worker calls
  * outside source reads (for example, textconv).
+ * A separate stopwatch sums outermost held intervals across the producer and
+ * readers, excluding sections that fully release the recursive mutex.
  */
 struct obj_read_lock_trace_stats {
 	uint64_t acquire_count, acquire_ns;
@@ -658,6 +660,7 @@ extern pthread_mutex_t obj_read_mutex;
 /* Published once before workers; never changed while they can read it. */
 extern int obj_read_lock_trace_ready;
 void obj_read_lock_with_trace(void);
+void obj_read_unlock_with_trace(void);
 #endif
 
 static inline void obj_read_lock(void)
@@ -674,8 +677,14 @@ static inline void obj_read_lock(void)
 
 static inline void obj_read_unlock(void)
 {
-	if(obj_read_use_lock)
-		pthread_mutex_unlock(&obj_read_mutex);
+	if (obj_read_use_lock) {
+#ifndef NO_PTHREADS
+		if (obj_read_lock_trace_ready)
+			obj_read_unlock_with_trace();
+		else
+#endif
+			pthread_mutex_unlock(&obj_read_mutex);
+	}
 }
 
 /* Flags for for_each_*_object(). */
