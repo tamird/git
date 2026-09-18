@@ -154,10 +154,33 @@ static int read_midx_bitmapped_packs(const char *object_dir)
 	return 0;
 }
 
+static int read_object_after_close(const char *object_dir, const char *hex)
+{
+	struct object_info oi = OBJECT_INFO_INIT;
+	struct odb_source *source;
+	struct object_id oid;
+	enum object_type type;
+
+	setup_git_directory(the_repository);
+	if (get_oid_hex(hex, &oid))
+		return error("invalid object ID");
+	source = odb_find_source_or_die(the_repository->objects, object_dir);
+	odb_source_prepare(source, 0);
+	odb_source_close(source);
+	oi.typep = &type;
+	if (odb_source_read_object_info(source, &oid, &oi,
+					OBJECT_INFO_QUICK, NULL))
+		return error("could not read object after closing its source");
+	printf("%s\n", type_name(type));
+	return 0;
+}
+
 int cmd__read_midx(int argc, const char **argv)
 {
+	if (argc == 4 && !strcmp(argv[1], "--read-after-close"))
+		return read_object_after_close(argv[2], argv[3]);
 	if (!(argc == 2 || argc == 3 || argc == 4))
-		usage("read-midx [--show-objects|--checksum|--preferred-pack|--bitmap] <object-dir> <checksum>");
+		usage("read-midx [--show-objects|--checksum|--preferred-pack|--bitmap|--read-after-close] <object-dir> <checksum-or-object>");
 
 	if (!strcmp(argv[1], "--show-objects"))
 		return read_midx_file(argv[2], argv[3], 1);

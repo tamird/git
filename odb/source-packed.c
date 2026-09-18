@@ -1044,6 +1044,7 @@ static void odb_source_packed_close(struct odb_source *source)
 	if (packed->midx)
 		close_midx(packed->midx);
 	packed->midx = NULL;
+	packed->initialized = false;
 }
 
 static void odb_source_packed_free(struct odb_source *source)

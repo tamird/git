@@ -6426,6 +6426,10 @@ test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose re
 			git pack-objects --window=0 .git/objects/pack/pack >fallback-pack &&
 		git prune-packed &&
 		printf "%s\n" "$midx_tree" >midx-tree &&
+		echo tree >expect-reopened &&
+		test-tool read-midx --read-after-close .git/objects "$midx_tree" \
+			>actual-reopened &&
+		test_cmp expect-reopened actual-reopened &&
 		root=$({
 			printf "040000 tree %s\ta-midx\n" "$midx_tree" &&
 			printf "040000 tree %s\tb-fallback\n" "$fallback_tree" &&
