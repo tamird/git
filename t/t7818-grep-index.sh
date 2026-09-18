@@ -2664,7 +2664,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_trace2_data grep content_index_tree_queried 3 <tree.trace &&
 	test_trace2_data grep content_index_tree_rejected 6 <tree.trace &&
 	test_trace2_data grep content_index_tree_batches 2 <tree.trace &&
-	test_region grep query_content_index_ipc tree.trace &&
+	test_region grep start_content_index_ipc tree.trace &&
 	test_must_fail git grep "present needle" HEAD -- "**/present" &&
 	git grep --no-content-index "present needle" HEAD HEAD^ -- present \
 		>expect-tree-positive &&
@@ -2708,7 +2708,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 			HEAD HEAD^ -- escaped-dot ordinary present \
 			>actual-tree-bypass &&
 	test_cmp expect-tree-bypass actual-tree-bypass &&
-	test_trace2_data grep content_index_tree_objects 2 \
+	test_trace2_data grep content_index_tree_objects 3 \
 		<tree-bypass.trace &&
 	test_trace2_data grep content_index_tree_queried 2 \
 		<tree-bypass.trace &&
@@ -2758,7 +2758,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-fallback.trace &&
 	test_trace2_data grep content_index_tree_batches 0 \
 		<tree-fallback.trace &&
-	test_region grep query_content_index_ipc tree-fallback.trace &&
+	test_region grep start_content_index_ipc tree-fallback.trace &&
 	test_region grep load_content_index tree-fallback.trace &&
 	git replace -d "$replaced_oid" &&
 	literal_glob_child=$(printf "100644 blob %s\tchild\n" \
@@ -2926,22 +2926,23 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-attributes.trace &&
 	if test_have_prereq PTHREADS
 	then
-		# Flush a matching root blob before reading the original nested tree.
-		# This starts the lazy workers; --threads=2 alone does not do so.
+		# Fill both batches before reading the original nested tree so the
+		# first retires and starts lazy workers; --threads=2 alone does not.
 		lock_attributes_tree=$({
 			printf "100644 blob %s\ta\n" "$replacement_oid" &&
+			printf "100644 blob %s\tb\n" "$replacement_oid" &&
 			printf "040000 tree %s\tnested\n" "$nested_tree"
 		} | git mktree) &&
 		lock_attributes_commit=$(echo lock-attributes |
 			git commit-tree "$lock_attributes_tree") &&
 		test_path_is_file ".git/objects/$(test_oid_to_path "$nested_tree")" &&
 		git grep --no-content-index --threads=2 "present needle" \
-			"$lock_attributes_commit" -- a nested >expect-tree-positive &&
+			"$lock_attributes_commit" -- a b nested >expect-tree-positive &&
 		>tree-positive.trace &&
 		env GIT_TRACE2_EVENT="$PWD/tree-positive.trace" \
 			GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=1 \
 			git grep --threads=2 "present needle" \
-				"$lock_attributes_commit" -- a nested >actual-tree-positive &&
+				"$lock_attributes_commit" -- a b nested >actual-tree-positive &&
 		test_cmp expect-tree-positive actual-tree-positive &&
 		test_trace2_data grep content_index_tree_directories 1 \
 			<tree-positive.trace &&
@@ -3398,7 +3399,8 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_must_fail git -c grep.threads=1 grep --no-content-index \
 		"tree marker" "$corrupt_commit" -- \
 		>expect-corrupt 2>expect-err-corrupt &&
-	test_must_fail env GIT_TRACE2_EVENT="$PWD/tree-corrupt.trace" \
+	test_must_fail env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=1 \
+		GIT_TRACE2_EVENT="$PWD/tree-corrupt.trace" \
 		git -c grep.threads=2 grep "tree marker" "$corrupt_commit" -- \
 		>actual-corrupt 2>err-corrupt &&
 	test_cmp expect-corrupt actual-corrupt &&
@@ -3419,7 +3421,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	test_must_fail git -c grep.threads=1 grep --no-content-index \
 		"tree marker" "$corrupt_trailing_commit" -- \
 		>expect-corrupt-trailing 2>expect-err-corrupt-trailing &&
-	test_must_fail env \
+	test_must_fail env GIT_TEST_GREP_TREE_INDEX_BATCH_SIZE=1 \
 		GIT_TRACE2_EVENT="$PWD/tree-corrupt-trailing.trace" \
 		git -c grep.threads=2 grep "tree marker" \
 			"$corrupt_trailing_commit" -- \

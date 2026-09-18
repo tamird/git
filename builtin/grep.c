@@ -3143,13 +3143,24 @@ out:
 	errno = saved_errno;
 }
 
-struct grep_tree_batch {
-	struct grep_opt *opt;
-	struct grep_tree_query_context *query;
+struct grep_tree_batch_buffer {
 	struct grep_tree_batch_item *items;
 	size_t nr;
 	size_t alloc;
 	size_t filename_bytes;
+	struct oid_array oids;
+	unsigned char *results;
+	struct grep_index_ipc_query_request *request;
+	struct grep_index_ipc_query_trace trace;
+	uint64_t ipc_begin;
+	int capture;
+};
+
+struct grep_tree_batch {
+	struct grep_opt *opt;
+	struct grep_tree_query_context *query;
+	struct grep_tree_batch_buffer filling, pending;
+	unsigned int readiness_checks;
 	int tree_name_len;
 	int check_attr;
 	int enabled;
@@ -3306,93 +3317,56 @@ static void trace_grep_selected_oid_ipc_query(
 			     "content_index_selected_oid_ipc_intervals");
 }
 
-static int flush_grep_tree_batch(struct grep_tree_batch *batch)
+/* Finish and classify only the older batch; the producer owns all caches. */
+static int finish_grep_tree_batch(struct grep_tree_batch *batch)
 {
 	struct grep_tree_query_context *query = batch->query;
-	struct oid_array oids = OID_ARRAY_INIT;
-	unsigned char *results = NULL;
+	struct grep_tree_batch_buffer *buffer = &batch->pending;
 	size_t rejected = 0;
 	uint64_t phase_begin = 0;
 	int queried = 0;
 	int hit = 0;
 
-	if (!batch->nr)
+	if (!buffer->nr)
 		return 0;
-	if (query->trace_enabled)
-		phase_begin = getnanotime();
-	for (size_t i = 0; i < batch->nr; i++) {
-		const struct object_id *oid = &batch->items[i].oid;
-
-		if (oidset_contains(&query->impossible, oid) ||
-		    oidset_contains(&query->maybe, oid))
-			continue;
-		oid_array_append(&oids, oid);
-	}
-	oid_array_sort(&oids);
-	if (oids.nr) {
-		size_t dst = 0;
-
-		for (size_t i = 0; i < oids.nr;
-		     i = oid_array_next_unique(&oids, i)) {
-			if (dst != i)
-				oidcpy(&oids.oid[dst], &oids.oid[i]);
-			dst++;
-		}
-		oids.nr = dst;
-		CALLOC_ARRAY(results, oids.nr);
-	}
-	query->objects += batch->nr;
-	if (query->trace_enabled)
-		query->batch_prepare_ns += getnanotime() - phase_begin;
-	if (oids.nr) {
-		struct grep_index_ipc_query_trace trace;
-		struct grep_index_ipc_query_trace *capture =
-			query->trace_enabled &&
-			query->ipc_trace_retained < GREP_TREE_IPC_TRACE_BATCHES ?
-				&trace : NULL;
+	if (buffer->oids.nr) {
 		int query_result;
 
-		if (query->trace_enabled) {
-			if (query->ipc_trace_attempted < INTMAX_MAX)
-				query->ipc_trace_attempted++;
-			else
-				query->ipc_trace_count_overflow = 1;
+		if (query->trace_enabled)
 			phase_begin = getnanotime();
-			if (capture && !query->ipc_trace_retained)
-				query->ipc_trace_epoch_ns = phase_begin;
-		}
-		trace2_region_enter("grep", "query_content_index_ipc",
+		trace2_region_enter("grep", "finish_content_index_ipc",
 				    batch->opt->repo);
-		query_result = grep_index_ipc_query_with_max_parallel_requests(
-			batch->opt->repo, content_index_query, oids.oid, oids.nr,
-			results, GREP_TREE_INDEX_MAX_REQUESTS, capture);
-		trace2_region_leave("grep", "query_content_index_ipc",
+		query_result = grep_index_ipc_query_finish(buffer->request,
+							   buffer->results);
+		buffer->request = NULL;
+		trace2_region_leave("grep", "finish_content_index_ipc",
 				    batch->opt->repo);
 		if (query->trace_enabled) {
 			uint64_t phase_end = getnanotime();
 
+			/* Producer time only; tree walking overlaps the request. */
 			query->batch_ipc_ns += phase_end - phase_begin;
-			if (capture)
+			if (buffer->capture)
 				trace_grep_tree_ipc_batch(batch->opt->repo, query,
-							 capture, phase_begin,
-							 phase_end, query_result);
+							  &buffer->trace, buffer->ipc_begin,
+							  phase_end, query_result);
 		}
 		if (!query_result) {
-			query->queried += oids.nr;
+			query->queried += buffer->oids.nr;
 			query->batches++;
 			queried = 1;
 			if (query->trace_enabled)
 				phase_begin = getnanotime();
-			for (size_t i = 0; i < oids.nr; i++) {
+			for (size_t i = 0; i < buffer->oids.nr; i++) {
 				if (oidset_size(&query->impossible) +
 					    oidset_size(&query->maybe) >=
 				    GREP_TREE_INDEX_CACHE_MAX_ENTRIES)
 					break;
-				if (results[i] == GREP_INDEX_IPC_IMPOSSIBLE)
+				if (buffer->results[i] == GREP_INDEX_IPC_IMPOSSIBLE)
 					oidset_insert(&query->impossible,
-						      &oids.oid[i]);
-				else if (results[i] == GREP_INDEX_IPC_MAYBE)
-					oidset_insert(&query->maybe, &oids.oid[i]);
+						      &buffer->oids.oid[i]);
+				else if (buffer->results[i] == GREP_INDEX_IPC_MAYBE)
+					oidset_insert(&query->maybe, &buffer->oids.oid[i]);
 			}
 			if (query->trace_enabled)
 				query->batch_seed_ns += getnanotime() - phase_begin;
@@ -3404,8 +3378,8 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 
 	if (query->trace_enabled)
 		phase_begin = getnanotime();
-	for (size_t i = 0; i < batch->nr; i++) {
-		struct grep_tree_batch_item *item = &batch->items[i];
+	for (size_t i = 0; i < buffer->nr; i++) {
+		struct grep_tree_batch_item *item = &buffer->items[i];
 		unsigned char result = GREP_INDEX_IPC_UNKNOWN;
 
 		if (oidset_contains(&query->impossible, &item->oid)) {
@@ -3413,11 +3387,11 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 		} else if (oidset_contains(&query->maybe, &item->oid)) {
 			result = GREP_INDEX_IPC_MAYBE;
 		} else if (queried) {
-			int pos = oid_array_lookup(&oids, &item->oid);
+			int pos = oid_array_lookup(&buffer->oids, &item->oid);
 
 			if (pos < 0)
 				BUG("grep tree batch lost an object ID");
-			result = results[pos];
+			result = buffer->results[pos];
 		}
 
 		if (result == GREP_INDEX_IPC_IMPOSSIBLE) {
@@ -3430,24 +3404,96 @@ static int flush_grep_tree_batch(struct grep_tree_batch *batch)
 						item->filename + batch->tree_name_len :
 						NULL,
 					0, SIZE_MAX,
-					queried ||
-					result == GREP_INDEX_IPC_MAYBE);
+					query->bypassed || queried ||
+						result == GREP_INDEX_IPC_MAYBE);
 		}
 		free(item->filename);
 	}
 	if (query->trace_enabled)
 		query->batch_classify_ns += getnanotime() - phase_begin;
 	/* Stop daemon queries for this command when one full batch rejects little. */
-	if (batch->enabled && batch->nr == query->batch_size &&
-	    rejected * 8 < batch->nr) {
+	if (batch->enabled && buffer->nr == query->batch_size &&
+	    rejected * 8 < buffer->nr) {
 		batch->enabled = 0;
 		query->bypassed = 1;
 	}
-	batch->nr = 0;
-	batch->filename_bytes = 0;
-	free(results);
-	oid_array_clear(&oids);
+	buffer->nr = 0;
+	buffer->filename_bytes = 0;
+	FREE_AND_NULL(buffer->results);
+	oid_array_clear(&buffer->oids);
 	return hit;
+}
+
+/* Retire the older batch before looking up cache entries for its successor. */
+static int start_grep_tree_batch(struct grep_tree_batch *batch)
+{
+	struct grep_tree_query_context *query = batch->query;
+	struct grep_tree_batch_buffer *buffer;
+	uint64_t phase_begin = 0;
+	int hit = finish_grep_tree_batch(batch);
+
+	if (!batch->filling.nr)
+		return hit;
+	SWAP(batch->pending, batch->filling);
+	buffer = &batch->pending;
+	query->objects += buffer->nr;
+	if (!batch->enabled)
+		return hit | finish_grep_tree_batch(batch);
+	if (query->trace_enabled)
+		phase_begin = getnanotime();
+	for (size_t i = 0; i < buffer->nr; i++) {
+		const struct object_id *oid = &buffer->items[i].oid;
+
+		if (oidset_contains(&query->impossible, oid) ||
+		    oidset_contains(&query->maybe, oid))
+			continue;
+		oid_array_append(&buffer->oids, oid);
+	}
+	oid_array_sort(&buffer->oids);
+	if (buffer->oids.nr) {
+		size_t dst = 0;
+
+		for (size_t i = 0; i < buffer->oids.nr;
+		     i = oid_array_next_unique(&buffer->oids, i)) {
+			if (dst != i)
+				oidcpy(&buffer->oids.oid[dst], &buffer->oids.oid[i]);
+			dst++;
+		}
+		buffer->oids.nr = dst;
+		CALLOC_ARRAY(buffer->results, buffer->oids.nr);
+	}
+	if (query->trace_enabled)
+		query->batch_prepare_ns += getnanotime() - phase_begin;
+	if (!buffer->oids.nr)
+		return hit | finish_grep_tree_batch(batch);
+
+	buffer->capture = query->trace_enabled &&
+			  query->ipc_trace_retained < GREP_TREE_IPC_TRACE_BATCHES;
+	if (query->trace_enabled) {
+		if (query->ipc_trace_attempted < INTMAX_MAX)
+			query->ipc_trace_attempted++;
+		else
+			query->ipc_trace_count_overflow = 1;
+		phase_begin = buffer->ipc_begin = getnanotime();
+		if (buffer->capture && !query->ipc_trace_retained)
+			query->ipc_trace_epoch_ns = phase_begin;
+	}
+	trace2_region_enter("grep", "start_content_index_ipc", batch->opt->repo);
+	buffer->request = grep_index_ipc_query_start(
+		batch->opt->repo, content_index_query, buffer->oids.oid,
+		buffer->oids.nr, GREP_TREE_INDEX_MAX_REQUESTS,
+		buffer->capture ? &buffer->trace : NULL);
+	trace2_region_leave("grep", "start_content_index_ipc", batch->opt->repo);
+	if (query->trace_enabled)
+		query->batch_ipc_ns += getnanotime() - phase_begin;
+	return hit;
+}
+
+static int flush_grep_tree_batch(struct grep_tree_batch *batch)
+{
+	int hit = start_grep_tree_batch(batch);
+
+	return hit | finish_grep_tree_batch(batch);
 }
 
 static void flush_grep_tree_batch_before_die(struct grep_tree_batch *batch)
@@ -3523,6 +3569,15 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 	while (tree->size) {
 		int te_len;
+
+		/* Bound first-output delay without locking for every tree entry. */
+		if (batch && batch->pending.nr &&
+		    !(++batch->readiness_checks % 256) &&
+		    grep_index_ipc_query_ready(batch->pending.request)) {
+			hit |= finish_grep_tree_batch(batch);
+			if (!batch->enabled)
+				hit |= flush_grep_tree_batch(batch);
+		}
 
 		if (batch) {
 			struct tree_desc next = *tree;
@@ -3675,10 +3730,10 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 					batch->query->batch_max_bytes;
 
 				if (filename_bytes > batch_max_bytes ||
-				    (batch->nr &&
+				    (batch->filling.nr &&
 				     filename_bytes >
 					     batch_max_bytes -
-						     batch->filename_bytes))
+						     batch->filling.filename_bytes))
 					hit |= flush_grep_tree_batch(batch);
 				if (!batch->enabled ||
 				    filename_bytes > batch_max_bytes) {
@@ -3690,18 +3745,18 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						0, SIZE_MAX,
 						query && query->bypassed);
 				} else {
-					ALLOC_GROW(batch->items, batch->nr + 1,
-						   batch->alloc);
-					item = &batch->items[batch->nr++];
+					ALLOC_GROW(batch->filling.items, batch->filling.nr + 1,
+						   batch->filling.alloc);
+					item = &batch->filling.items[batch->filling.nr++];
 					oidcpy(&item->oid, &entry.oid);
 					item->filename = xstrdup(base->buf);
-					batch->filename_bytes += filename_bytes;
-					if (batch->nr ==
+					batch->filling.filename_bytes += filename_bytes;
+					if (batch->filling.nr ==
 						    batch->query->batch_size ||
-					    batch->filename_bytes >=
+					    batch->filling.filename_bytes >=
 						    batch_max_bytes)
 						hit |=
-							flush_grep_tree_batch(batch);
+							start_grep_tree_batch(batch);
 				}
 			} else {
 				hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
@@ -4077,7 +4132,8 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		}
 		if (batch_ptr) {
 			hit |= flush_grep_tree_batch(batch_ptr);
-			free(batch.items);
+			free(batch.filling.items);
+			free(batch.pending.items);
 		}
 		strbuf_release(&base);
 		free(data);

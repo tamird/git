@@ -63,6 +63,27 @@ int grep_index_ipc_query_with_max_parallel_requests(
 	return -1;
 }
 
+struct grep_index_ipc_query_request *grep_index_ipc_query_start(
+	struct repository *repo UNUSED, const struct grep_index_query *query UNUSED,
+	const struct object_id *oids UNUSED, size_t nr UNUSED,
+	size_t max_parallel_requests UNUSED, struct grep_index_ipc_query_trace *trace)
+{
+	if (trace)
+		memset(trace, 0, sizeof(*trace));
+	return NULL;
+}
+
+int grep_index_ipc_query_ready(struct grep_index_ipc_query_request *request UNUSED)
+{
+	return 1;
+}
+
+int grep_index_ipc_query_finish(struct grep_index_ipc_query_request *request UNUSED,
+				unsigned char *maybe UNUSED)
+{
+	return -1;
+}
+
 int grep_index_ipc_query_index(struct repository *repo UNUSED,
 			       const struct grep_index_query *query UNUSED,
 			       const struct object_id *index_identity UNUSED,
@@ -279,6 +300,7 @@ struct grep_index_ipc_query_stats {
 };
 
 struct grep_index_ipc_query_task {
+	struct grep_index_ipc_query_request *request;
 	const char *path;
 	const char *query;
 	size_t query_len;
@@ -295,6 +317,27 @@ struct grep_index_ipc_query_task {
 struct grep_index_ipc_query_oid {
 	struct oidmap_entry entry;
 	size_t pos;
+};
+
+/* All storage used by transport threads lives until query_finish(). */
+struct grep_index_ipc_query_request {
+	struct repository *repo;
+	const struct object_id *oids;
+	size_t nr;
+	struct strbuf serialized;
+	struct oidmap seen;
+	struct grep_index_ipc_query_oid *entries;
+	struct object_id *unique_oids;
+	unsigned char *unique_maybe;
+	char *path;
+	struct grep_index_ipc_query_task *tasks;
+	pthread_t *threads;
+	pthread_mutex_t mutex;
+	size_t completed;
+	size_t unique_nr, threads_nr, started;
+	uint32_t diagnostic_version;
+	struct grep_index_ipc_query_trace *trace;
+	int result;
 };
 
 static void grep_index_ipc_put_u32(struct strbuf *buf, uint32_t value)
@@ -2243,6 +2286,9 @@ done:
 		task->trace->end_ns = grep_index_ipc_trace_clock();
 		task->trace->outcome = !!task->result;
 	}
+	pthread_mutex_lock(&task->request->mutex);
+	task->request->completed++;
+	pthread_mutex_unlock(&task->request->mutex);
 	return NULL;
 }
 
@@ -2331,75 +2377,73 @@ static void grep_index_ipc_trace_backend(
 	jw_release(&jw);
 }
 
-int grep_index_ipc_query_with_max_parallel_requests(
+static struct grep_index_ipc_query_request *start_grep_index_ipc_query(
 	struct repository *repo, const struct grep_index_query *query,
-	const struct object_id *oids, size_t nr, unsigned char *maybe,
-	size_t max_parallel_requests, struct grep_index_ipc_query_trace *trace)
+	const struct object_id *oids, size_t nr, size_t max_parallel_requests,
+	struct grep_index_ipc_query_trace *trace, int asynchronous)
 {
-	struct strbuf serialized = STRBUF_INIT;
-	struct oidmap seen = OIDMAP_INIT;
-	struct grep_index_ipc_query_oid *entries = NULL;
-	struct object_id *unique_oids = NULL;
-	unsigned char *unique_maybe = NULL;
-	char *path = NULL;
-	struct grep_index_ipc_query_task *tasks = NULL;
-	pthread_t *threads = NULL;
-	size_t unique_nr = 0;
-	size_t threads_nr = 1;
-	size_t started = 0;
+	struct grep_index_ipc_query_request *request = xcalloc(1, sizeof(*request));
 	int cpus;
-	uint32_t diagnostic_version = 0;
-	int result = -1;
 
+	request->repo = repo;
+	request->oids = oids;
+	request->nr = nr;
+	request->threads_nr = 1;
+	request->result = -1;
+	strbuf_init(&request->serialized, 0);
+	pthread_mutex_init(&request->mutex, NULL);
 	if (trace) {
 		memset(trace, 0, sizeof(*trace));
 		if (!trace2_is_enabled())
 			trace = NULL;
 	}
-	if (!nr)
-		return 0;
-	path = grep_index_ipc_path(repo);
+	if (!nr) {
+		request->result = 0;
+		return request;
+	}
+	request->trace = trace;
+	request->path = grep_index_ipc_path(repo);
 	if (!query || nr > UINT32_MAX ||
-	    grep_index_query_serialize(query, &serialized) ||
-	    serialized.len > UINT32_MAX)
-		goto cleanup;
+	    grep_index_query_serialize(query, &request->serialized) ||
+	    request->serialized.len > UINT32_MAX)
+		return request;
 	if (replace_refs_enabled(repo)) {
 		prepare_replace_object(repo);
 		if (oidmap_get_size(&repo->objects->replace_map))
-			goto cleanup;
+			return request;
 	}
 
 	/* Repeated positions must not count as cache reuse in the daemon. */
-	CALLOC_ARRAY(entries, nr);
-	ALLOC_ARRAY(unique_oids, nr);
-	oidmap_init(&seen, nr);
+	CALLOC_ARRAY(request->entries, nr);
+	ALLOC_ARRAY(request->unique_oids, nr);
+	oidmap_init(&request->seen, nr);
 	for (size_t i = 0; i < nr; i++) {
 		struct grep_index_ipc_query_oid *entry;
 
-		if (oidmap_get(&seen, &oids[i]))
+		if (oidmap_get(&request->seen, &oids[i]))
 			continue;
-		entry = &entries[unique_nr];
+		entry = &request->entries[request->unique_nr];
 		oidcpy(&entry->entry.oid, &oids[i]);
-		entry->pos = unique_nr;
-		oidcpy(&unique_oids[unique_nr++], &oids[i]);
-		oidmap_put(&seen, entry);
+		entry->pos = request->unique_nr;
+		oidcpy(&request->unique_oids[request->unique_nr++], &oids[i]);
+		oidmap_put(&request->seen, entry);
 	}
-	ALLOC_ARRAY(unique_maybe, unique_nr);
+	ALLOC_ARRAY(request->unique_maybe, request->unique_nr);
 
-	if (unique_nr >= 2 * GREP_INDEX_IPC_MIN_OIDS_PER_THREAD) {
-		threads_nr = DIV_ROUND_UP(
-			unique_nr, GREP_INDEX_IPC_MIN_OIDS_PER_THREAD);
-		if (threads_nr > GREP_INDEX_IPC_MAX_CLIENT_THREADS)
-			threads_nr = GREP_INDEX_IPC_MAX_CLIENT_THREADS;
+	if (request->unique_nr >= 2 * GREP_INDEX_IPC_MIN_OIDS_PER_THREAD) {
+		request->threads_nr = DIV_ROUND_UP(
+			request->unique_nr, GREP_INDEX_IPC_MIN_OIDS_PER_THREAD);
+		if (request->threads_nr > GREP_INDEX_IPC_MAX_CLIENT_THREADS)
+			request->threads_nr = GREP_INDEX_IPC_MAX_CLIENT_THREADS;
 		cpus = online_cpus();
-		if (cpus > 0 && threads_nr > (size_t)cpus)
-			threads_nr = cpus;
+		if (cpus > 0 && request->threads_nr > (size_t)cpus)
+			request->threads_nr = cpus;
 		if (max_parallel_requests &&
-		    threads_nr > max_parallel_requests)
-			threads_nr = max_parallel_requests;
+		    request->threads_nr > max_parallel_requests)
+			request->threads_nr = max_parallel_requests;
 	}
 	if (trace)
-		trace->requests_planned = threads_nr;
+		trace->requests_planned = request->threads_nr;
 	if (trace2_is_enabled()) {
 		enum grep_index_ipc_capability_outcome outcome;
 		unsigned int attempts = 1;
@@ -2407,9 +2451,8 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		if (trace)
 			trace->probe_begin_ns = grep_index_ipc_trace_clock();
 		outcome = grep_index_ipc_query_capability(
-			path, trace ? GREP_INDEX_IPC_TIMING_VERSION :
-				      GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
-			&diagnostic_version);
+			request->path, trace ? GREP_INDEX_IPC_TIMING_VERSION : GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
+			&request->diagnostic_version);
 		/*
 		 * An old diagnostic server rejects v2 with an empty reply,
 		 * just like a pre-capability server. A second probe preserves
@@ -2419,92 +2462,135 @@ int grep_index_ipc_query_with_max_parallel_requests(
 		if (trace && outcome == GREP_INDEX_IPC_CAPABILITY_EMPTY_REPLY) {
 			attempts++;
 			outcome = grep_index_ipc_query_capability(
-				path, GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
-				&diagnostic_version);
+				request->path, GREP_INDEX_IPC_DIAGNOSTIC_VERSION,
+				&request->diagnostic_version);
 		}
 		if (trace) {
 			trace->probe_end_ns = grep_index_ipc_trace_clock();
 			trace->probe_outcome = outcome;
 			trace->probe_attempts = attempts;
-			trace->diagnostic_version = diagnostic_version;
+			trace->diagnostic_version = request->diagnostic_version;
 		}
 
 		trace2_data_intmax("grep", repo,
 				   "content_index_ipc_capability", outcome);
 	}
-	CALLOC_ARRAY(tasks, threads_nr);
-	for (size_t i = 0, pos = 0; i < threads_nr; i++) {
-		size_t remaining = unique_nr - pos;
-		size_t task_nr = DIV_ROUND_UP(remaining, threads_nr - i);
+	CALLOC_ARRAY(request->tasks, request->threads_nr);
+	for (size_t i = 0, pos = 0; i < request->threads_nr; i++) {
+		size_t remaining = request->unique_nr - pos;
+		size_t task_nr = DIV_ROUND_UP(remaining, request->threads_nr - i);
 
-		tasks[i].path = path;
-		tasks[i].query = serialized.buf;
-		tasks[i].query_len = serialized.len;
-		tasks[i].hash_algo = repo->hash_algo;
-		tasks[i].oids = unique_oids + pos;
-		tasks[i].nr = task_nr;
-		tasks[i].maybe = unique_maybe + pos;
-		tasks[i].diagnostic_version = diagnostic_version;
+		request->tasks[i].request = request;
+		request->tasks[i].path = request->path;
+		request->tasks[i].query = request->serialized.buf;
+		request->tasks[i].query_len = request->serialized.len;
+		request->tasks[i].hash_algo = repo->hash_algo;
+		request->tasks[i].oids = request->unique_oids + pos;
+		request->tasks[i].nr = task_nr;
+		request->tasks[i].maybe = request->unique_maybe + pos;
+		request->tasks[i].diagnostic_version = request->diagnostic_version;
 		if (trace) {
-			tasks[i].trace = &trace->requests[i];
-			tasks[i].trace->objects = task_nr;
+			request->tasks[i].trace = &trace->requests[i];
+			request->tasks[i].trace->objects = task_nr;
 		}
 		pos += task_nr;
 	}
-	if (threads_nr == 1) {
-		started = 1;
-		grep_index_ipc_query_thread(&tasks[0]);
-		if (tasks[0].result)
-			goto cleanup;
-		goto scatter;
+	if (!asynchronous && request->threads_nr == 1) {
+		request->started = 1;
+		grep_index_ipc_query_thread(&request->tasks[0]);
+		request->result = 0;
+		return request;
 	}
-	ALLOC_ARRAY(threads, threads_nr);
-	for (size_t i = 0; i < threads_nr; i++) {
-		if (pthread_create(&threads[i], NULL,
-				   grep_index_ipc_query_thread, &tasks[i]))
-			goto join;
-		started++;
+	ALLOC_ARRAY(request->threads, request->threads_nr);
+	for (size_t i = 0; i < request->threads_nr; i++) {
+		if (pthread_create(&request->threads[i], NULL,
+				   grep_index_ipc_query_thread, &request->tasks[i]))
+			return request;
+		request->started++;
 	}
 
-join:
-	for (size_t i = 0; i < started; i++)
-		pthread_join(threads[i], NULL);
-	if (started != threads_nr)
+	request->result = 0;
+	return request;
+}
+
+struct grep_index_ipc_query_request *grep_index_ipc_query_start(
+	struct repository *repo, const struct grep_index_query *query,
+	const struct object_id *oids, size_t nr, size_t max_parallel_requests,
+	struct grep_index_ipc_query_trace *trace)
+{
+	return start_grep_index_ipc_query(repo, query, oids, nr,
+					  max_parallel_requests, trace, HAVE_THREADS);
+}
+
+int grep_index_ipc_query_ready(struct grep_index_ipc_query_request *request)
+{
+	int ready;
+
+	pthread_mutex_lock(&request->mutex);
+	ready = request->completed == request->started;
+	pthread_mutex_unlock(&request->mutex);
+	return ready;
+}
+
+int grep_index_ipc_query_finish(struct grep_index_ipc_query_request *request,
+				unsigned char *maybe)
+{
+	struct grep_index_ipc_query_trace *trace = request->trace;
+	int result = request->result;
+
+	if (request->threads)
+		for (size_t i = 0; i < request->started; i++)
+			pthread_join(request->threads[i], NULL);
+	if (result)
 		goto cleanup;
-	for (size_t i = 0; i < threads_nr; i++)
-		if (tasks[i].result)
+	for (size_t i = 0; i < request->threads_nr && request->nr; i++)
+		if (request->tasks[i].result) {
+			result = -1;
 			goto cleanup;
-
-scatter:
-	for (size_t i = 0; i < nr; i++) {
+		}
+	for (size_t i = 0; i < request->nr; i++) {
 		struct grep_index_ipc_query_oid *entry =
-			oidmap_get(&seen, &oids[i]);
+			oidmap_get(&request->seen, &request->oids[i]);
 
 		if (!entry)
 			BUG("grep index query lost an object ID");
-		maybe[i] = unique_maybe[entry->pos];
+		maybe[i] = request->unique_maybe[entry->pos];
 	}
-	result = 0;
 
 cleanup:
 	if (trace)
-		trace->requests_started = started;
-	if (tasks && trace2_is_enabled()) {
-		grep_index_ipc_trace_query(repo, nr, unique_nr, tasks,
-					   threads_nr, started, result, trace);
-		if (diagnostic_version)
-			grep_index_ipc_trace_backend(repo, unique_nr, tasks,
-						     threads_nr, started, result, trace);
+		trace->requests_started = request->started;
+	if (request->tasks && trace2_is_enabled()) {
+		grep_index_ipc_trace_query(request->repo, request->nr,
+					   request->unique_nr, request->tasks, request->threads_nr,
+					   request->started, result, trace);
+		if (request->diagnostic_version)
+			grep_index_ipc_trace_backend(request->repo,
+						     request->unique_nr, request->tasks, request->threads_nr,
+						     request->started, result, trace);
 	}
-	oidmap_clear(&seen, 0);
-	free(unique_maybe);
-	free(unique_oids);
-	free(entries);
-	free(threads);
-	free(tasks);
-	free(path);
-	strbuf_release(&serialized);
+	oidmap_clear(&request->seen, 0);
+	free(request->unique_maybe);
+	free(request->unique_oids);
+	free(request->entries);
+	free(request->threads);
+	free(request->tasks);
+	free(request->path);
+	strbuf_release(&request->serialized);
+	pthread_mutex_destroy(&request->mutex);
+	free(request);
 	return result;
+}
+
+int grep_index_ipc_query_with_max_parallel_requests(
+	struct repository *repo, const struct grep_index_query *query,
+	const struct object_id *oids, size_t nr, unsigned char *maybe,
+	size_t max_parallel_requests, struct grep_index_ipc_query_trace *trace)
+{
+	struct grep_index_ipc_query_request *request = start_grep_index_ipc_query(
+		repo, query, oids, nr, max_parallel_requests, trace, 0);
+
+	return grep_index_ipc_query_finish(request, maybe);
 }
 
 int grep_index_ipc_query(struct repository *repo,

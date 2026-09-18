@@ -76,6 +76,21 @@ struct grep_index_ipc_query_trace {
 	uint64_t unavailable_prebuild, waited;
 };
 
+/*
+ * start() owns the serialized query and transport buffers. The repository,
+ * input OIDs and optional trace must remain valid until finish(), which joins
+ * every started thread and releases the request, including on failure.
+ * Only finish() writes results; failed requests leave the output untouched.
+ */
+struct grep_index_ipc_query_request;
+struct grep_index_ipc_query_request *grep_index_ipc_query_start(
+	struct repository *repo, const struct grep_index_query *query,
+	const struct object_id *oids, size_t nr, size_t max_parallel_requests,
+	struct grep_index_ipc_query_trace *trace);
+int grep_index_ipc_query_ready(struct grep_index_ipc_query_request *request);
+int grep_index_ipc_query_finish(struct grep_index_ipc_query_request *request,
+				unsigned char *maybe);
+
 int grep_index_ipc_query_with_max_parallel_requests(
 	struct repository *repo, const struct grep_index_query *query,
 	const struct object_id *oids, size_t nr, unsigned char *maybe,
