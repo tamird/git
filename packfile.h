@@ -222,6 +222,9 @@ extern void (*report_garbage)(unsigned seen_bits, const char *path);
 
 void pack_report(struct repository *repo);
 
+/* Report process-wide counters with no concurrent pack readers. */
+void trace_packfile_stats(void);
+
 /*
  * mmap the index file for the specified packfile (if it is not
  * already mmapped).  Return 0 on success.

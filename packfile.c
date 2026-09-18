@@ -13,6 +13,7 @@
 #include "hash-lookup.h"
 #include "commit.h"
 #include "object.h"
+#include "json-writer.h"
 #include "tag.h"
 #include "trace2.h"
 #include "trace.h"
@@ -190,6 +191,27 @@ void pack_report(struct repository *repo)
 		pack_mmap_calls,
 		pack_open_windows, peak_pack_open_windows,
 		sz_fmt(pack_mapped), sz_fmt(peak_pack_mapped));
+}
+
+void trace_packfile_stats(void)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+	int saved_errno = errno;
+
+	if (!trace2_is_enabled())
+		return;
+
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "mmap_calls", pack_mmap_calls);
+	jw_object_intmax(&jw, "open_windows", pack_open_windows);
+	jw_object_intmax(&jw, "peak_open_windows", peak_pack_open_windows);
+	jw_object_intmax(&jw, "mapped_bytes", pack_mapped);
+	jw_object_intmax(&jw, "peak_mapped_bytes", peak_pack_mapped);
+	jw_object_intmax(&jw, "open_fds", pack_open_fds);
+	jw_end(&jw);
+	trace2_data_json("pack", NULL, "usage", &jw);
+	jw_release(&jw);
+	errno = saved_errno;
 }
 
 /*

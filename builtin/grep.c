@@ -42,6 +42,7 @@
 #include "oid-array.h"
 #include "oidset.h"
 #include "pager.h"
+#include "packfile.h"
 #include "path.h"
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
@@ -4983,6 +4984,7 @@ int cmd_grep(int argc,
 	if (threads_started)
 		hit |= wait_all();
 	t_dispatch_end = getnanotime();
+	trace_packfile_stats();
 	producer_stats_ready = !!producer_stats;
 	producer_stats = NULL;
 	trace_worktree_finalize = !!worktree_cache;
