@@ -203,7 +203,7 @@ trace2_follow_numeric_value () {
 	sed -n "s#.*\"key\":\"$1\",\"value\":\"\([0-9][0-9]*\)\".*#\1#p" "$2"
 }
 
-test_expect_success 'full-tree follow samples requested tree OID reuse' '
+test_expect_success 'follow samples requested tree OID reuse' '
 	test_create_repo follow-oid-sample &&
 	(
 		cd follow-oid-sample &&
@@ -271,7 +271,26 @@ test_expect_success 'full-tree follow samples requested tree OID reuse' '
 		test_trace2_data diff follow-full-tree/count 2 <oid-sample-limited.trace &&
 		test_trace2_data diff follow-full-tree/tree-read/count 8 <oid-sample-limited.trace &&
 		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/same-search-repeats 2 <oid-sample-limited.trace &&
-		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats "[1-9][0-9]*" <oid-sample-limited.trace
+		test_trace2_data diff follow-full-tree/tree-read/requested-oid-sample/cross-search-repeats "[1-9][0-9]*" <oid-sample-limited.trace &&
+
+		# Reuse the selected tree as a root, before any full-tree search.
+		changed_tree=$(printf "100644 blob %s\titem06660\n" \
+			"$(git rev-parse HEAD:source)" | git mktree) &&
+		base=$(git commit-tree -m first "$first_oid") &&
+		changed=$(git commit-tree -m changed -p "$base" "$changed_tree") &&
+		restored=$(git commit-tree -m restored -p "$changed" "$first_oid") &&
+		printf "restored\nchanged\nfirst\n" >expect-ordinary &&
+		GIT_TRACE2_EVENT="$PWD/ordinary-sample.trace" \
+			git log --follow --format=%s "$restored" -- item06660 >actual-ordinary &&
+		test_cmp expect-ordinary actual-ordinary &&
+		test_trace2_data diff follow-ordinary-tree/sample/valid 1 <ordinary-sample.trace &&
+		test_trace2_data diff follow-ordinary-tree/sample/truncated 0 <ordinary-sample.trace &&
+		test_trace2_data diff follow-ordinary-tree/sample/first 1 <ordinary-sample.trace &&
+		test_trace2_data diff follow-ordinary-tree/sample/repeated "[1-9][0-9]*" <ordinary-sample.trace &&
+		first=$(trace2_follow_numeric_value follow-ordinary-tree/sample/first ordinary-sample.trace) &&
+		repeated=$(trace2_follow_numeric_value follow-ordinary-tree/sample/repeated ordinary-sample.trace) &&
+		test_trace2_data diff follow-ordinary-tree/sample/odb/reads "$((first + repeated))" <ordinary-sample.trace &&
+		test_trace2_data diff follow-ordinary-tree/sample/odb/loose "$((first + repeated))" <ordinary-sample.trace
 	)
 '
 

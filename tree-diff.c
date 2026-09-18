@@ -956,14 +956,23 @@ struct follow_oid_sample_entry {
 	uint64_t last_scan;
 };
 
+struct ordinary_oid_sample_entry {
+	struct ordinary_oid_sample_entry *next;
+	struct object_id oid;
+	int replace_mode;
+};
+
 struct diff_follow_oid_sample {
 	struct follow_oid_sample_entry **buckets;
+	struct ordinary_oid_sample_entry **ordinary_buckets;
 	pthread_mutex_t mutex;
 	uint64_t read_ordinal;
 	uint64_t scan_sequence;
 	size_t distinct;
+	size_t ordinary_distinct;
 	int truncated;
 	int invalid;
+	int ordinary_done;
 };
 
 struct follow_addremove_data {
@@ -1004,6 +1013,18 @@ void diff_follow_oid_sample_clear(struct repository *repo)
 			}
 		}
 		free(sample->buckets);
+		if (sample->ordinary_buckets) {
+			for (i = 0; i < FOLLOW_OID_SAMPLE_BUCKETS; i++) {
+				struct ordinary_oid_sample_entry *ordinary, *next;
+
+				for (ordinary = sample->ordinary_buckets[i];
+				     ordinary; ordinary = next) {
+					next = ordinary->next;
+					free(ordinary);
+				}
+			}
+			free(sample->ordinary_buckets);
+		}
 		pthread_mutex_unlock(&sample->mutex);
 		pthread_mutex_destroy(&sample->mutex);
 		free(sample);
@@ -1011,13 +1032,9 @@ void diff_follow_oid_sample_clear(struct repository *repo)
 	pthread_mutex_unlock(&follow_oid_init_mutex);
 }
 
-static void follow_oid_sample_begin(struct repository *repo,
-				    struct follow_addremove_data *data)
+static struct diff_follow_oid_sample *follow_oid_sample_get(struct repository *repo)
 {
 	struct diff_follow_oid_sample *sample;
-
-	if (!trace2_is_enabled())
-		return;
 
 	pthread_mutex_lock(&follow_oid_init_mutex);
 	sample = repo->follow_oid_sample;
@@ -1037,7 +1054,18 @@ static void follow_oid_sample_begin(struct repository *repo,
 		}
 	}
 	pthread_mutex_unlock(&follow_oid_init_mutex);
+	return sample;
+}
 
+static void follow_oid_sample_begin(struct repository *repo,
+				    struct follow_addremove_data *data)
+{
+	struct diff_follow_oid_sample *sample;
+
+	if (!trace2_is_enabled())
+		return;
+
+	sample = follow_oid_sample_get(repo);
 	if (!sample) {
 		data->oid_delta[0] = 1;
 		return;
@@ -1281,6 +1309,152 @@ static void follow_odb_result(const struct odb_read_result *result, void *data)
 		       result->packed_cache_copy_ns);
 }
 
+static void follow_odb_validate_elapsed(struct follow_odb_read *read,
+					uint64_t elapsed_ns)
+{
+	uint64_t location_ns = read->value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS -
+					   TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+	uint64_t content_ns = read->value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS -
+					  TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
+
+	if (location_ns > elapsed_ns || content_ns > elapsed_ns - location_ns)
+		read->value[0] = 1;
+}
+
+/* Ordinary samples have their own cap and never alter full-search samples. */
+static struct {
+	uint64_t first, repeated, first_bytes, repeated_bytes;
+	uint64_t first_ns, repeated_ns;
+	uint64_t odb[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS -
+		     TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID + 1];
+	int invalid, truncated, registered;
+} ordinary_sample;
+
+static void ordinary_sample_report(void)
+{
+	static const struct {
+		enum trace2_counter_id cid;
+		const char *name;
+	} odb_fields[] = {
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS, "odb/reads" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INMEMORY, "odb/inmemory" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOOSE, "odb/loose" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_COPY, "odb/packed-copy" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_PACKED_UNPACK, "odb/packed-unpack" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS, "odb/location-ns" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS, "odb/content-ns" },
+		{ TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS, "odb/copy-ns" },
+	};
+	const struct {
+		const char *name;
+		uint64_t value;
+	} fields[] = {
+		{ "first", ordinary_sample.first },
+		{ "repeated", ordinary_sample.repeated },
+		{ "first-bytes", ordinary_sample.first_bytes },
+		{ "repeated-bytes", ordinary_sample.repeated_bytes },
+		{ "first-ns", ordinary_sample.first_ns },
+		{ "repeated-ns", ordinary_sample.repeated_ns },
+	};
+	char key[128];
+	int saved_errno = errno;
+	int valid = !ordinary_sample.invalid;
+
+	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/valid", valid);
+	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/truncated",
+			   ordinary_sample.truncated);
+	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/modulus",
+			   TRACE2_FOLLOW_OID_SAMPLE_MODULUS);
+	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/distinct-cap",
+			   TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT);
+	for (size_t i = 0; valid && i < ARRAY_SIZE(fields); i++) {
+		xsnprintf(key, sizeof(key), "follow-ordinary-tree/sample/%s", fields[i].name);
+		trace2_data_intmax("diff", NULL, key, fields[i].value);
+	}
+	for (size_t i = 0; valid && i < ARRAY_SIZE(odb_fields); i++) {
+		xsnprintf(key, sizeof(key), "follow-ordinary-tree/sample/%s", odb_fields[i].name);
+		trace2_data_intmax("diff", NULL, key,
+				   ordinary_sample.odb[odb_fields[i].cid -
+						       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
+	}
+	errno = saved_errno;
+}
+
+/* Called under follow_oid_init_mutex, which also owns the ordinary maps. */
+static void ordinary_sample_add(uint64_t *sum, uint64_t value)
+{
+	if (value > INTMAX_MAX - *sum)
+		ordinary_sample.invalid = 1;
+	else
+		*sum += value;
+}
+
+static void ordinary_sample_read(struct repository *repo,
+				 const struct object_id *oid, int replace_mode,
+				 size_t size, uint64_t elapsed_ns,
+				 const struct follow_odb_read *read)
+{
+	struct diff_follow_oid_sample *sample = follow_oid_sample_get(repo);
+	struct ordinary_oid_sample_entry *entry;
+	size_t bucket;
+
+	pthread_mutex_lock(&follow_oid_init_mutex);
+	if (!ordinary_sample.registered) {
+		if (atexit(ordinary_sample_report))
+			ordinary_sample.invalid = 1;
+		else
+			ordinary_sample.registered = 1;
+	}
+	if (!sample || read->value[0] || replace_refs_enabled(repo) != replace_mode)
+		ordinary_sample.invalid = 1;
+	if (ordinary_sample.invalid || sample->ordinary_done)
+		goto done;
+	if (!sample->ordinary_buckets) {
+		sample->ordinary_buckets = calloc(FOLLOW_OID_SAMPLE_BUCKETS,
+						  sizeof(*sample->ordinary_buckets));
+		if (!sample->ordinary_buckets) {
+			ordinary_sample.invalid = 1;
+			goto done;
+		}
+	}
+	bucket = (follow_oid_hash(oid) ^ (replace_mode * 0x9e3779b9U)) &
+		 (FOLLOW_OID_SAMPLE_BUCKETS - 1);
+	for (entry = sample->ordinary_buckets[bucket]; entry; entry = entry->next)
+		if (entry->replace_mode == replace_mode &&
+		    entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
+			break;
+	if (!entry) {
+		if (sample->ordinary_distinct == TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT) {
+			sample->ordinary_done = ordinary_sample.truncated = 1;
+			goto done;
+		}
+		entry = malloc(sizeof(*entry));
+		if (!entry) {
+			ordinary_sample.invalid = 1;
+			goto done;
+		}
+		oidcpy(&entry->oid, oid);
+		entry->replace_mode = replace_mode;
+		entry->next = sample->ordinary_buckets[bucket];
+		sample->ordinary_buckets[bucket] = entry;
+		sample->ordinary_distinct++;
+		ordinary_sample_add(&ordinary_sample.first, 1);
+		ordinary_sample_add(&ordinary_sample.first_bytes, size);
+		ordinary_sample_add(&ordinary_sample.first_ns, elapsed_ns);
+	} else {
+		ordinary_sample_add(&ordinary_sample.repeated, 1);
+		ordinary_sample_add(&ordinary_sample.repeated_bytes, size);
+		ordinary_sample_add(&ordinary_sample.repeated_ns, elapsed_ns);
+	}
+	for (enum trace2_counter_id cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS;
+	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++)
+		ordinary_sample_add(
+			&ordinary_sample.odb[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID],
+			read->value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
+done:
+	pthread_mutex_unlock(&follow_oid_init_mutex);
+}
+
 /*
  * Only the unrestricted --follow search installs follow_change. In
  * particular, blame also sets single_follow without entering that search.
@@ -1292,11 +1466,11 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 					  const struct object_id *oid)
 {
 	struct follow_odb_read read;
-	uint64_t elapsed_ns, location_ns, content_ns;
+	uint64_t elapsed_ns;
 	enum trace2_counter_id cid;
 	size_t size;
 	void *buffer;
-	int saved_errno, traced, replace_mode;
+	int saved_errno, traced, replace_mode, selected;
 
 	if (opt->change != follow_change) {
 		if (opt->trace_pruning_tree_read && oid && trace2_is_enabled()) {
@@ -1315,12 +1489,27 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 
 		saved_errno = errno;
 		follow_tree_cache_probe_ordinary(opt->repo, oid);
+		selected = !(oid->hash[0] & (TRACE2_FOLLOW_OID_SAMPLE_MODULUS - 1)) &&
+			   follow_tree_cache_eligible(opt->repo, oid);
+		if (selected) {
+			replace_mode = replace_refs_enabled(opt->repo);
+			memset(&read, 0, sizeof(read));
+		}
 		errno = saved_errno;
 		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
 		errno = saved_errno;
-		buffer = fill_tree_descriptor(opt->repo, desc, oid);
+		if (selected)
+			buffer = fill_tree_descriptor_with_results(
+				opt->repo, desc, oid, follow_odb_result, &read, &size);
+		else
+			buffer = fill_tree_descriptor(opt->repo, desc, oid);
 		saved_errno = errno;
-		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		if (selected) {
+			follow_odb_validate_elapsed(&read, elapsed_ns);
+			ordinary_sample_read(opt->repo, oid, replace_mode, size,
+					     elapsed_ns, &read);
+		}
 		errno = saved_errno;
 		return buffer;
 	}
@@ -1355,12 +1544,7 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 	if (!traced)
 		return buffer;
 	elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE_READ);
-	location_ns = read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_LOCATION_NS -
-				TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
-	content_ns = read.value[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_CONTENT_NS -
-			       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID];
-	if (location_ns > elapsed_ns || content_ns > elapsed_ns - location_ns)
-		read.value[0] = 1;
+	follow_odb_validate_elapsed(&read, elapsed_ns);
 	if (!read.lookup[0] && !read.value[0] &&
 	    read.lookup[TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_LOCATION_COUNT -
 			TRACE2_COUNTER_ID_DIFF_FOLLOW_LOOKUP_INVALID] !=
