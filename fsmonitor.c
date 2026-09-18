@@ -221,7 +221,8 @@ static size_t handle_path_with_trailing_slash(
 	struct index_state *istate, const char *name, int pos,
 	struct fsmonitor_refresh_stats *stats);
 
-#define FSMONITOR_ICASE_SCAN_LIMIT 1024
+#define FSMONITOR_ICASE_SCAN_MIN 1024
+#define FSMONITOR_ICASE_SCAN_MAX 4096
 
 struct fsmonitor_refresh_stats {
 	struct strset exact_dirs;
@@ -362,6 +363,13 @@ static int find_icase_match(
 	struct fsmonitor_icase_match *match)
 {
 	int matches = 0;
+	size_t scan_limit = istate->cache_nr / 512;
+
+	/* Spend more on sibling scans when fallback would hash a large index. */
+	if (scan_limit < FSMONITOR_ICASE_SCAN_MIN)
+		scan_limit = FSMONITOR_ICASE_SCAN_MIN;
+	else if (scan_limit > FSMONITOR_ICASE_SCAN_MAX)
+		scan_limit = FSMONITOR_ICASE_SCAN_MAX;
 
 	for (size_t i = range_start; i < range_end;) {
 		const struct cache_entry *ce = istate->cache[i];
@@ -373,7 +381,7 @@ static int find_icase_match(
 		size_t j;
 		size_t dir_start = SIZE_MAX;
 
-		if (stats->scans == FSMONITOR_ICASE_SCAN_LIMIT)
+		if (stats->scans == scan_limit)
 			return -1;
 		stats->scans++;
 
