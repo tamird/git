@@ -89,6 +89,19 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "filespec/load-driver",
 		.want_per_thread_events = 0,
 	},
+	/* One query in 128 per attr_check; interval counts give the sample size. */
+	[TRACE2_TIMER_ID_ATTR_PREPARE] = {
+		.category = "attr",
+		.name = "sample/prepare",
+	},
+	[TRACE2_TIMER_ID_ATTR_INITIALIZE] = {
+		.category = "attr",
+		.name = "sample/initialize",
+	},
+	[TRACE2_TIMER_ID_ATTR_MATCH] = {
+		.category = "attr",
+		.name = "sample/match",
+	},
 	/* Span-hash helpers also serve rewrite breaking, not only renames. */
 	[TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD] = {
 		.category = "diff",

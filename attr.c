@@ -25,6 +25,7 @@
 #include "odb.h"
 #include "setup.h"
 #include "thread-utils.h"
+#include "trace2.h"
 #include "tree-walk.h"
 #include "object-name.h"
 
@@ -1187,6 +1188,15 @@ static void collect_some_attrs(struct index_state *istate,
 	int pathlen, rem, dirlen;
 	const char *cp, *last_slash = NULL;
 	int basename_offset;
+	int sample = 0, saved_errno;
+
+	if (trace2_is_enabled()) {
+		saved_errno = errno;
+		trace2_counter_add(TRACE2_COUNTER_ID_ATTR_QUERIES, 1);
+		/* Sample each check independently, including its first query. */
+		sample = !(check->trace_query_count++ % 128);
+		errno = saved_errno;
+	}
 
 	for (cp = path; *cp; cp++) {
 		if (*cp == '/' && cp[1])
@@ -1201,12 +1211,34 @@ static void collect_some_attrs(struct index_state *istate,
 		dirlen = 0;
 	}
 
+	if (sample) {
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_ATTR_PREPARE);
+		errno = saved_errno;
+	}
 	prepare_attr_stack(istate, tree_oid, path, dirlen, &check->stack);
+	if (sample) {
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_ATTR_PREPARE);
+		trace2_timer_start(TRACE2_TIMER_ID_ATTR_INITIALIZE);
+		errno = saved_errno;
+	}
 	all_attrs_init(&g_attr_hashmap, check);
 	determine_macros(check->all_attrs, check->stack);
+	if (sample) {
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_ATTR_INITIALIZE);
+		trace2_timer_start(TRACE2_TIMER_ID_ATTR_MATCH);
+		errno = saved_errno;
+	}
 
 	rem = check->all_attrs_nr;
 	fill(path, pathlen, basename_offset, check->stack, check->all_attrs, rem);
+	if (sample) {
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_ATTR_MATCH);
+		errno = saved_errno;
+	}
 }
 
 static const char *default_attr_source_tree_object_name;

@@ -190,6 +190,7 @@ struct attr_check {
 	int all_attrs_nr;
 	struct all_attrs_item *all_attrs;
 	struct attr_stack *stack;
+	unsigned int trace_query_count;
 };
 
 struct attr_check *attr_check_alloc(void);
