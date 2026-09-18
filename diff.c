@@ -2310,16 +2310,24 @@ static void diff_words_flush(struct emit_callback *ecbdata)
 static void diff_filespec_load_driver(struct diff_filespec *one,
 				      struct index_state *istate)
 {
+	int saved_errno;
+
 	/* Use already-loaded driver */
 	if (one->driver)
 		return;
 
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_FILESPEC_LOAD_DRIVER);
+	errno = saved_errno;
 	if (S_ISREG(one->mode))
 		one->driver = userdiff_find_by_path(istate, one->path);
 
 	/* Fallback to default settings */
 	if (!one->driver)
 		one->driver = userdiff_find_by_name("default");
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FILESPEC_LOAD_DRIVER);
+	errno = saved_errno;
 }
 
 static const char *userdiff_word_regex(struct diff_filespec *one,

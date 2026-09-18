@@ -84,6 +84,11 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "rename/populate",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_DIFF_FILESPEC_LOAD_DRIVER] = {
+		.category = "diff",
+		.name = "filespec/load-driver",
+		.want_per_thread_events = 0,
+	},
 	/* Span-hash helpers also serve rewrite breaking, not only renames. */
 	[TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD] = {
 		.category = "diff",
