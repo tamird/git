@@ -57,7 +57,7 @@ static int do_send_query(const char *token)
 	if (!token || !*token)
 		token = get_token_from_index();
 
-	ret = fsmonitor_ipc__send_query(token, &answer);
+	ret = fsmonitor_ipc__send_query(token, &answer, FSMONITOR_QUERY_INDEX);
 	if (ret < 0)
 		die("could not query fsmonitor--daemon");
 
@@ -265,7 +265,8 @@ static void *hammer_thread_proc(void *_hammer_thread_data)
 	for (k = 0; k < data->nr_requests; k++) {
 		strbuf_reset(&answer);
 
-		ret = fsmonitor_ipc__send_query(data->token, &answer);
+		ret = fsmonitor_ipc__send_query(data->token, &answer,
+						FSMONITOR_QUERY_INDEX);
 		if (ret < 0)
 			data->sum_errors++;
 		else

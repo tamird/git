@@ -352,7 +352,8 @@ static int refresh_index_quietly(const struct pathspec *pathspec,
 		reuse_outcome = DIFF_INDEX_REUSE_NON_IPC;
 	else if (!repo_verify_index(the_repository))
 		reuse_outcome = DIFF_INDEX_REUSE_INDEX_UNVERIFIED;
-	else if (fsmonitor_ipc__send_query(token, &answer))
+	else if (fsmonitor_ipc__send_query(token, &answer,
+					   FSMONITOR_QUERY_AUXILIARY))
 		reuse_outcome = DIFF_INDEX_REUSE_QUERY_FAILED;
 	else if (answer.len != strlen(token) + 1)
 		reuse_outcome = DIFF_INDEX_REUSE_REPLY_LENGTH_MISMATCH;

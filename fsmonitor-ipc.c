@@ -43,7 +43,8 @@ enum ipc_active_state fsmonitor_ipc__get_state(void)
 }
 
 int fsmonitor_ipc__send_query(const char *since_token UNUSED,
-			      struct strbuf *answer UNUSED)
+			      struct strbuf *answer UNUSED,
+			      enum fsmonitor_query_kind kind UNUSED)
 {
 	return -1;
 }
@@ -154,7 +155,8 @@ static int spawn_daemon(void)
 }
 
 int fsmonitor_ipc__send_query(const char *since_token,
-			      struct strbuf *answer)
+			      struct strbuf *answer,
+			      enum fsmonitor_query_kind kind)
 {
 	struct strbuf command = STRBUF_INIT;
 	struct strbuf identity = STRBUF_INIT;
@@ -183,6 +185,8 @@ int fsmonitor_ipc__send_query(const char *since_token,
 	strbuf_addstr(&command, FSMONITOR_IPC_QUERY_PREFIX);
 	strbuf_addbuf(&command, &identity);
 	strbuf_addch(&command, '\n');
+	if (kind == FSMONITOR_QUERY_AUXILIARY)
+		strbuf_addstr(&command, FSMONITOR_IPC_KEEP_HISTORY_PREFIX);
 	strbuf_addstr(&command, tok);
 #ifdef __APPLE__
 	fsmonitor_ipc__format_request(&request, command.buf, command.len);
@@ -718,7 +722,8 @@ get_base:
 			answer.buf + 4, istate->fsmonitor_last_update);
 		if (strcmp(generation.reason, "same-token-generation"))
 			goto done;
-		if (fsmonitor_ipc__send_query(answer.buf + 4, &delta) ||
+		if (fsmonitor_ipc__send_query(answer.buf + 4, &delta,
+					      FSMONITOR_QUERY_AUXILIARY) ||
 		    !delta.len || delta.len > 32 * 1024 * 1024)
 			goto done;
 		end = memchr(delta.buf, '\0',

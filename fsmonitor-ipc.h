@@ -7,6 +7,7 @@ struct repository;
 struct index_state;
 
 #define FSMONITOR_IPC_QUERY_PREFIX "query-v1 "
+#define FSMONITOR_IPC_KEEP_HISTORY_PREFIX    "keep-history "
 #define FSMONITOR_IPC_WORKTREE_ID_HEX 64
 #define FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX "untracked-cache-v1 "
 #define FSMONITOR_IPC_UNTRACKED_CACHE_MAX (8 * 1024 * 1024)
@@ -37,6 +38,13 @@ enum fsmonitor_untracked_cache_save_mode {
 	FSMONITOR_UNTRACKED_CACHE_SAVE_REPAIR,
 	/* Preserve a snapshot that another command saved while this one ran. */
 	FSMONITOR_UNTRACKED_CACHE_SAVE_IF_ABSENT,
+};
+
+enum fsmonitor_query_kind {
+	/* The token came from the index and may advance history retention. */
+	FSMONITOR_QUERY_INDEX,
+	/* The token may be newer than the index; preserve its older history. */
+	FSMONITOR_QUERY_AUXILIARY,
 };
 
 /* Hash the canonical worktree root and its stable filesystem identity. */
@@ -73,7 +81,8 @@ enum ipc_active_state fsmonitor_ipc__get_state(void);
  * Returns -1 on error; 0 on success.
  */
 int fsmonitor_ipc__send_query(const char *since_token,
-			      struct strbuf *answer);
+			      struct strbuf *answer,
+			      enum fsmonitor_query_kind kind);
 
 /*
  * Connect to a `git-fsmonitor--daemon` process via simple-ipc and

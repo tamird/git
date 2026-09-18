@@ -2154,6 +2154,50 @@ test_expect_success 'cold all-mode status populates an empty normal cache' '
 	)
 '
 
+test_expect_success 'snapshot replay preserves history needed by the disk index' '
+	test_when_finished "stop_daemon_delete_repo test_snapshot_history" &&
+	git init test_snapshot_history &&
+	(
+		cd test_snapshot_history &&
+		test_commit base tracked &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true
+	) &&
+	GIT_TEST_FSMONITOR_TRUNCATE_DELAY=0 \
+		start_daemon -C test_snapshot_history &&
+	(
+		cd test_snapshot_history &&
+		git status --porcelain >../snapshot-history.initial &&
+		test_must_be_empty ../snapshot-history.initial &&
+		git --no-optional-locks status --porcelain >/dev/null &&
+		git hash-object .git/index >../snapshot-history.index-before &&
+		for i in 1 2 3
+		do
+			echo "$i" >untracked-$i &&
+			GIT_TRACE2_EVENT="$PWD/../snapshot-history-$i.trace" \
+				git --no-optional-locks status --porcelain \
+				>../snapshot-history.actual &&
+			test-tool fsmonitor-client query >../snapshot-history.raw &&
+			nul_to_q <../snapshot-history.raw >../snapshot-history.reply &&
+			test_grep ! "Q/Q" ../snapshot-history.reply || return 1
+		done &&
+		test_trace2_data fsmonitor untracked-cache/replay 1 \
+			<../snapshot-history-3.trace &&
+		printf "?? untracked-%s\n" 1 2 3 >../snapshot-history.expect &&
+		test_cmp ../snapshot-history.expect ../snapshot-history.actual &&
+		git hash-object .git/index >../snapshot-history.index-after &&
+		test_cmp ../snapshot-history.index-before \
+			../snapshot-history.index-after &&
+
+		# A regular query at the newer token can still retire old history.
+		newer=$(sed "s/Q.*//" ../snapshot-history.reply) &&
+		test-tool fsmonitor-client query --token="$newer" >/dev/null &&
+		test-tool fsmonitor-client query >../snapshot-history.raw &&
+		nul_to_q <../snapshot-history.raw >../snapshot-history.reply &&
+		test_grep "Q/Q" ../snapshot-history.reply
+	)
+'
+
 test_expect_success 'lock-free status reuses current untracked snapshot' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot" &&
 	git init test_untracked_snapshot &&

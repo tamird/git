@@ -565,6 +565,8 @@ static void fsmonitor_batch__combine(struct fsmonitor_batch *batch_dest,
  * recent changes *since* that new token.  So as tokens advance into the
  * future, older batch items will never be requested/needed.  So we can
  * truncate them without loss of functionality.
+ * Queries that only validate a newer in-memory snapshot must not advance
+ * this boundary: the next command may still read the older index token.
  *
  * However, multiple commands may be talking to the daemon concurrently
  * or perform a slow command, so a little "token skew" is possible.
@@ -582,7 +584,7 @@ static void fsmonitor_batch__combine(struct fsmonitor_batch *batch_dest,
  * Return the obsolete portion of the list after we have removed it from
  * the official list so that the caller can free it after leaving the lock.
  */
-#define MY_TIME_DELAY_SECONDS (5 * 60) /* seconds */
+# define MY_TIME_DELAY_SECONDS (5 * 60) /* seconds */
 
 static struct fsmonitor_batch *with_lock__truncate_old_batches(
 	struct fsmonitor_daemon_state *state,
@@ -592,6 +594,8 @@ static struct fsmonitor_batch *with_lock__truncate_old_batches(
 
 	const struct fsmonitor_batch *batch;
 	struct fsmonitor_batch *remainder;
+	unsigned long delay = git_env_ulong("GIT_TEST_FSMONITOR_TRUNCATE_DELAY",
+					    MY_TIME_DELAY_SECONDS);
 
 	if (!batch_marker)
 		return NULL;
@@ -606,7 +610,7 @@ static struct fsmonitor_batch *with_lock__truncate_old_batches(
 		if (!batch->pinned_time) /* an overflow batch */
 			continue;
 
-		t = batch->pinned_time + MY_TIME_DELAY_SECONDS;
+		t = batch->pinned_time + delay;
 		if (t > batch_marker->pinned_time) /* too close to marker */
 			continue;
 
@@ -1007,6 +1011,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	int do_flush = 0;
 	int do_cookie = 0;
 	int invalid_binding = 0;
+	int keep_history = 0;
 	int result = 0;
 	enum fsmonitor_cookie_item_result cookie_result;
 
@@ -1039,7 +1044,13 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 	 *            | flush NUL
 	 *            | <V1-time-since-epoch-ns> NUL
 	 *            | <V2-opaque-fsmonitor-token> NUL
+	 *            | keep-history SP <V2-opaque-fsmonitor-token> NUL
 	 */
+	if (!invalid_binding &&
+	    skip_prefix(command, FSMONITOR_IPC_KEEP_HISTORY_PREFIX, &p)) {
+		keep_history = 1;
+		command = p;
+	}
 
 	if (!invalid_binding &&
 	    skip_prefix(command, FSMONITOR_IPC_UNTRACKED_CACHE_PREFIX, &p)) {
@@ -1316,7 +1327,7 @@ static int do_handle_client(struct fsmonitor_daemon_state *state,
 			 * that work.
 			 */
 			fsmonitor_free_token_data(token_data);
-		} else if (batch) {
+		} else if (batch && !keep_history) {
 			/*
 			 * We are holding the lock and are the only
 			 * reader of the ref-counted portion of the

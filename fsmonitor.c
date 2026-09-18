@@ -939,8 +939,9 @@ void refresh_fsmonitor(struct index_state *istate)
 	if (fsm_mode == FSMONITOR_MODE_IPC) {
 		query_success = !fsmonitor_ipc__send_query(
 			istate->fsmonitor_last_update ?
-			istate->fsmonitor_last_update : "builtin:fake",
-			&query_result);
+				istate->fsmonitor_last_update :
+				"builtin:fake",
+			&query_result, FSMONITOR_QUERY_INDEX);
 		if (query_success) {
 			/*
 			 * The response contains a series of nul terminated
