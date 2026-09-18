@@ -505,6 +505,27 @@ test_expect_success 'query binary macro directly' '
 	test_cmp expect actual
 '
 
+test_expect_success 'unqueried macro values control nested expansion' '
+	cat >.gitattributes <<-\EOF &&
+	[attr]inner diff=macro
+	[attr]outer inner
+	* outer
+	unset -inner
+	unspecified !inner
+	value inner=value
+	direct !diff
+	EOF
+	cat >expect <<-\EOF &&
+	file: diff: macro
+	unset: diff: unspecified
+	unspecified: diff: unspecified
+	value: diff: unspecified
+	direct: diff: unspecified
+	EOF
+	git check-attr diff -- file unset unspecified value direct >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success SYMLINKS 'set up symlink tests' '
 	echo "* test" >attr &&
 	rm -f .gitattributes

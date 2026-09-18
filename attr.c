@@ -136,6 +136,7 @@ struct all_attrs_item {
 	 * definition of the macro
 	 */
 	const struct match_attr *macro;
+	unsigned requested:1;
 };
 
 /*
@@ -184,7 +185,10 @@ static void all_attrs_init(struct attr_hashmap *map, struct attr_check *check)
 	for (i = 0; i < check->all_attrs_nr; i++) {
 		check->all_attrs[i].value = ATTR__UNKNOWN;
 		check->all_attrs[i].macro = NULL;
+		check->all_attrs[i].requested = !check->nr;
 	}
+	for (i = 0; i < check->nr; i++)
+		check->all_attrs[check->items[i].attr->attr_nr].requested = 1;
 }
 
 /*
@@ -1114,6 +1118,20 @@ static int fill_one(struct all_attrs_item *all_attrs,
 	return rem;
 }
 
+static int attrs_are_relevant(const struct match_attr *a,
+			      const struct all_attrs_item *all_attrs)
+{
+	for (size_t i = 0; i < a->num_attr; i++) {
+		const struct all_attrs_item *item =
+			&all_attrs[a->state[i].attr->attr_nr];
+
+		/* Macro values also control whether lower rules can expand them. */
+		if (item->requested || item->macro)
+			return 1;
+	}
+	return 0;
+}
+
 static int fill(const char *path, int pathlen, int basename_offset,
 		const struct attr_stack *stack,
 		struct all_attrs_item *all_attrs, int rem)
@@ -1124,7 +1142,7 @@ static int fill(const char *path, int pathlen, int basename_offset,
 
 		for (i = stack->num_matches; 0 < rem && 0 < i; i--) {
 			const struct match_attr *a = stack->attrs[i - 1];
-			if (a->is_macro)
+			if (a->is_macro || !attrs_are_relevant(a, all_attrs))
 				continue;
 			if (path_matches(path, pathlen, basename_offset,
 					 &a->u.pat, base, stack->originlen))
