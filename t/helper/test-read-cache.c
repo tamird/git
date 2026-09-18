@@ -3,6 +3,7 @@
 #include "test-tool.h"
 #include "config.h"
 #include "environment.h"
+#include "grep-index-identity.h"
 #include "name-hash.h"
 #include "read-cache-ll.h"
 #include "repository.h"
@@ -13,9 +14,16 @@ int cmd__read_cache(int argc, const char **argv)
 	int i, cnt = 1;
 	const char *name = NULL;
 	const char *probe_name = NULL;
+	const char *replace_old = NULL;
+	const char *replace_new = NULL;
 
 	if (argc > 1 &&
-	    skip_prefix(argv[1], "--icase-probe=", &probe_name)) {
+	    skip_prefix(argv[1], "--identity-replace=", &replace_old)) {
+		if (argc != 3)
+			die("expected replacement file after --identity-replace");
+		replace_new = argv[2];
+	} else if (argc > 1 &&
+		   skip_prefix(argv[1], "--icase-probe=", &probe_name)) {
 		argc--;
 		argv++;
 	} else if (argc > 1 &&
@@ -28,6 +36,31 @@ int cmd__read_cache(int argc, const char **argv)
 		cnt = strtol(argv[1], NULL, 0);
 	setup_git_directory(the_repository);
 	repo_config(the_repository, git_default_config, NULL);
+
+	if (replace_old) {
+		struct grep_index_identity before, after;
+		struct index_state *istate = the_repository->index;
+		size_t old_nr;
+		int pos;
+
+		setup_work_tree(the_repository);
+		repo_read_index(the_repository);
+		old_nr = istate->cache_nr;
+		if (grep_index_identity_get(the_repository, istate, &before))
+			die("unable to identify loaded index");
+		pos = index_name_pos(istate, replace_old, strlen(replace_old));
+		if (pos < 0)
+			die("index entry to replace does not exist");
+		remove_index_entry_at(istate, pos);
+		if (add_file_to_index(istate, replace_new, 0) ||
+		    istate->cache_nr != old_nr)
+			die("unable to replace entry in loaded index");
+		if (grep_index_identity_get(the_repository, istate, &after) ||
+		    oideq(&before.oid_sequence, &after.oid_sequence) ||
+		    oideq(&before.worktree, &after.worktree))
+			die("in-memory index mutation reused stale identity");
+		return 0;
+	}
 
 	if (probe_name) {
 		enum index_file_icase_probe_result result;

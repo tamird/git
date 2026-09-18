@@ -2517,6 +2517,7 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 				 const char *gitdir, unsigned int options)
 {
 	struct split_index *split_index;
+	unsigned int entry_changes_before_merge;
 	int ret;
 	char *base_oid_hex;
 	char *base_path;
@@ -2576,9 +2577,14 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 
 	if (!(options & READ_INDEX_NO_SIDE_EFFECTS))
 		freshen_shared_index(base_path, 0);
+	entry_changes_before_merge =
+		istate->cache_changed & (CE_ENTRY_ADDED | CE_ENTRY_REMOVED);
 	trace2_region_enter("index", "shared/merge", istate->repo);
 	merge_base_index(istate);
 	trace2_region_leave("index", "shared/merge", istate->repo);
+	/* The merged additions and removals were already stored on disk. */
+	istate->cache_changed &= ~(CE_ENTRY_ADDED | CE_ENTRY_REMOVED);
+	istate->cache_changed |= entry_changes_before_merge;
 	post_read_index_from(istate, options);
 	trace_performance_leave("read cache %s", base_path);
 	free(base_path);

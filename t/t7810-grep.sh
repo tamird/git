@@ -5510,8 +5510,28 @@ test_expect_success NO_FORCED_SPLIT_INDEX \
 			<trace-recovered &&
 		test_trace2_data grep worktree_blob/recorded_equal 0 \
 			<trace-recovered &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-split-added-repeat" \
+			git grep "absent split base" -- target &&
+		test_trace2_data grep index_identity/token_read_outcome 0 \
+			<trace-split-added-repeat &&
 
 		git rm --cached cycle &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-split-deleted" \
+			git grep "absent split base" -- target &&
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/trace-split-deleted-repeat" \
+			git grep "absent split base" -- target &&
+		test_trace2_data grep index_identity/token_read_outcome 0 \
+			<trace-split-deleted-repeat &&
+		echo "in-memory addition" >memory-only &&
+		GIT_TRACE2_EVENT="$PWD/trace-split-memory-replace" \
+			test-tool read-cache --identity-replace=target memory-only &&
+		test_trace2_data grep index_identity/token_read_outcome 0 \
+			<trace-split-memory-replace &&
+		test_trace2_data grep index_identity/token_read_outcome 4 \
+			<trace-split-memory-replace &&
 		>.git/fsmonitor-cycle &&
 		printf "split base cycle\r\n" >cycle &&
 		test-tool chmtime =-5 cycle &&
