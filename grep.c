@@ -1981,7 +1981,7 @@ static int look_ahead(struct grep_opt *opt,
 		*left_p = 0;
 		return 1;
 	}
-	if (misses >= 2 && !memchr(bol, '\n', earliest))
+	if (misses && !memchr(bol, '\n', earliest))
 		(*dense_hits)++;
 	else
 		*dense_hits = 0;
