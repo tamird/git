@@ -2049,8 +2049,11 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 			      (uintmax_t)curpos, p->pack_name);
 			data = NULL;
 		} else {
+			/* Both buffers remain private until cache insertion below. */
+			obj_read_unlock();
 			data = patch_delta(base, base_size, delta_data,
 					   delta_size, &size);
+			obj_read_lock();
 
 			/*
 			 * We could not apply the delta; warn the user, but
@@ -2067,11 +2070,10 @@ static void *unpack_entry_with_result(struct repository *r, struct packed_git *p
 
 		/*
 		 * We delay adding `base` to the cache until the end of the loop
-		 * because unpack_compressed_entry() momentarily releases the
-		 * obj_read_mutex, giving another thread the chance to access
-		 * the cache. Therefore, if `base` was already there, this other
-		 * thread could free() it (e.g. to make space for another entry)
-		 * before we are done using it.
+		 * because inflation and delta application release obj_read_mutex,
+		 * giving another thread the chance to access the cache. If `base`
+		 * was already there, this other thread could free() it (e.g. to
+		 * make space for another entry) before we are done using it.
 		 */
 		if (!external_base)
 			add_delta_base_cache(p, base_obj_offset, base, base_size,
