@@ -917,8 +917,10 @@ void fsmonitor_ipc__save_untracked_cache(
 		goto done;
 	}
 
+	trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_SERIALIZE);
 	encoding = write_untracked_snapshot(&snapshot, istate->untracked,
 					    &bound);
+	trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_SERIALIZE);
 	if (encoding == UNTRACKED_CACHE_ENCODING_TOO_LARGE) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED;
 		trace2_data_intmax("fsmonitor", istate->repo,
@@ -952,7 +954,12 @@ void fsmonitor_ipc__save_untracked_cache(
 	}
 	if (snapshot.len > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
 	    git_env_bool("GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE", 0)) {
-		if (compress_untracked_cache(&snapshot)) {
+		int ret;
+
+		trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_COMPRESS);
+		ret = compress_untracked_cache(&snapshot);
+		trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_COMPRESS);
+		if (ret) {
 			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
 			trace2_data_string("fsmonitor", istate->repo,
 					   "untracked-cache/save-reason",

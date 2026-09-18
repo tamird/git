@@ -546,6 +546,16 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "revalidate/ignore-attempt",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_SERIALIZE] = {
+		.category = "fsmonitor",
+		.name = "untracked-cache/save/serialize",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_COMPRESS] = {
+		.category = "fsmonitor",
+		.name = "untracked-cache/save/compress",
+		.want_per_thread_events = 0,
+	},
 
 	[TRACE2_TIMER_ID_DIR_IGNORE_LOAD] = {
 		.category = "dir",
