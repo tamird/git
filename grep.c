@@ -1969,8 +1969,11 @@ static int look_ahead(struct grep_opt *opt,
 		if (hit < 0)
 			return -1;
 		if (!hit) {
-			/* An absent literal stays absent in every later suffix. */
-			if (p->is_fixed && !p->ignore_case)
+			/*
+			 * Literals and generated multiline candidates stay absent
+			 * as we advance to later line starts in the same buffer.
+			 */
+			if (p->pcre2_lookahead || (p->is_fixed && !p->ignore_case))
 				p->lookahead_exhausted = 1;
 			else
 				misses++;
