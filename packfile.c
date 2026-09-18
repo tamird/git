@@ -1387,6 +1387,8 @@ static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 				   struct odb_read_result *result)
 {
 	struct delta_base_cache_entry *ent;
+	int trace_copy;
+	void *data;
 
 	ent = get_delta_base_cache_entry(p, base_offset);
 	if (result)
@@ -1400,7 +1402,21 @@ static void *cache_or_unpack_entry(struct repository *r, struct packed_git *p,
 		*type = ent->type;
 	if (base_size)
 		*base_size = ent->size;
-	return xmemdupz(ent->data, ent->size);
+	trace_copy = obj_read_lock_trace_enabled();
+	if (trace_copy) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_PACKED_CACHE_COPY);
+		errno = saved_errno;
+	}
+	data = xmemdupz(ent->data, ent->size);
+	if (trace_copy) {
+		int saved_errno = errno;
+
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_PACKED_CACHE_COPY);
+		errno = saved_errno;
+	}
+	return data;
 }
 
 static inline void release_delta_base_cache(struct delta_base_cache_entry *ent)

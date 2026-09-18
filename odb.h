@@ -663,6 +663,15 @@ void obj_read_lock_with_trace(void);
 void obj_read_unlock_with_trace(void);
 #endif
 
+static inline int obj_read_lock_trace_enabled(void)
+{
+#ifndef NO_PTHREADS
+	return obj_read_use_lock && obj_read_lock_trace_ready;
+#else
+	return 0;
+#endif
+}
+
 static inline void obj_read_lock(void)
 {
 	if (obj_read_use_lock) {

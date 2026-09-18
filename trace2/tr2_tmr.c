@@ -511,6 +511,14 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.category = "grep",
 		.name = "object-lock-held",
 	},
+	[TRACE2_TIMER_ID_GREP_PACKED_ENTRY_LOOKUP] = {
+		.category = "grep",
+		.name = "packed/entry-lookup",
+	},
+	[TRACE2_TIMER_ID_GREP_PACKED_CACHE_COPY] = {
+		.category = "grep",
+		.name = "packed/cache-copy",
+	},
 	[TRACE2_TIMER_ID_GREP_PRODUCER_LOCK] = {
 		.category = "grep",
 		.name = "dispatch/producer-lock",

@@ -175,6 +175,7 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	struct pack_entry e;
 	uint64_t started = 0, finished;
 	int ret, found, timed = 0;
+	int trace_lookup = obj_read_lock_trace_enabled();
 
 	if (result && !oi->contentp &&
 	    (!oi->sizep || !result->size_info_enabled))
@@ -209,8 +210,20 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 
 	if (result && !result->packed_entry_location_invalid)
 		timed = !packed_entry_location_time(&started);
+	if (trace_lookup) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_PACKED_ENTRY_LOOKUP);
+		errno = saved_errno;
+	}
 	found = find_pack_entry(packed, oid, &e, !!oi, flags, &bad_pack,
 				lookup, diagnostic);
+	if (trace_lookup) {
+		int saved_errno = errno;
+
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_PACKED_ENTRY_LOOKUP);
+		errno = saved_errno;
+	}
 	if (diagnostic && !diagnostic->invalid) {
 		if (packed_entry_location_time(&finished) ||
 		    finished < diagnostic->started)
