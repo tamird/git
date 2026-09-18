@@ -3580,9 +3580,52 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git reset --hard HEAD &&
 			    rm -f negative-learn.trace negative-hit.trace \
-				  negative-alt-*.trace" &&
+				  negative-alt-*.trace negative-file-*.trace" &&
+	test_config grep.worktreeBlobCache true &&
 	git config core.fsmonitor true &&
 	git fsmonitor--daemon start &&
+	for threads in 1 2
+	do
+		git fsmonitor--daemon stop &&
+		git fsmonitor--daemon start &&
+		rm -f .git/index.grep-worktree \
+			.git/index.grep-worktree-generation \
+			.git/index.grep-worktree-recovery \
+			.git/index.grep-worktree-recovery-next &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+			GIT_TRACE2_EVENT="$PWD/negative-file-$threads.trace" \
+			git grep --threads=$threads -F conts -- ordinary &&
+		test_grep_timer negative-file-$threads.trace source/file-hash 1 &&
+		test_trace2_data grep worktree_blob/recorded_equal 1 \
+			<negative-file-$threads.trace &&
+		test_trace2_data grep content_index_negative_cache_entries 1 \
+			<negative-file-$threads.trace &&
+		test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+			GIT_TRACE2_EVENT="$PWD/negative-file-hit-$threads.trace" \
+			git grep --threads=$threads -F conts -- ordinary &&
+		test_trace2_data grep content_index_negative_cache_hits 1 \
+			<negative-file-hit-$threads.trace &&
+		test_grep_timer negative-file-hit-$threads.trace source/process 0 ||
+		return 1
+	done &&
+	echo changed >ordinary &&
+	rm -f .git/index.grep-worktree \
+		.git/index.grep-worktree-generation \
+		.git/index.grep-worktree-recovery \
+		.git/index.grep-worktree-recovery-next &&
+	git status --porcelain >/dev/null &&
+	git update-index --fsmonitor-valid ordinary &&
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/negative-file-different.trace" \
+		git grep --threads=2 -F ordinary -- ordinary &&
+	test_grep_timer negative-file-different.trace source/file-hash 1 &&
+	test_trace2_data grep worktree_blob/recorded_different 1 \
+		<negative-file-different.trace &&
+	echo "ordinary:ordinary contents" >expect &&
+	git grep --cached -F ordinary -- ordinary >actual &&
+	test_cmp expect actual &&
+	git checkout -- ordinary &&
 	oid=$(git rev-parse :ordinary) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&

@@ -423,14 +423,17 @@ static void content_index_record_negative(struct grep_source *source,
 {
 	unsigned char bit;
 
-	/* File fallback bytes need not match the indexed object. */
+	/* File bytes describe the indexed object only after a matching hash. */
 	if (!content_index_negative_result || !negative || source->match_error ||
-	    !grep_index_query_negative_is_cacheable(
-		    content_index_query, source->buf, source->size) ||
 	    (source->type != GREP_SOURCE_OID &&
 	     (source->type != GREP_SOURCE_OID_OR_FILE ||
-	      !source->worktree_blob_used)) ||
-	    pos >= content_index_negative_nr)
+	      !source->worktree_blob_used) &&
+	     (source->type != GREP_SOURCE_FILE ||
+	      !source->worktree_blob_observed ||
+	      !source->worktree_blob_match)) ||
+	    pos >= content_index_negative_nr ||
+	    !grep_index_query_negative_is_cacheable(
+		    content_index_query, source->buf, source->size))
 		return;
 	bit = 1u << (pos & 7);
 	if (threads_started)
@@ -1136,6 +1139,7 @@ static int grep_file(struct grep_opt *opt, const char *filename,
 		int hit;
 
 		hit = grep_source(opt, &gs);
+		content_index_record_negative(&gs, pos, !hit && gs.buf);
 		if (gs.worktree_blob_observed)
 			grep_worktree_cache_record(worktree_cache,
 						   pos, gs.worktree_blob_match);
