@@ -170,6 +170,7 @@ cc_library(
         "//:git_compat_util",
         "//:hash",
         "//:hex",
+        "//:json_writer",
         "//:path",
         "//:repository",
         "//:simple_ipc",

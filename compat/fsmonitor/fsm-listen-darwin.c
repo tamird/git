@@ -30,10 +30,21 @@
 #include "fsmonitor--daemon.h"
 #include "fsmonitor-path-utils.h"
 #include "gettext.h"
+#include "json-writer.h"
 #include "simple-ipc.h"
 #include "string-list.h"
 #include "trace.h"
 #include "trace2.h"
+
+struct fsm_callback_stats {
+	uint64_t callbacks;
+	uint64_t input_events;
+	uint64_t total_ns;
+	uint64_t max_ns;
+	/* Includes both the main_lock wait and publication work. */
+	uint64_t publish_ns;
+	uint64_t max_publish_ns;
+};
 
 struct fsm_listen_data
 {
@@ -49,6 +60,9 @@ struct fsm_listen_data
 	pthread_cond_t dq_finished;
 	pthread_mutex_t dq_lock;
 
+	/* Owned by the serial callback queue until it is drained at stop. */
+	struct fsm_callback_stats callback_stats;
+
 	enum shutdown_style {
 		WAITING = 0,
 		SHUTDOWN_EVENT,
@@ -62,6 +76,41 @@ struct fsm_listen_data
 
 static void fsm_listen__queue_marker(void *ctx UNUSED)
 {
+}
+
+static uint64_t fsm_listen__trace_clock(void)
+{
+	int saved_errno = errno;
+	uint64_t now = getnanotime();
+
+	errno = saved_errno;
+	return now;
+}
+
+/*
+ * Emit only at resync or stop: writing Trace2 inside the watched tree on
+ * every callback would itself generate an endless stream of events.
+ */
+static void fsm_listen__trace_stats(struct fsm_callback_stats *stats,
+				    const char *key)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+	int saved_errno = errno;
+
+	if (!stats->callbacks)
+		return;
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "callbacks", stats->callbacks);
+	jw_object_intmax(&jw, "input_events", stats->input_events);
+	jw_object_intmax(&jw, "total_ns", stats->total_ns);
+	jw_object_intmax(&jw, "max_ns", stats->max_ns);
+	jw_object_intmax(&jw, "publish_ns", stats->publish_ns);
+	jw_object_intmax(&jw, "max_publish_ns", stats->max_publish_ns);
+	jw_end(&jw);
+	trace2_data_json("fsmonitor", NULL, key, &jw);
+	jw_release(&jw);
+	memset(stats, 0, sizeof(*stats));
+	errno = saved_errno;
 }
 
 static void log_flags_set(const char *path, const FSEventStreamEventFlags flag)
@@ -216,6 +265,9 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 	struct strbuf tmp = STRBUF_INIT;
 	enum fsmonitor_path_type path_type;
 	const char *worktree_rel;
+	uint64_t begin = trace2_is_enabled() ? fsm_listen__trace_clock() : 0;
+	uint64_t publish_begin = 0, publish_ns = 0;
+	int resynced = 0;
 
 	/*
 	 * Build a list of all filesystem changes into a private/local
@@ -288,6 +340,7 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 				reason = "cookie-prefix";
 				cause = FSMONITOR_GENERATION_DARWIN_COOKIE_PREFIX;
 			}
+			resynced = 1;
 			fsmonitor_force_resync(state, cause);
 			trace2_data_string("fsmonitor", NULL, "resync/reason", reason);
 			fsmonitor_batch__free_list(batch);
@@ -437,10 +490,13 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 	}
 
 	free(resolved);
+	if (begin)
+		publish_begin = fsm_listen__trace_clock();
 	fsmonitor_publish(state, batch, &cookie_list);
+	if (begin)
+		publish_ns = fsm_listen__trace_clock() - publish_begin;
 	string_list_clear(&cookie_list, 0);
-	strbuf_release(&tmp);
-	return;
+	goto done;
 
 force_shutdown:
 	free(resolved);
@@ -452,7 +508,26 @@ force_shutdown:
 	pthread_cond_broadcast(&data->dq_finished);
 	pthread_mutex_unlock(&data->dq_lock);
 
+done:
 	strbuf_release(&tmp);
+	if (begin) {
+		struct fsm_callback_stats *stats = &data->callback_stats;
+		uint64_t elapsed = fsm_listen__trace_clock() - begin;
+
+		/* Keep work before a resync separate from its recovery cost. */
+		if (resynced)
+			fsm_listen__trace_stats(stats, "listener/pre_resync");
+		stats->callbacks++;
+		stats->input_events += num_of_events;
+		stats->total_ns += elapsed;
+		if (elapsed > stats->max_ns)
+			stats->max_ns = elapsed;
+		stats->publish_ns += publish_ns;
+		if (publish_ns > stats->max_publish_ns)
+			stats->max_publish_ns = publish_ns;
+		if (resynced)
+			fsm_listen__trace_stats(stats, "listener/resync_callback");
+	}
 	return;
 }
 
@@ -600,6 +675,7 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	FSEventStreamStop(data->stream);
 	data->stream_started = 0;
 	dispatch_sync_f(data->dq, NULL, fsm_listen__queue_marker);
+	fsm_listen__trace_stats(&data->callback_stats, "listener/stop");
 
 	switch (data->shutdown_style) {
 	case FORCE_ERROR_STOP:
