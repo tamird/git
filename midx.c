@@ -534,7 +534,8 @@ static int bsearch_one_midx_interpolated(const struct object_id *oid,
 					 uint32_t *result)
 {
 	uint32_t hi = ntohl(m->chunk_oid_fanout[oid->hash[0]]);
-	uint32_t lo = 0, guess, step, prefix;
+	uint32_t lo = 0, guess, step, prefix, bucket_nr, observed;
+	const unsigned char *row;
 	unsigned probes;
 	int cmp;
 
@@ -546,10 +547,35 @@ static int bsearch_one_midx_interpolated(const struct object_id *oid,
 
 	/* Estimate the position from the next three hash bytes. */
 	prefix = (oid->hash[1] << 16) | (oid->hash[2] << 8) | oid->hash[3];
-	guess = lo + ((uint64_t)(hi - lo) * prefix >> 24);
+	bucket_nr = hi - lo;
+	guess = lo + ((uint64_t)bucket_nr * prefix >> 24);
 	cmp = cmp_midx_oid_at(oid, m, guess);
 	if (!cmp)
 		goto found;
+
+	/* Correct the rank estimate using the prefix at the first probe. */
+	row = m->chunk_oid_lookup + (size_t)guess * m->hash_len;
+	observed = (row[1] << 16) | (row[2] << 8) | row[3];
+	if (observed != prefix) {
+		int64_t next = guess + ((int64_t)prefix - observed) *
+					       bucket_nr / (1 << 24);
+
+		if (cmp < 0)
+			lo = guess + 1;
+		else
+			hi = guess;
+		if (lo == hi)
+			goto missing;
+		if (next < lo)
+			guess = lo;
+		else if (next >= hi)
+			guess = hi - 1;
+		else
+			guess = next;
+		cmp = cmp_midx_oid_at(oid, m, guess);
+		if (!cmp)
+			goto found;
+	}
 
 	if (cmp < 0) {
 		lo = guess + 1;
