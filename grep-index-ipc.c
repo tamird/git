@@ -1032,7 +1032,9 @@ static int grep_index_ipc_handle_register_request(
 	size_t rawsz = server->repo.hash_algo->rawsz;
 	size_t locations_bytes;
 	int result = 0;
+	int saved_errno;
 
+	trace2_region_enter("grep-index", "register_index", &server->repo);
 	grep_index_ipc_refresh_generation(server);
 	pthread_rwlock_rdlock(&server->generation_lock);
 	if (!server->persistent ||
@@ -1060,16 +1062,20 @@ static int grep_index_ipc_handle_register_request(
 		server->repo.hash_algo);
 	oid_data = raw + GREP_INDEX_IPC_REGISTER_REQUEST_HEADER_SIZE +
 		   rawsz;
+	trace2_data_intmax("grep-index", &server->repo, "register_index/entries", nr);
+	trace2_region_enter("grep-index", "hash_identity", &server->repo);
 	grep_index_identity_oid_sequence_init(
 		&server->repo, &ctx, nr);
 	git_hash_update(&ctx, oid_data, (size_t)nr * rawsz);
 	git_hash_final_oid(&actual_identity, &ctx);
+	trace2_region_leave("grep-index", "hash_identity", &server->repo);
 	if (!oideq(&actual_identity, &identity)) {
 		trace2_data_string("grep-index", &server->repo,
 				   "ipc_index/reject", "identity-mismatch");
 		goto cleanup;
 	}
 
+	trace2_region_enter("grep-index", "resolve_locations", &server->repo);
 	CALLOC_ARRAY(cached, 1);
 	oidcpy(&cached->identity, &identity);
 	cached->nr = nr;
@@ -1085,6 +1091,7 @@ static int grep_index_ipc_handle_register_request(
 		grep_index_resolve_location(
 			server->persistent, &oid, &cached->locations[i]);
 	}
+	trace2_region_leave("grep-index", "resolve_locations", &server->repo);
 
 	pthread_mutex_lock(&server->index_mutex);
 	if (!grep_index_ipc_get_cached_index(
@@ -1107,6 +1114,9 @@ cleanup:
 	pthread_rwlock_unlock(&server->generation_lock);
 	grep_index_ipc_cached_index_free(cached);
 	strbuf_release(&response);
+	saved_errno = errno;
+	trace2_region_leave("grep-index", "register_index", &server->repo);
+	errno = saved_errno;
 	return result;
 }
 
@@ -1222,7 +1232,9 @@ static int grep_index_ipc_handle_index_request(
 	size_t response_header_size;
 	int cache_negatives;
 	int result = 0;
+	int saved_errno;
 
+	trace2_region_enter("grep-index", "query_index", &server->repo);
 	grep_index_ipc_refresh_generation(server);
 	pthread_rwlock_rdlock(&server->generation_lock);
 	if (!server->persistent ||
@@ -1254,6 +1266,7 @@ static int grep_index_ipc_handle_index_request(
 	query = grep_index_query_deserialize((const char *)data, query_len);
 	if (!query)
 		goto cleanup;
+	trace2_data_intmax("grep-index", &server->repo, "query_index/entries", nr);
 
 	pthread_mutex_lock(&server->index_mutex);
 	cached = grep_index_ipc_get_cached_index(
@@ -1270,9 +1283,12 @@ static int grep_index_ipc_handle_index_request(
 			reply_data, response.buf, response.len);
 		goto cleanup;
 	}
+	trace2_region_enter("grep-index", "prepare_query", &server->repo);
 	prepared = grep_index_prepare(server->persistent, query);
+	trace2_region_leave("grep-index", "prepare_query", &server->repo);
 	if (!prepared)
 		goto cleanup;
+	trace2_region_enter("grep-index", "project_query", &server->repo);
 	bitmap_size = nr / 8 + !!(nr % 8);
 	grep_index_ipc_put_u32(
 		&response, cache_negatives ?
@@ -1329,6 +1345,7 @@ static int grep_index_ipc_handle_index_request(
 		pthread_mutex_unlock(&server->index_mutex);
 		put_be32(response.buf + 3 * sizeof(uint32_t), hits);
 	}
+	trace2_region_leave("grep-index", "project_query", &server->repo);
 	result = reply(reply_data, response.buf, response.len);
 
 cleanup:
@@ -1342,6 +1359,9 @@ cleanup:
 	grep_index_prepared_free(prepared);
 	grep_index_query_free(query);
 	strbuf_release(&response);
+	saved_errno = errno;
+	trace2_region_leave("grep-index", "query_index", &server->repo);
+	errno = saved_errno;
 	return result;
 }
 
