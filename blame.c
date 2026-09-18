@@ -1256,12 +1256,12 @@ static int fill_blob_sha1_and_mode(struct repository *r,
 
 struct blame_bloom_data {
 	/*
-	 * Changed-path Bloom filter keys. These can help prevent
+	 * Changed-path Bloom filter key vectors. These can help prevent
 	 * computing diffs against first parents, but we need to
 	 * expand the list as code is moved or files are renamed.
 	 */
 	struct bloom_filter_settings *settings;
-	struct bloom_key **keys;
+	struct bloom_keyvec **keyvecs;
 	int nr;
 	int alloc;
 };
@@ -1283,9 +1283,8 @@ static int maybe_changed_path(struct repository *r,
 
 	bloom_count_queries++;
 	for (i = 0; i < bd->nr; i++) {
-		if (bloom_filter_contains(&filter,
-					  bd->keys[i],
-					  bd->settings))
+		if (bloom_filter_contains_vec(&filter, bd->keyvecs[i],
+					      bd->settings))
 			return 1;
 	}
 
@@ -1293,19 +1292,18 @@ static int maybe_changed_path(struct repository *r,
 	return 0;
 }
 
-static void add_bloom_key(struct blame_bloom_data *bd,
-			  const char *path)
+static void add_bloom_keyvec(struct blame_bloom_data *bd,
+			     const char *path)
 {
 	if (!bd)
 		return;
 
 	if (bd->nr >= bd->alloc) {
 		bd->alloc *= 2;
-		REALLOC_ARRAY(bd->keys, bd->alloc);
+		REALLOC_ARRAY(bd->keyvecs, bd->alloc);
 	}
 
-	bd->keys[bd->nr] = xmalloc(sizeof(struct bloom_key));
-	bloom_key_fill(bd->keys[bd->nr], path, strlen(path), bd->settings);
+	bd->keyvecs[bd->nr] = bloom_keyvec_new(path, strlen(path), bd->settings);
 	bd->nr++;
 }
 
@@ -1446,7 +1444,7 @@ static struct blame_origin *find_rename(struct repository *r,
 		struct diff_filepair *p = diff_queued_diff.queue[i];
 		if ((p->status == 'R' || p->status == 'C') &&
 		    !strcmp(p->two->path, origin->path)) {
-			add_bloom_key(bd, p->one->path);
+			add_bloom_keyvec(bd, p->one->path);
 			porigin = get_origin(parent, p->one->path);
 			oidcpy(&porigin->blob_oid, &p->one->oid);
 			porigin->mode = p->one->mode;
@@ -2956,9 +2954,9 @@ void setup_blame_bloom_data(struct blame_scoreboard *sb)
 
 	bd->alloc = 4;
 	bd->nr = 0;
-	ALLOC_ARRAY(bd->keys, bd->alloc);
+	ALLOC_ARRAY(bd->keyvecs, bd->alloc);
 
-	add_bloom_key(bd, sb->path);
+	add_bloom_keyvec(bd, sb->path);
 
 	sb->bloom_data = bd;
 }
@@ -2972,11 +2970,9 @@ void cleanup_scoreboard(struct blame_scoreboard *sb)
 
 	if (sb->bloom_data) {
 		int i;
-		for (i = 0; i < sb->bloom_data->nr; i++) {
-			free(sb->bloom_data->keys[i]->hashes);
-			free(sb->bloom_data->keys[i]);
-		}
-		free(sb->bloom_data->keys);
+		for (i = 0; i < sb->bloom_data->nr; i++)
+			bloom_keyvec_free(sb->bloom_data->keyvecs[i]);
+		free(sb->bloom_data->keyvecs);
 		FREE_AND_NULL(sb->bloom_data);
 
 		trace2_data_intmax("blame", sb->repo,

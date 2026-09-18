@@ -659,6 +659,9 @@ int bloom_filter_contains_vec(const struct bloom_filter *filter,
 {
 	int ret = 1;
 
+	if (vec->count == 1)
+		return bloom_filter_contains(filter, &vec->key[0], settings);
+
 	for (size_t nr = 0; ret > 0 && nr < vec->count; nr++)
 		ret = bloom_filter_contains(filter, &vec->key[nr], settings);
 

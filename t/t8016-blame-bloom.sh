@@ -27,17 +27,21 @@ check_blame () {
 
 test_expect_success 'blame follows renames across unchanged commits' '
 	git init rename &&
-	test_commit -C rename base old line &&
+	mkdir -p rename/old-dir rename/new-dir &&
+	test_commit -C rename base old-dir/file line &&
+	test_commit --append -C rename modified old-dir/file second &&
 	test_commit -C rename before unrelated before &&
-	git -C rename mv old new &&
+	git -C rename mv old-dir/file new-dir/file &&
 	git -C rename commit -m rename &&
 	test_commit -C rename after unrelated after &&
 	git -C rename commit-graph write --reachable --changed-paths &&
 
-	check_blame rename --porcelain new &&
+	check_blame rename --porcelain new-dir/file &&
 	base=$(git -C rename rev-parse base) &&
+	modified=$(git -C rename rev-parse modified) &&
 	test_grep "^$base " actual &&
-	test_grep "^filename old$" actual
+	test_grep "^$modified " actual &&
+	test_grep "^filename old-dir/file$" actual
 '
 
 test_expect_success 'blame uses Bloom filters in shallow repositories' '
