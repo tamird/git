@@ -1614,33 +1614,36 @@ static struct path_pattern *last_matching_pattern_from_list(const char *pathname
 		struct path_pattern *pattern = pl->patterns[i];
 		const char *exclude = pattern->pattern;
 		int prefix = pattern->nowildcardlen;
+		int matched;
 
+		if ((pattern->flags & PATTERN_FLAG_MUSTBEDIR) &&
+		    *dtype != DT_UNKNOWN && *dtype != DT_DIR)
+			continue;
+
+		if (pattern->flags & PATTERN_FLAG_NODIR) {
+			matched = match_basename(basename,
+						 pathlen - (basename - pathname),
+						 exclude, prefix, pattern->patternlen,
+						 pattern->flags);
+		} else {
+			assert(pattern->baselen == 0 ||
+			       pattern->base[pattern->baselen - 1] == '/');
+			matched = match_pathname(pathname, pathlen,
+						 pattern->base,
+						 pattern->baselen ? pattern->baselen - 1 : 0,
+						 exclude, prefix, pattern->patternlen);
+		}
+		if (!matched)
+			continue;
+
+		/* Resolving an unknown type may initialize the index name hash. */
 		if (pattern->flags & PATTERN_FLAG_MUSTBEDIR) {
 			*dtype = resolve_dtype(*dtype, istate, pathname, pathlen);
 			if (*dtype != DT_DIR)
 				continue;
 		}
-
-		if (pattern->flags & PATTERN_FLAG_NODIR) {
-			if (match_basename(basename,
-					   pathlen - (basename - pathname),
-					   exclude, prefix, pattern->patternlen,
-					   pattern->flags)) {
-				res = pattern;
-				break;
-			}
-			continue;
-		}
-
-		assert(pattern->baselen == 0 ||
-		       pattern->base[pattern->baselen - 1] == '/');
-		if (match_pathname(pathname, pathlen,
-				   pattern->base,
-				   pattern->baselen ? pattern->baselen - 1 : 0,
-				   exclude, prefix, pattern->patternlen)) {
-			res = pattern;
-			break;
-		}
+		res = pattern;
+		break;
 	}
 	return res;
 }

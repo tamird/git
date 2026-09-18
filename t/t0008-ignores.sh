@@ -839,6 +839,14 @@ test_expect_success 'existing directory and file' '
 	test_grep top-level-dir actual
 '
 
+test_expect_success 'directory-only pattern does not match a regular file' '
+	test_when_finished "rm -f top-level-dir" &&
+	>top-level-dir &&
+	printf "::\ttop-level-dir\n" >expected &&
+	test_expect_code 1 git check-ignore -v -n top-level-dir >actual &&
+	test_cmp expected actual
+'
+
 test_expect_success 'exact prefix matching (with root)' '
 	test_when_finished rm -r a &&
 	mkdir -p a/git a/git-foo &&
