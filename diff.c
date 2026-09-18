@@ -4503,13 +4503,6 @@ static int reuse_worktree_file(struct index_state *istate,
 		return 0;
 
 	/*
-	 * Similarly, if we'd have to convert the file contents anyway, that
-	 * makes the optimization not worthwhile.
-	 */
-	if (!want_file && would_convert_to_git(istate, name))
-		return 0;
-
-	/*
 	 * If this path does not match our sparse-checkout definition,
 	 * then the file will not be in the working directory.
 	 */
@@ -4534,6 +4527,10 @@ static int reuse_worktree_file(struct index_state *istate,
 	 * guarantee that work tree matches what we are looking for.
 	 */
 	if ((ce->ce_flags & CE_VALID) || ce_skip_worktree(ce))
+		return 0;
+
+	/* Conversion is only relevant for an otherwise reusable entry. */
+	if (!want_file && would_convert_to_git(istate, name))
 		return 0;
 
 	/*
