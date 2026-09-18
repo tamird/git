@@ -1960,6 +1960,8 @@ static int look_ahead(struct grep_opt *opt,
 						     p->pcre2_lookahead :
 						     p;
 
+		if (p->lookahead_exhausted)
+			continue;
 		if (p->kws_utf8)
 			hit = kwset_match(p, bol, bol + *left_p, &m);
 		else
@@ -1967,7 +1969,11 @@ static int look_ahead(struct grep_opt *opt,
 		if (hit < 0)
 			return -1;
 		if (!hit) {
-			misses++;
+			/* An absent literal stays absent in every later suffix. */
+			if (p->is_fixed && !p->ignore_case)
+				p->lookahead_exhausted = 1;
+			else
+				misses++;
 			continue;
 		}
 		if (m.rm_so < 0 || m.rm_eo < 0)
@@ -1981,7 +1987,7 @@ static int look_ahead(struct grep_opt *opt,
 		*left_p = 0;
 		return 1;
 	}
-	if (misses && !memchr(bol, '\n', earliest))
+	if (misses >= 2 && !memchr(bol, '\n', earliest))
 		(*dense_hits)++;
 	else
 		*dense_hits = 0;
@@ -2149,6 +2155,9 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	opt->priv = &xecfg;
 
 	try_lookahead = should_lookahead(opt);
+	if (try_lookahead)
+		for (struct grep_pat *p = opt->pattern_list; p; p = p->next)
+			p->lookahead_exhausted = 0;
 
 	if (fill_textconv_grep(opt->repo, textconv, gs) < 0)
 		return 0;
