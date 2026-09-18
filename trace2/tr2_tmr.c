@@ -73,6 +73,26 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "stat/emit",
 		.want_per_thread_events = 0,
 	},
+	/* File patch work excludes the separate submodule summary paths. */
+	[TRACE2_TIMER_ID_DIFF_PATCH_BUILTIN] = {
+		.category = "diff",
+		.name = "patch/builtin",
+	},
+	/* Binary checks may populate content before the explicit loading stage. */
+	[TRACE2_TIMER_ID_DIFF_PATCH_BINARY_CHECK] = {
+		.category = "diff",
+		.name = "patch/binary-check",
+	},
+	/* Includes any textconv work performed while loading the two sides. */
+	[TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE] = {
+		.category = "diff",
+		.name = "patch/content-populate",
+	},
+	/* Includes xdiff's output callbacks, but not subsequent stdout flushing. */
+	[TRACE2_TIMER_ID_DIFF_PATCH_XDIFF] = {
+		.category = "diff",
+		.name = "patch/xdiff",
+	},
 	/* The builtin diff result-code call includes stdout flush and warnings. */
 	[TRACE2_TIMER_ID_DIFF_RESULT_REPORTING] = {
 		.category = "diff",

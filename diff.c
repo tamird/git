@@ -1881,7 +1881,7 @@ static void emit_rewrite_diff(const char *name_a,
 			      struct userdiff_driver *textconv_two,
 			      struct diff_options *o)
 {
-	int lc_a, lc_b;
+	int lc_a, lc_b, saved_errno;
 	static struct strbuf a_name = STRBUF_INIT, b_name = STRBUF_INIT;
 	const char *a_prefix, *b_prefix;
 	char *data_one, *data_two;
@@ -1906,8 +1906,14 @@ static void emit_rewrite_diff(const char *name_a,
 	quote_two_c_style(&a_name, a_prefix, name_a, 0);
 	quote_two_c_style(&b_name, b_prefix, name_b, 0);
 
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+	errno = saved_errno;
 	size_one = fill_textconv(o->repo, textconv_one, one, &data_one);
 	size_two = fill_textconv(o->repo, textconv_two, two, &data_two);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+	errno = saved_errno;
 
 	ws_rule = whitespace_rule(o->repo->index, name_b);
 
@@ -3838,6 +3844,35 @@ static int set_diff_algorithm(struct diff_options *opts,
 	return 0;
 }
 
+static int diff_patch_is_binary(struct repository *r, struct diff_filespec *s)
+{
+	int ret, saved_errno = errno;
+
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_BINARY_CHECK);
+	errno = saved_errno;
+	ret = diff_filespec_is_binary(r, s);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_BINARY_CHECK);
+	errno = saved_errno;
+	return ret;
+}
+
+static int diff_patch_xdiff(mmfile_t *mf1, mmfile_t *mf2,
+			    xdiff_emit_hunk_fn hunk_fn,
+			    xdiff_emit_line_fn line_fn, void *data,
+			    const xpparam_t *xpp, const xdemitconf_t *xecfg)
+{
+	int ret, saved_errno = errno;
+
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_XDIFF);
+	errno = saved_errno;
+	ret = xdi_diff_outf(mf1, mf2, hunk_fn, line_fn, data, xpp, xecfg);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_XDIFF);
+	errno = saved_errno;
+	return ret;
+}
+
 static void builtin_diff(const char *name_a,
 			 const char *name_b,
 			 struct diff_filespec *one,
@@ -3858,6 +3893,7 @@ static void builtin_diff(const char *name_a,
 	struct userdiff_driver *textconv_two = NULL;
 	struct strbuf header = STRBUF_INIT;
 	const char *line_prefix = diff_line_prefix(o);
+	int saved_errno;
 
 	diff_set_mnemonic_prefix(o, "a/", "b/");
 	if (o->flags.reverse_diff) {
@@ -3887,6 +3923,10 @@ static void builtin_diff(const char *name_a,
 		o->found_changes = 1;
 		return;
 	}
+
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_BUILTIN);
+	errno = saved_errno;
 
 	if (o->flags.allow_textconv) {
 		textconv_one = get_textconv(o->repo, one);
@@ -3945,8 +3985,8 @@ static void builtin_diff(const char *name_a,
 		if ((one->mode ^ two->mode) & S_IFMT)
 			goto free_ab_and_return;
 		if (complete_rewrite &&
-		    (textconv_one || !diff_filespec_is_binary(o->repo, one)) &&
-		    (textconv_two || !diff_filespec_is_binary(o->repo, two))) {
+		    (textconv_one || !diff_patch_is_binary(o->repo, one)) &&
+		    (textconv_two || !diff_patch_is_binary(o->repo, two))) {
 			emit_diff_symbol(o, DIFF_SYMBOL_HEADER,
 					 header.buf, header.len, 0);
 			strbuf_reset(&header);
@@ -3963,9 +4003,10 @@ static void builtin_diff(const char *name_a,
 		strbuf_reset(&header);
 		goto free_ab_and_return;
 	} else if (!o->flags.text &&
-		   ( (!textconv_one && diff_filespec_is_binary(o->repo, one)) ||
-		     (!textconv_two && diff_filespec_is_binary(o->repo, two)) )) {
+		   ((!textconv_one && diff_patch_is_binary(o->repo, one)) ||
+		    (!textconv_two && diff_patch_is_binary(o->repo, two)))) {
 		struct strbuf sb = STRBUF_INIT;
+		int failed;
 		if (!one->data && !two->data &&
 		    S_ISREG(one->mode) && S_ISREG(two->mode) &&
 		    !o->flags.binary) {
@@ -3986,8 +4027,15 @@ static void builtin_diff(const char *name_a,
 			o->found_changes = 1;
 			goto free_ab_and_return;
 		}
-		if (fill_mmfile(o->repo, &mf1, one) < 0 ||
-		    fill_mmfile(o->repo, &mf2, two) < 0)
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+		errno = saved_errno;
+		failed = fill_mmfile(o->repo, &mf1, one) < 0 ||
+			 fill_mmfile(o->repo, &mf2, two) < 0;
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+		errno = saved_errno;
+		if (failed)
 			die("unable to read files to diff");
 		/* Quite common confusing case */
 		if (mf1.size == mf2.size &&
@@ -4025,8 +4073,14 @@ static void builtin_diff(const char *name_a,
 			strbuf_reset(&header);
 		}
 
+		saved_errno = errno;
+		trace2_timer_start(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+		errno = saved_errno;
 		mf1.size = fill_textconv(o->repo, textconv_one, one, &mf1.ptr);
 		mf2.size = fill_textconv(o->repo, textconv_two, two, &mf2.ptr);
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_CONTENT_POPULATE);
+		errno = saved_errno;
 
 		ws_rule = whitespace_rule(o->repo->index, name_b);
 
@@ -4085,8 +4139,8 @@ static void builtin_diff(const char *name_a,
 			 * xdi_diff_outf() signals an error by returning
 			 * non-zero.
 			 */
-			xdi_diff_outf(&mf1, &mf2, NULL, quick_consume,
-				      &ecbdata, &xpp, &xecfg);
+			diff_patch_xdiff(&mf1, &mf2, NULL, quick_consume,
+					 &ecbdata, &xpp, &xecfg);
 		} else if (line_ranges) {
 			struct line_range_callback lr_state;
 			unsigned int i;
@@ -4120,10 +4174,10 @@ static void builtin_diff(const char *name_a,
 			if (max_span > xecfg.ctxlen)
 				xecfg.ctxlen = max_span;
 
-			if (xdi_diff_outf(&mf1, &mf2,
-					  line_range_hunk_fn,
-					  line_range_line_fn,
-					  &lr_state, &xpp, &xecfg))
+			if (diff_patch_xdiff(&mf1, &mf2,
+					     line_range_hunk_fn,
+					     line_range_line_fn,
+					     &lr_state, &xpp, &xecfg))
 				die("unable to generate diff for %s",
 				    one->path);
 
@@ -4133,8 +4187,8 @@ static void builtin_diff(const char *name_a,
 				    one->path);
 			strbuf_release(&lr_state.rhunk);
 			strbuf_release(&lr_state.pending_rm);
-		} else if (xdi_diff_outf(&mf1, &mf2, NULL, fn_out_consume,
-					 &ecbdata, &xpp, &xecfg))
+		} else if (diff_patch_xdiff(&mf1, &mf2, NULL, fn_out_consume,
+					    &ecbdata, &xpp, &xecfg))
 			die("unable to generate diff for %s", one->path);
 		if (o->word_diff)
 			free_diff_words_data(&ecbdata);
@@ -4151,6 +4205,9 @@ static void builtin_diff(const char *name_a,
 	diff_free_filespec_data(two);
 	free(a_one);
 	free(b_two);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_PATCH_BUILTIN);
+	errno = saved_errno;
 	return;
 }
 
