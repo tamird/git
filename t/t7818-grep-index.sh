@@ -3107,21 +3107,26 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 	done &&
 	for tree_sample_trace in tree-positive.trace tree-no-batch.trace
 	do
-		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
+		test_trace2_data grep content_index_tree_object_read_sample_unique_limit 4096 \
 			<"$tree_sample_trace" &&
-		test_trace2_data grep content_index_tree_object_read_sampled_visits 3 \
-			<"$tree_sample_trace" &&
-		test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 3 \
-			<"$tree_sample_trace" &&
-		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
+		test_trace2_data grep content_index_tree_object_read_sample_modulus 256 \
 			<"$tree_sample_trace" &&
 		test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
 			<"$tree_sample_trace" || return 1
 	done &&
+	# These tree names produce a selected OID under either hash algorithm.
+	test_oid_cache <<-EOF &&
+	selected_tree_seed sha1:141
+	selected_tree_seed sha256:176
+	EOF
+	tree_sample_blob=$(printf "present needle\n" | git hash-object -w --stdin) &&
+	tree_sample_selected=$(printf "100644 blob %s\tselected%s\n" \
+		"$tree_sample_blob" "$(test_oid selected_tree_seed)" | git mktree) &&
+	case "$tree_sample_selected" in 00*) ;; *) return 1 ;; esac &&
 	# Reusing a tree OID still reports each path in full.
 	tree_sample_root=$({
-		printf "040000 tree %s\ta\n" "$nested_tree" &&
-		printf "040000 tree %s\tz\n" "$nested_tree"
+		printf "040000 tree %s\ta\n" "$tree_sample_selected" &&
+		printf "040000 tree %s\tz\n" "$tree_sample_selected"
 	} | git mktree) &&
 	git grep --no-content-index --threads=1 "present needle" \
 		"$tree_sample_root" >expect-tree-positive &&
@@ -3140,18 +3145,17 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 		<tree-no-batch.trace &&
 	test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
 		<tree-no-batch.trace &&
-	# The cap counts visits, including repeated in-memory empty trees.
+	# Unselected visits do not prevent a later selected tree from being read.
 	for i in $(test_seq 1 4096)
 	do
 		printf "040000 tree %s\ta%04d\n" "$backend_empty" "$i" || return 1
 	done >tree-sample-entries &&
-	for tree_sample_truncated in 0 1
+	for tree_sample_late in 0 1
 	do
 		tree_sample_status=1 &&
-		if test "$tree_sample_truncated" = 1
+		if test "$tree_sample_late" = 1
 		then
-			# The first unsampled tree must still be read and searched.
-			printf "040000 tree %s\tz\n" "$nested_tree" >>tree-sample-entries &&
+			printf "040000 tree %s\tz\n" "$tree_sample_selected" >>tree-sample-entries &&
 			tree_sample_status=0
 		fi &&
 		tree_sample_root=$(git mktree <tree-sample-entries) &&
@@ -3166,7 +3170,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 					"$tree_sample_root" >actual-tree-positive &&
 		test_cmp expect-tree-positive actual-tree-positive &&
 		test_trace2_data grep content_index_tree_directories \
-			"$((4096 + tree_sample_truncated))" <tree-no-batch.trace &&
+			"$((4096 + tree_sample_late))" <tree-no-batch.trace &&
 		test_trace2_data grep content_index_tree_object_read_us \
 			"[0-9][0-9]*" <tree-no-batch.trace &&
 		test_trace2_data grep content_index_tree_object_read_detail_sample_prefix \
@@ -3181,16 +3185,16 @@ test_expect_success FSMONITOR_DAEMON 'daemon reuses persistent content index' '
 			80 <tree-no-batch.trace &&
 		test_grep ! content_index_tree_object_read_winner_ \
 			tree-no-batch.trace &&
-		test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
+		test_trace2_data grep content_index_tree_object_read_sample_unique_limit 4096 \
 			<tree-no-batch.trace &&
-		test_trace2_data grep content_index_tree_object_read_sampled_visits 4096 \
+		test_trace2_data grep content_index_tree_object_read_sampled_visits "$tree_sample_late" \
 			<tree-no-batch.trace &&
-		test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 1 \
+		test_trace2_data grep content_index_tree_object_read_sampled_unique_oids "$tree_sample_late" \
 			<tree-no-batch.trace &&
-		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 4095 \
+		test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
 			<tree-no-batch.trace &&
 		test_trace2_data grep content_index_tree_object_read_sample_truncated \
-			"$tree_sample_truncated" <tree-no-batch.trace || return 1
+			0 <tree-no-batch.trace || return 1
 	done &&
 	printf "%s:nested/text:present needle\n" "$attributes_commit" \
 		>expect-tree-positive &&

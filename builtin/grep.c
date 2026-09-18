@@ -2686,7 +2686,7 @@ struct grep_tree_batch_item {
  * excluded, so object IDs alone identify reusable content-index answers.
  */
 #define GREP_TREE_IPC_TRACE_BATCHES 16
-/* Bound a prefix of child-read visits, not the number of distinct OIDs. */
+/* Select whole OID histories while bounding the number of retained keys. */
 #define GREP_TREE_OID_SAMPLE_LIMIT 4096
 /* Unscaled ODB details sample visit order; the exact outer timer runs on all. */
 #define GREP_TREE_READ_DETAIL_PREFIX   64
@@ -2698,7 +2698,7 @@ struct grep_tree_query_context {
 	struct oidset impossible;
 	struct oidset maybe;
 	struct oidset tree_oid_sample;
-	unsigned int tree_oid_sample_visits;
+	uint64_t tree_oid_sample_visits;
 	int tree_oid_sample_truncated;
 	int ipc_available;
 	int onestar_suffix_pathspec;
@@ -3005,12 +3005,14 @@ static void grep_tree_trace_object_read_sources(
 	int saved_errno = errno;
 	char key[96];
 
-	if (query->tree_oid_sample_visits) {
+	{
 		unsigned int unique = oidset_size(&query->tree_oid_sample);
 
 		trace2_data_intmax("grep", the_repository,
-			"content_index_tree_object_read_sample_limit",
-			GREP_TREE_OID_SAMPLE_LIMIT);
+				   "content_index_tree_object_read_sample_modulus", 256);
+		trace2_data_intmax("grep", the_repository,
+				   "content_index_tree_object_read_sample_unique_limit",
+				   GREP_TREE_OID_SAMPLE_LIMIT);
 		trace2_data_intmax("grep", the_repository,
 			"content_index_tree_object_read_sampled_visits",
 			query->tree_oid_sample_visits);
@@ -3725,14 +3727,17 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 						  GREP_TREE_READ_DETAIL_INTERVAL);
 				if (sample_detail)
 					query->tree_object_read_detail_sampled++;
-				if (!query->tree_oid_sample_truncated) {
-					if (query->tree_oid_sample_visits ==
-					    GREP_TREE_OID_SAMPLE_LIMIT) {
-						query->tree_oid_sample_truncated = 1;
-					} else {
+				if (!entry.oid.hash[0]) {
+					if (oidset_contains(&query->tree_oid_sample,
+							    &entry.oid)) {
+						query->tree_oid_sample_visits++;
+					} else if (oidset_size(&query->tree_oid_sample) <
+						   GREP_TREE_OID_SAMPLE_LIMIT) {
 						oidset_insert(&query->tree_oid_sample,
 							      &entry.oid);
 						query->tree_oid_sample_visits++;
+					} else {
+						query->tree_oid_sample_truncated = 1;
 					}
 				}
 				if (sample_detail)
