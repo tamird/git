@@ -16,6 +16,32 @@
 #include "quote.h"
 #include "wildmatch.h"
 
+static int literal_pathspec_prefix_len(const struct pathspec *pathspec)
+{
+	const char *prefix = pathspec->items[0].match;
+	int len = pathspec->items[0].len;
+
+	if (pathspec->has_wildcard ||
+	    (pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL |
+				 PATHSPEC_MAXDEPTH)))
+		return 0;
+
+	for (int i = 1; i < pathspec->nr && len; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		int common = 0;
+
+		while (common < len && common < item->len &&
+		       prefix[common] == item->match[common])
+			common++;
+		len = common;
+	}
+
+	/* A trailing slash can match a gitlink without the slash. */
+	if (len && prefix[len - 1] == '/')
+		len--;
+	return len;
+}
+
 /*
  * Finds which of the given pathspecs match items in the index.
  *
@@ -35,6 +61,7 @@ void add_pathspec_matches_against_index(const struct pathspec *pathspec,
 					enum ps_skip_worktree_action sw_action)
 {
 	int num_unmatched = 0;
+	int prefix_len, first = 0;
 
 	/*
 	 * Since we are walking the index as if we were walking the directory,
@@ -47,8 +74,20 @@ void add_pathspec_matches_against_index(const struct pathspec *pathspec,
 			num_unmatched++;
 	if (!num_unmatched)
 		return;
-	for (unsigned int i = 0; i < istate->cache_nr; i++) {
+
+	/* Keep matching within the literal prefix, without expanding a sparse index. */
+	prefix_len = literal_pathspec_prefix_len(pathspec);
+	if (prefix_len) {
+		first = index_name_pos_sparse(istate, pathspec->items[0].match,
+					      prefix_len);
+		if (first < 0)
+			first = -1 - first;
+	}
+	for (unsigned int i = first; i < istate->cache_nr; i++) {
 		const struct cache_entry *ce = istate->cache[i];
+		if (prefix_len && strncmp(ce->name, pathspec->items[0].match,
+					  prefix_len))
+			break;
 		if (sw_action == PS_IGNORE_SKIP_WORKTREE &&
 		    (ce_skip_worktree(ce) || !path_in_sparse_checkout(ce->name, istate)))
 			continue;

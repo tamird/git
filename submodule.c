@@ -340,30 +340,42 @@ void die_in_unpopulated_submodule(struct index_state *istate,
 void die_path_inside_submodule(struct index_state *istate,
 			       const struct pathspec *ps)
 {
-	int i, j;
+	const struct pathspec_item *matched_item = NULL;
+	int matched_pos = istate->cache_nr;
 
-	for (i = 0; i < istate->cache_nr; i++) {
-		struct cache_entry *ce = istate->cache[i];
-		int ce_len = ce_namelen(ce);
+	for (int i = 0; i < ps->nr; i++) {
+		const struct pathspec_item *item = &ps->items[i];
+		const char *slash = item->match;
 
-		if (!S_ISGITLINK(ce->ce_mode))
-			continue;
+		while ((slash = strchr(slash, '/'))) {
+			int len = slash++ - item->match;
+			int pos;
 
-		for (j = 0; j < ps->nr ; j++) {
-			const struct pathspec_item *item = &ps->items[j];
+			if (!*slash)
+				break;
+			pos = index_name_pos_sparse(istate, item->match, len);
+			if (pos < 0)
+				pos = -1 - pos;
+			for (; pos < matched_pos; pos++) {
+				const struct cache_entry *ce = istate->cache[pos];
 
-			if (item->len <= ce_len)
-				continue;
-			if (item->match[ce_len] != '/')
-				continue;
-			if (strncmp(ce->name, item->match, ce_len))
-				continue;
-			if (item->len == ce_len + 1)
-				continue;
-
-			die(_("Pathspec '%s' is in submodule '%.*s'"),
-			    item->original, ce_len, ce->name);
+				if (ce_namelen(ce) != len ||
+				    strncmp(ce->name, item->match, len))
+					break;
+				if (S_ISGITLINK(ce->ce_mode)) {
+					matched_pos = pos;
+					matched_item = item;
+					break;
+				}
+			}
 		}
+	}
+	if (matched_item) {
+		const struct cache_entry *ce = istate->cache[matched_pos];
+
+		/* Preserve the first error in index order, then pathspec order. */
+		die(_("Pathspec '%s' is in submodule '%.*s'"),
+		    matched_item->original, ce_namelen(ce), ce->name);
 	}
 }
 

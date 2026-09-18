@@ -55,4 +55,15 @@ test_expect_success COLON_DIR 'a file with the same (short) magic name exists' '
 	git add -n "./:/bar"
 '
 
+test_expect_success 'index-only matches with icase and glob pathspecs' '
+	git add sub/foo anothersub/foo &&
+	rm sub/foo anothersub/foo &&
+	cat >expected <<-\EOF &&
+	remove '\''anothersub/foo'\''
+	remove '\''sub/foo'\''
+	EOF
+	git add -u -n -- ":(icase)SUB/FOO" ":(glob)another*/foo" >actual &&
+	test_cmp expected actual
+'
+
 test_done

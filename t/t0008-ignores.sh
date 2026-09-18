@@ -538,6 +538,41 @@ test_expect_success_multi 'submodule from subdirectory' '' '
 	test_stderr "fatal: Pathspec '\''submodule/one'\'' is in submodule '\''a/submodule'\''"
 '
 
+test_expect_success 'indexed prefixes, stages and submodule error order' '
+	test_when_finished "rm -f lookup-index" &&
+	blob=$(git rev-parse :ignored-but-in-index) &&
+	commit=$(git -C a/submodule rev-parse HEAD) &&
+	(
+		GIT_INDEX_FILE="$TRASH_DIRECTORY/lookup-index" &&
+		export GIT_INDEX_FILE &&
+		git read-tree --empty &&
+		git update-index --index-info <<-EOF &&
+		100644 $blob 1	a/submodule
+		160000 $commit 2	a/submodule
+		100644 $blob 0	ignored-dir/file
+		100644 $blob 0	ignored-prefix-sibling
+		100644 $blob 0	ignored-skip
+		100644 $blob 1	ignored-stage
+		100644 $blob 3	ignored-stage
+		160000 $commit 2	z/submodule
+		EOF
+		git update-index --skip-worktree ignored-skip &&
+		printf "%s\n" ignored-prefix ignored-dir ignored-dir/ \
+			ignored-skip ignored-stage "ignored-st*" \
+			a/submodule/ a/submodule-other/not-ignored >paths &&
+		echo ignored-prefix >expected &&
+		git check-ignore --stdin <paths >actual &&
+		test_cmp expected actual &&
+		git check-ignore ignored-prefix ignored-dir ignored-dir/ \
+			ignored-skip ignored-stage >actual &&
+		test_cmp expected actual &&
+		expect "" &&
+		test_check_ignore \
+			"z/submodule/one a/submodule/one a/submodule/two" 128 &&
+		test_stderr "fatal: Pathspec '\''a/submodule/one'\'' is in submodule '\''a/submodule'\''"
+	)
+'
+
 ############################################################################
 #
 # test handling of global ignore files
