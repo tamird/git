@@ -56,13 +56,19 @@ struct spanhash_top {
 #define SPAN_SAMPLE_MAX_KEYS (1u << 16)
 #define SPAN_SAMPLE_MAX_SELECTED (1u << 18)
 
+enum span_hash_mode {
+	SPAN_HASH_BINARY,
+	SPAN_HASH_TEXT,
+	SPAN_HASH_NO_CRLF,
+};
+
 struct span_cache_entry {
 	struct span_cache_entry *next;
 	struct list_head lru;
 	struct object_id oid;
 	struct spanhash_top *value;
 	size_t value_bytes;
-	unsigned char is_text;
+	enum span_hash_mode mode;
 	unsigned char auto_binary;
 };
 
@@ -77,7 +83,7 @@ struct span_sample_entry {
 	struct repository *repo;
 	struct object_id oid;
 	uint64_t last_build;
-	unsigned char is_text;
+	enum span_hash_mode mode;
 };
 
 struct span_sample_state {
@@ -101,10 +107,11 @@ static size_t spanhash_bytes(const struct spanhash_top *value)
 			      (size_t)1 << value->alloc_log2));
 }
 
-static size_t span_cache_bucket(const struct object_id *oid, int is_text)
+static size_t span_cache_bucket(const struct object_id *oid,
+				enum span_hash_mode mode)
 {
-	return (oidhash(oid) ^ (is_text ? 0x9e3779b9u : 0u)) &
-		(SPANHASH_CACHE_BUCKETS - 1);
+	return (oidhash(oid) ^ (mode * 0x9e3779b9u)) &
+	       (SPANHASH_CACHE_BUCKETS - 1);
 }
 
 static void span_sample_report(void)
@@ -134,7 +141,8 @@ static void span_sample_report(void)
 
 /* Called under span_cache_mutex; gaps count build lookups, not time or bytes. */
 static uint64_t span_sample_probe(struct repository *r,
-				  const struct object_id *oid, int is_text)
+				  const struct object_id *oid,
+				  enum span_hash_mode mode)
 {
 	struct span_sample_entry *entry;
 	size_t bucket;
@@ -170,9 +178,9 @@ static uint64_t span_sample_probe(struct repository *r,
 		span_sample.invalid = span_sample.truncated = 1;
 		return 0;
 	}
-	bucket = span_cache_bucket(oid, is_text);
+	bucket = span_cache_bucket(oid, mode);
 	for (entry = span_sample.buckets[bucket]; entry; entry = entry->next)
-		if (entry->repo == r && entry->is_text == is_text &&
+		if (entry->repo == r && entry->mode == mode &&
 		    entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
 			break;
 	if (!entry) {
@@ -187,7 +195,7 @@ static uint64_t span_sample_probe(struct repository *r,
 		}
 		entry->repo = r;
 		oidcpy(&entry->oid, oid);
-		entry->is_text = is_text;
+		entry->mode = mode;
 		entry->next = span_sample.buckets[bucket];
 		span_sample.buckets[bucket] = entry;
 		span_sample.keys++;
@@ -226,16 +234,15 @@ static void span_sample_clear_repo(struct repository *r)
 
 static struct span_cache_entry *span_cache_find(struct diff_spanhash_cache *cache,
 						const struct object_id *oid,
-						int is_text)
+						enum span_hash_mode mode)
 {
 	struct span_cache_entry *entry;
 
-	for (entry = cache->buckets[span_cache_bucket(oid, is_text)]; entry;
-	     entry = entry->next) {
-		if (entry->is_text == is_text && entry->oid.algo == oid->algo &&
+	for (entry = cache->buckets[span_cache_bucket(oid, mode)]; entry;
+	     entry = entry->next)
+		if (entry->mode == mode && entry->oid.algo == oid->algo &&
 		    oideq(&entry->oid, oid))
 			return entry;
-	}
 	return NULL;
 }
 
@@ -315,29 +322,51 @@ static void span_cache_clear_locked(struct repository *r)
 }
 
 static struct spanhash_top *span_cache_lookup(struct repository *r,
-					      const struct object_id *oid,
-					      int is_text, int require_auto_binary,
-					      int count_miss)
+					      struct diff_filespec *one,
+					      enum span_hash_mode *mode)
 {
 	struct diff_spanhash_cache *cache;
 	struct span_cache_entry *entry;
 	struct spanhash_top *copy = NULL;
-	uint64_t sample_gap = 0;
+	int driver_loaded = 0, is_binary = -1;
 	int saved_errno = errno;
 
+retry:
 	pthread_mutex_lock(&span_cache_mutex);
-	/* Prepopulation probes do not necessarily lead to a span build. */
-	if (count_miss)
-		sample_gap = span_sample_probe(r, oid, is_text);
-	errno = saved_errno;
 	cache = r->spanhash_cache;
-	entry = cache ? span_cache_find(cache, oid, is_text) : NULL;
-	if (entry && require_auto_binary && entry->auto_binary == is_text)
-		entry = NULL;
+	if (!cache)
+		goto done;
+	entry = span_cache_find(cache, &one->oid, SPAN_HASH_NO_CRLF);
+	if (!entry) {
+		struct span_cache_entry *text =
+			span_cache_find(cache, &one->oid, SPAN_HASH_TEXT);
+		struct span_cache_entry *binary =
+			span_cache_find(cache, &one->oid, SPAN_HASH_BINARY);
+
+		if (!text && !binary)
+			goto done;
+		/* Resolve attributes only when a cached table depends on them. */
+		if (!driver_loaded) {
+			pthread_mutex_unlock(&span_cache_mutex);
+			is_binary = diff_filespec_binary_driver(r, one);
+			driver_loaded = 1;
+			goto retry;
+		}
+		if (is_binary >= 0)
+			entry = is_binary ? binary : text;
+		else if (text && !text->auto_binary)
+			entry = text;
+		else if (binary && binary->auto_binary)
+			entry = binary;
+	}
 	if (entry) {
 		copy = malloc(entry->value_bytes);
 		if (copy) {
 			memcpy(copy, entry->value, entry->value_bytes);
+			*mode = entry->mode;
+			/* A no-CRLF table does not identify this path's driver. */
+			if (*mode != SPAN_HASH_NO_CRLF)
+				one->is_binary = *mode == SPAN_HASH_BINARY;
 			list_move(&entry->lru, &cache->lru);
 			span_cache_hits++;
 		} else {
@@ -346,8 +375,22 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 			span_cache_bypassed++;
 		}
 	}
+done:
+	pthread_mutex_unlock(&span_cache_mutex);
+	errno = saved_errno;
+	return copy;
+}
+
+static void span_sample_record(struct repository *r, const struct object_id *oid,
+			       enum span_hash_mode mode, int hit)
+{
+	uint64_t sample_gap;
+
+	/* The mode is known only after lookup or hashing. */
+	pthread_mutex_lock(&span_cache_mutex);
+	sample_gap = span_sample_probe(r, oid, mode);
 	if (sample_gap) {
-		if (copy)
+		if (hit)
 			span_sample.repeat_hit++;
 		else {
 			span_sample.repeat_miss++;
@@ -359,14 +402,14 @@ static struct spanhash_top *span_cache_lookup(struct repository *r,
 				span_sample.miss_gap_gt_65536++;
 		}
 	}
-	if (!copy && count_miss)
+	if (!hit)
 		span_cache_misses++;
 	pthread_mutex_unlock(&span_cache_mutex);
-	return copy;
 }
 
 static void span_cache_insert(struct repository *r,
-			      const struct diff_filespec *one, int is_text,
+			      const struct diff_filespec *one,
+			      enum span_hash_mode mode,
 			      const struct spanhash_top *value)
 {
 	const struct object_id *oid = &one->oid;
@@ -391,7 +434,7 @@ static void span_cache_insert(struct repository *r,
 		span_cache_bypassed++;
 		goto done;
 	}
-	if (span_cache_find(cache, oid, is_text))
+	if (span_cache_find(cache, oid, mode))
 		goto done; /* Another caller filled this key while we built it. */
 	before = span_cache_bytes(cache);
 	/* Leave room before allocating the new value, including its entry. */
@@ -401,7 +444,7 @@ static void span_cache_insert(struct repository *r,
 			list_entry(cache->lru.prev, struct span_cache_entry, lru);
 		struct span_cache_entry **slot =
 			&cache->buckets[span_cache_bucket(&oldest->oid,
-							    oldest->is_text)];
+							  oldest->mode)];
 
 		while (*slot && *slot != oldest)
 			slot = &(*slot)->next;
@@ -419,8 +462,8 @@ static void span_cache_insert(struct repository *r,
 		goto updated;
 	}
 	oidcpy(&entry->oid, oid);
-	entry->is_text = is_text;
-	entry->auto_binary = one->size &&
+	entry->mode = mode;
+	entry->auto_binary = mode != SPAN_HASH_NO_CRLF && one->size &&
 			     buffer_is_binary(one->data, one->size);
 	entry->value_bytes = bytes;
 	entry->value = malloc(bytes);
@@ -430,7 +473,7 @@ static void span_cache_insert(struct repository *r,
 		goto updated;
 	}
 	memcpy(entry->value, value, bytes);
-	bucket = span_cache_bucket(oid, is_text);
+	bucket = span_cache_bucket(oid, mode);
 	entry->next = cache->buckets[bucket];
 	cache->buckets[bucket] = entry;
 	list_add(&entry->lru, &cache->lru);
@@ -521,7 +564,8 @@ static int spanhash_cmp(const void *a_, const void *b_)
 }
 
 static struct spanhash_top *hash_chars(struct repository *r,
-				       struct diff_filespec *one)
+				       struct diff_filespec *one,
+				       enum span_hash_mode *mode)
 {
 	int i, n;
 	unsigned int accum1, accum2, hashval;
@@ -529,7 +573,8 @@ static struct spanhash_top *hash_chars(struct repository *r,
 	struct spanhash_top *hash;
 	unsigned char *buf = one->data;
 	unsigned int sz = one->size;
-	int is_text = !diff_filespec_is_binary(r, one);
+
+	*mode = SPAN_HASH_NO_CRLF;
 
 	i = INITIAL_HASH_SIZE;
 	hash = xmalloc(st_add(sizeof(*hash),
@@ -545,9 +590,15 @@ static struct spanhash_top *hash_chars(struct repository *r,
 		unsigned int old_1 = accum1;
 		sz--;
 
-		/* Ignore CR in CRLF sequence if text */
-		if (is_text && c == '\r' && sz && *buf == '\n')
-			continue;
+		/* Text and binary hashes differ only for CRLF sequences. */
+		if (c == '\r' && sz && *buf == '\n') {
+			if (*mode == SPAN_HASH_NO_CRLF)
+				*mode = diff_filespec_is_binary(r, one) ?
+						SPAN_HASH_BINARY :
+						SPAN_HASH_TEXT;
+			if (*mode == SPAN_HASH_TEXT)
+				continue;
+		}
 
 		accum1 = (accum1 << 7) ^ (accum2 >> 25);
 		accum2 = (accum2 << 7) ^ (old_1 >> 25);
@@ -587,23 +638,25 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 
 	if (!count) {
 		int saved_errno = errno;
-		int is_text = -1;
+		enum span_hash_mode mode;
+		int hit;
 
-		if (one->oid_data_unreplaced) {
-			is_text = !diff_filespec_is_binary(r, one);
-			saved_errno = errno;
-			count = span_cache_lookup(r, &one->oid, is_text, 0, 1);
-		}
+		if (one->oid_data_unreplaced)
+			count = span_cache_lookup(r, one, &mode);
+		hit = !!count;
 
 		if (!count) {
 			trace2_timer_start(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
 			errno = saved_errno;
-			count = hash_chars(r, one);
+			count = hash_chars(r, one, &mode);
 			saved_errno = errno;
 			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
-			if (is_text >= 0)
-				span_cache_insert(r, one, is_text, count);
+			if (one->oid_data_unreplaced)
+				span_cache_insert(r, one, mode, count);
 		}
+		/* Prepopulation probes do not necessarily lead to a build lookup. */
+		if (one->oid_data_unreplaced)
+			span_sample_record(r, &one->oid, mode, hit);
 		errno = saved_errno;
 		if (count_p)
 			*count_p = count;
@@ -614,29 +667,17 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 void diffcore_reuse_cached_spanhash(struct repository *r,
 				    struct diff_filespec *one)
 {
-	int is_binary, is_text, saved_errno;
+	int saved_errno;
+	enum span_hash_mode mode;
 	struct spanhash_top *count;
 
 	if (one->cnt_data || !diff_filespec_can_reuse_spanhash(r, one))
 		return;
 
 	saved_errno = errno;
-	is_binary = diff_filespec_binary_driver(r, one);
-	if (is_binary >= 0) {
-		is_text = !is_binary;
-		count = span_cache_lookup(r, &one->oid, is_text, 0, 0);
-	} else {
-		is_text = 1;
-		count = span_cache_lookup(r, &one->oid, is_text, 1, 0);
-		if (!count) {
-			is_text = 0;
-			count = span_cache_lookup(r, &one->oid, is_text, 1, 0);
-		}
-	}
-	if (count) {
+	count = span_cache_lookup(r, one, &mode);
+	if (count)
 		one->cnt_data = count;
-		one->is_binary = !is_text;
-	}
 	errno = saved_errno;
 }
 

@@ -3137,7 +3137,13 @@ test_expect_success 'spanhash cache respects text attributes and replacements' '
 			"^R[0-9][0-9][0-9][[:space:]]+text/old[[:space:]]+text/new$" actual &&
 		test_grep "^D[[:space:]]binary/old$" actual &&
 		test_grep "^A[[:space:]]binary/new$" actual &&
-		test_trace2_data diff spanhash/cache/hits 0 <attributes.trace &&
+		# The shared LF blob is reusable across opposing diff attributes.
+		test_trace2_data diff spanhash/cache/hits 1 <attributes.trace &&
+		GIT_TRACE2_EVENT="$PWD/numstat.trace" \
+			git log -M90% --numstat --format= attr-base..HEAD >numstat &&
+		test_grep "^100[[:space:]]100[[:space:]]text/{old => new}$" numstat &&
+		test_grep "^-[[:space:]]-[[:space:]]binary/new$" numstat &&
+		test_trace2_data diff spanhash/cache/hits 1 <numstat.trace &&
 		original=$(git rev-parse attr-base:text/old) &&
 		test_seq -f "completely different line number %09g words" 1 100 >other &&
 		replacement=$(git hash-object -w other) &&
