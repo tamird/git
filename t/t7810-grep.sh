@@ -3439,6 +3439,17 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		<grep-worktree-trace-2 &&
 	test_trace2_data grep worktree_blob/recorded_different 1 \
 		<grep-worktree-trace-2 &&
+	if test_have_prereq PTHREADS
+	then
+		test_expect_code 1 env \
+			GIT_TRACE2_EVENT="$PWD/grep-worktree-trace-threaded" \
+			git grep --no-content-index --threads=2 \
+				"absent worktree blob" -- grep-worktree-equal &&
+		test_trace2_data grep worktree_blob/hits 1 \
+			<grep-worktree-trace-threaded &&
+		test_trace2_data grep worker/object-lock-acquire/count \
+			"[1-9][0-9]*" <grep-worktree-trace-threaded || return 1
+	fi &&
 	cp .git/index.grep-worktree \
 		.git/index.grep-worktree.no-optional-locks-save &&
 	test_expect_code 1 env \

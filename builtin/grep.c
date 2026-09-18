@@ -4929,7 +4929,7 @@ int cmd_grep(int argc,
 	}
 	producer_stats = trace2_is_enabled() ? &local_producer_stats : NULL;
 	/* Submodule grep can start readers before grep_objects(). */
-	if (list.nr && trace2_is_enabled())
+	if (trace2_is_enabled())
 		obj_read_lock_trace_prepare();
 	if (num_threads > 1 && recurse_submodules)
 		start_threads(&opt);
