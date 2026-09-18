@@ -1230,7 +1230,7 @@ static int compute_default_attr_source(struct object_id *attr_source)
 	return 1;
 }
 
-static struct object_id *default_attr_source(void)
+const struct object_id *git_attr_source(void)
 {
 	static struct object_id attr_source;
 	static int has_attr_source = -1;
@@ -1327,7 +1327,7 @@ void git_check_attr(struct index_state *istate,
 		    struct attr_check *check)
 {
 	int i;
-	const struct object_id *tree_oid = default_attr_source();
+	const struct object_id *tree_oid = git_attr_source();
 
 	collect_some_attrs(istate, tree_oid, path, check);
 
@@ -1344,7 +1344,7 @@ void git_all_attrs(struct index_state *istate,
 		   const char *path, struct attr_check *check)
 {
 	int i;
-	const struct object_id *tree_oid = default_attr_source();
+	const struct object_id *tree_oid = git_attr_source();
 
 	attr_check_reset(check);
 	collect_some_attrs(istate, tree_oid, path, check);

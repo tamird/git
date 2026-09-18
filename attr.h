@@ -140,6 +140,9 @@ struct attr_stack;
  */
 void set_git_attr_source(const char *);
 
+/* Resolve the attribute source, rejecting invalid explicit sources. */
+const struct object_id *git_attr_source(void);
+
 /*
  * Given a string, return the gitattribute object that
  * corresponds to it.

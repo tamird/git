@@ -9,6 +9,7 @@
 
 #include "builtin.h"
 #include "abspath.h"
+#include "attr.h"
 #include "environment.h"
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
@@ -4840,6 +4841,8 @@ int cmd_grep(int argc,
 	t_compile_begin = getnanotime();
 	compile_grep_patterns(&opt);
 	t_compile_end = getnanotime();
+	if (opt.binary != GREP_BINARY_TEXT || opt.allow_textconv)
+		git_attr_source();
 	revision_count = list.nr;
 	pathspec_count = pathspec.nr;
 	matcher_type = opt.pattern_type_option;
