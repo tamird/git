@@ -5,6 +5,12 @@
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 
+#if defined(RUSAGE_INFO_V2) && defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && \
+	__MAC_OS_X_VERSION_MIN_REQUIRED >= 1090
+# include <libproc.h>
+# define HAVE_DARWIN_DISK_USAGE
+#endif
+
 /*
  * An arbitrarily chosen value to limit the depth of the ancestor chain.
  */
@@ -71,6 +77,22 @@ cleanup:
 static void trace_resource_usage(void)
 {
 	struct rusage usage;
+#ifdef HAVE_DARWIN_DISK_USAGE
+	struct rusage_info_v2 disk_usage;
+	int saved_errno = errno;
+
+	/* Accounted I/O requests, not necessarily physical device transfers. */
+	if (!proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
+			     (rusage_info_t *)&disk_usage)) {
+		if (disk_usage.ri_diskio_bytesread <= INTMAX_MAX)
+			trace2_data_intmax("process", NULL, "darwin/disk_read_bytes",
+					   (intmax_t)disk_usage.ri_diskio_bytesread);
+		if (disk_usage.ri_diskio_byteswritten <= INTMAX_MAX)
+			trace2_data_intmax("process", NULL, "darwin/disk_write_bytes",
+					   (intmax_t)disk_usage.ri_diskio_byteswritten);
+	}
+	errno = saved_errno;
+#endif
 
 	if (getrusage(RUSAGE_SELF, &usage))
 		return;
