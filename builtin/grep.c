@@ -2455,7 +2455,7 @@ static int grep_cache(struct grep_opt *opt,
 	}
 	if (!skip_cache_setup && (!use_selected || literal_selected) &&
 	    repo == the_repository &&
-	    prepare_index_query &&
+	    prepare_index_query && (cached || worktree_cache) &&
 	    !handled_selected_oid_query && !used_index_ipc && !content_index) {
 		trace2_region_enter("grep", "load_content_index", repo);
 		content_index = grep_index_load(repo);

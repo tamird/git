@@ -1717,10 +1717,7 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						valid = 0;
 						break;
 					}
-					if (candidate &&
-					    (depth != 1 || j != i + 2 ||
-					     (!isalnum(p->pattern[i + 1]) &&
-					      p->pattern[i + 1] != '_')))
+					if (candidate && depth != 1)
 						candidate_simple = 0;
 					if (j + 1 < scan_end &&
 					    p->pattern[j + 1] == '{') {
@@ -1779,6 +1776,8 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 							0
 						};
 						struct strbuf literal = STRBUF_INIT;
+						struct strbuf fragment = STRBUF_INIT;
+						int alternative_is_literal = 1;
 						size_t alternatives_left =
 							GREP_INDEX_MAX_QUERY_ALTERNATIVES -
 							group_query->clauses_nr -
@@ -1840,11 +1839,26 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 								    p->pattern[j] != '|') {
 									if (p->pattern[j] ==
 									    '[') {
-										strbuf_addch(
-											&literal,
-											p->pattern
-												[j + 1]);
-										j += 2;
+										size_t class_end;
+
+										if (grep_index_posix_class_end(
+											    p->pattern, j, i,
+											    GREP_PATTERN_TYPE_ERE,
+											    &class_end)) {
+											candidate_simple = 0;
+											break;
+										}
+										if (class_end == j + 2 &&
+										    (isalnum(p->pattern[j + 1]) ||
+										     p->pattern[j + 1] == '_')) {
+											strbuf_addch(&literal, p->pattern[j + 1]);
+										} else {
+											alternative_is_literal = 0;
+											grep_index_query_consider_required_literal(
+												&fragment, literal.buf, literal.len, 0);
+											strbuf_reset(&literal);
+										}
+										j = class_end;
 										continue;
 									}
 									if (p->pattern[j] ==
@@ -1855,13 +1869,19 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 										p->pattern[j]);
 									continue;
 								}
-								if (literal.len < 2 ||
+								if (!alternative_is_literal) {
+									/* A class separates required literal runs. */
+									grep_index_query_consider_required_literal(
+										&fragment, literal.buf, literal.len, 0);
+									strbuf_swap(&literal, &fragment);
+								}
+								if (literal.len < (alternative_is_literal ? 2 : 3) ||
 								    group.alternatives_nr ==
 									    alternatives_left) {
 									candidate_simple = 0;
 									break;
 								}
-								if (enrich_boundaries) {
+								if (enrich_boundaries && alternative_is_literal) {
 									unsigned char text[4];
 									size_t text_nr = 0;
 
@@ -1961,11 +1981,14 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 								trigrams_nr +=
 									alternative_trigrams_nr;
 								strbuf_reset(&literal);
+								strbuf_reset(&fragment);
+								alternative_is_literal = 1;
 							}
 						} else {
 							candidate_simple = 0;
 						}
 						strbuf_release(&literal);
+						strbuf_release(&fragment);
 						if (candidate_simple) {
 							for (size_t j =
 								     group_boundaries_start;

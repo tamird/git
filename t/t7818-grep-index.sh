@@ -1452,6 +1452,25 @@ test_expect_success 'write shared content index' '
 	test_path_is_file .git/objects/info/grep-index/grep-$segment.idx
 '
 
+test_expect_success 'worktree grep without identities prepares the index lazily' '
+	test_config core.fsmonitor false &&
+	test_config grep.worktreeBlobCache true &&
+	test_when_finished "git update-index --no-assume-unchanged present &&
+			    rm -f worktree-no-identity.trace worktree-assumed.trace" &&
+	git grep --no-content-index -F "present needle" >expect &&
+	GIT_TRACE2_EVENT="$PWD/worktree-no-identity.trace" \
+		git grep -F "present needle" >actual &&
+	test_cmp expect actual &&
+	test_region ! grep load_content_index worktree-no-identity.trace &&
+	test_region ! grep prepare_content_index worktree-no-identity.trace &&
+	git update-index --assume-unchanged present &&
+	GIT_TRACE2_EVENT="$PWD/worktree-assumed.trace" \
+		git grep -F "present needle" >actual &&
+	test_cmp expect actual &&
+	test_region grep load_content_index worktree-assumed.trace &&
+	test_region grep prepare_content_index worktree-assumed.trace
+'
+
 test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
 	'locale regexes use only verified ASCII-clean index entries' '
 	test_create_repo locale-safety &&
@@ -5238,6 +5257,33 @@ test_expect_success 'content index decodes singleton ERE classes' '
 	test_must_be_empty err
 '
 
+test_expect_success 'content index keeps required ERE fragments around classes' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	for alternative in "[aA]bsent" "abs[[:alpha:]]ent" "absen[tT]"
+	do
+		test_must_fail git grep --cached -E \
+			"(missing|$alternative)[[:space:]]*(=|:)" \
+			-- present 2>err &&
+		test_must_be_empty err || return 1
+	done
+'
+
+test_expect_success 'ERE fragments do not supply group boundaries' '
+	for pattern in \
+		"p([rR]esent|missing) needle" \
+		"p(resen[tT]|missing) needle" \
+		"(missing|pre[sS]ent) needle"
+	do
+		git grep --cached --no-content-index -E "$pattern" \
+			-- present >expect &&
+		git grep --cached -E "$pattern" -- present >actual &&
+		test_cmp expect actual || return 1
+	done
+'
+
 test_expect_success 'content index unwraps whole ERE group' '
 	oid=$(git rev-parse :ordinary) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -5961,20 +6007,30 @@ test_expect_success 'possible singleton ERE classes use normal blob reads' '
 	test_grep "unable to read" err
 '
 
-test_expect_success 'quantified singleton ERE classes read blobs' '
-	oid=$(git rev-parse :present) &&
+test_expect_success 'ERE alternatives without required fragments read blobs' '
+	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	mv "$object" "$object.save" &&
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 	test_must_fail git grep --cached -E \
-		"(present[x]*|absent)" -- present 2>err &&
-	test_grep "unable to read" err &&
-	test_must_fail git grep --cached -E \
-		"(present[x]?|absent)" -- present 2>err &&
-	test_grep "unable to read" err &&
-	test_must_fail git grep --cached -E \
-		"(present[x]{0}|absent)" -- present 2>err &&
+		"(absent|[[:alpha:]])[[:space:]]*" -- short 2>err &&
 	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified ERE classes read blobs' '
+	oid=$(git rev-parse :present) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	for class in "[x]" "[xy]"
+	do
+		for quantifier in "*" "?" "{0}"
+		do
+			test_must_fail git grep --cached -E \
+				"(present$class$quantifier|absent)" -- present 2>err &&
+			test_grep "unable to read" err || return 1
+		done
+	done
 '
 
 test_expect_success 'quantified ordinary atoms retain later literals' '
