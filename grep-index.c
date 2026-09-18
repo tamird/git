@@ -183,9 +183,9 @@ struct grep_index_query {
 	size_t alternatives_nr;
 	size_t trigrams_nr;
 	struct object_id cache_key;
-	char *cache_pattern;
-	size_t cache_patternlen;
-	int cache_pattern_alternation;
+	struct strbuf *cache_literals;
+	size_t cache_literals_nr;
+	size_t cache_literals_alloc;
 	int ignore_case;
 	int locale_sensitive_case;
 	int cacheable;
@@ -1036,6 +1036,26 @@ static int grep_index_query_add_ere_alternative(
 	return 0;
 }
 
+static void grep_index_query_clear_cache_literals(struct grep_index_query *query)
+{
+	for (size_t i = 0; i < query->cache_literals_nr; i++)
+		strbuf_release(&query->cache_literals[i]);
+	FREE_AND_NULL(query->cache_literals);
+	query->cache_literals_nr = query->cache_literals_alloc = 0;
+}
+
+static void grep_index_query_add_cache_literal(struct grep_index_query *query,
+					       const char *literal, size_t len)
+{
+	struct strbuf *buf;
+
+	ALLOC_GROW(query->cache_literals, query->cache_literals_nr + 1,
+		   query->cache_literals_alloc);
+	buf = &query->cache_literals[query->cache_literals_nr++];
+	strbuf_init(buf, len);
+	strbuf_add(buf, literal, len);
+}
+
 void grep_index_query_free(struct grep_index_query *query)
 {
 	if (!query)
@@ -1046,7 +1066,7 @@ void grep_index_query_free(struct grep_index_query *query)
 		grep_index_query_branch_clear(&query->branches[i]);
 	free(query->clauses);
 	free(query->branches);
-	free(query->cache_pattern);
+	grep_index_query_clear_cache_literals(query);
 	free(query);
 }
 
@@ -1504,6 +1524,75 @@ static int grep_index_ere_outer_group(const char *pattern, size_t len,
 			return 1;
 		}
 	}
+	return 0;
+}
+
+static int grep_index_cache_literal_cmp(const void *a, const void *b)
+{
+	return strbuf_cmp(a, b);
+}
+
+static int grep_index_query_cache_literals(struct grep_index_query *query,
+					   const struct grep_opt *opt,
+					   enum grep_pattern_type type)
+{
+	static const char domain[] = "grep-index-negative-literals-v1";
+	struct git_hash_ctx ctx;
+	size_t nr = 0;
+
+	if (type != GREP_PATTERN_TYPE_FIXED && type != GREP_PATTERN_TYPE_BRE &&
+	    type != GREP_PATTERN_TYPE_ERE)
+		return 0;
+	for (const struct grep_pat *p = opt->pattern_list; p; p = p->next) {
+		size_t start = 0;
+
+		if (type == GREP_PATTERN_TYPE_FIXED) {
+			grep_index_query_add_cache_literal(query, p->pattern,
+							   p->patternlen);
+			continue;
+		}
+		for (size_t i = 0; i <= p->patternlen; i++) {
+			unsigned char ch = i < p->patternlen ? p->pattern[i] : 0;
+
+			if (i == p->patternlen ||
+			    (type == GREP_PATTERN_TYPE_ERE && ch == '|')) {
+				if (i == start)
+					goto non_literal;
+				grep_index_query_add_cache_literal(
+					query, p->pattern + start, i - start);
+				start = i + 1;
+			} else if (!ch || ch & 0x80 || is_regex_special(ch) ||
+				   (type == GREP_PATTERN_TYPE_ERE && ch == '}')) {
+				goto non_literal;
+			}
+		}
+	}
+
+	QSORT(query->cache_literals, query->cache_literals_nr,
+	      grep_index_cache_literal_cmp);
+	for (size_t i = 0; i < query->cache_literals_nr; i++)
+		if (nr && !strbuf_cmp(&query->cache_literals[nr - 1],
+				      &query->cache_literals[i]))
+			strbuf_release(&query->cache_literals[i]);
+		else
+			query->cache_literals[nr++] = query->cache_literals[i];
+	query->cache_literals_nr = nr;
+	git_hash_init(&ctx, opt->repo->hash_algo);
+	git_hash_update(&ctx, domain, sizeof(domain));
+	for (size_t i = 0; i < nr; i++) {
+		const struct strbuf *literal = &query->cache_literals[i];
+		unsigned char length[sizeof(uint64_t)];
+
+		put_be64(length, literal->len);
+		git_hash_update(&ctx, length, sizeof(length));
+		git_hash_update(&ctx, literal->buf, literal->len);
+	}
+	git_hash_final_oid(&query->cache_key, &ctx);
+	query->cacheable = 1;
+	return 1;
+
+non_literal:
+	grep_index_query_clear_cache_literals(query);
 	return 0;
 }
 
@@ -2616,112 +2705,33 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 		query->alternatives_nr = patterns_nr;
 	}
 	/*
-	 * Cache only searches whose no-match result can be proved from the raw
-	 * bytes. Default binary handling and --text both search those bytes;
-	 * -I, folding, and word boundaries do not share that invariant. A
-	 * case-sensitive fixed-string OR list can trust the matcher's successful
-	 * no-match result. Single fixed patterns and plain ASCII BRE and ERE
-	 * literals are also checked against the bytes before their negative result
-	 * is reported. A more complex ERE can use an unquantified top-level literal
-	 * that every match must contain.
+	 * Canonical literal sets share byte-proven negatives across pattern
+	 * order and matcher syntax. Even fixed patterns can use a locale-aware
+	 * regex fallback, so verify every literal against the raw blob before
+	 * publishing a no-match result. More complex EREs retain their original
+	 * pattern key and use a required literal only as the absence proof.
 	 */
 	cacheable_options = !opt->ignore_case && !opt->word_regexp &&
 			    opt->binary != GREP_BINARY_NOMATCH && !opt->no_body_match;
-
-	if (cacheable_options && !opt->all_match && patterns_nr > 1 &&
-	    pattern_type == GREP_PATTERN_TYPE_FIXED) {
-		static const char fixed_list_domain[] =
-			"grep-index-negative-fixed-list-v1";
-		struct git_hash_ctx ctx;
+	if (cacheable_options && (!opt->all_match || patterns_nr == 1))
+		grep_index_query_cache_literals(query, opt, pattern_type);
+	if (cacheable_options && !query->cacheable && patterns_nr == 1 &&
+	    pattern_type == GREP_PATTERN_TYPE_ERE && required_literal_valid &&
+	    required_literal.len >= 3) {
+		static const char domain[] =
+			"grep-index-negative-literal-regex-v1";
 		const struct grep_pat *pattern = opt->pattern_list;
+		struct git_hash_ctx ctx;
+		unsigned char type = pattern_type;
 
 		git_hash_init(&ctx, opt->repo->hash_algo);
-		git_hash_update(&ctx, fixed_list_domain,
-				sizeof(fixed_list_domain));
-		for (; pattern; pattern = pattern->next) {
-			unsigned char length[sizeof(uint64_t)];
-
-			put_be64(length, pattern->patternlen);
-			git_hash_update(&ctx, length, sizeof(length));
-			git_hash_update(&ctx, pattern->pattern,
-					pattern->patternlen);
-		}
+		git_hash_update(&ctx, domain, sizeof(domain));
+		git_hash_update(&ctx, &type, sizeof(type));
+		git_hash_update(&ctx, pattern->pattern, pattern->patternlen);
 		git_hash_final_oid(&query->cache_key, &ctx);
+		grep_index_query_add_cache_literal(query, required_literal.buf,
+						   required_literal.len);
 		query->cacheable = 1;
-	}
-	if (cacheable_options &&
-	    patterns_nr == 1 && pattern_type != GREP_PATTERN_TYPE_PCRE) {
-		const struct grep_pat *pattern = opt->pattern_list;
-		int fixed = pattern_type == GREP_PATTERN_TYPE_FIXED;
-		int literal_regex = 0;
-		int required_literal_regex;
-
-		if (!fixed && (pattern_type == GREP_PATTERN_TYPE_BRE ||
-			       pattern_type == GREP_PATTERN_TYPE_ERE)) {
-			size_t literal_len = 0;
-
-			literal_regex = 1;
-			for (size_t i = 0; i < pattern->patternlen; i++) {
-				unsigned char ch = pattern->pattern[i];
-
-				if (pattern_type == GREP_PATTERN_TYPE_ERE &&
-				    ch == '|') {
-					if (!literal_len) {
-						literal_regex = 0;
-						break;
-					}
-					literal_len = 0;
-					continue;
-				}
-				if (ch & 0x80 || is_regex_special(ch) ||
-				    (pattern_type == GREP_PATTERN_TYPE_ERE &&
-				     ch == '}')) {
-					literal_regex = 0;
-					break;
-				}
-				literal_len++;
-			}
-			if (!literal_len)
-				literal_regex = 0;
-		}
-		required_literal_regex =
-			!literal_regex && pattern_type == GREP_PATTERN_TYPE_ERE &&
-			required_literal_valid && required_literal.len >= 3;
-		if (fixed || literal_regex || required_literal_regex) {
-			static const char fixed_domain[] =
-				"grep-index-negative-v2";
-			static const char regex_domain[] =
-				"grep-index-negative-literal-regex-v1";
-			struct git_hash_ctx ctx;
-			unsigned char type = pattern_type;
-
-			git_hash_init(&ctx, opt->repo->hash_algo);
-			if (literal_regex || required_literal_regex) {
-				git_hash_update(&ctx, regex_domain,
-						sizeof(regex_domain));
-				git_hash_update(&ctx, &type, sizeof(type));
-			} else {
-				git_hash_update(&ctx, fixed_domain,
-						sizeof(fixed_domain));
-			}
-			if (required_literal_regex) {
-				query->cache_pattern =
-					strbuf_detach(&required_literal,
-						      &query->cache_patternlen);
-			} else {
-				query->cache_pattern = xmemdupz(
-					pattern->pattern, pattern->patternlen);
-				query->cache_patternlen = pattern->patternlen;
-			}
-			query->cache_pattern_alternation =
-				literal_regex &&
-				pattern_type == GREP_PATTERN_TYPE_ERE &&
-				memchr(pattern->pattern, '|', pattern->patternlen);
-			git_hash_update(&ctx, pattern->pattern,
-					pattern->patternlen);
-			git_hash_final_oid(&query->cache_key, &ctx);
-			query->cacheable = 1;
-		}
 	}
 	strbuf_release(&required_literal);
 	free(enrichments);
@@ -2775,21 +2785,13 @@ const struct object_id *grep_index_query_cache_key(
 int grep_index_query_negative_is_cacheable(
 	const struct grep_index_query *query, const char *buf, size_t len)
 {
-	size_t start = 0;
-
-	if (!query || !query->cache_pattern)
-		return 1;
-	if (!buf)
+	if (!query || !query->cacheable || !buf)
 		return 0;
-	if (!query->cache_pattern_alternation)
-		return !memmem(buf, len, query->cache_pattern,
-			       query->cache_patternlen);
-	for (size_t i = 0; i <= query->cache_patternlen; i++) {
-		if (i < query->cache_patternlen && query->cache_pattern[i] != '|')
-			continue;
-		if (memmem(buf, len, query->cache_pattern + start, i - start))
+	for (size_t i = 0; i < query->cache_literals_nr; i++) {
+		const struct strbuf *literal = &query->cache_literals[i];
+
+		if (memmem(buf, len, literal->buf, literal->len))
 			return 0;
-		start = i + 1;
 	}
 	return 1;
 }

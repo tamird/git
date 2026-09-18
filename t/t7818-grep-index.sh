@@ -3597,7 +3597,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 		<negative-learn.trace &&
 	mv "$object" "$object.save" &&
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/negative-hit.trace" \
-		git grep --cached --text foo -- ordinary 2>err-after &&
+		git grep --cached --text -e foo -e foo -- ordinary 2>err-after &&
 	test_must_be_empty err-after &&
 	test_trace2_data grep content_index_negative_cache_hits 1 \
 		<negative-hit.trace &&
@@ -3664,7 +3664,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon learns negative index results' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'daemon learns multi-pattern fixed negatives' '
+	'daemon shares negatives for equivalent literal lists' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    rm -f negative-fixed-list-*.trace" &&
@@ -3683,11 +3683,37 @@ test_expect_success FSMONITOR_DAEMON \
 			    mv \"$object.save\" \"$object\"" &&
 	test_must_fail env \
 		GIT_TRACE2_EVENT="$PWD/negative-fixed-list-hit.trace" \
-		git grep --cached -F -e foo -e "absent|two" \
+		git grep --cached -F -e "absent|two" -e foo -e foo \
 		-- ordinary 2>err &&
 	test_must_be_empty err &&
 	test_trace2_data grep content_index_negative_cache_hits 1 \
-		<negative-fixed-list-hit.trace
+		<negative-fixed-list-hit.trace &&
+	mv "$object.save" "$object" &&
+	echo "present:present needle" >expect &&
+	env GIT_TRACE2_EVENT="$PWD/negative-fixed-list-terms.trace" \
+		git grep --cached -F -e conts -e needle -- ordinary present \
+		>actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_negative_cache_entries 1 \
+		<negative-fixed-list-terms.trace &&
+	mv "$object" "$object.save" &&
+	for option in -G -E -F
+	do
+		env GIT_TRACE2_EVENT="$PWD/negative-fixed-list-$option.trace" \
+			git grep --cached "$option" -e needle -e conts -e conts \
+			-- ordinary present >actual 2>err &&
+		test_must_be_empty err &&
+		test_cmp expect actual &&
+		test_trace2_data grep content_index_negative_cache_hits 1 \
+			<negative-fixed-list-$option.trace || return 1
+	done &&
+	env GIT_TRACE2_EVENT="$PWD/negative-fixed-list-alt.trace" \
+		git grep --cached -E "needle|conts" -- ordinary present \
+		>actual 2>err &&
+	test_must_be_empty err &&
+	test_cmp expect actual &&
+	test_trace2_data grep content_index_negative_cache_hits 1 \
+		<negative-fixed-list-alt.trace
 '
 
 test_expect_success FSMONITOR_DAEMON \
@@ -3795,7 +3821,7 @@ test_expect_success FSMONITOR_DAEMON,SJIS_REGEX_NOMATCH \
 '
 
 test_expect_success FSMONITOR_DAEMON,SJIS_REGEX_NOMATCH,!LIBPCRE2 \
-	'daemon verifies fixed negatives against blob bytes' '
+	'daemon verifies literal-list negatives against blob bytes' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git reset --hard HEAD &&
@@ -3808,16 +3834,21 @@ test_expect_success FSMONITOR_DAEMON,SJIS_REGEX_NOMATCH,!LIBPCRE2 \
 	object=.git/objects/$(test_oid_to_path "$oid") &&
 	test_when_finished "test ! -e \"$object.save\" ||
 			    mv \"$object.save\" \"$object\"" &&
-	test_must_fail env LC_ALL=ja_JP.SJIS \
-		GIT_TRACE2_EVENT="$PWD/negative-bytes-fixed.trace" \
-		git grep --cached -F foo -- negative-bytes &&
-	mv "$object" "$object.save" &&
-	test_must_fail env LC_ALL=ja_JP.SJIS \
-		GIT_TRACE2_EVENT="$PWD/negative-bytes-fixed-miss.trace" \
-		git grep --cached -F foo -- negative-bytes 2>err-fixed-bytes &&
-	test_grep "unable to read" err-fixed-bytes &&
-	test_trace2_data grep content_index_negative_cache_hits 0 \
-		<negative-bytes-fixed-miss.trace
+	for option in -F -G -E
+	do
+		test_must_fail env LC_ALL=ja_JP.SJIS \
+			git grep --cached "$option" -e foo -e absent \
+			-- negative-bytes &&
+		mv "$object" "$object.save" &&
+		test_must_fail env LC_ALL=ja_JP.SJIS \
+			GIT_TRACE2_EVENT="$PWD/negative-bytes-fixed-$option.trace" \
+			git grep --cached -F -e foo -e absent -- negative-bytes \
+			2>err-fixed-bytes &&
+		test_grep "unable to read" err-fixed-bytes &&
+		test_trace2_data grep content_index_negative_cache_hits 0 \
+			<negative-bytes-fixed-$option.trace &&
+		mv "$object.save" "$object" || return 1
+	done
 '
 
 test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
