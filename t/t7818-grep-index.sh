@@ -2119,6 +2119,7 @@ test_expect_success SHA1 'grep token reuses unchanged v4 entries after an index 
 		rm -rf token-v6-untracked &&
 		rm -f token-v6-entry token-v6-0-before \
 			.git/token-v6-dirty .git/index.grep-token \
+			.git/token-legacy .git/token-checksum \
 			.git/index.grep-token.lock \
 			.git/index.grep-worktree \
 			.git/index.grep-worktree-generation \
@@ -2154,6 +2155,46 @@ test_expect_success SHA1 'grep token reuses unchanged v4 entries after an index 
 	test_path_is_file .git/index.grep-token &&
 	test_trace2_data grep index_identity/token_write_outcome 0 \
 		<token-v6-created.trace &&
+	test "$(test_file_size .git/index.grep-token)" -eq 224 &&
+	for version in 5 6
+	do
+		if test "$version" = 5
+		then
+			header_size=76
+		else
+			header_size=92
+		fi &&
+		dd if=.git/index.grep-token of=.git/token-legacy \
+			bs=1 count="$header_size" 2>/dev/null &&
+		printf "\000\000\000\00$version" |
+			dd of=.git/token-legacy bs=1 seek=4 conv=notrunc 2>/dev/null &&
+		dd if=.git/index.grep-token bs=1 skip=92 count=80 \
+			>>.git/token-legacy 2>/dev/null &&
+		if test "$version" = 6
+		then
+			# Exact-generation hits do not consult the entry checksum.
+			dd if=/dev/zero bs=1 count=20 >>.git/token-legacy 2>/dev/null
+		fi &&
+		test-tool sha1 -b <.git/token-legacy >.git/token-checksum &&
+		cat .git/token-checksum >>.git/token-legacy &&
+		mv .git/token-legacy .git/index.grep-token &&
+		GIT_TRACE2_EVENT="$PWD/token-v6-legacy-$version-hit.trace" \
+			git --no-optional-locks grep \
+			"token original contents" -- token-v6-entry >actual &&
+		test_cmp expect actual &&
+		test_trace2_data grep index_identity/token_read_outcome 0 \
+			<token-v6-legacy-$version-hit.trace &&
+		git update-index --force-write-index &&
+		GIT_TRACE2_EVENT="$PWD/token-v6-legacy-$version-stale.trace" \
+			git grep "token original contents" -- token-v6-entry >actual &&
+		test_cmp expect actual &&
+		test_trace2_data grep index_identity/token_read_outcome 4 \
+			<token-v6-legacy-$version-stale.trace &&
+		test_region grep index-identity/compute token-v6-legacy-$version-stale.trace &&
+		test_trace2_data grep index_identity/token_write_outcome 0 \
+			<token-v6-legacy-$version-stale.trace &&
+		test "$(test_file_size .git/index.grep-token)" -eq 224 || return 1
+	done &&
 	mkdir token-v6-untracked &&
 	echo untracked >token-v6-untracked/file &&
 	test-tool chmtime =-5 . &&
@@ -2268,6 +2309,7 @@ test_expect_success !SHA1 'grep token falls back without a parsed SHA-256 EOIE' 
 	test_cmp expect actual &&
 	test_trace2_data grep index_identity/token_write_outcome 0 \
 		<token-v6-sha256-created.trace &&
+	test "$(test_file_size .git/index.grep-token)" -eq 284 &&
 	GIT_TRACE2_EVENT="$PWD/token-v6-sha256-rewrite.trace" \
 		git update-index --force-write-index &&
 	test_trace2_data index write/version 4 \

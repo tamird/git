@@ -11,7 +11,7 @@ _GIT_BASE_COPTS = [
     "-DSHA1DC_INIT_SAFE_HASH_DEFAULT=0",
     '-DSHA1DC_CUSTOM_INCLUDE_SHA1_C=\\"git-compat-util.h\\"',
     '-DSHA1DC_CUSTOM_INCLUDE_UBC_CHECK_C=\\"git-compat-util.h\\"',
-    "-DSHA256_BLK",
+    "-DSHA256_OPENSSL",
     '-DSHELL_PATH=\\"/bin/sh\\"',
     '-DGIT_HTML_PATH=\\"share/doc/git-doc\\"',
     '-DGIT_MAN_PATH=\\"share/man\\"',

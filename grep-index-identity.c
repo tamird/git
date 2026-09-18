@@ -12,7 +12,7 @@
 #include "wrapper.h"
 
 #define GREP_INDEX_TOKEN_SIGNATURE 0x47574944
-#define GREP_INDEX_TOKEN_VERSION	6
+#define GREP_INDEX_TOKEN_VERSION	7
 #define GREP_INDEX_TOKEN_HEADER_SIZE	92
 #define GREP_INDEX_TOKEN_V5_HEADER_SIZE 76
 #define GREP_INDEX_EOIE_SIZE		32
@@ -184,6 +184,8 @@ static int compute_identity(struct repository *repo,
 	result = 0;
 
 cleanup:
+	git_hash_discard(&entries_ctx);
+	git_hash_discard(&oids_ctx);
 	strbuf_release(&entries);
 	strbuf_release(&oids);
 	return result;
@@ -251,7 +253,7 @@ static int index_entry_checksum(struct repository *repo,
 	const unsigned char *map;
 	const unsigned char *eoie;
 	struct stat st, after;
-	struct git_hash_ctx ctx;
+	struct git_hash_ctx ctx = { 0 };
 	size_t size, offset, end = istate->index_file_entries_end;
 	int ieot_seen = 0;
 	int result = -1;
@@ -287,9 +289,9 @@ static int index_entry_checksum(struct repository *repo,
 	    !hasheq(map + size - repo->hash_algo->rawsz,
 		    istate->oid.hash, repo->hash_algo))
 		goto unmap;
-	git_hash_init(&ctx, repo->hash_algo);
-	git_hash_update(&ctx, "grep-index-entry-bytes-v6",
-			sizeof("grep-index-entry-bytes-v6") - 1);
+	git_hash_init(&ctx, &hash_algos[GIT_HASH_SHA256]);
+	git_hash_update(&ctx, "grep-index-entry-bytes-v7",
+			sizeof("grep-index-entry-bytes-v7") - 1);
 	hash_uint32(&ctx, istate->index_file_used_ieot);
 	git_hash_update(&ctx, map + sizeof(struct cache_header),
 			end - sizeof(struct cache_header));
@@ -317,6 +319,7 @@ static int index_entry_checksum(struct repository *repo,
 unmap:
 	munmap((void *)map, size);
 done:
+	git_hash_discard(&ctx);
 	trace2_region_leave("grep", "index-identity/entry-checksum", repo);
 	return result;
 }
@@ -355,17 +358,21 @@ static enum grep_index_token_read_outcome load_token(
 	if (map_size < 8)
 		goto unmap;
 	version = get_be32(map + 4);
+	if (version != 5 && version != 6 &&
+	    version != GREP_INDEX_TOKEN_VERSION)
+		goto unmap;
 	header_size = version == 5 ? GREP_INDEX_TOKEN_V5_HEADER_SIZE :
 				     GREP_INDEX_TOKEN_HEADER_SIZE;
-	expected = header_size + (version == 5 ? 5 : 6) * rawsz;
+	expected = header_size + 5 * rawsz;
+	if (version != 5)
+		expected += version == 6 ? rawsz : GIT_SHA256_RAWSZ;
 	if (map_size != expected ||
 	    !hashfile_checksum_valid(repo->hash_algo, map, map_size) ||
 	    get_be32(map) != GREP_INDEX_TOKEN_SIGNATURE ||
-	    (version != 5 && version != GREP_INDEX_TOKEN_VERSION) ||
 	    get_be32(map + 8) != repo->hash_algo->format_id ||
 	    get_be32(map + 12) != istate->cache_nr ||
 	    get_be32(map + 72) != istate->sparse_index ||
-	    (version == GREP_INDEX_TOKEN_VERSION &&
+	    (version >= 6 &&
 	     get_be32(map + 88) != istate->index_file_used_ieot) ||
 	    !hasheq(map + header_size + rawsz,
 		    scope_oid->hash, repo->hash_algo))
@@ -386,7 +393,7 @@ static enum grep_index_token_read_outcome load_token(
 		 index_entry_checksum(repo, istate, &entry_checksum) == 0) {
 		oidcpy(entry_checksum_out, &entry_checksum);
 		if (hasheq(map + header_size + 4 * rawsz,
-			   entry_checksum.hash, repo->hash_algo))
+			   entry_checksum.hash, &hash_algos[GIT_HASH_SHA256]))
 			result = GREP_INDEX_TOKEN_READ_ENTRY_MATCH;
 	}
 	if (result == GREP_INDEX_TOKEN_READ_INVALID)
@@ -438,7 +445,7 @@ static enum grep_index_token_write_outcome write_token(
 	if (verified_entry_checksum)
 		oidcpy(&entry_checksum, verified_entry_checksum);
 	else if (index_entry_checksum(repo, istate, &entry_checksum))
-		oidclr(&entry_checksum, repo->hash_algo);
+		oidclr(&entry_checksum, &hash_algos[GIT_HASH_SHA256]);
 	f = hashfd(repo->hash_algo, fd, get_lock_file_path(&lock));
 	hashwrite_be32(f, GREP_INDEX_TOKEN_SIGNATURE);
 	hashwrite_be32(f, GREP_INDEX_TOKEN_VERSION);
@@ -460,7 +467,7 @@ static enum grep_index_token_write_outcome write_token(
 	hashwrite(f, scope_oid->hash, repo->hash_algo->rawsz);
 	hashwrite(f, identity->oid_sequence.hash, repo->hash_algo->rawsz);
 	hashwrite(f, identity->worktree.hash, repo->hash_algo->rawsz);
-	hashwrite(f, entry_checksum.hash, repo->hash_algo->rawsz);
+	hashwrite(f, entry_checksum.hash, GIT_SHA256_RAWSZ);
 	finalize_hashfile(f, NULL, FSYNC_COMPONENT_NONE, CSUM_HASH_IN_STREAM);
 	f = NULL;
 	if (commit_lock_file(&lock)) {
@@ -489,7 +496,7 @@ int grep_index_identity_get(struct repository *repo,
 	int compute_result, read_errno, write_errno;
 
 	hash_scope(repo, &scope_oid);
-	oidclr(&entry_checksum, repo->hash_algo);
+	oidclr(&entry_checksum, &hash_algos[GIT_HASH_SHA256]);
 	oidcpy(&identity->worktree_scope, &scope_oid);
 	oidclr(&identity->worktree_split_base_identity, repo->hash_algo);
 	if (istate->split_index && istate->split_index->base &&
