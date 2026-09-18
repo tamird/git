@@ -206,11 +206,14 @@ void add_entry_to_dir(struct ref_dir *dir, struct ref_entry *entry);
  * specified, only include references whose names start with that
  * prefix. If `prime_dir` is true, then fill any incomplete
  * directories before beginning the iteration. The output is ordered
- * by refname.
+ * by refname. Optional casefold_prefixes restrict both priming and iteration
+ * to the union of ASCII case-insensitive prefixes. The array is borrowed
+ * until the iterator is released.
  */
 struct ref_iterator *cache_ref_iterator_begin(struct ref_cache *cache,
 					      const char *prefix,
 					      struct repository *repo,
-					      int prime_dir);
+					      int prime_dir,
+					      const char **casefold_prefixes);
 
 #endif /* REFS_REF_CACHE_H */

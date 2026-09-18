@@ -1040,6 +1040,7 @@ struct files_ref_iterator {
 	struct ref_iterator *iter0;
 	struct repository *repo;
 	unsigned int flags;
+	const char **casefold_prefixes;
 };
 
 static int files_ref_iterator_advance(struct ref_iterator *ref_iterator)
@@ -1049,6 +1050,11 @@ static int files_ref_iterator_advance(struct ref_iterator *ref_iterator)
 	int ok;
 
 	while ((ok = ref_iterator_advance(iter->iter0)) == ITER_OK) {
+		/* Pruned loose overrides must not expose unrelated packed refs. */
+		if (iter->casefold_prefixes &&
+		    !refname_matches_casefold_prefixes(iter->iter0->ref.name,
+						       iter->casefold_prefixes, 0))
+			continue;
 		if (iter->flags & REFS_FOR_EACH_PER_WORKTREE_ONLY &&
 		    parse_worktree_ref(iter->iter0->ref.name, NULL, NULL,
 				       NULL) != REF_WORKTREE_CURRENT)
@@ -1096,9 +1102,9 @@ static struct ref_iterator_vtable files_ref_iterator_vtable = {
 };
 
 static struct ref_iterator *files_ref_iterator_begin(
-		struct ref_store *ref_store,
-		const char *prefix, const char **exclude_patterns,
-		unsigned int flags)
+	struct ref_store *ref_store,
+	const char *prefix, const char **exclude_patterns,
+	unsigned int flags, const char **casefold_prefixes)
 {
 	struct files_ref_store *refs;
 	struct ref_iterator *loose_iter, *packed_iter, *overlay_iter;
@@ -1129,7 +1135,8 @@ static struct ref_iterator *files_ref_iterator_begin(
 	 */
 
 	loose_iter = cache_ref_iterator_begin(get_loose_ref_cache(refs, flags),
-					      prefix, ref_store->repo, 1);
+					      prefix, ref_store->repo, 1,
+					      casefold_prefixes);
 
 	/*
 	 * The packed-refs file might contain broken references, for
@@ -1154,6 +1161,7 @@ static struct ref_iterator *files_ref_iterator_begin(
 	iter->iter0 = overlay_iter;
 	iter->repo = ref_store->repo;
 	iter->flags = flags;
+	iter->casefold_prefixes = casefold_prefixes;
 
 	return ref_iterator;
 }
@@ -1525,7 +1533,7 @@ static int should_pack_refs(struct files_ref_store *refs,
 		limit = 16;
 
 	iter = cache_ref_iterator_begin(get_loose_ref_cache(refs, 0), NULL,
-					refs->base.repo, 0);
+					refs->base.repo, 0, NULL);
 	while ((ret = ref_iterator_advance(iter)) == ITER_OK) {
 		if (should_pack_ref(refs, &iter->ref, opts))
 			refcount++;
@@ -1565,7 +1573,7 @@ static int files_optimize(struct ref_store *ref_store,
 	packed_refs_lock(refs->packed_ref_store, LOCK_DIE_ON_ERROR, &err);
 
 	iter = cache_ref_iterator_begin(get_loose_ref_cache(refs, 0), NULL,
-					refs->base.repo, 0);
+					refs->base.repo, 0, NULL);
 	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
 		/*
 		 * If the loose reference can be packed, add an entry

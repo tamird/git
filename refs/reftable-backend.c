@@ -846,7 +846,8 @@ done:
 static struct ref_iterator *reftable_be_iterator_begin(struct ref_store *ref_store,
 						       const char *prefix,
 						       const char **exclude_patterns,
-						       unsigned int flags)
+						       unsigned int flags,
+						       const char **casefold_prefixes UNUSED)
 {
 	struct reftable_ref_iterator *main_iter, *worktree_iter;
 	struct reftable_ref_store *refs;

@@ -1966,6 +1966,53 @@ test_expect_success "${git_for_each_ref} --ignore-case ignores case" '
 	test_cmp expect actual
 '
 
+test_expect_success 'case-insensitive literal prefixes preserve selection and overlays' '
+	test_when_finished "rm -rf casefold-refs" &&
+	git init casefold-refs &&
+	(
+		cd casefold-refs &&
+		test_commit first &&
+		old=$(git rev-parse HEAD) &&
+		git update-ref refs/MiXeD/Dir/First "$old" &&
+		git update-ref refs/MiXeD/Dir/Second "$old" &&
+		git update-ref refs/MiXeD/Other/Child "$old" &&
+		git update-ref refs/MiXeD/Otherish "$old" &&
+		git update-ref refs/elsewhere/unrelated "$old" &&
+		git pack-refs --all &&
+		test_commit second &&
+		new=$(git rev-parse HEAD) &&
+		git update-ref refs/MiXeD/Dir/First "$new" &&
+		if test_have_prereq REFFILES
+		then
+			# An excluded loose override must still hide its stale packed ref.
+			missing=$(test_oid deadbeef) &&
+			sed "s/^$old refs\/elsewhere\/unrelated$/$missing refs\/elsewhere\/unrelated/" \
+				.git/packed-refs >packed &&
+			mv packed .git/packed-refs &&
+			git update-ref refs/elsewhere/unrelated "$new" || return 1
+		fi &&
+		cat >expect <<-EOF &&
+		$new refs/MiXeD/Dir/First
+		$old refs/MiXeD/Other/Child
+		EOF
+		GIT_REF_PARANOIA=0 ${git_for_each_ref} --ignore-case \
+			--format="%(objectname) %(refname)" \
+			refs/mixed/dir/first refs/MiXeD/Other \
+			refs/MIXED/DIR/FIRST >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		# Globs and escapes keep the original matcher and traversal.
+		${git_for_each_ref} --ignore-case \
+			--format="%(objectname) %(refname)" \
+			"refs/mixed/dir/firs?" "refs/MiXeD/Other/*" >actual &&
+		test_cmp expect actual &&
+		${git_for_each_ref} --ignore-case \
+			--format="%(objectname) %(refname)" \
+			"refs/mixed/dir/firs\\t" "refs/MiXeD/Other/*" >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success "${git_for_each_ref} --omit-empty works" '
 	${git_for_each_ref} --format="%(refname)" >actual &&
 	test_line_count -gt 1 actual &&

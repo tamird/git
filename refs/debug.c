@@ -212,12 +212,14 @@ static struct ref_iterator_vtable debug_ref_iterator_vtable = {
 
 static struct ref_iterator *
 debug_ref_iterator_begin(struct ref_store *ref_store, const char *prefix,
-			 const char **exclude_patterns, unsigned int flags)
+			 const char **exclude_patterns, unsigned int flags,
+			 const char **casefold_prefixes)
 {
 	struct debug_ref_store *drefs = (struct debug_ref_store *)ref_store;
 	struct ref_iterator *res =
 		drefs->refs->be->iterator_begin(drefs->refs, prefix,
-						exclude_patterns, flags);
+						exclude_patterns, flags,
+						casefold_prefixes);
 	struct debug_ref_iterator *diter = xcalloc(1, sizeof(*diter));
 	base_ref_iterator_init(&diter->base, &debug_ref_iterator_vtable);
 	diter->iter = res;

@@ -1173,9 +1173,9 @@ static void populate_excluded_jump_list(struct packed_ref_iterator *iter,
 }
 
 static struct ref_iterator *packed_ref_iterator_begin(
-		struct ref_store *ref_store,
-		const char *prefix, const char **exclude_patterns,
-		unsigned int flags)
+	struct ref_store *ref_store,
+	const char *prefix, const char **exclude_patterns,
+	unsigned int flags, const char **casefold_prefixes UNUSED)
 {
 	struct packed_ref_store *refs;
 	struct snapshot *snapshot;
@@ -1424,7 +1424,7 @@ static enum ref_transaction_error write_with_updates(struct packed_ref_store *re
 	 * of updates is exhausted, leave i set to updates->nr.
 	 */
 	iter = packed_ref_iterator_begin(&refs->base, "", NULL,
-					 REFS_FOR_EACH_INCLUDE_BROKEN);
+					 REFS_FOR_EACH_INCLUDE_BROKEN, NULL);
 	if ((ok = ref_iterator_advance(iter)) != ITER_OK) {
 		ref_iterator_free(iter);
 		iter = NULL;

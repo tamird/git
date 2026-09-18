@@ -1829,12 +1829,32 @@ int refs_head_ref(struct ref_store *refs, refs_for_each_cb fn, void *cb_data)
 	return 0;
 }
 
-struct ref_iterator *refs_ref_iterator_begin(
-		struct ref_store *refs,
-		const char *prefix,
-		const char **exclude_patterns,
-		int trim,
-		enum refs_for_each_flag flags)
+int refname_matches_casefold_prefixes(const char *refname,
+				      const char **prefixes, int directory)
+{
+	if (!prefixes)
+		return 1;
+	for (; *prefixes; prefixes++) {
+		const char *name = refname, *prefix = *prefixes;
+
+		while (*name && *prefix &&
+		       tolower((unsigned char)*name) == tolower((unsigned char)*prefix)) {
+			name++;
+			prefix++;
+		}
+		if (!*prefix || (directory && !*name))
+			return 1;
+	}
+	return 0;
+}
+
+static struct ref_iterator *refs_ref_iterator_begin_with_prefixes(
+	struct ref_store *refs,
+	const char *prefix,
+	const char **exclude_patterns,
+	int trim,
+	enum refs_for_each_flag flags,
+	const char **casefold_prefixes)
 {
 	struct ref_iterator *iter;
 	struct strvec normalized_exclude_patterns = STRVEC_INIT;
@@ -1867,7 +1887,8 @@ struct ref_iterator *refs_ref_iterator_begin(
 		}
 	}
 
-	iter = refs->be->iterator_begin(refs, prefix, exclude_patterns, flags);
+	iter = refs->be->iterator_begin(refs, prefix, exclude_patterns, flags,
+					casefold_prefixes);
 	/*
 	 * `iterator_begin()` already takes care of prefix, but we
 	 * might need to do some trimming:
@@ -1878,6 +1899,14 @@ struct ref_iterator *refs_ref_iterator_begin(
 	strvec_clear(&normalized_exclude_patterns);
 
 	return iter;
+}
+
+struct ref_iterator *refs_ref_iterator_begin(
+	struct ref_store *refs, const char *prefix,
+	const char **exclude_patterns, int trim, enum refs_for_each_flag flags)
+{
+	return refs_ref_iterator_begin_with_prefixes(refs, prefix, exclude_patterns,
+						     trim, flags, NULL);
 }
 
 int refs_for_each_ref_ext(struct ref_store *refs,
@@ -1953,8 +1982,9 @@ int refs_for_each_ref_ext(struct ref_store *refs,
 		exclude_patterns = opts->exclude_patterns;
 	}
 
-	iter = refs_ref_iterator_begin(refs, prefix, exclude_patterns,
-				       trim_prefix, opts->flags);
+	iter = refs_ref_iterator_begin_with_prefixes(refs, prefix, exclude_patterns,
+						     trim_prefix, opts->flags,
+						     opts->namespace ? NULL : opts->casefold_prefixes);
 
 	ret = do_for_each_ref_iterator(iter, cb, cb_data);
 

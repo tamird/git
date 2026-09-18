@@ -3126,12 +3126,18 @@ static int for_each_fullref_in_pattern(struct ref_filter *filter,
 	}
 
 	if (filter->ignore_case) {
-		/*
-		 * we can't handle case-insensitive comparisons,
-		 * so just return everything and let the caller
-		 * sort it out.
-		 */
-		return for_each_fullref_with_seek(filter, cb, cb_data, 0);
+		const char **pattern = filter->name_patterns;
+
+		if (filter->start_after || !pattern || !*pattern)
+			return for_each_fullref_with_seek(filter, cb, cb_data, 0);
+		for (; *pattern; pattern++)
+			if (!**pattern || strpbrk(*pattern, "*?[\\"))
+				return for_each_fullref_with_seek(filter, cb, cb_data, 0);
+		/* Keep final matching here; backends may only prune subtrees. */
+		opts.exclude_patterns = NULL;
+		opts.casefold_prefixes = filter->name_patterns;
+		return refs_for_each_ref_ext(get_main_ref_store(the_repository),
+					     cb, cb_data, &opts);
 	}
 
 	if (!filter->name_patterns || !filter->name_patterns[0]) {

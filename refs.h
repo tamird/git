@@ -496,6 +496,13 @@ struct refs_for_each_ref_options {
 	const char **exclude_patterns;
 
 	/*
+	 * Optional pruning hints: full refname prefixes matched with ASCII case
+	 * folding. Backends may ignore these; the caller must still filter refs.
+	 * The NULL-terminated array remains valid throughout the iteration.
+	 */
+	const char **casefold_prefixes;
+
+	/*
 	 * The number of bytes to trim from the refname. Note that the trimmed
 	 * bytes must not cause the reference to become empty. As such, this
 	 * field should typically only be set when one uses a `prefix` ending

@@ -278,10 +278,11 @@ static enum prefix_state overlaps_prefix(const char *dirname,
 
 /*
  * Load all of the refs from `dir` (recursively) that could possibly
- * contain references matching `prefix` into our in-memory cache. If
- * `prefix` is NULL, prime unconditionally.
+ * contain references matching `prefix` and `casefold_prefixes` into our
+ * in-memory cache. A NULL filter imposes no restriction.
  */
-static void prime_ref_dir(struct ref_dir *dir, const char *prefix)
+static void prime_ref_dir(struct ref_dir *dir, const char *prefix,
+			  const char **casefold_prefixes)
 {
 	/*
 	 * The hard work of loading loose refs is done by get_ref_dir(), so we
@@ -292,11 +293,16 @@ static void prime_ref_dir(struct ref_dir *dir, const char *prefix)
 	int i;
 	for (i = 0; i < dir->nr; i++) {
 		struct ref_entry *entry = dir->entries[i];
-		if (!(entry->flag & REF_DIR)) {
-			/* Not a directory; no need to recurse. */
-		} else if (!prefix) {
+
+		if (!(entry->flag & REF_DIR))
+			continue;
+		if (casefold_prefixes &&
+		    !refname_matches_casefold_prefixes(entry->name,
+						       casefold_prefixes, 1))
+			continue;
+		if (!prefix) {
 			/* Recurse in any case: */
-			prime_ref_dir(get_ref_dir(entry), NULL);
+			prime_ref_dir(get_ref_dir(entry), NULL, casefold_prefixes);
 		} else {
 			switch (overlaps_prefix(entry->name, prefix)) {
 			case PREFIX_CONTAINS_DIR:
@@ -305,10 +311,10 @@ static void prime_ref_dir(struct ref_dir *dir, const char *prefix)
 				 * don't have to check the prefix
 				 * anymore:
 				 */
-				prime_ref_dir(get_ref_dir(entry), NULL);
+				prime_ref_dir(get_ref_dir(entry), NULL, casefold_prefixes);
 				break;
 			case PREFIX_WITHIN_DIR:
-				prime_ref_dir(get_ref_dir(entry), prefix);
+				prime_ref_dir(get_ref_dir(entry), prefix, casefold_prefixes);
 				break;
 			case PREFIX_EXCLUDES_DIR:
 				/* No need to prime this directory. */
@@ -361,6 +367,7 @@ struct cache_ref_iterator {
 	 * component boundaries.
 	 */
 	char *prefix;
+	const char **casefold_prefixes;
 
 	/*
 	 * A stack of levels. levels[0] is the uppermost level that is
@@ -405,6 +412,11 @@ static int cache_ref_iterator_advance(struct ref_iterator *ref_iterator)
 		}
 
 		entry = dir->entries[level->index];
+		if (iter->casefold_prefixes &&
+		    !refname_matches_casefold_prefixes(entry->name,
+						       iter->casefold_prefixes,
+						       entry->flag & REF_DIR))
+			continue;
 
 		if (level->prefix_state == PREFIX_WITHIN_DIR) {
 			entry_prefix_state = overlaps_prefix(entry->name, iter->prefix);
@@ -450,7 +462,7 @@ static int cache_ref_iterator_set_prefix(struct cache_ref_iterator *iter,
 	}
 
 	if (iter->prime_dir)
-		prime_ref_dir(dir, prefix);
+		prime_ref_dir(dir, prefix, iter->casefold_prefixes);
 	iter->levels_nr = 1;
 	level = &iter->levels[0];
 	level->index = -1;
@@ -484,7 +496,7 @@ static int cache_ref_iterator_seek(struct ref_iterator *ref_iterator,
 		dir = get_ref_dir(iter->cache->root);
 
 		if (iter->prime_dir)
-			prime_ref_dir(dir, refname);
+			prime_ref_dir(dir, refname, iter->casefold_prefixes);
 
 		iter->levels_nr = 1;
 		level = &iter->levels[0];
@@ -563,7 +575,8 @@ static struct ref_iterator_vtable cache_ref_iterator_vtable = {
 struct ref_iterator *cache_ref_iterator_begin(struct ref_cache *cache,
 					      const char *prefix,
 					      struct repository *repo,
-					      int prime_dir)
+					      int prime_dir,
+					      const char **casefold_prefixes)
 {
 	struct cache_ref_iterator *iter;
 	struct ref_iterator *ref_iterator;
@@ -576,6 +589,7 @@ struct ref_iterator *cache_ref_iterator_begin(struct ref_cache *cache,
 	iter->repo = repo;
 	iter->cache = cache;
 	iter->prime_dir = prime_dir;
+	iter->casefold_prefixes = casefold_prefixes;
 
 	if (cache_ref_iterator_seek(&iter->base, prefix,
 				    REF_ITERATOR_SEEK_SET_PREFIX) < 0) {

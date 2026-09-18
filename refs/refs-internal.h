@@ -463,12 +463,18 @@ typedef int copy_ref_fn(struct ref_store *ref_store,
  * `prefix`. `prefix` is matched as a literal string, without regard
  * for path separators. If prefix is NULL or the empty string, iterate
  * over all references in `ref_store`. The output is ordered by
- * refname.
+ * refname. casefold_prefixes is an optional pruning hint as described in
+ * refs_for_each_ref_options; backends may ignore it. Its array and strings
+ * are borrowed until the iterator is released.
  */
 typedef struct ref_iterator *ref_iterator_begin_fn(
-		struct ref_store *ref_store,
-		const char *prefix, const char **exclude_patterns,
-		unsigned int flags);
+	struct ref_store *ref_store,
+	const char *prefix, const char **exclude_patterns,
+	unsigned int flags, const char **casefold_prefixes);
+
+/* A directory also matches when it could contain a matching ref. */
+int refname_matches_casefold_prefixes(const char *refname,
+				      const char **prefixes, int directory);
 
 /* reflog functions */
 
