@@ -702,6 +702,7 @@ static int index_icase_find_component(struct index_state *istate,
 				      size_t *matched_dir_start)
 {
 	int matches = 0;
+	size_t prior_scans = *scans;
 
 	for (size_t i = range_start; i < range_end;) {
 		const struct cache_entry *ce = istate->cache[i];
@@ -713,8 +714,15 @@ static int index_icase_find_component(struct index_state *istate,
 		size_t j;
 		size_t dir_start = SIZE_MAX;
 
-		if (*scans >= scan_limit)
+		if (*scans >= scan_limit) {
+			trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PRIOR_SCANS,
+					   prior_scans);
+			trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_RANGE_ENTRIES,
+					   range_end - range_start);
+			trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PARENT,
+					   require_dir);
 			return -1;
+		}
 		(*scans)++;
 
 		if (!slow_same_name(component_name, 1, component, 1)) {
