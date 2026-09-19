@@ -154,6 +154,7 @@ static int pack_objects(struct repository *r,
 	 */
 	opts.pack_fd = args->stateless_rpc ? -1 : fd;
 
+	trace2_region_enter("send_pack", "prepare_objects", r);
 	for (size_t i = 0; i < advertised->nr; i++)
 		append_negative_object(r, &opts.haves, &advertised->oid[i]);
 	for (size_t i = 0; i < negotiated->nr; i++)
@@ -174,6 +175,9 @@ static int pack_objects(struct repository *r,
 			oid_array_append(&opts.wants, &refs->new_oid);
 		refs = refs->next;
 	}
+	trace2_region_leave("send_pack", "prepare_objects", r);
+	trace2_data_intmax("send_pack", r, "prepare_objects/haves", opts.haves.nr);
+	trace2_data_intmax("send_pack", r, "prepare_objects/wants", opts.wants.nr);
 	if (bound_haves) {
 		trace2_data_intmax("send_pack", r, "bounded_haves/retained",
 				   retained);
