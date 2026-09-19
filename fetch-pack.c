@@ -683,9 +683,15 @@ static int mark_complete(const struct object_id *oid)
 	return 0;
 }
 
-static int mark_complete_oid(const struct reference *ref, void *cb_data UNUSED)
+static int mark_complete_oid(const struct object_id *oid, void *cb_data UNUSED)
 {
-	return mark_complete(ref->oid);
+	return mark_complete(oid);
+}
+
+static int collect_complete_ref(const struct reference *ref, void *cb_data)
+{
+	oid_array_append(cb_data, ref->oid);
+	return 0;
 }
 
 static void mark_recent_complete_commits(struct fetch_pack_args *args,
@@ -866,10 +872,14 @@ static void mark_complete_and_common_ref(struct fetch_negotiator *negotiator,
 		struct refs_for_each_ref_options opts = {
 			.flags = REFS_FOR_EACH_INCLUDE_BROKEN,
 		};
+		struct oid_array local_oids = OID_ARRAY_INIT;
 
 		trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_REFS);
 		refs_for_each_ref_ext(get_main_ref_store(the_repository),
-				      mark_complete_oid, NULL, &opts);
+				      collect_complete_ref, &local_oids, &opts);
+		/* OID order visits nearby pack-index and MIDX keys. */
+		oid_array_for_each_unique(&local_oids, mark_complete_oid, NULL);
+		oid_array_clear(&local_oids);
 		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_REFS);
 		trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_ALTERNATES);
 		for_each_cached_alternate(NULL, mark_alternate_complete);
