@@ -515,6 +515,10 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.category = "grep",
 		.name = "packed/entry-lookup",
 	},
+	[TRACE2_TIMER_ID_GREP_MIDX_PACK_PREPARE] = {
+		.category = "grep",
+		.name = "packed/midx-pack-prepare",
+	},
 	[TRACE2_TIMER_ID_GREP_PACKED_CACHE_COPY] = {
 		.category = "grep",
 		.name = "packed/cache-copy",

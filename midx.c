@@ -743,6 +743,8 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 	struct packed_git *p;
 	uint64_t started = lookup ? packed_lookup_begin(lookup) : 0;
 	int found = bsearch_midx(oid, m, &pos);
+	int trace_prepare = lookup && obj_read_lock_trace_enabled() &&
+			    trace2_is_enabled();
 	enum midx_fill_result ret = MIDX_FILL_MISS;
 
 	if (lookup)
@@ -754,9 +756,15 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 	midx_for_object(&m, pos);
 	pack_int_id = nth_midxed_pack_int_id(m, pos);
 
+	if (trace_prepare) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_GREP_MIDX_PACK_PREPARE);
+		errno = saved_errno;
+	}
 	if (prepare_midx_pack(m, pack_int_id)) {
 		ret = MIDX_FILL_OWNER_UNAVAILABLE;
-		goto out;
+		goto prepared;
 	}
 	p = m->packs[pack_int_id - m->num_packs_in_base];
 
@@ -767,10 +775,18 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 	* answer, as it may have been deleted since the MIDX was
 	* loaded!
 	*/
-	if (!is_pack_valid(p)) {
+	if (!is_pack_valid(p))
 		ret = MIDX_FILL_OWNER_UNAVAILABLE;
-		goto out;
+
+prepared:
+	if (trace_prepare) {
+		int saved_errno = errno;
+
+		trace2_timer_stop(TRACE2_TIMER_ID_GREP_MIDX_PACK_PREPARE);
+		errno = saved_errno;
 	}
+	if (ret == MIDX_FILL_OWNER_UNAVAILABLE)
+		goto out;
 
 	if (oidset_size(&p->bad_objects) &&
 	    oidset_contains(&p->bad_objects, oid)) {
