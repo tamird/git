@@ -3996,6 +3996,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 					dir->internal.stat_prevalidated =
 						validate_untracked_stats(untracked, istate, NULL);
 			} else if (had_skippable_subtree ||
+				   !untracked_cache->root->valid ||
 				   untracked_cache->dir_invalidated) {
 				if (!has_skip_worktree_excludes(dir, istate)) {
 					if (untracked_cache->root->can_skip_replay) {

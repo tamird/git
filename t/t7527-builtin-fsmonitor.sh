@@ -2902,6 +2902,37 @@ test_expect_success 'lock-free status recovers untracked snapshot after daemon r
 		git hash-object .git/index >../untracked-restart-clean-index.after &&
 		test_cmp ../untracked-restart-clean-index.before \
 			../untracked-restart-clean-index.after &&
+		echo untracked >nested/partial &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-partial-first.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-partial-first.out &&
+		echo "?? nested/partial" >../untracked-restart-partial.expect &&
+		test_cmp ../untracked-restart-partial.expect \
+			../untracked-restart-partial-first.out &&
+		test_trace2_data fsmonitor untracked-cache/save-root-valid 0 \
+			<../untracked-restart-partial-first.trace &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-partial-second.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-partial-second.out &&
+		test_cmp ../untracked-restart-partial-first.out \
+			../untracked-restart-partial-second.out &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../untracked-restart-partial-second.trace &&
+		test_trace2_data status untracked/cache-root-valid 0 \
+			<../untracked-restart-partial-second.trace &&
+		test_trace2_data status untracked/subtrees-repaired 0 \
+			<../untracked-restart-partial-second.trace &&
+		! have_t2_data_event fsmonitor untracked-cache/save-outcome \
+			<../untracked-restart-partial-second.trace &&
+		rm nested/partial &&
+		GIT_TRACE2_EVENT="$PWD/../untracked-restart-partial-repaired.trace" \
+			git --no-optional-locks status --porcelain -uall \
+			>../untracked-restart-partial-repaired.out &&
+		test_must_be_empty ../untracked-restart-partial-repaired.out &&
+		test_trace2_data status untracked/subtrees-repaired \
+			"[1-9][0-9]*" <../untracked-restart-partial-repaired.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../untracked-restart-partial-repaired.trace &&
 		for restore_case in index token unsupported
 		do
 			restore_prefix="../untracked-restart-pending-$restore_case" &&

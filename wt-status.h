@@ -138,6 +138,7 @@ struct wt_status {
 	/* These are computed during processing of the individual sections */
 	int committable;
 	int workdir_dirty;
+	int untracked_cache_repaired;
 	const char *index_file;
 	FILE *fp;
 	const char *prefix;

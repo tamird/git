@@ -665,7 +665,8 @@ static int run_status(FILE *fp, const char *index_file, const char *prefix, int 
 	    !istate->untracked->fsmonitor_resync &&
 	    (istate->untracked->dir_opened ||
 	     istate->untracked->gitignore_invalidated ||
-	     istate->untracked->dir_invalidated))
+	     istate->untracked->dir_invalidated ||
+	     s->untracked_cache_repaired))
 		fsmonitor_ipc__save_untracked_cache(
 			istate, FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
 
@@ -1831,7 +1832,8 @@ struct repository *repo UNUSED)
 	      the_repository->index->untracked &&
 	      (the_repository->index->untracked->dir_opened ||
 	       the_repository->index->untracked->gitignore_invalidated ||
-	       the_repository->index->untracked->dir_invalidated))))
+	       the_repository->index->untracked->dir_invalidated ||
+	       s.untracked_cache_repaired))))
 		fsmonitor_ipc__save_untracked_cache(
 			the_repository->index,
 			FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);

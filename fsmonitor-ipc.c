@@ -784,8 +784,6 @@ decode_snapshot:
 	}
 	result = FSMONITOR_UNTRACKED_CACHE_HIT;
 	candidate->use_fsmonitor = 1;
-	if (candidate->root && !candidate->root->valid)
-		candidate->dir_invalidated = 1;
 	free_untracked_cache(istate->untracked);
 	istate->untracked = candidate;
 	if (tracked_bitmap) {

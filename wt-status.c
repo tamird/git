@@ -851,6 +851,7 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	int cache_resync = 0;
 	unsigned int stored_flags;
 
+	s->untracked_cache_repaired = 0;
 	if (!s->show_untracked_files)
 		return;
 
@@ -890,6 +891,7 @@ static void wt_status_collect_untracked(struct wt_status *s)
 	t_fill_begin = getnanotime();
 	fill_directory(&dir, istate, &s->pathspec);
 	t_fill_end = getnanotime();
+	s->untracked_cache_repaired = !!dir.internal.repaired_subtrees;
 
 	for (i = 0; i < dir.nr; i++) {
 		struct dir_entry *ent = dir.entries[i];
