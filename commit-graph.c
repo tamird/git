@@ -589,16 +589,45 @@ static int validate_mixed_generation_chain(struct commit_graph *g)
 	return 0;
 }
 
-static void validate_mixed_bloom_settings(struct commit_graph *g)
+static void trace2_bloom_layer_mismatch(
+	struct repository *r, unsigned int depth, unsigned int reference_depth,
+	const struct bloom_filter_settings *actual,
+	const struct bloom_filter_settings *reference)
+{
+	struct json_writer jw = JSON_WRITER_INIT;
+
+	if (!trace2_is_enabled())
+		return;
+
+	jw_object_begin(&jw, 0);
+	jw_object_intmax(&jw, "layer_depth", depth);
+	jw_object_intmax(&jw, "reference_depth", reference_depth);
+	jw_object_intmax(&jw, "actual_hash_version", actual->hash_version);
+	jw_object_intmax(&jw, "reference_hash_version", reference->hash_version);
+	jw_object_intmax(&jw, "actual_num_hashes", actual->num_hashes);
+	jw_object_intmax(&jw, "reference_num_hashes", reference->num_hashes);
+	jw_object_intmax(&jw, "actual_bits_per_entry", actual->bits_per_entry);
+	jw_object_intmax(&jw, "reference_bits_per_entry", reference->bits_per_entry);
+	jw_end(&jw);
+	trace2_data_json("bloom", r, "layer_mismatch", &jw);
+	jw_release(&jw);
+}
+
+static void validate_mixed_bloom_settings(struct repository *r,
+					  struct commit_graph *g)
 {
 	struct bloom_filter_settings *settings = NULL;
-	for (; g; g = g->base_graph) {
+	unsigned int depth = 0, reference_depth = 0;
+
+	/* Depth zero is the newest layer, including layers without filters. */
+	for (; g; g = g->base_graph, depth++) {
 		int incompatible_parameters;
 
 		if (!g->bloom_filter_settings)
 			continue;
 		if (!settings) {
 			settings = g->bloom_filter_settings;
+			reference_depth = depth;
 			continue;
 		}
 
@@ -607,6 +636,8 @@ static void validate_mixed_bloom_settings(struct commit_graph *g)
 			g->bloom_filter_settings->num_hashes != settings->num_hashes;
 		if (incompatible_parameters ||
 		    g->bloom_filter_settings->hash_version != settings->hash_version) {
+			trace2_bloom_layer_mismatch(r, depth, reference_depth,
+						    g->bloom_filter_settings, settings);
 			g->chunk_bloom_indexes = NULL;
 			g->chunk_bloom_data = NULL;
 			FREE_AND_NULL(g->bloom_filter_settings);
@@ -743,7 +774,7 @@ struct commit_graph *load_commit_graph_chain_fd_st(struct object_database *odb,
 	}
 
 	validate_mixed_generation_chain(graph_chain);
-	validate_mixed_bloom_settings(graph_chain);
+	validate_mixed_bloom_settings(odb->repo, graph_chain);
 
 	free(oids);
 	fclose(fp);

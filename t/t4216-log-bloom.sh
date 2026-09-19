@@ -1009,7 +1009,9 @@ test_expect_success 'setup for mixed Bloom setting tests' '
 test_expect_success 'ensure Bloom filters with incompatible settings are ignored' '
 	# Compute Bloom filters with "unusual" settings.
 	git -C $repo rev-parse one >in &&
-	GIT_TEST_BLOOM_SETTINGS_NUM_HASHES=3 git -C $repo commit-graph write \
+	GIT_TEST_BLOOM_SETTINGS_NUM_HASHES=3 \
+	GIT_TEST_BLOOM_SETTINGS_BITS_PER_ENTRY=15 \
+		git -C $repo commit-graph write \
 		--stdin-commits --changed-paths --split <in &&
 	layer=$(head -n 1 $repo/$chain) &&
 
@@ -1031,9 +1033,15 @@ test_expect_success 'ensure Bloom filters with incompatible settings are ignored
 	# Ensure that incompatible Bloom filters are ignored.
 	git -C $repo -c core.commitGraph=false log --oneline --no-decorate -- file \
 		>expect 2>err &&
-	git -C $repo log --oneline --no-decorate -- file >actual 2>err &&
+	>trace2.txt &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+		git -C $repo log --oneline --no-decorate -- file >actual 2>err &&
 	test_cmp expect actual &&
-	test_grep "disabling Bloom filters for commit-graph layer .$layer." err
+	test_grep "disabling Bloom filters for commit-graph layer .$layer." err &&
+	test_grep "\"key\":\"layer_mismatch\"" trace2.txt &&
+	test_grep "\"layer_depth\":2,\"reference_depth\":0" trace2.txt &&
+	test_grep "\"actual_num_hashes\":3,\"reference_num_hashes\":7" trace2.txt &&
+	test_grep "\"actual_bits_per_entry\":15,\"reference_bits_per_entry\":10" trace2.txt
 '
 
 test_expect_success 'merge graph layers with incompatible Bloom settings' '
@@ -1079,10 +1087,15 @@ test_expect_success 'ensure Bloom filter with incompatible versions are ignored'
 
 	test_line_count = 2 $repo/$chain &&
 
-	git -C $repo log --oneline --no-decorate -- $CENT >actual 2>err &&
+	>trace2.txt &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+		git -C $repo log --oneline --no-decorate -- $CENT >actual 2>err &&
 	test_cmp expect actual &&
 
 	test_must_be_empty err &&
+	test_grep "\"key\":\"layer_mismatch\"" trace2.txt &&
+	test_grep "\"layer_depth\":1,\"reference_depth\":0" trace2.txt &&
+	test_grep "\"actual_hash_version\":1,\"reference_hash_version\":2" trace2.txt &&
 
 	# Merge the two layers with incompatible bloom filter versions,
 	# ensuring that the v2 filters are used.
