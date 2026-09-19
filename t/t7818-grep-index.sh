@@ -4550,6 +4550,29 @@ test_expect_success FSMONITOR_DAEMON \
 		.git/candidate-untracked-actual &&
 	test_trace2_data grep "$scope_key" 0 \
 		<.git/candidate-untracked-narrow.trace &&
+	printf "%s\n" candidate-clean candidate-depth/deep \
+		>.git/candidate-untracked-literal-expect &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_SAMPLE_ENTRIES=2 \
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=2 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-literal.trace" \
+		git grep --untracked -l "untracked acceleration needle" -- \
+		candidate-clean candidate-depth candidate-depth/deep \
+		>.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-literal-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 1 \
+		<.git/candidate-untracked-literal.trace &&
+	test_region grep load_worktree_cache \
+		.git/candidate-untracked-literal.trace &&
+	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=2 \
+	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-overlap.trace" \
+		git grep --untracked -l "untracked acceleration needle" -- \
+		candidate-clean candidate-clean candidate-cle candidate-depth \
+		":(exclude)candidate-depth" >.git/candidate-untracked-actual &&
+	test_cmp .git/candidate-untracked-narrow-expect \
+		.git/candidate-untracked-actual &&
+	test_trace2_data grep "$scope_key" 0 \
+		<.git/candidate-untracked-overlap.trace &&
 	GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS=2 \
 	GIT_TRACE2_EVENT="$PWD/.git/candidate-untracked-excluded.trace" \
 		git grep --untracked -l "untracked acceleration needle" -- \
