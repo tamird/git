@@ -713,6 +713,7 @@ static int index_icase_find_component(struct index_state *istate,
 			(size_t)(slash - component) : remaining;
 		size_t j;
 		size_t dir_start = SIZE_MAX;
+		size_t prefix_len = 0;
 
 		if (*scans >= scan_limit) {
 			trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PRIOR_SCANS,
@@ -725,17 +726,23 @@ static int index_icase_find_component(struct index_state *istate,
 		}
 		(*scans)++;
 
-		if (!slow_same_name(component_name, 1, component, 1)) {
+		while (prefix_len < component_len && prefix_len < candidate_len &&
+		       slow_same_name(component_name + prefix_len, 1,
+				      component + prefix_len, 1))
+			prefix_len++;
+		if (prefix_len < candidate_len) {
 			size_t lo = i + 1;
 			size_t hi = range_end;
 
-			/* Raw first-byte groups are contiguous in index order. */
+			/* Include the byte that makes this prefix incompatible. */
+			prefix_len++;
+			/* Raw prefix groups are contiguous in index order. */
 			while (lo < hi) {
 				size_t mid = lo + (hi - lo) / 2;
 				const char *next_component =
 					istate->cache[mid]->name + parent_len;
 
-				if (*next_component == *component)
+				if (!strncmp(next_component, component, prefix_len))
 					lo = mid + 1;
 				else
 					hi = mid;
@@ -786,9 +793,7 @@ static int index_icase_find_component(struct index_state *istate,
 		}
 
 		if ((!require_dir || dir_start != SIZE_MAX) &&
-		    component_len == candidate_len &&
-		    slow_same_name(component_name, component_len,
-				   component, candidate_len)) {
+		    component_len == candidate_len) {
 			if (++matches > 1)
 				return matches;
 			*matched_dir_start = dir_start;

@@ -75,17 +75,25 @@ test_expect_success 'bounded index probe exhausts budget' '
 			done &&
 			printf "100644 %s\\tz/file\\n" "$blob"
 		} | git update-index --index-info &&
-		echo "unknown 1024" >expect &&
-		test-tool read-cache --icase-probe=z/missing >actual &&
+		echo "unknown 4" >expect &&
+		test-tool read-cache --icase-probe=z/missing 4 >actual &&
 		test_cmp expect actual
 	)
 '
 
-test_expect_success 'bounded index probe skips unrelated first-byte groups' '
+test_expect_success 'bounded index probe skips unrelated prefixes' '
 	(
 		cd budget &&
-		echo absent >expect &&
-		test-tool read-cache --icase-probe=missing >probe-actual &&
+		cat >expect <<-\EOF &&
+		absent
+		absent
+		absent
+		EOF
+		{
+			test-tool read-cache --icase-probe=missing 16 &&
+			test-tool read-cache --icase-probe=zmissing 16 &&
+			test-tool read-cache --icase-probe=z/missing 16
+		} >probe-actual &&
 		cut -d" " -f1 probe-actual >actual &&
 		test_cmp expect actual
 	)

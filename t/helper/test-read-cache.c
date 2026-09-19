@@ -65,11 +65,15 @@ int cmd__read_cache(int argc, const char **argv)
 	if (probe_name) {
 		enum index_file_icase_probe_result result;
 		size_t scans = 0;
+		unsigned int scan_limit = 1024;
 
+		if (argc > 2 ||
+		    (argc == 2 && strtoul_ui(argv[1], 10, &scan_limit)))
+			die("expected an unsigned scan limit after --icase-probe");
 		repo_read_index(the_repository);
 		result = index_file_exists_icase_probe(
 			the_repository->index, probe_name, strlen(probe_name),
-			&scans, 1024);
+			&scans, scan_limit);
 		switch (result) {
 		case INDEX_FILE_ICASE_PROBE_UNKNOWN:
 			printf("unknown");
