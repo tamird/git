@@ -554,10 +554,6 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "index",
 		.name = "icase-probe/ambiguous-parent",
 	},
-	[TRACE2_COUNTER_ID_ICASE_PROBE_MISSING_PARENT] = {
-		.category = "index",
-		.name = "icase-probe/missing-parent",
-	},
 	[TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PRIOR_SCANS] = {
 		.category = "index",
 		.name = "icase-probe/scan-limit/prior-scans",

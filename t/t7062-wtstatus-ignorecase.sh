@@ -52,7 +52,13 @@ test_expect_success 'bounded index probe' '
 			test-tool read-cache --icase-dir-probe=alias &&
 			test-tool read-cache --icase-dir-probe=df &&
 			test-tool read-cache --icase-dir-probe=gitlink &&
-			test-tool read-cache --icase-dir-probe=missing
+			test-tool read-cache --icase-dir-probe=missing &&
+			test-tool read-cache --icase-probe=missing/child &&
+			test-tool read-cache --icase-probe=exact/missing/child &&
+			test-tool read-cache --icase-probe=gitlink/child &&
+			test-tool read-cache --icase-probe=EXACT/tracked &&
+			test-tool read-cache --icase-dir-probe=missing/child &&
+			test-tool read-cache --icase-dir-probe=exact/missing/child
 		} | cut -d" " -f1 >actual &&
 		cat >expect <<-\EOF &&
 		absent
@@ -69,6 +75,12 @@ test_expect_success 'bounded index probe' '
 		absent
 		unknown
 		present
+		absent
+		absent
+		absent
+		absent
+		absent
+		unknown
 		absent
 		absent
 		EOF

@@ -863,6 +863,23 @@ index_icase_probe(struct index_state *istate, const char *name,
 			goto cleanup;
 		}
 
+		matches = index_icase_find_component(
+			istate, range_start, range_end, parent_len,
+			name + name_pos, component_len, 1,
+			scans, scan_limit, &matched_dir_start);
+		if (!matches) {
+			result = INDEX_ICASE_PROBE_ABSENT;
+			goto cleanup;
+		}
+		if (matches < 0 || matches > 1) {
+			if (matches < 0)
+				trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PARENT, 1);
+			fallback_reason = matches < 0 ?
+				TRACE2_COUNTER_ID_ICASE_PROBE_SCAN_LIMIT :
+				TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_PARENT;
+			goto cleanup;
+		}
+
 		strbuf_add(&path, name + name_pos, component_len);
 		strbuf_addch(&path, '/');
 		pos = index_name_pos(istate, path.buf, path.len);
@@ -890,22 +907,6 @@ index_icase_probe(struct index_state *istate, const char *name,
 			exact_end = lo;
 		}
 
-		strbuf_setlen(&path, parent_len);
-		matches = index_icase_find_component(
-			istate, range_start, range_end, parent_len,
-			name + name_pos, component_len, 1,
-			scans, scan_limit, &matched_dir_start);
-		if (matches != 1) {
-			if (matches < 0)
-				trace2_counter_add(TRACE2_COUNTER_ID_ICASE_PROBE_LIMIT_PARENT, 1);
-			fallback_reason = matches < 0 ? TRACE2_COUNTER_ID_ICASE_PROBE_SCAN_LIMIT :
-					  matches > 1 ? TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_PARENT :
-							TRACE2_COUNTER_ID_ICASE_PROBE_MISSING_PARENT;
-			goto cleanup;
-		}
-
-		strbuf_add(&path, name + name_pos, component_len);
-		strbuf_addch(&path, '/');
 		range_start = exact_start;
 		range_end = exact_end;
 		name_pos = component_end + 1;
