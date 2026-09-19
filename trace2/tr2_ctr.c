@@ -493,6 +493,26 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "grep",
 		.name = "source/selected",
 	},
+	[TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID] = {
+		.category = "grep",
+		.name = "packed/lookup/invalid",
+	},
+	[TRACE2_COUNTER_ID_GREP_LOOKUP_COUNT] = {
+		.category = "grep",
+		.name = "packed/lookup/count",
+	},
+	[TRACE2_COUNTER_ID_GREP_LOOKUP_MIDX_SEARCH_NS] = {
+		.category = "grep",
+		.name = "packed/lookup/midx-search-ns",
+	},
+	[TRACE2_COUNTER_ID_GREP_LOOKUP_MIDX_RESOLVE_NS] = {
+		.category = "grep",
+		.name = "packed/lookup/midx-resolve-ns",
+	},
+	[TRACE2_COUNTER_ID_GREP_LOOKUP_FALLBACK_NS] = {
+		.category = "grep",
+		.name = "packed/lookup/fallback-ns",
+	},
 
 	/* Add additional metadata before here. */
 };
@@ -534,6 +554,10 @@ static inline void tr2_counter_increment_for_ctx(struct tr2tls_thread_ctx *ctx,
 		 cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_TRUNCATED)
 		add_checked_counter(&ctx->counter_block,
 			TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID, cid, value);
+	else if (cid >= TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID &&
+		 cid <= TRACE2_COUNTER_ID_GREP_LOOKUP_FALLBACK_NS)
+		add_checked_counter(&ctx->counter_block,
+				    TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID, cid, value);
 	else if (cid >= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT &&
 		 cid <= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS) {
 		if (value > UINT64_MAX - c->value)
@@ -596,6 +620,11 @@ void tr2_update_final_counters(void)
 			add_checked_counter(&final_counter_block,
 				TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID,
 				cid, c->value);
+		else if (cid >= TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID &&
+			 cid <= TRACE2_COUNTER_ID_GREP_LOOKUP_FALLBACK_NS)
+			add_checked_counter(&final_counter_block,
+					    TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID,
+					    cid, c->value);
 		else if (cid >= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SIZE_COUNT &&
 			 cid <= TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_FULL_NS) {
 			if (c->value > UINT64_MAX - c_final->value)

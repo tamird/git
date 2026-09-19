@@ -160,6 +160,27 @@ static int packed_entry_location_time(uint64_t *now)
 #endif
 }
 
+static void trace_packed_lookup(const struct odb_packed_lookup *before,
+				const struct odb_packed_lookup *after)
+{
+	if (before->invalid || after->invalid) {
+		trace2_counter_add(TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID, 1);
+	} else {
+		const uint64_t values[] = {
+			1,
+			after->ns[ODB_PACKED_LOOKUP_MIDX_SEARCH] -
+				before->ns[ODB_PACKED_LOOKUP_MIDX_SEARCH],
+			after->ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE] -
+				before->ns[ODB_PACKED_LOOKUP_MIDX_RESOLVE],
+			after->ns[ODB_PACKED_LOOKUP_FALLBACK] -
+				before->ns[ODB_PACKED_LOOKUP_FALLBACK],
+		};
+
+		trace2_counter_add_many(TRACE2_COUNTER_ID_GREP_LOOKUP_COUNT,
+					values, ARRAY_SIZE(values));
+	}
+}
+
 static enum odb_read_status odb_source_packed_read_object_info(struct odb_source *source,
 							       const struct object_id *oid,
 							       struct object_info *oi,
@@ -170,12 +191,13 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	struct packed_git *bad_pack = NULL;
 	struct odb_read_result *result = oi ? oi->read_resultp : NULL;
 	struct odb_packed_lookup *lookup;
+	struct odb_packed_lookup local_lookup, lookup_before;
 	struct packed_lookup_probe probe;
 	struct packed_lookup_probe *diagnostic = NULL;
 	struct pack_entry e;
 	uint64_t started = 0, finished;
 	int ret, found, timed = 0;
-	int trace_lookup = obj_read_lock_trace_enabled();
+	int trace_lookup = obj_read_lock_trace_enabled() && trace2_is_enabled();
 
 	if (result && !oi->contentp &&
 	    (!oi->sizep || !result->size_info_enabled))
@@ -206,6 +228,14 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 					     diagnostic);
 		else
 			odb_source_prepare(source, ODB_PREPARE_FLUSH_CACHES);
+	}
+
+	if (trace_lookup) {
+		if (!lookup) {
+			memset(&local_lookup, 0, sizeof(local_lookup));
+			lookup = &local_lookup;
+		}
+		lookup_before = *lookup;
 	}
 
 	if (result && !result->packed_entry_location_invalid)
@@ -243,6 +273,12 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 			result->packed_entry_location_attempt_count++;
 			result->packed_entry_location_ns += finished - started;
 		}
+	}
+	if (trace_lookup) {
+		int saved_errno = errno;
+
+		trace_packed_lookup(&lookup_before, lookup);
+		errno = saved_errno;
 	}
 	if (!found) {
 		/* A known-bad owner is corrupt, while an absent object is missing. */

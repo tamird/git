@@ -3452,6 +3452,8 @@ test_expect_success 'grep reuses observed worktree blob bytes' '
 		test_grep "\"event\":\"timer\".*\"category\":\"grep\".*\"name\":\"object-lock-held\".*\"intervals\":[1-9]" \
 			grep-worktree-trace-threaded &&
 		test_grep "\"event\":\"timer\".*\"category\":\"grep\".*\"name\":\"packed/entry-lookup\".*\"intervals\":[1-9]" \
+			grep-worktree-trace-threaded &&
+		test_grep -E "\"event\":\"counter\".*\"category\":\"grep\".*\"name\":\"packed/lookup/(count|invalid)\".*\"count\":[1-9]" \
 			grep-worktree-trace-threaded || return 1
 	fi &&
 	cp .git/index.grep-worktree \
