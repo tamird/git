@@ -2120,11 +2120,20 @@ test_expect_success UNTRACKED_CACHE 'ls-files honors fsmonitor invalidation' '
 test_expect_success UNTRACKED_CACHE 'ls-files persists repaired empty subtree' '
 	test_when_finished "
 		git -C cross-mode-untracked checkout -- quiet/b/.gitignore &&
-		rm -f cross-mode-untracked/quiet/b/hidden
+		rm -f cross-mode-untracked/quiet/b/hidden &&
+		rm -rf cross-mode-untracked/quiet/b/nested
 	" &&
 	(
 		cd cross-mode-untracked &&
+		mkdir quiet/b/nested &&
+		: >quiet/b/nested/untracked &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "quiet/b/nested/\0"
+		EOF
+		git status --porcelain >/dev/null &&
 		echo hidden >quiet/b/.gitignore &&
+		echo nested/ >>quiet/b/.gitignore &&
 		: >quiet/b/hidden &&
 		touch quiet/b/tracked &&
 		test_hook --clobber fsmonitor-test <<-\EOF &&
@@ -2151,7 +2160,25 @@ test_expect_success UNTRACKED_CACHE 'ls-files persists repaired empty subtree' '
 	test_cmp expect actual-repaired &&
 	test_grep "subtrees-repaired:[1-9]" trace-ls-files-repair &&
 	test_grep "subtrees-pruned:[1-9]" trace-ls-files-repaired &&
-	test_grep ! quiet/b/hidden actual-repaired
+	test_grep "subtrees-repaired:0" trace-ls-files-repaired &&
+	test_grep ! do_write_index trace-ls-files-repaired &&
+	test_grep ! quiet/b/hidden actual-repaired &&
+	(
+		cd cross-mode-untracked &&
+		echo hidden >quiet/b/.gitignore &&
+		test_hook --clobber fsmonitor-test <<-\EOF &&
+			printf "last_update_token\0"
+			printf "quiet/b/.gitignore\0"
+		EOF
+		git ls-files --others --exclude-standard >../actual-visible
+	) &&
+	cat >expect-visible <<-\EOF &&
+	clean/a/new
+	quiet/b/nested/untracked
+	results/one
+	results/two
+	EOF
+	test_cmp expect-visible actual-visible
 '
 
 test_expect_success UNTRACKED_CACHE 'ls-files falls back after fsmonitor failure' '

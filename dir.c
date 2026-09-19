@@ -3311,6 +3311,15 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 		for (size_t i = 0; i < untracked_prune->untracked_nr; i++)
 			free(untracked_prune->untracked[i]);
 		untracked_prune->untracked_nr = 0;
+		/* Keep the empty summary valid when it is recomputed on reload. */
+		for (int i = 0; i < untracked_prune->dirs_nr; i++) {
+			struct untracked_cache_dir *child = untracked_prune->dirs[i];
+
+			if (child->recurse && !child->can_skip_replay) {
+				do_invalidate_gitignore(child);
+				child->recurse = 0;
+			}
+		}
 		/* Force a stat-based reader to verify this fsmonitor result. */
 		memset(&untracked_prune->stat_data, 0,
 		       sizeof(untracked_prune->stat_data));
