@@ -781,12 +781,20 @@ index_file_exists_icase_probe(struct index_state *istate,
 	size_t name_pos = 0;
 	size_t range_start = 0;
 	size_t range_end = istate->cache_nr;
+	enum trace2_counter_id fallback_reason = TRACE2_NUMBER_OF_COUNTERS;
 	enum index_file_icase_probe_result result =
 		INDEX_FILE_ICASE_PROBE_UNKNOWN;
 
-	if (!namelen || name[namelen - 1] == '/' ||
-	    istate->sparse_index || istate->name_hash_initialized)
-		return INDEX_FILE_ICASE_PROBE_UNKNOWN;
+	if (!namelen)
+		fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_EMPTY_NAME;
+	else if (name[namelen - 1] == '/')
+		fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_TRAILING_SLASH;
+	else if (istate->sparse_index)
+		fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_SPARSE_INDEX;
+	else if (istate->name_hash_initialized)
+		fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_HASH_INITIALIZED;
+	if (fallback_reason != TRACE2_NUMBER_OF_COUNTERS)
+		goto cleanup;
 
 	while (name_pos < namelen) {
 		size_t component_end = name_pos;
@@ -803,16 +811,22 @@ index_file_exists_icase_probe(struct index_state *istate,
 			component_end++;
 		component_len = component_end - name_pos;
 		is_last = component_end == namelen;
-		if (!component_len)
+		if (!component_len) {
+			fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_EMPTY_COMPONENT;
 			goto cleanup;
+		}
 
 		if (is_last) {
 			matches = index_icase_find_component(
 				istate, range_start, range_end, parent_len,
 				name + name_pos, component_len, 0,
 				scans, scan_limit, &matched_dir_start);
-			if (matches < 0 || matches > 1)
+			if (matches < 0 || matches > 1) {
+				fallback_reason = matches < 0 ?
+							  TRACE2_COUNTER_ID_ICASE_PROBE_SCAN_LIMIT :
+							  TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_LEAF;
 				goto cleanup;
+			}
 			if (!matches || matched_dir_start != SIZE_MAX)
 				result = INDEX_FILE_ICASE_PROBE_ABSENT;
 			else
@@ -826,8 +840,10 @@ index_file_exists_icase_probe(struct index_state *istate,
 		exact_start = pos < 0 ? -pos - 1 : pos;
 		if (exact_start < range_start ||
 		    exact_start >= range_end ||
-		    !starts_with(istate->cache[exact_start]->name, path.buf))
+		    !starts_with(istate->cache[exact_start]->name, path.buf)) {
+			fallback_reason = TRACE2_COUNTER_ID_ICASE_PROBE_NONEXACT_PARENT;
 			goto cleanup;
+		}
 
 		{
 			size_t lo = exact_start + 1;
@@ -850,8 +866,12 @@ index_file_exists_icase_probe(struct index_state *istate,
 			istate, range_start, range_end, parent_len,
 			name + name_pos, component_len, 1,
 			scans, scan_limit, &matched_dir_start);
-		if (matches != 1)
+		if (matches != 1) {
+			fallback_reason = matches < 0 ? TRACE2_COUNTER_ID_ICASE_PROBE_SCAN_LIMIT :
+					  matches > 1 ? TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_PARENT :
+							TRACE2_COUNTER_ID_ICASE_PROBE_MISSING_PARENT;
 			goto cleanup;
+		}
 
 		strbuf_add(&path, name + name_pos, component_len);
 		strbuf_addch(&path, '/');
@@ -861,6 +881,8 @@ index_file_exists_icase_probe(struct index_state *istate,
 	}
 
 cleanup:
+	if (fallback_reason != TRACE2_NUMBER_OF_COUNTERS)
+		trace2_counter_add(fallback_reason, 1);
 	strbuf_release(&path);
 	return result;
 }

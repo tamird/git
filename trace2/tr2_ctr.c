@@ -514,6 +514,47 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "packed/lookup/fallback-ns",
 	},
 
+	[TRACE2_COUNTER_ID_ICASE_PROBE_EMPTY_NAME] = {
+		.category = "index",
+		.name = "icase-probe/empty-name",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_TRAILING_SLASH] = {
+		.category = "index",
+		.name = "icase-probe/trailing-slash",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_SPARSE_INDEX] = {
+		.category = "index",
+		.name = "icase-probe/sparse-index",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_HASH_INITIALIZED] = {
+		.category = "index",
+		.name = "icase-probe/hash-initialized",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_EMPTY_COMPONENT] = {
+		.category = "index",
+		.name = "icase-probe/empty-component",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_SCAN_LIMIT] = {
+		.category = "index",
+		.name = "icase-probe/scan-limit",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_LEAF] = {
+		.category = "index",
+		.name = "icase-probe/ambiguous-leaf",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_NONEXACT_PARENT] = {
+		.category = "index",
+		.name = "icase-probe/nonexact-parent",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_AMBIGUOUS_PARENT] = {
+		.category = "index",
+		.name = "icase-probe/ambiguous-parent",
+	},
+	[TRACE2_COUNTER_ID_ICASE_PROBE_MISSING_PARENT] = {
+		.category = "index",
+		.name = "icase-probe/missing-parent",
+	},
+
 	/* Add additional metadata before here. */
 };
 
