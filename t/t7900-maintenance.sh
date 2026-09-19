@@ -1005,6 +1005,34 @@ test_expect_success 'reflog-expire task --auto only packs when exceeding limits'
 	test_subcommand git reflog expire --all <reflog-expire-auto.txt
 '
 
+test_expect_success 'reflog-expire auto accounts for HEAD reachability' '
+	test_create_repo reflog-reachability &&
+	(
+		cd reflog-reachability &&
+		sane_unset GIT_TEST_DATE_NOW &&
+		old_date=$(test-tool date timestamp "45 days ago") &&
+		old_date="${old_date##* } +0000" &&
+		test_commit --no-tag --date "$old_date" initial &&
+		test_commit --no-tag --date "$old_date" second &&
+		git config gc.reflogExpire 90.days.ago &&
+		git config gc.reflogExpireUnreachable 30.days.ago &&
+		git config maintenance.reflog-expire.auto 1 &&
+		GIT_TRACE2_EVENT="$PWD/reachable.trace" \
+			git maintenance run --auto --task=reflog-expire &&
+		test_subcommand ! git reflog expire --all <reachable.trace &&
+		git branch retained &&
+		git commit --amend -m replacement &&
+		GIT_TRACE2_EVENT="$PWD/retained.trace" \
+			git maintenance run --auto --task=reflog-expire &&
+		test_subcommand ! git reflog expire --all <retained.trace &&
+		git branch -D retained &&
+		GIT_TRACE2_EVENT="$PWD/unreachable.trace" \
+			git maintenance run --auto --task=reflog-expire &&
+		test_subcommand git reflog expire --all <unreachable.trace &&
+		test_must_fail git maintenance is-needed --auto --task=reflog-expire
+	)
+'
+
 test_expect_worktree_prune () {
 	negate=
 	if test "$1" = "!"
