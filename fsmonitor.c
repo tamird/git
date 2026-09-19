@@ -385,6 +385,26 @@ static int find_icase_match(
 			return -1;
 		stats->scans++;
 
+		if (component_len &&
+		    fspathncmp(component_name, component, 1)) {
+			size_t lo = i + 1;
+			size_t hi = range_end;
+
+			/* Raw first-byte groups are contiguous in index order. */
+			while (lo < hi) {
+				size_t mid = lo + (hi - lo) / 2;
+				const char *next_component =
+					istate->cache[mid]->name + parent_len;
+
+				if (*next_component == *component)
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			i = lo;
+			continue;
+		}
+
 		if (slash) {
 			size_t lo = i + 1;
 			size_t hi = range_end;
