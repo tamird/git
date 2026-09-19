@@ -1990,7 +1990,7 @@ static int look_ahead(struct grep_opt *opt,
 		*left_p = 0;
 		return 1;
 	}
-	if (misses >= 2 && !memchr(bol, '\n', earliest))
+	if (misses && !memchr(bol, '\n', earliest))
 		(*dense_hits)++;
 	else
 		*dense_hits = 0;
@@ -2086,6 +2086,8 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 	int binary_checked = 0;
 	unsigned count = 0;
 	unsigned dense_lookahead = 0;
+	unsigned lookahead_delay = 1;
+	unsigned lookahead_wait = 0;
 	int try_lookahead = 0;
 	int show_function = 0;
 	struct userdiff_driver *textconv = NULL;
@@ -2187,18 +2189,27 @@ static int grep_source_1(struct grep_opt *opt, struct grep_source *gs, int colle
 		 * line as a context around the previous hit when it
 		 * doesn't hit.
 		 */
-		if (try_lookahead
-		    && !(last_hit
-			 && (show_function ||
-			     lno <= last_hit + opt->post_context))) {
+		if (lookahead_wait) {
+			lookahead_wait--;
+		} else if (try_lookahead && !(last_hit && (show_function ||
+							   lno <= last_hit + opt->post_context))) {
 			hit = look_ahead(opt, &left, &lno, &bol,
 					 &dense_lookahead);
 			if (hit < 0)
 				try_lookahead = 0;
 			else if (hit)
 				break;
-			else if (dense_lookahead >= 3)
-				try_lookahead = 0;
+			else if (dense_lookahead >= 3) {
+				/*
+				 * Reduce repeated suffix scans, but retry so a dense
+				 * header does not disable skipping a sparse tail.
+				 */
+				lookahead_wait = lookahead_delay;
+				if (lookahead_delay <= UINT_MAX / 2)
+					lookahead_delay *= 2;
+			} else {
+				lookahead_delay = 1;
+			}
 		}
 		eol = end_of_line(bol, &left);
 

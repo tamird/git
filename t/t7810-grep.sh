@@ -276,7 +276,7 @@ test_expect_success LIBPCRE2 'POSIX anchors preserve matches' '
 	anchor-lookahead:6:missing
 	EOF
 	git grep --no-index --threads=1 -n -e "^missing" -e "^absent" \
-		-e "partial" -e "literal" \
+		-e "partial" -e "literal" -e "n[oe]ver" \
 		-- anchor-lookahead anchor-literal >actual &&
 	test_cmp expect actual &&
 	printf "partial\r\n" >anchor-crlf &&
