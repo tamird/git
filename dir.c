@@ -2087,39 +2087,53 @@ static struct dir_entry *dir_entry_new(const char *pathname, int len)
 }
 
 #define DIR_ICASE_SCAN_LIMIT 1024
+#define DIR_EXACT_LOOKUP_LIMIT 1024
+
+/* Only directory traversal needs an existence result, not an index entry. */
+static int index_path_exists(struct dir_struct *dir, struct index_state *istate,
+			     const char *path, int len)
+{
+	int ignore_case = repo_ignore_case(the_repository);
+
+	if (!istate->sparse_index && !istate->name_hash_initialized && len > 0) {
+		int pos;
+
+		/* Full indexes have no file entries with a trailing slash. */
+		if (path[len - 1] == '/')
+			return 0;
+		if (dir->internal.exact_lookup_budget_used <
+		    DIR_EXACT_LOOKUP_LIMIT) {
+			enum index_icase_probe_result probe;
+
+			dir->internal.exact_lookup_budget_used++;
+			pos = index_name_pos_sparse(istate, path, len);
+			if (pos < 0)
+				pos = -pos - 1;
+			if (pos < istate->cache_nr &&
+			    ce_namelen(istate->cache[pos]) == len &&
+			    !memcmp(istate->cache[pos]->name, path, len))
+				return 1;
+			if (!ignore_case)
+				return 0;
+
+			probe = index_file_exists_icase_probe(
+				istate, path, len,
+				&dir->internal.icase_scan_budget_used,
+				DIR_ICASE_SCAN_LIMIT);
+			if (probe == INDEX_ICASE_PROBE_PRESENT)
+				return 1;
+			if (probe == INDEX_ICASE_PROBE_ABSENT)
+				return 0;
+		}
+	}
+	return !!index_file_exists(istate, path, len, ignore_case);
+}
 
 static struct dir_entry *dir_add_name(struct dir_struct *dir,
 				      struct index_state *istate,
-				      const char *pathname, int len,
-				      int from_untracked_cache)
+				      const char *pathname, int len)
 {
-	enum index_file_icase_probe_result probe;
-	int ignore_case = repo_ignore_case(the_repository);
-	int exists;
-
-	if (from_untracked_cache && ignore_case &&
-	    !istate->name_hash_initialized) {
-		probe = index_file_exists_icase_probe(
-			istate, pathname, len,
-			&dir->internal.icase_scan_budget_used,
-			DIR_ICASE_SCAN_LIMIT);
-		switch (probe) {
-		case INDEX_FILE_ICASE_PROBE_UNKNOWN:
-			exists = !!index_file_exists(
-				istate, pathname, len, ignore_case);
-			break;
-		case INDEX_FILE_ICASE_PROBE_ABSENT:
-			exists = 0;
-			break;
-		case INDEX_FILE_ICASE_PROBE_PRESENT:
-			exists = 1;
-			break;
-		}
-	} else {
-		exists = !!index_file_exists(
-			istate, pathname, len, ignore_case);
-	}
-	if (exists)
+	if (index_path_exists(dir, istate, pathname, len))
 		return NULL;
 
 	ALLOC_GROW(dir->entries, dir->nr+1, dir->internal.alloc);
@@ -2143,15 +2157,51 @@ enum exist_status {
 	index_gitdir
 };
 
-/*
- * Do not use the alphabetically sorted index to look up
- * the directory name; instead, use the case insensitive
- * directory hash.
- */
-static enum exist_status directory_exists_in_index_icase(struct index_state *istate,
+/* Exact directory prefixes can be found directly in index order. */
+static int index_dir_exists_exact(struct index_state *istate,
+				  const char *dirname, int len)
+{
+	struct strbuf prefix = STRBUF_INIT;
+	int pos, exists;
+
+	strbuf_add(&prefix, dirname, len);
+	strbuf_addch(&prefix, '/');
+	pos = index_name_pos_sparse(istate, prefix.buf, prefix.len);
+	if (pos < 0)
+		pos = -pos - 1;
+	exists = pos < istate->cache_nr &&
+		starts_with(istate->cache[pos]->name, prefix.buf);
+	strbuf_release(&prefix);
+	return exists;
+}
+
+static enum exist_status directory_exists_in_index_icase(struct dir_struct *dir,
+							 struct index_state *istate,
 							 const char *dirname, int len)
 {
 	struct cache_entry *ce;
+
+	if (len > 0 && !istate->sparse_index &&
+	    !istate->name_hash_initialized &&
+	    dir->internal.exact_lookup_budget_used < DIR_EXACT_LOOKUP_LIMIT) {
+		enum index_icase_probe_result probe;
+
+		dir->internal.exact_lookup_budget_used++;
+		if (index_dir_exists_exact(istate, dirname, len))
+			return index_directory;
+		probe = index_dir_exists_icase_probe(
+			istate, dirname, len,
+			&dir->internal.icase_scan_budget_used,
+			DIR_ICASE_SCAN_LIMIT);
+		if (probe == INDEX_ICASE_PROBE_PRESENT)
+			return index_directory;
+		if (probe == INDEX_ICASE_PROBE_ABSENT &&
+		    index_file_exists_icase_probe(
+			    istate, dirname, len,
+			    &dir->internal.icase_scan_budget_used,
+			    DIR_ICASE_SCAN_LIMIT) == INDEX_ICASE_PROBE_ABSENT)
+			return index_nonexistent;
+	}
 
 	if (index_dir_exists(istate, dirname, len))
 		return index_directory;
@@ -2170,13 +2220,14 @@ static enum exist_status directory_exists_in_index_icase(struct index_state *ist
  * the files it contains) will sort with the '/' at the
  * end.
  */
-static enum exist_status directory_exists_in_index(struct index_state *istate,
+static enum exist_status directory_exists_in_index(struct dir_struct *dir,
+						   struct index_state *istate,
 						   const char *dirname, int len)
 {
 	int pos;
 
 	if (repo_ignore_case(the_repository))
-		return directory_exists_in_index_icase(istate, dirname, len);
+		return directory_exists_in_index_icase(dir, istate, dirname, len);
 
 	pos = index_name_pos(istate, dirname, len);
 	if (pos < 0)
@@ -2248,7 +2299,7 @@ static enum path_treatment treat_directory(struct dir_struct *dir,
 	int check_only, stop_early;
 	int old_ignored_nr, old_untracked_nr;
 	/* The "len-1" is to strip the final '/' */
-	enum exist_status status = directory_exists_in_index(istate, dirname, len-1);
+	enum exist_status status = directory_exists_in_index(dir, istate, dirname, len-1);
 
 	if (status == index_directory)
 		return path_recurse;
@@ -2720,8 +2771,9 @@ static enum path_treatment treat_path(struct dir_struct *dir,
 	dtype = resolve_dtype(cdir->d_type, istate, path->buf, path->len);
 
 	/* Always exclude indexed files */
-	has_path_in_index = !!index_file_exists(istate, path->buf, path->len,
-						repo_ignore_case(the_repository));
+	has_path_in_index = (dtype != DT_DIR ||
+			     (dir->flags & DIR_COLLECT_KILLED_ONLY)) &&
+		index_path_exists(dir, istate, path->buf, path->len);
 	if (dtype != DT_DIR && has_path_in_index)
 		return path_none;
 
@@ -2746,7 +2798,7 @@ static enum path_treatment treat_path(struct dir_struct *dir,
 	if ((dir->flags & DIR_COLLECT_KILLED_ONLY) &&
 	    (dtype == DT_DIR) &&
 	    !has_path_in_index &&
-	    (directory_exists_in_index(istate, path->buf, path->len) == index_nonexistent))
+	    (directory_exists_in_index(dir, istate, path->buf, path->len) == index_nonexistent))
 		return path_none;
 
 	excluded = is_excluded(dir, istate, path->buf, &dtype);
@@ -3146,8 +3198,7 @@ static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 	switch (state) {
 	case path_excluded:
 		if (dir->flags & DIR_SHOW_IGNORED)
-			dir_add_name(dir, istate, path->buf, path->len,
-				     !cdir->fdir);
+			dir_add_name(dir, istate, path->buf, path->len);
 		else if ((dir->flags & DIR_SHOW_IGNORED_TOO) ||
 			((dir->flags & DIR_COLLECT_IGNORED) &&
 			exclude_matches_pathspec(path->buf, path->len,
@@ -3158,7 +3209,7 @@ static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 	case path_untracked:
 		if (dir->flags & DIR_SHOW_IGNORED)
 			break;
-		dir_add_name(dir, istate, path->buf, path->len, !cdir->fdir);
+		dir_add_name(dir, istate, path->buf, path->len);
 		if (cdir->fdir)
 			add_untracked(untracked, path->buf + baselen);
 		break;
@@ -3954,6 +4005,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.stat_prevalidated = 0;
 	dir->internal.untracked_cache_revalidated = 0;
 	dir->internal.icase_scan_budget_used = 0;
+	dir->internal.exact_lookup_budget_used = 0;
 
 	if (has_symlink_leading_path(path, len)) {
 		trace2_region_leave("dir", "read_directory", istate->repo);

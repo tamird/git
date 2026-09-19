@@ -4,10 +4,10 @@
 struct cache_entry;
 struct index_state;
 
-enum index_file_icase_probe_result {
-	INDEX_FILE_ICASE_PROBE_UNKNOWN,
-	INDEX_FILE_ICASE_PROBE_ABSENT,
-	INDEX_FILE_ICASE_PROBE_PRESENT,
+enum index_icase_probe_result {
+	INDEX_ICASE_PROBE_UNKNOWN,
+	INDEX_ICASE_PROBE_ABSENT,
+	INDEX_ICASE_PROBE_PRESENT,
 };
 
 int index_dir_find(struct index_state *istate, const char *name, int namelen,
@@ -23,10 +23,15 @@ struct cache_entry *index_file_exists(struct index_state *istate, const char *na
  * cumulative input/output budget; sparse indexes, non-exact parents,
  * ambiguous aliases, and budget exhaustion return UNKNOWN.
  */
-enum index_file_icase_probe_result
+enum index_icase_probe_result
 index_file_exists_icase_probe(struct index_state *istate,
 			      const char *name, size_t namelen,
 			      size_t *scans, size_t scan_limit);
+/* UNKNOWN requires falling back to index_dir_exists() for directory aliases. */
+enum index_icase_probe_result
+index_dir_exists_icase_probe(struct index_state *istate,
+			     const char *name, size_t namelen,
+			     size_t *scans, size_t scan_limit);
 
 int test_lazy_init_name_hash(struct index_state *istate, int try_threaded);
 void add_name_hash(struct index_state *istate, struct cache_entry *ce);

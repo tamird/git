@@ -14,6 +14,7 @@ int cmd__read_cache(int argc, const char **argv)
 	int i, cnt = 1;
 	const char *name = NULL;
 	const char *probe_name = NULL;
+	int probe_dir = 0;
 	const char *replace_old = NULL;
 	const char *replace_new = NULL;
 
@@ -22,6 +23,11 @@ int cmd__read_cache(int argc, const char **argv)
 		if (argc != 3)
 			die("expected replacement file after --identity-replace");
 		replace_new = argv[2];
+	} else if (argc > 1 &&
+		   skip_prefix(argv[1], "--icase-dir-probe=", &probe_name)) {
+		probe_dir = 1;
+		argc--;
+		argv++;
 	} else if (argc > 1 &&
 		   skip_prefix(argv[1], "--icase-probe=", &probe_name)) {
 		argc--;
@@ -63,25 +69,26 @@ int cmd__read_cache(int argc, const char **argv)
 	}
 
 	if (probe_name) {
-		enum index_file_icase_probe_result result;
+		enum index_icase_probe_result result;
 		size_t scans = 0;
 		unsigned int scan_limit = 1024;
 
 		if (argc > 2 ||
 		    (argc == 2 && strtoul_ui(argv[1], 10, &scan_limit)))
-			die("expected an unsigned scan limit after --icase-probe");
+			die("expected an unsigned scan limit after the probe option");
 		repo_read_index(the_repository);
-		result = index_file_exists_icase_probe(
+		result = (probe_dir ? index_dir_exists_icase_probe :
+			  index_file_exists_icase_probe)(
 			the_repository->index, probe_name, strlen(probe_name),
 			&scans, scan_limit);
 		switch (result) {
-		case INDEX_FILE_ICASE_PROBE_UNKNOWN:
+		case INDEX_ICASE_PROBE_UNKNOWN:
 			printf("unknown");
 			break;
-		case INDEX_FILE_ICASE_PROBE_ABSENT:
+		case INDEX_ICASE_PROBE_ABSENT:
 			printf("absent");
 			break;
-		case INDEX_FILE_ICASE_PROBE_PRESENT:
+		case INDEX_ICASE_PROBE_PRESENT:
 			printf("present");
 			break;
 		}

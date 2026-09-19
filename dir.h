@@ -396,6 +396,7 @@ struct dir_struct {
 		/* Excludes pending revalidation and non-traversal ignore consumers. */
 		unsigned trace_normal_ignore_loads:1;
 		size_t icase_scan_budget_used;
+		size_t exact_lookup_budget_used;
 
 		/* Stats about the traversal */
 		unsigned visited_paths;

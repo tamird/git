@@ -770,7 +770,7 @@ int add_to_index(struct index_state *istate, const char *path, struct stat *st, 
 		    (!ignore_case ||
 		     index_file_exists_icase_probe(
 			     istate, path, namelen, &scans, 1024) ==
-			     INDEX_FILE_ICASE_PROBE_PRESENT))
+			     INDEX_ICASE_PROBE_PRESENT))
 			alias = istate->cache[pos];
 	}
 	ce = make_empty_cache_entry(istate, namelen);
