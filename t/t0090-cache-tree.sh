@@ -256,7 +256,10 @@ test_commit_as_is_timer () {
 
 test_expect_success 'initial commit has cache-tree' '
 	test_commit foo &&
-	test_cache_tree
+	test_cache_tree &&
+	GIT_TRACE2_EVENT="$(pwd)/.git/root-match.trace" \
+		git diff-index --cached --quiet HEAD &&
+	test_trace2_data diff index/cache-tree-root-match 1 <.git/root-match.trace
 '
 
 test_expect_success 'ls-files and grep defer cache-tree parsing' '
@@ -280,7 +283,10 @@ test_expect_success 'git-add invalidates cache-tree' '
 	test_when_finished "git reset --hard; git read-tree HEAD" &&
 	echo "I changed this file" >foo &&
 	git add foo &&
-	test_invalid_cache_tree
+	test_invalid_cache_tree &&
+	GIT_TRACE2_EVENT="$(pwd)/.git/root-invalid.trace" \
+		git diff-index --cached HEAD >/dev/null &&
+	test_trace2_data diff index/cache-tree-root-invalid 1 <.git/root-invalid.trace
 '
 
 test_expect_success 'git-add in subdir invalidates cache-tree' '
@@ -386,7 +392,10 @@ test_expect_success 'threaded read discards deferred cache-tree' '
 
 test_expect_success 'second commit has cache-tree' '
 	test_commit bar &&
-	test_cache_tree
+	test_cache_tree &&
+	GIT_TRACE2_EVENT="$(pwd)/.git/root-mismatch.trace" \
+		git diff-index --cached HEAD^ >/dev/null &&
+	test_trace2_data diff index/cache-tree-root-oid-mismatch 1 <.git/root-mismatch.trace
 '
 
 test_expect_success 'commit --interactive gives cache-tree on partial commit' '

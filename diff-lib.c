@@ -593,6 +593,32 @@ static int only_excluded_pathspec(const struct pathspec *pathspec)
 	return positives == 1;
 }
 
+static void trace_cache_tree_root(struct index_state *istate,
+				  const struct object_id *tree_oid)
+{
+	const struct cache_tree *root = istate->cache_tree;
+	const char *key;
+
+	if (!trace2_is_enabled())
+		return;
+
+	/* Observe the parsed root without forcing deferred TREE decoding. */
+	if (!root)
+		key = istate->cache_tree_data ?
+			      "index/cache-tree-root-deferred" :
+			      "index/cache-tree-root-absent";
+	else if (root->entry_count < 0)
+		key = "index/cache-tree-root-invalid";
+	else if (root->entry_count != istate->cache_nr)
+		key = "index/cache-tree-root-count-mismatch";
+	else if (!oideq(&root->oid, tree_oid))
+		key = "index/cache-tree-root-oid-mismatch";
+	else
+		key = "index/cache-tree-root-match";
+
+	trace2_data_intmax("diff", istate->repo, key, 1);
+}
+
 static int diff_cache(struct rev_info *revs,
 		      const struct object_id *tree_oid,
 		      const char *tree_name,
@@ -629,6 +655,8 @@ static int diff_cache(struct rev_info *revs,
 	if (revs->diffopt.max_depth_valid)
 		die(_("max-depth is not supported for index diffs"));
 
+	if (opts.diff_index_cached)
+		trace_cache_tree_root(opts.src_index, &tree->object.oid);
 	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
 	ret = unpack_trees(1, &t, &opts);
 	trace2_data_intmax("diff", the_repository, "index/cached-traversal",
