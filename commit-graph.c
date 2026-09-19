@@ -593,6 +593,8 @@ static void validate_mixed_bloom_settings(struct commit_graph *g)
 {
 	struct bloom_filter_settings *settings = NULL;
 	for (; g; g = g->base_graph) {
+		int incompatible_parameters;
+
 		if (!g->bloom_filter_settings)
 			continue;
 		if (!settings) {
@@ -600,16 +602,20 @@ static void validate_mixed_bloom_settings(struct commit_graph *g)
 			continue;
 		}
 
-		if (g->bloom_filter_settings->bits_per_entry != settings->bits_per_entry ||
-		    g->bloom_filter_settings->num_hashes != settings->num_hashes ||
+		incompatible_parameters =
+			g->bloom_filter_settings->bits_per_entry != settings->bits_per_entry ||
+			g->bloom_filter_settings->num_hashes != settings->num_hashes;
+		if (incompatible_parameters ||
 		    g->bloom_filter_settings->hash_version != settings->hash_version) {
 			g->chunk_bloom_indexes = NULL;
 			g->chunk_bloom_data = NULL;
 			FREE_AND_NULL(g->bloom_filter_settings);
 
-			warning(_("disabling Bloom filters for commit-graph "
-				  "layer '%s' due to incompatible settings"),
-				oid_to_hex(&g->oid));
+			/* Version changes are expected during incremental upgrades. */
+			if (incompatible_parameters)
+				warning(_("disabling Bloom filters for commit-graph "
+					  "layer '%s' due to incompatible settings"),
+					oid_to_hex(&g->oid));
 		}
 	}
 }

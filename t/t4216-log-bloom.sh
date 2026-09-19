@@ -695,7 +695,7 @@ test_expect_success 'mixed version 2 and 3 layers ignore basename filters' '
 		-- "**/target" >expect &&
 	git -C basename-mixed log --format=%s -- "**/target" >actual 2>err &&
 	test_cmp expect actual &&
-	test_grep "disabling Bloom filters" err
+	test_must_be_empty err
 '
 
 test_expect_success 'git log with path contains various magic signatures' '
@@ -1082,18 +1082,14 @@ test_expect_success 'ensure Bloom filter with incompatible versions are ignored'
 	git -C $repo log --oneline --no-decorate -- $CENT >actual 2>err &&
 	test_cmp expect actual &&
 
-	layer="$(head -n 1 $repo/$chain)" &&
-	cat >expect.err <<-EOF &&
-	warning: disabling Bloom filters for commit-graph layer $SQ$layer$SQ due to incompatible settings
-	EOF
-	test_cmp expect.err err &&
+	test_must_be_empty err &&
 
 	# Merge the two layers with incompatible bloom filter versions,
 	# ensuring that the v2 filters are used.
 	>trace2.txt &&
 	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
 		git -C $repo -c commitGraph.changedPathsVersion=2 commit-graph write --reachable --changed-paths 2>err &&
-	test_grep "disabling Bloom filters for commit-graph layer .$layer." err &&
+	test_must_be_empty err &&
 	test_grep "{\"hash_version\":2,\"num_hashes\":7,\"bits_per_entry\":10,\"max_changed_paths\":512" trace2.txt
 '
 
