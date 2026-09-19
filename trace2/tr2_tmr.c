@@ -590,6 +590,10 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "name-hash-init",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_SEND_PACK_PREPARE_OBJECTS] = {
+		.category = "send_pack",
+		.name = "prepare_objects",
+	},
 
 	/* Execution includes setup, dispatch, and cleanup, not process teardown. */
 	[TRACE2_TIMER_ID_SHOW_EXECUTION] = {

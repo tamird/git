@@ -566,6 +566,14 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "index",
 		.name = "icase-probe/scan-limit/parent",
 	},
+	[TRACE2_COUNTER_ID_SEND_PACK_PREPARE_HAVES] = {
+		.category = "send_pack",
+		.name = "prepare_objects/haves",
+	},
+	[TRACE2_COUNTER_ID_SEND_PACK_PREPARE_WANTS] = {
+		.category = "send_pack",
+		.name = "prepare_objects/wants",
+	},
 
 	/* Add additional metadata before here. */
 };
