@@ -225,6 +225,7 @@ static int threads_started;
 static pthread_t worker_lease_thread;
 static int worker_lease_thread_started;
 static int worker_lease_stop;
+static int worker_lease_stop_pipe[2];
 static int worker_thread_count;
 static int worker_target;
 static unsigned char *worker_busy;
@@ -735,6 +736,11 @@ static int start_worker_thread(int id)
 
 static void *renew_worker_lease(void *data UNUSED)
 {
+	struct pollfd stop_fd = {
+		.fd = worker_lease_stop_pipe[0],
+		.events = POLLIN,
+	};
+
 	trace2_thread_start("grep-lease");
 	for (;;) {
 		uint64_t lease_id;
@@ -743,7 +749,10 @@ static void *renew_worker_lease(void *data UNUSED)
 		int err;
 
 		for (int i = 0; i < 5; i++) {
-			sleep_millisec(10);
+			/* Keep the renewal cadence, but wake promptly at shutdown. */
+			if ((poll(&stop_fd, 1, 10) < 0 && errno != EINTR) ||
+			    (stop_fd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+				sleep_millisec(10);
 			grep_lock();
 			if (!worker_lease_stop) {
 				grep_unlock();
@@ -805,6 +814,25 @@ static void *renew_worker_lease(void *data UNUSED)
 done:
 	trace2_thread_exit();
 	return NULL;
+}
+
+static int start_worker_lease_thread(void)
+{
+	int err;
+
+	if (pipe(worker_lease_stop_pipe))
+		return errno;
+	if (fcntl(worker_lease_stop_pipe[0], F_SETFD, FD_CLOEXEC) < 0 ||
+	    fcntl(worker_lease_stop_pipe[1], F_SETFD, FD_CLOEXEC) < 0)
+		err = errno;
+	else
+		err = pthread_create(&worker_lease_thread, NULL,
+				     renew_worker_lease, NULL);
+	if (err) {
+		close(worker_lease_stop_pipe[0]);
+		close(worker_lease_stop_pipe[1]);
+	}
+	return err;
 }
 
 static void start_threads(struct grep_opt *opt)
@@ -874,8 +902,7 @@ static void start_threads(struct grep_opt *opt)
 		memset(&worker_growth_stats, 0, sizeof(worker_growth_stats));
 		worker_growth_stats.enabled = trace2_is_enabled();
 		worker_growth_stats.valid = 1;
-		err = pthread_create(
-			&worker_lease_thread, NULL, renew_worker_lease, NULL);
+		err = start_worker_lease_thread();
 
 		if (err) {
 			grep_index_ipc_release_workers(
@@ -914,6 +941,9 @@ static int wait_all(void)
 	while (todo_done != todo_end)
 		pthread_cond_wait(&cond_result, &grep_mutex);
 	worker_lease_stop = 1;
+	if (worker_lease_thread_started &&
+	    xwrite(worker_lease_stop_pipe[1], "", 1) < 0)
+		warning_errno("grep: failed to wake worker lease thread");
 
 	/* Wake up all the consumer threads so they can see that there
 	 * is no more work to do.
@@ -924,6 +954,8 @@ static int wait_all(void)
 
 	if (worker_lease_thread_started) {
 		pthread_join(worker_lease_thread, NULL);
+		close(worker_lease_stop_pipe[0]);
+		close(worker_lease_stop_pipe[1]);
 		trace_worker_target_growth();
 		worker_lease_thread_started = 0;
 	}
