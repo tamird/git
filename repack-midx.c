@@ -998,8 +998,13 @@ static int write_midx_incremental(struct repack_write_midx_opts *opts)
 		strvec_push(&keep_hashes, step->csum);
 	}
 
-	commit_lock_file(&lf);
+	if (commit_lock_file(&lf) < 0) {
+		ret = error_errno(_("unable to commit multi-pack-index chain file"));
+		goto done;
+	}
 
+	/* The flat MIDX shadows the chain, so retire it after publication. */
+	clear_midx_file(opts->existing->repo);
 	clear_incremental_midx_files(opts->existing->repo, &keep_hashes);
 
 done:

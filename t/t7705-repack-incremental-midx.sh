@@ -63,7 +63,7 @@ create_layers () {
 	done
 }
 
-test_expect_success '--write-midx=incremental without --geometric' '
+test_expect_success '--write-midx=incremental converts a flat MIDX and appends' '
 	git init incremental-without-geometric &&
 	(
 		cd incremental-without-geometric &&
@@ -71,13 +71,15 @@ test_expect_success '--write-midx=incremental without --geometric' '
 		git config maintenance.auto false &&
 
 		test_commit first &&
-		git repack -d &&
+		git repack -d --write-midx --write-bitmap-index &&
+		test_path_is_file $packdir/multi-pack-index &&
 
 		test_commit second &&
 		git repack --write-midx=incremental &&
 
+		test_path_is_missing $packdir/multi-pack-index &&
 		git multi-pack-index verify &&
-		test_line_count = 1 $midx_chain &&
+		test_line_count = 2 $midx_chain &&
 		cp $midx_chain $midx_chain.before &&
 
 		# A second repack appends a new layer without
@@ -86,11 +88,30 @@ test_expect_success '--write-midx=incremental without --geometric' '
 		git repack --write-midx=incremental &&
 
 		git multi-pack-index verify &&
-		test_line_count = 2 $midx_chain &&
-		head -n 1 $midx_chain.before >expect &&
-		head -n 1 $midx_chain >actual &&
+		test_line_count = 3 $midx_chain &&
+		head -n 2 $midx_chain.before >expect &&
+		head -n 2 $midx_chain >actual &&
 		test_cmp expect actual &&
 
+		git fsck
+	)
+'
+
+test_expect_success 'failed chain publication preserves the flat MIDX' '
+	git init failed-chain-publication &&
+	(
+		cd failed-chain-publication &&
+		git config maintenance.auto false &&
+		test_commit first &&
+		git repack -d --write-midx --write-bitmap-index &&
+		cp $packdir/multi-pack-index before &&
+		test_commit second &&
+		mkdir -p $midx_chain &&
+
+		test_must_fail git repack --write-midx=incremental 2>err &&
+		test_grep "unable to commit multi-pack-index chain file" err &&
+		test_cmp before $packdir/multi-pack-index &&
+		git multi-pack-index verify &&
 		git fsck
 	)
 '
