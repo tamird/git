@@ -789,4 +789,28 @@ test_expect_success 'expire with pattern config' '
 	test_cmp expect actual.sorted
 '
 
+test_expect_success 'reflog expiration uses the default retention periods' '
+	test_create_repo default-expiry &&
+	(
+		cd default-expiry &&
+		sane_unset GIT_TEST_DATE_NOW &&
+		old_date=$(test-tool date timestamp "45 days ago") &&
+		old_date="${old_date##* } +0000" &&
+		test_commit --no-tag --date "$old_date" initial &&
+		test_commit --no-tag --date "$old_date" second &&
+		git reflog expire refs/heads/main &&
+		git reflog --format=%gs refs/heads/main >actual &&
+		cat >expect <<-\EOF &&
+		commit: second
+		commit (initial): initial
+		EOF
+		test_cmp expect actual &&
+		git commit --amend -m replacement &&
+		git reflog expire refs/heads/main &&
+		git reflog --format=%gs refs/heads/main >actual &&
+		echo "commit (initial): initial" >expect &&
+		test_cmp expect actual
+	)
+'
+
 test_done
