@@ -70,13 +70,23 @@ test_expect_success 'bounded index probe exhausts budget' '
 		{
 			for i in $(test_seq 1 1024)
 			do
-				printf "100644 %s\\ta%s/file\\n" "$blob" "$i" ||
+				printf "100644 %s\\tz%s/file\\n" "$blob" "$i" ||
 				return 1
 			done &&
 			printf "100644 %s\\tz/file\\n" "$blob"
 		} | git update-index --index-info &&
 		echo "unknown 1024" >expect &&
 		test-tool read-cache --icase-probe=z/missing >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'bounded index probe skips unrelated first-byte groups' '
+	(
+		cd budget &&
+		echo absent >expect &&
+		test-tool read-cache --icase-probe=missing >probe-actual &&
+		cut -d" " -f1 probe-actual >actual &&
 		test_cmp expect actual
 	)
 '

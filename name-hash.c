@@ -717,6 +717,25 @@ static int index_icase_find_component(struct index_state *istate,
 			return -1;
 		(*scans)++;
 
+		if (!slow_same_name(component_name, 1, component, 1)) {
+			size_t lo = i + 1;
+			size_t hi = range_end;
+
+			/* Raw first-byte groups are contiguous in index order. */
+			while (lo < hi) {
+				size_t mid = lo + (hi - lo) / 2;
+				const char *next_component =
+					istate->cache[mid]->name + parent_len;
+
+				if (*next_component == *component)
+					lo = mid + 1;
+				else
+					hi = mid;
+			}
+			i = lo;
+			continue;
+		}
+
 		if (slash) {
 			size_t lo = i + 1;
 			size_t hi = range_end;
