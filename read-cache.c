@@ -3895,6 +3895,8 @@ void move_index_extensions(struct index_state *dst, struct index_state *src)
 	dst->cache_tree_data_size = src->cache_tree_data_size;
 	src->cache_tree_data = NULL;
 	src->cache_tree_data_size = 0;
+	dst->cache_tree_flat = src->cache_tree_flat;
+	src->cache_tree_flat = NULL;
 }
 
 struct cache_entry *dup_cache_entry(const struct cache_entry *ce,

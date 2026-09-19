@@ -172,6 +172,8 @@ struct index_state {
 	/* Owned copy of a TREE extension pending cache_tree_get(). */
 	char *cache_tree_data;
 	size_t cache_tree_data_size;
+	/* Read-only directory lookup borrowing storage from cache_tree_data. */
+	struct cache_tree_flat *cache_tree_flat;
 	struct split_index *split_index;
 	struct cache_time timestamp;
 	struct stat index_file_stat;

@@ -23,6 +23,33 @@
 #define DEBUG_CACHE_TREE 0
 #endif
 
+struct cache_tree_record {
+	const char *name;
+	const unsigned char *oid;
+	int namelen;
+	int entry_count;
+	int subtree_nr;
+};
+
+struct cache_tree_flat_entry {
+	/* Names and OIDs borrow storage from index_state.cache_tree_data. */
+	struct cache_tree_record record;
+	size_t children;
+};
+
+struct cache_tree_flat {
+	struct cache_tree_flat_entry *entries;
+	size_t nr, alloc;
+};
+
+static void cache_tree_flat_free(struct index_state *istate)
+{
+	if (istate->cache_tree_flat) {
+		free(istate->cache_tree_flat->entries);
+		FREE_AND_NULL(istate->cache_tree_flat);
+	}
+}
+
 struct cache_tree *cache_tree(void)
 {
 	struct cache_tree *it = xcalloc(1, sizeof(struct cache_tree));
@@ -50,6 +77,7 @@ void cache_tree_free(struct cache_tree **it_p)
 struct cache_tree *cache_tree_get(struct index_state *istate)
 {
 	if (!istate->cache_tree && istate->cache_tree_data) {
+		cache_tree_flat_free(istate);
 		istate->cache_tree = cache_tree_read(
 			istate->cache_tree_data,
 			istate->cache_tree_data_size);
@@ -61,6 +89,7 @@ struct cache_tree *cache_tree_get(struct index_state *istate)
 
 void cache_tree_discard(struct index_state *istate)
 {
+	cache_tree_flat_free(istate);
 	cache_tree_free(&istate->cache_tree);
 	FREE_AND_NULL(istate->cache_tree_data);
 	istate->cache_tree_data_size = 0;
@@ -1100,43 +1129,62 @@ static int parse_int(const char **ptr, unsigned long *len_p, int *out)
 	return 0;
 }
 
-static struct cache_tree *read_one(const char **buffer, unsigned long *size_p)
+static int read_record(const char **buffer, unsigned long *size_p,
+		       struct cache_tree_record *record)
 {
 	const char *buf = *buffer;
 	unsigned long size = *size_p;
-	struct cache_tree *it;
-	int i, subtree_nr;
 	const unsigned rawsz = the_hash_algo->rawsz;
 
-	it = NULL;
+	record->name = buf;
 	/* skip name, but make sure name exists */
 	while (size && *buf) {
 		size--;
 		buf++;
 	}
 	if (!size)
-		goto free_return;
+		return -1;
+	record->namelen = buf - record->name;
 	buf++; size--;
-	it = cache_tree();
 
-	if (parse_int(&buf, &size, &it->entry_count) < 0)
-		goto free_return;
+	if (parse_int(&buf, &size, &record->entry_count) < 0)
+		return -1;
 	if (!size || *buf != ' ')
-		goto free_return;
+		return -1;
 	buf++; size--;
-	if (parse_int(&buf, &size, &subtree_nr) < 0)
-		goto free_return;
+	if (parse_int(&buf, &size, &record->subtree_nr) < 0)
+		return -1;
 	if (!size || *buf != '\n')
-		goto free_return;
+		return -1;
 	buf++; size--;
-	if (0 <= it->entry_count) {
+	if (0 <= record->entry_count) {
 		if (size < rawsz)
-			goto free_return;
-		oidread(&it->oid, (const unsigned char *)buf,
-			the_repository->hash_algo);
+			return -1;
+		record->oid = (const unsigned char *)buf;
 		buf += rawsz;
 		size -= rawsz;
-	}
+	} else
+		record->oid = NULL;
+	*buffer = buf;
+	*size_p = size;
+	return 0;
+}
+
+static struct cache_tree *read_one(const char **buffer, unsigned long *size_p)
+{
+	const char *buf = *buffer;
+	unsigned long size = *size_p;
+	struct cache_tree_record record;
+	struct cache_tree *it;
+	int i, subtree_nr;
+
+	if (read_record(&buf, &size, &record))
+		return NULL;
+	it = cache_tree();
+	it->entry_count = record.entry_count;
+	if (record.oid)
+		oidread(&it->oid, record.oid, the_repository->hash_algo);
+	subtree_nr = record.subtree_nr;
 
 #if DEBUG_CACHE_TREE
 	if (0 <= it->entry_count)
@@ -1204,6 +1252,64 @@ struct cache_tree *cache_tree_read(const char *buffer, unsigned long size)
 	trace2_region_leave("cache_tree", "read", the_repository);
 
 	return result;
+}
+
+/* Keep each node's children contiguous for the usual binary name lookup. */
+static int read_flat_one(const char **buffer, unsigned long *size,
+			 struct cache_tree_flat *flat, size_t pos)
+{
+	struct cache_tree_record record;
+	const char *previous = NULL;
+	size_t children;
+	int previous_len = 0, i;
+
+	/* Even an invalid, nameless leaf needs "\0-1 0\n". */
+	if (read_record(buffer, size, &record) || record.subtree_nr < 0 ||
+	    record.subtree_nr > *size / 6)
+		return -1;
+	flat->entries[pos].record = record;
+	flat->entries[pos].children = children = flat->nr;
+	flat->nr = st_add(flat->nr, record.subtree_nr);
+	ALLOC_GROW(flat->entries, flat->nr, flat->alloc);
+	for (i = 0; i < record.subtree_nr; i++) {
+		struct cache_tree_record *child;
+
+		if (read_flat_one(buffer, size, flat, children + i))
+			return -1;
+		child = &flat->entries[children + i].record;
+		/* Leave legacy unordered or duplicate names to the full reader. */
+		if (previous && subtree_name_cmp(previous, previous_len,
+						 child->name, child->namelen) >= 0)
+			return -1;
+		previous = child->name;
+		previous_len = child->namelen;
+	}
+	return 0;
+}
+
+static int prepare_cache_tree_flat(struct index_state *istate)
+{
+	const char *buffer = istate->cache_tree_data;
+	unsigned long size = istate->cache_tree_data_size;
+	struct cache_tree_flat *flat;
+	int ret;
+
+	if (istate->cache_tree_flat)
+		return 0;
+	CALLOC_ARRAY(istate->cache_tree_flat, 1);
+	flat = istate->cache_tree_flat;
+	flat->nr = 1;
+	ALLOC_GROW(flat->entries, flat->nr, flat->alloc);
+	trace2_region_enter("cache_tree", "flat-read", istate->repo);
+	ret = !size || *buffer || read_flat_one(&buffer, &size, flat, 0);
+	trace2_region_leave("cache_tree", "flat-read", istate->repo);
+	if (ret) {
+		cache_tree_flat_free(istate);
+		return -1;
+	}
+	trace2_data_intmax("cache_tree", istate->repo, "flat/nodes",
+			   istate->cache_tree_flat->nr);
+	return 0;
 }
 
 static struct cache_tree *cache_tree_find(struct cache_tree *it, const char *path)
@@ -1469,13 +1575,77 @@ static struct cache_tree *find_cache_tree_from_traversal(struct cache_tree *root
 	return cache_tree_find(our_parent, info->name);
 }
 
-int cache_tree_matches_traversal(struct cache_tree *root,
+static size_t cache_tree_flat_find(struct cache_tree_flat *flat, size_t pos,
+				   const char *path)
+{
+	if (pos == SIZE_MAX)
+		return pos;
+	while (*path) {
+		const char *slash = strchrnul(path, '/');
+		struct cache_tree_flat_entry *parent = &flat->entries[pos];
+		size_t lo = parent->children;
+		size_t hi = lo + parent->record.subtree_nr;
+		int namelen = slash - path;
+
+		pos = SIZE_MAX;
+		while (lo < hi) {
+			size_t mid = lo + (hi - lo) / 2;
+			struct cache_tree_record *entry = &flat->entries[mid].record;
+			int cmp = subtree_name_cmp(path, namelen,
+						   entry->name, entry->namelen);
+
+			if (cmp < 0)
+				hi = mid;
+			else if (cmp > 0)
+				lo = mid + 1;
+			else {
+				pos = mid;
+				break;
+			}
+		}
+		if (pos == SIZE_MAX)
+			return pos;
+		path = slash;
+		while (*path == '/')
+			path++;
+	}
+	return pos;
+}
+
+static size_t find_flat_from_traversal(struct cache_tree_flat *flat,
+				       struct traverse_info *info)
+{
+	if (!info->prev)
+		return 0;
+	return cache_tree_flat_find(flat,
+		find_flat_from_traversal(flat, info->prev), info->name);
+}
+
+int cache_tree_matches_traversal(struct index_state *istate,
 				 struct name_entry *ent,
 				 struct traverse_info *info)
 {
 	struct cache_tree *it;
 
-	it = find_cache_tree_from_traversal(root, info);
+	if (istate->cache_tree_data && !prepare_cache_tree_flat(istate)) {
+		struct cache_tree_flat *flat = istate->cache_tree_flat;
+		size_t pos = cache_tree_flat_find(flat,
+			find_flat_from_traversal(flat, info), ent->path);
+
+		if (pos != SIZE_MAX) {
+			struct cache_tree_record *record = &flat->entries[pos].record;
+
+			if (record->entry_count > 0) {
+				struct object_id oid;
+
+				oidread(&oid, record->oid, the_repository->hash_algo);
+				if (oideq(&ent->oid, &oid))
+					return record->entry_count;
+			}
+		}
+		return 0;
+	}
+	it = find_cache_tree_from_traversal(cache_tree_get(istate), info);
 	it = cache_tree_find(it, ent->path);
 	if (it && it->entry_count > 0 && oideq(&ent->oid, &it->oid))
 		return it->entry_count;

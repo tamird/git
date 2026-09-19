@@ -270,6 +270,87 @@ test_expect_success 'ls-files and grep defer cache-tree parsing' '
 	test_grep ! "cache_tree.*label:read" .git/grep.trace
 '
 
+test_expect_success 'readonly status uses flat cache trees for nested changes' '
+	test_when_finished "rm -rf flat-tree" &&
+	git init flat-tree &&
+	(
+		cd flat-tree &&
+		mkdir -p z/deep aa/deep &&
+		echo one >z/deep/file &&
+		echo two >aa/deep/file &&
+		git add . &&
+		git commit -m base &&
+		for state in clean staged rebuilt
+		do
+			case "$state" in
+			staged)
+				echo changed >z/deep/file &&
+				git add z/deep/file || exit 1
+				;;
+			rebuilt)
+				git write-tree >/dev/null || exit 1
+				;;
+			esac &&
+			GIT_OPTIONAL_LOCKS=1 git status --porcelain >.git/expect &&
+			GIT_TRACE2_EVENT="$(pwd)/.git/$state.trace" \
+				git --no-optional-locks status --porcelain >.git/actual &&
+			test_cmp .git/expect .git/actual &&
+			test_trace2_data cache_tree flat/nodes 5 <.git/$state.trace &&
+			test_grep ! "\"category\":\"cache_tree\".*\"label\":\"read\"" \
+				.git/$state.trace || exit 1
+		done
+	)
+'
+
+test_expect_success PERL 'readonly status accepts legacy unordered TREE children' '
+	test_when_finished "rm -rf flat-tree-legacy" &&
+	git init flat-tree-legacy &&
+	(
+		cd flat-tree-legacy &&
+		git config index.version 2 &&
+		git config core.fsmonitor false &&
+		mkdir -p a/deep b/deep &&
+		echo one >a/deep/file &&
+		echo two >b/deep/file &&
+		git add . &&
+		git commit -m base &&
+		GIT_OPTIONAL_LOCKS=0 git status --porcelain -uno >.git/expect &&
+		cp .git/index .git/legacy.index &&
+		perl - "$(test_oid rawsz)" .git/legacy.index <<-\EOF &&
+		use strict;
+		use warnings;
+		my ($rawsz, $path) = @ARGV;
+		open my $fh, "+<", $path or die "$path: $!";
+		binmode $fh;
+		local $/;
+		my $index = <$fh>;
+		my $at = index($index, "TREE");
+		$at >= 12 && $at == rindex($index, "TREE") or die "TREE extension not unique";
+		my $size = unpack("N", substr($index, $at + 4, 4));
+		$at + 8 + $size <= length($index) - $rawsz or die "TREE extension too long";
+		my $payload = substr($index, $at + 8, $size);
+		$payload =~ /\A\0[0-9]+ 2\n/s or die "unexpected TREE root";
+		my $header_end = index($payload, "\n") + 1 + $rawsz;
+		my $children = substr($payload, $header_end);
+		my $record = qr/[ab]\0[0-9]+ 1\n.{${rawsz}}deep\0[0-9]+ 0\n.{${rawsz}}/s;
+		$children =~ /\A($record)($record)\z/s or die "unexpected TREE children";
+		my ($first, $second) = ($1, $2);
+		substr($first, 0, 1) eq "a" && substr($second, 0, 1) eq "b"
+			or die "unexpected TREE order";
+		substr($index, $at + 8 + $header_end, length($children), $second . $first);
+		seek($fh, 0, 0) or die "seek: $!";
+		print {$fh} $index or die "write: $!";
+		close $fh or die "close: $!";
+		EOF
+		GIT_INDEX_FILE="$PWD/.git/legacy.index" GIT_OPTIONAL_LOCKS=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/legacy.trace" GIT_TRACE2_EVENT_NESTING=10 \
+			git status --porcelain -uno >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_grep "\"category\":\"cache_tree\",\"label\":\"read\"" .git/legacy.trace &&
+		test_grep ! "\"key\":\"flat/nodes\"" .git/legacy.trace
+	)
+'
+
 test_expect_success 'threaded read materializes deferred cache-tree' '
 	test_config index.threads 2 &&
 	git read-tree HEAD &&

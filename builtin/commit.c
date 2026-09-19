@@ -1748,6 +1748,8 @@ struct repository *repo UNUSED)
 	if (status_format != STATUS_FORMAT_PORCELAIN &&
 	    status_format != STATUS_FORMAT_PORCELAIN_V2)
 		progress_flag = REFRESH_PROGRESS;
+	if (!optional_locks)
+		the_repository->index->lazy_cache_tree = 1;
 	repo_read_index(the_repository);
 	pending_untracked_cache = the_repository->index->untracked &&
 				  (!the_repository->index->untracked->root ||

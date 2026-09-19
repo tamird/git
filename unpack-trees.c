@@ -827,7 +827,7 @@ static int all_trees_same_as_cache_tree(int n, unsigned long dirmask,
 		if (!are_same_oid(names, names + i))
 			return 0;
 
-	return cache_tree_matches_traversal(cache_tree_get(o->src_index),
+	return cache_tree_matches_traversal(o->src_index,
 					    names, info);
 }
 
@@ -1660,7 +1660,7 @@ static int unpack_callback(int n, unsigned long mask, unsigned long dirmask, str
 		    n == 1 && dirmask == 1 && S_ISDIR(names->mode)) {
 			int matches;
 			matches = cache_tree_matches_traversal(
-				cache_tree_get(o->src_index), names, info);
+				o->src_index, names, info);
 			/*
 			 * Everything under the name matches; skip the
 			 * entire hierarchy.  diff_index_cached codepath

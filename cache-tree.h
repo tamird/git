@@ -69,5 +69,5 @@ struct tree *write_in_core_index_as_tree(struct repository *repo,
 int write_index_as_tree(struct object_id *oid, struct index_state *index_state, const char *index_path, int flags, const char *prefix);
 void prime_cache_tree(struct repository *, struct index_state *, struct tree *);
 
-int cache_tree_matches_traversal(struct cache_tree *, struct name_entry *ent, struct traverse_info *info);
+int cache_tree_matches_traversal(struct index_state *, struct name_entry *ent, struct traverse_info *info);
 #endif
