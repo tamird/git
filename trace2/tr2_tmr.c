@@ -612,6 +612,14 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.want_per_thread_events = 0,
 	},
 
+	[TRACE2_TIMER_ID_CACHE_TREE_READ] = {
+		.category = "cache_tree",
+		.name = "read",
+	},
+	[TRACE2_TIMER_ID_CACHE_TREE_FLAT_READ] = {
+		.category = "cache_tree",
+		.name = "flat-read",
+	},
 	[TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK] = {
 		.category = "cache_tree",
 		.name = "validate/object-check",

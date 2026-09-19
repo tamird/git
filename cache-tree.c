@@ -1248,7 +1248,9 @@ struct cache_tree *cache_tree_read(const char *buffer, unsigned long size)
 		return NULL; /* not the whole tree */
 
 	trace2_region_enter("cache_tree", "read", the_repository);
+	trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_READ);
 	result = read_one(&buffer, &size);
+	trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_READ);
 	trace2_region_leave("cache_tree", "read", the_repository);
 
 	return result;
@@ -1301,13 +1303,15 @@ static int prepare_cache_tree_flat(struct index_state *istate)
 	flat->nr = 1;
 	ALLOC_GROW(flat->entries, flat->nr, flat->alloc);
 	trace2_region_enter("cache_tree", "flat-read", istate->repo);
+	trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_FLAT_READ);
 	ret = !size || *buffer || read_flat_one(&buffer, &size, flat, 0);
+	trace2_timer_stop(TRACE2_TIMER_ID_CACHE_TREE_FLAT_READ);
 	trace2_region_leave("cache_tree", "flat-read", istate->repo);
 	if (ret) {
 		cache_tree_flat_free(istate);
 		return -1;
 	}
-	trace2_data_intmax("cache_tree", istate->repo, "flat/nodes",
+	trace2_counter_add(TRACE2_COUNTER_ID_CACHE_TREE_FLAT_NODES,
 			   istate->cache_tree_flat->nr);
 	return 0;
 }

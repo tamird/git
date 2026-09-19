@@ -293,10 +293,14 @@ test_expect_success 'readonly status uses flat cache trees for nested changes' '
 			esac &&
 			GIT_OPTIONAL_LOCKS=1 git status --porcelain >.git/expect &&
 			GIT_TRACE2_EVENT="$(pwd)/.git/$state.trace" \
+			GIT_TRACE2_EVENT_NESTING=2 \
 				git --no-optional-locks status --porcelain >.git/actual &&
 			test_cmp .git/expect .git/actual &&
-			test_trace2_data cache_tree flat/nodes 5 <.git/$state.trace &&
-			test_grep ! "\"category\":\"cache_tree\".*\"label\":\"read\"" \
+			test_grep "\"event\":\"counter\".*\"category\":\"cache_tree\",\"name\":\"flat/nodes\",\"count\":5" \
+				.git/$state.trace &&
+			test_grep "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"flat-read\",\"intervals\":1," \
+				.git/$state.trace &&
+			test_grep ! "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"read\"" \
 				.git/$state.trace || exit 1
 		done
 	)
@@ -343,11 +347,14 @@ test_expect_success PERL 'readonly status accepts legacy unordered TREE children
 		close $fh or die "close: $!";
 		EOF
 		GIT_INDEX_FILE="$PWD/.git/legacy.index" GIT_OPTIONAL_LOCKS=0 \
-		GIT_TRACE2_EVENT="$PWD/.git/legacy.trace" GIT_TRACE2_EVENT_NESTING=10 \
+		GIT_TRACE2_EVENT="$PWD/.git/legacy.trace" GIT_TRACE2_EVENT_NESTING=2 \
 			git status --porcelain -uno >.git/actual &&
 		test_cmp .git/expect .git/actual &&
-		test_grep "\"category\":\"cache_tree\",\"label\":\"read\"" .git/legacy.trace &&
-		test_grep ! "\"key\":\"flat/nodes\"" .git/legacy.trace
+		test_grep "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"flat-read\",\"intervals\":1," \
+			.git/legacy.trace &&
+		test_grep "\"event\":\"timer\".*\"category\":\"cache_tree\",\"name\":\"read\",\"intervals\":1," \
+			.git/legacy.trace &&
+		test_grep ! "\"name\":\"flat/nodes\"" .git/legacy.trace
 	)
 '
 
