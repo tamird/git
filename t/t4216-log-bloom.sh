@@ -1297,6 +1297,52 @@ test_expect_success 'version 3 key limit accommodates basename keys' '
 	)
 '
 
+test_expect_success 'explicitly recompute truncated filters within the budget' '
+	(
+		cd doublewrite &&
+		cp .git/objects/info/commit-graph before &&
+		GIT_TRACE2_EVENT="$PWD/trace-reuse" \
+			git commit-graph write --reachable --changed-paths &&
+		test_filter_computed 0 trace-reuse &&
+		test_cmp_bin before .git/objects/info/commit-graph &&
+
+		test_must_fail git commit-graph write --reachable \
+			--no-changed-paths --recompute-truncated 2>err &&
+		test_grep "requires --changed-paths" err &&
+		test_cmp_bin before .git/objects/info/commit-graph &&
+
+		# The old filters used a limit of three. Reading the graph
+		# restores the default limit, so both can now fit.
+		for budget in 0 1
+		do
+			GIT_TRACE2_EVENT="$PWD/trace-budget-$budget" \
+				git commit-graph write --reachable --changed-paths \
+				--recompute-truncated --max-new-filters=$budget &&
+			test_filter_computed $budget trace-budget-$budget &&
+			test_filter_not_computed $((4 - budget)) \
+				trace-budget-$budget &&
+			test_filter_trunc_large 0 trace-budget-$budget || return 1
+			if test $budget = 0
+			then
+				test_cmp_bin before .git/objects/info/commit-graph || return 1
+			fi
+		done &&
+
+		GIT_TRACE2_EVENT="$PWD/trace-refresh" \
+			git commit-graph write --stdin-commits --append \
+			--changed-paths --recompute-truncated \
+			--split=replace </dev/null &&
+		test_filter_computed 1 trace-refresh &&
+		test_filter_not_computed 3 trace-refresh &&
+		test_filter_trunc_large 0 trace-refresh &&
+		git commit-graph verify &&
+		git -c core.commitGraph=false log --format=%s -- \
+			nested deep file1 absent >expect &&
+		git log --format=%s -- nested deep file1 absent >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'when writing commit graph, reuse changed-path of another version where possible' '
 	git init upgrade &&
 

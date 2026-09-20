@@ -124,9 +124,14 @@ enum bloom_filter_computed {
 	BLOOM_UPGRADED     = (1 << 4),
 };
 
+enum bloom_filter_compute_flags {
+	BLOOM_COMPUTE_IF_MISSING = (1 << 0),
+	BLOOM_RECOMPUTE_TRUNCATED = (1 << 1),
+};
+
 struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 						 struct commit *c,
-						 int compute_if_not_present,
+						 enum bloom_filter_compute_flags flags,
 						 const struct bloom_filter_settings *settings,
 						 enum bloom_filter_computed *computed);
 

@@ -12,7 +12,8 @@ SYNOPSIS
 'git commit-graph verify' [--object-dir <dir>] [--shallow] [--[no-]progress]
 'git commit-graph write' [--object-dir <dir>] [--append]
 			[--split[=<strategy>]] [--reachable | --stdin-packs | --stdin-commits]
-			[--changed-paths] [--[no-]max-new-filters <n>] [--[no-]progress]
+			[--changed-paths] [--recompute-truncated]
+			[--[no-]max-new-filters <n>] [--[no-]progress]
 			<split-options>
 
 
@@ -73,12 +74,26 @@ this option is given, future commit-graph writes will automatically assume
 that this option was intended. Use `--no-changed-paths` to stop storing this
 data. `--changed-paths` is implied by config `commitGraph.changedPaths=true`.
 +
+With the `--recompute-truncated` option, recompute existing Bloom filters
+that were replaced by an always-matching filter because they exceeded
+the size limit. Requires `--changed-paths`, either explicitly or through
+configuration. Other existing filters are reused. Use `--split=replace`
+to rewrite earlier layers and `--append` to retain their commits even
+when they are no longer reachable. This can be expensive: filters
+that still exceed the limit are also recomputed, including on repeated
+invocations of this option.
++
 With the `--max-new-filters=<n>` option, generate at most `n` new Bloom
 filters (if `--changed-paths` is specified). If `n` is `-1`, no limit is
 enforced. Only commits present in the new layer count against this
 limit. To retroactively compute Bloom filters over earlier layers, it is
 advised to use `--split=replace`.  Overrides the `commitGraph.maxNewFilters`
 configuration.
++
+Recomputations requested by `--recompute-truncated` also count against
+this limit, even when the resulting filter is still truncated. Repeating
+a limited write may retry the same truncated filters before reaching
+others. The limit does not bound the work of rewriting graph metadata.
 +
 With the `--split[=<strategy>]` option, write the commit-graph as a
 chain of multiple commit-graph files stored in

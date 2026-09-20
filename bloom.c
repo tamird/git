@@ -468,7 +468,7 @@ int get_bloom_filter(struct repository *r, struct commit *c,
 
 struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 						 struct commit *c,
-						 int compute_if_not_present,
+						 enum bloom_filter_compute_flags flags,
 						 const struct bloom_filter_settings *settings,
 						 enum bloom_filter_computed *computed)
 {
@@ -476,6 +476,8 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 	struct tree *commit_tree;
 	struct tree *parent_tree = NULL;
 	int i;
+	int compute_if_not_present = flags & BLOOM_COMPUTE_IF_MISSING;
+	int recompute;
 	struct diff_options diffopt;
 
 	if (computed)
@@ -495,7 +497,10 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 			load_bloom_filter_from_graph(g, filter, graph_pos);
 	}
 
-	if (filter->data && filter->len) {
+	recompute = settings && compute_if_not_present &&
+		    (flags & BLOOM_RECOMPUTE_TRUNCATED) &&
+		    filter->data && filter->len == 1 && filter->data[0] == 0xff;
+	if (filter->data && filter->len && !recompute) {
 		struct bloom_filter *upgrade;
 		if (!settings || settings->hash_version == filter->version)
 			return filter;
@@ -514,6 +519,10 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 	}
 	if (!compute_if_not_present)
 		return NULL;
+
+	FREE_AND_NULL(filter->to_free);
+	filter->data = NULL;
+	filter->len = 0;
 
 	/*
 	 * Resolve the trees once instead of making the tree diff peel the

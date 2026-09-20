@@ -38,7 +38,8 @@ static void get_bloom_filter_for_commit(const struct object_id *commit_oid)
 	struct commit *c;
 	struct bloom_filter *filter;
 	c = lookup_commit(the_repository, commit_oid);
-	filter = get_or_compute_bloom_filter(the_repository, c, 1,
+	filter = get_or_compute_bloom_filter(the_repository, c,
+					     BLOOM_COMPUTE_IF_MISSING,
 					     &settings,
 					     NULL);
 	print_bloom_filter(filter);

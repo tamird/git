@@ -2002,11 +2002,19 @@ static void compute_bloom_filters(struct write_commit_graph_context *ctx)
 
 	for (i = 0; i < ctx->commits.nr; i++) {
 		enum bloom_filter_computed computed = 0;
+		enum bloom_filter_compute_flags flags = 0;
 		struct commit *c = sorted_commits[i];
-		struct bloom_filter *filter = get_or_compute_bloom_filter(
+		struct bloom_filter *filter;
+
+		if (ctx->count_bloom_filter_computed < max_new_filters) {
+			flags |= BLOOM_COMPUTE_IF_MISSING;
+			if (ctx->opts && ctx->opts->recompute_truncated)
+				flags |= BLOOM_RECOMPUTE_TRUNCATED;
+		}
+		filter = get_or_compute_bloom_filter(
 			ctx->r,
 			c,
-			ctx->count_bloom_filter_computed < max_new_filters,
+			flags,
 			ctx->bloom_settings,
 			&computed);
 		if (computed & BLOOM_COMPUTED) {

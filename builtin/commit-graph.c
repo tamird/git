@@ -17,10 +17,11 @@
 #define BUILTIN_COMMIT_GRAPH_VERIFY_USAGE \
 	N_("git commit-graph verify [--object-dir <dir>] [--shallow] [--[no-]progress]")
 
-#define BUILTIN_COMMIT_GRAPH_WRITE_USAGE \
-	N_("git commit-graph write [--object-dir <dir>] [--append]\n" \
+#define BUILTIN_COMMIT_GRAPH_WRITE_USAGE                                                                     \
+	N_("git commit-graph write [--object-dir <dir>] [--append]\n"                                        \
 	   "                       [--split[=<strategy>]] [--reachable | --stdin-packs | --stdin-commits]\n" \
-	   "                       [--changed-paths] [--[no-]max-new-filters <n>] [--[no-]progress]\n" \
+	   "                       [--changed-paths] [--recompute-truncated]\n"                              \
+	   "                       [--[no-]max-new-filters <n>] [--[no-]progress]\n"                         \
 	   "                       <split-options>")
 
 static const char * const builtin_commit_graph_verify_usage[] = {
@@ -232,28 +233,30 @@ static int graph_write(int argc, const char **argv, const char *prefix,
 
 	static struct option builtin_commit_graph_write_options[] = {
 		OPT_BOOL(0, "reachable", &opts.reachable,
-			N_("start walk at all refs")),
+			 N_("start walk at all refs")),
 		OPT_BOOL(0, "stdin-packs", &opts.stdin_packs,
-			N_("scan pack-indexes listed by stdin for commits")),
+			 N_("scan pack-indexes listed by stdin for commits")),
 		OPT_BOOL(0, "stdin-commits", &opts.stdin_commits,
-			N_("start walk at commits listed by stdin")),
+			 N_("start walk at commits listed by stdin")),
 		OPT_BOOL(0, "append", &opts.append,
-			N_("include all commits already in the commit-graph file")),
+			 N_("include all commits already in the commit-graph file")),
 		OPT_BOOL(0, "changed-paths", &opts.enable_changed_paths,
-			N_("enable computation for changed paths")),
+			 N_("enable computation for changed paths")),
+		OPT_BOOL(0, "recompute-truncated", &write_opts.recompute_truncated,
+			 N_("recompute Bloom filters previously truncated for size")),
 		OPT_CALLBACK_F(0, "split", &write_opts.split_flags, NULL,
-			N_("allow writing an incremental commit-graph file"),
-			PARSE_OPT_OPTARG | PARSE_OPT_NONEG,
-			write_option_parse_split),
+			       N_("allow writing an incremental commit-graph file"),
+			       PARSE_OPT_OPTARG | PARSE_OPT_NONEG,
+			       write_option_parse_split),
 		OPT_INTEGER(0, "max-commits", &write_opts.max_commits,
-			N_("maximum number of commits in a non-base split commit-graph")),
+			    N_("maximum number of commits in a non-base split commit-graph")),
 		OPT_INTEGER(0, "size-multiple", &write_opts.size_multiple,
-			N_("maximum ratio between two levels of a split commit-graph")),
+			    N_("maximum ratio between two levels of a split commit-graph")),
 		OPT_EXPIRY_DATE(0, "expire-time", &write_opts.expire_time,
-			N_("only expire files older than a given date-time")),
+				N_("only expire files older than a given date-time")),
 		OPT_CALLBACK_F(0, "max-new-filters", &write_opts.max_new_filters,
-			NULL, N_("maximum number of changed-path Bloom filters to compute"),
-			0, write_option_max_new_filters),
+			       NULL, N_("maximum number of changed-path Bloom filters to compute"),
+			       0, write_option_max_new_filters),
 		OPT_BOOL(0, "progress", &opts.progress,
 			 N_("force progress reporting")),
 		OPT_END(),
@@ -279,6 +282,8 @@ static int graph_write(int argc, const char **argv, const char *prefix,
 
 	if (opts.reachable + opts.stdin_packs + opts.stdin_commits > 1)
 		die(_("use at most one of --reachable, --stdin-commits, or --stdin-packs"));
+	if (write_opts.recompute_truncated && opts.enable_changed_paths != 1)
+		die(_("--recompute-truncated requires --changed-paths"));
 	if (!opts.obj_dir)
 		opts.obj_dir = repo_get_object_directory(the_repository);
 	if (opts.append)

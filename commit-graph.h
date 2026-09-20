@@ -180,6 +180,7 @@ struct commit_graph_opts {
 	timestamp_t expire_time;
 	enum commit_graph_split_flags split_flags;
 	int max_new_filters;
+	int recompute_truncated;
 };
 
 /*
