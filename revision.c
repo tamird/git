@@ -933,6 +933,7 @@ static void file_change(struct diff_options *options,
 
 static int bloom_filter_atexit_registered;
 static unsigned int count_bloom_filter_maybe;
+static unsigned int count_bloom_filter_trivial_maybe;
 static unsigned int count_bloom_filter_definitely_not;
 static unsigned int count_bloom_filter_false_positive;
 static unsigned int count_bloom_filter_not_present;
@@ -950,6 +951,7 @@ static void trace2_bloom_filter_statistics_atexit(void)
 	jw_object_intmax(&jw, "false_positive", count_bloom_filter_false_positive);
 	jw_object_intmax(&jw, "commits_elided", count_bloom_filter_commits_elided);
 	jw_object_intmax(&jw, "trie_steps", count_bloom_filter_trie_steps);
+	jw_object_intmax(&jw, "trivial_maybe", count_bloom_filter_trivial_maybe);
 	jw_end(&jw);
 
 	trace2_data_json("bloom", the_repository, "statistics", &jw);
@@ -1374,6 +1376,9 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		count_bloom_filter_maybe++;
 	else
 		count_bloom_filter_definitely_not++;
+	/* A one-byte, all-ones filter cannot reject any queried path. */
+	if (result && filter.len == 1 && filter.data[0] == 0xff)
+		count_bloom_filter_trivial_maybe++;
 
 	if (result)
 		return REVISION_BLOOM_FILTER_MAYBE;

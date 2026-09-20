@@ -127,7 +127,8 @@ test_bloom_filters_not_used () {
 		data="$data\"definitely_not\":0,"
 		data="$data\"false_positive\":0,"
 		data="$data\"commits_elided\":0,"
-		data="$data\"trie_steps\":0}"
+		data="$data\"trie_steps\":0,"
+		data="$data\"trivial_maybe\":0}"
 
 		grep -q "$data" "$TRASH_DIRECTORY/trace.perf"
 	fi &&
@@ -1323,14 +1324,18 @@ test_expect_success PERL_TEST_HELPERS 'Bloom reader notices too-small index chun
 '
 
 test_expect_success PERL_TEST_HELPERS 'Bloom reader notices out-of-order index offsets' '
-	# we do not know any real offsets, but we can pick
-	# something plausible; we should not get to the point of
-	# actually reading from the bogus offsets anyway.
-	corrupt_graph BIDX 4 0000000c00000005 &&
+	# The lexically greater of these commits has a nonzero graph position.
+	# Query just that commit so no adjacent corrupted filter is read.
+	commit=$(git rev-parse c16 c17 | LC_ALL=C sort | tail -n 1) &&
+	position=$(git rev-list --all | LC_ALL=C sort |
+		grep -n -F -x "$commit" | cut -d: -f1) &&
+	position=$((position - 1)) &&
+	test "$position" -gt 0 &&
+	corrupt_graph BIDX "$((4 * (position - 1)))" 0000000c00000005 &&
 	echo "warning: ignoring decreasing changed-path index offsets" \
-		"(12 > 5) for positions 1 and 2 of .git/objects/info/commit-graph" >expect.err &&
-	git -c core.commitGraph=false log -- A/B/file2 >expect.out &&
-	git -c core.commitGraph=true log -- A/B/file2 >out 2>err &&
+		"(12 > 5) for positions $((position - 1)) and $position of .git/objects/info/commit-graph" >expect.err &&
+	git -c core.commitGraph=false log "$commit^..$commit" -- A >expect.out &&
+	git -c core.commitGraph=true log "$commit^..$commit" -- A >out 2>err &&
 	test_cmp expect.out out &&
 	test_cmp expect.err err
 '
