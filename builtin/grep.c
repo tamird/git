@@ -1219,7 +1219,8 @@ struct grep_tree_query_context;
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
 		     int check_attr, struct grep_tree_batch *batch,
-		     struct grep_tree_query_context *query);
+		     struct grep_tree_query_context *query,
+		     struct index_state *revision_index);
 
 static int grep_submodule(struct grep_opt *opt,
 			  const struct pathspec *pathspec,
@@ -1313,7 +1314,7 @@ static int grep_submodule(struct grep_opt *opt,
 
 		init_tree_desc(&tree, oid, data, size);
 		hit = grep_tree(&subopt, pathspec, &tree, &base, base.len,
-				object_type == OBJ_COMMIT, NULL, NULL);
+				object_type == OBJ_COMMIT, NULL, NULL, NULL);
 		strbuf_release(&base);
 		free(data);
 	} else {
@@ -2694,7 +2695,7 @@ static int grep_cache(struct grep_opt *opt,
 			init_tree_desc(&tree, &ce->oid, data, size);
 
 			hit |= grep_tree(opt, pathspec, &tree, &name, 0, 0,
-					 NULL, NULL);
+					 NULL, NULL, NULL);
 			strbuf_setlen(&name, name_base_len);
 			strbuf_addstr(&name, ce->name);
 			free(data);
@@ -3717,10 +3718,16 @@ static int grep_tree_contents_excluded(const struct repository *repo,
 	return 0;
 }
 
+static int grep_tree_from_matching_index(
+	struct grep_opt *, const struct pathspec *, const struct object_id *,
+	struct strbuf *, int, int, struct grep_tree_batch *,
+	struct grep_tree_query_context *, struct index_state *, int *);
+
 static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		     struct tree_desc *tree, struct strbuf *base, int tn_len,
 		     int check_attr, struct grep_tree_batch *batch,
-		     struct grep_tree_query_context *query)
+		     struct grep_tree_query_context *query,
+		     struct index_state *revision_index)
 {
 	struct repository *repo = opt->repo;
 	int hit = 0;
@@ -3911,6 +3918,12 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 			struct odb_read_result object_read_result;
 			int sample_detail = 0;
 
+			if (revision_index &&
+			    grep_tree_from_matching_index(
+				    opt, pathspec, &entry.oid, base, tn_len,
+				    check_attr, batch, query, revision_index, &hit))
+				goto next_entry;
+
 			if (query && query->trace_enabled) {
 				int saved_errno = errno;
 				uint64_t ordinal = query->tree_directories++;
@@ -3997,7 +4010,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 				init_tree_desc(&sub, &entry.oid, data, size);
 			}
 			hit |= grep_tree(opt, pathspec, &sub, base, tn_len,
-					 check_attr, batch, query);
+					 check_attr, batch, query, revision_index);
 			free(data);
 		} else if (recurse_submodules && S_ISGITLINK(entry.mode)) {
 			hit |= grep_submodule(opt, pathspec, &entry.oid,
@@ -4005,6 +4018,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 					      1); /* ignored */
 		}
 
+	next_entry:
 		strbuf_setlen(base, old_baselen);
 
 		if (hit && opt->status_only)
@@ -4181,19 +4195,101 @@ static int grep_tree_pageins_sample(uint64_t *pageins)
 
 #endif
 
-/* Keep the tree walker as the fallback when the optional index is unsuitable. */
-static int grep_tree_from_matching_index(
-	struct grep_opt *opt, const struct pathspec *pathspec,
-	const struct object_id *tree_oid, struct strbuf *base,
-	int tn_len, int check_attr, struct grep_tree_batch *batch,
-	struct grep_tree_query_context *query, int *hit)
-{
-	struct index_state index = INDEX_STATE_INIT(opt->repo);
-	struct strbuf parent = STRBUF_INIT;
-	int matched = 0;
+struct grep_revision_index_probe {
+	const struct object_id *tree_oid;
+	struct tree_desc tree;
+	struct strbuf excluded;
+};
 
-	if (!query->recursive_basename_all_directories ||
-	    opt->status_only || recurse_submodules ||
+/* Only admit pathspecs whose coverage can be estimated without tree reads. */
+static int grep_revision_index_pathspec(const struct pathspec *pathspec,
+					struct grep_tree_query_context *query,
+					struct strbuf *excluded)
+{
+	int positive = 0, negative = 0;
+
+	if (pathspec->magic & PATHSPEC_MAXDEPTH)
+		return 0;
+	if (query->recursive_basename_all_directories || !pathspec->nr)
+		return 1;
+	for (int i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+
+		if (!item->magic && !item->len) {
+			positive++;
+		} else if (item->magic == PATHSPEC_EXCLUDE && item->len > 3 &&
+			   item->nowildcard_len == item->len - 2 &&
+			   !memcmp(item->match + item->len - 3, "/**", 3)) {
+			negative++;
+			strbuf_add(excluded, item->match, item->len - 3);
+		} else {
+			return 0;
+		}
+	}
+	return positive == 1 && negative <= 1;
+}
+
+static int grep_revision_index_accept(struct index_state *index, void *data)
+{
+	struct grep_revision_index_probe *probe = data;
+	struct tree_desc tree = probe->tree;
+	struct name_entry entry;
+	struct object_id oid;
+	uintmax_t covered = 0;
+	int count, excluded = 0;
+
+	if (!probe->excluded.len &&
+	    cache_tree_root_matches_index(index, probe->tree_oid))
+		return 1;
+	if (cache_tree_get_path(index, "", &oid) != index->cache_nr)
+		return 0;
+	if (probe->excluded.len) {
+		excluded = cache_tree_get_path(index, probe->excluded.buf, &oid);
+		if (excluded < 0)
+			return 0;
+	}
+	/* The actual root is already read. Inspect its children without I/O. */
+	tree.flags |= TREE_DESC_SILENT_ERRORS;
+	while (tree.size) {
+		const char *suffix;
+
+		entry = tree.entry;
+		if (update_tree_entry_gently(&tree))
+			return 0;
+
+		if (!S_ISDIR(entry.mode))
+			continue;
+		count = cache_tree_get_path(index, entry.path, &oid);
+		if (count <= 0 || !oideq(&oid, &entry.oid))
+			continue;
+		if (probe->excluded.len &&
+		    skip_prefix(probe->excluded.buf, entry.path, &suffix) &&
+		    (!*suffix || *suffix == '/')) {
+			if (excluded > count)
+				return 0;
+			count -= excluded;
+		}
+		covered += count;
+		if (covered > index->cache_nr)
+			return 0;
+	}
+	/* Decoding the whole index is worthwhile only for broad overlap. */
+	return covered && covered >= (index->cache_nr + 1) / 2;
+}
+
+static int grep_revision_index_prepare(
+	struct grep_opt *opt, const struct pathspec *pathspec,
+	const struct object_id *tree_oid, struct tree_desc *tree,
+	struct grep_tree_query_context *query, struct index_state *index)
+{
+	struct grep_revision_index_probe probe = {
+		.tree_oid = tree_oid,
+		.tree = *tree,
+		.excluded = STRBUF_INIT,
+	};
+	int usable = 0;
+
+	if (opt->status_only || recurse_submodules ||
 	    opt->repo != the_repository || opt->repo->submodule_prefix ||
 	    repo_has_promisor_remote(opt->repo))
 		return 0;
@@ -4202,30 +4298,72 @@ static int grep_tree_from_matching_index(
 		if (oidmap_get_size(&opt->repo->objects->replace_map))
 			return 0;
 	}
-
-	index.lazy_cache_tree = 1;
-	if (read_index_from_if_matching_tree(
-		    &index, repo_get_index_file(opt->repo),
-		    repo_get_git_dir(opt->repo), tree_oid) < 0)
+	if (!grep_revision_index_pathspec(pathspec, query, &probe.excluded))
 		goto done;
-	for (unsigned int i = 0; i < index.cache_nr; i++)
-		if (index.cache[i]->ce_flags &
+	index->lazy_cache_tree = 1;
+	if (read_index_from_if_tree_accepted(
+		    index, repo_get_index_file(opt->repo), repo_get_git_dir(opt->repo),
+		    grep_revision_index_accept, &probe) < 0)
+		goto done;
+	for (unsigned int i = 0; i < index->cache_nr; i++)
+		if (index->cache[i]->ce_flags &
 		    (CE_STAGEMASK | CE_INTENT_TO_ADD | CE_REMOVE))
 			goto done;
-	/* As with cached diff, a matching TREE root permits skipping child trees. */
-	matched = 1;
+	usable = 1;
+done:
+	strbuf_release(&probe.excluded);
+	if (!usable)
+		discard_index(index);
+	return usable;
+}
+
+/* A matching cache tree permits skipping child trees, as with cached diff. */
+static int grep_tree_from_matching_index(
+	struct grep_opt *opt, const struct pathspec *pathspec,
+	const struct object_id *tree_oid, struct strbuf *base,
+	int tn_len, int check_attr, struct grep_tree_batch *batch,
+	struct grep_tree_query_context *query, struct index_state *index, int *hit)
+{
+	struct strbuf parent = STRBUF_INIT;
+	struct strbuf prefix = STRBUF_INIT;
+	struct object_id oid;
+	unsigned int first = 0, count;
+	int entries, pos, oldlen = base->len;
+
+	if (base->len == tn_len) {
+		if (!cache_tree_root_matches_index(index, tree_oid))
+			return 0;
+		count = index->cache_nr;
+	} else {
+		entries = cache_tree_get_path(index, base->buf + tn_len, &oid);
+		if (entries <= 0 || !oideq(tree_oid, &oid))
+			return 0;
+		strbuf_addstr(&prefix, base->buf + tn_len);
+		strbuf_addch(&prefix, '/');
+		pos = index_name_pos(index, prefix.buf, prefix.len);
+		first = pos < 0 ? -pos - 1 : pos;
+		count = entries;
+		/* Validate the complete contiguous range before producing output. */
+		if (count > index->cache_nr - first ||
+		    !starts_with(index->cache[first]->name, prefix.buf) ||
+		    !starts_with(index->cache[first + count - 1]->name, prefix.buf) ||
+		    (first + count < index->cache_nr &&
+		     starts_with(index->cache[first + count]->name, prefix.buf))) {
+			strbuf_release(&prefix);
+			return 0;
+		}
+	}
 	if (query->trace_enabled)
 		trace2_data_intmax("grep", opt->repo,
 				   "revision_index_reused", 1);
-	for (unsigned int i = 0; i < index.cache_nr; i++) {
-		const struct cache_entry *ce = index.cache[i];
+	for (unsigned int i = first; i < first + count; i++) {
+		const struct cache_entry *ce = index->cache[i];
 		const char *slash = strrchr(ce->name, '/');
 		struct name_entry entry = {
 			.path = slash ? slash + 1 : ce->name,
 			.mode = ce->ce_mode,
 		};
 		enum interesting interest;
-		int oldlen;
 
 		*hit |= poll_grep_tree_batch(batch);
 		if (!S_ISREG(entry.mode))
@@ -4244,16 +4382,15 @@ static int grep_tree_from_matching_index(
 				query->pathspec_rejected++;
 			continue;
 		}
-		oldlen = base->len;
+		strbuf_setlen(base, tn_len);
 		strbuf_addstr(base, ce->name);
 		*hit |= grep_tree_blob(opt, &ce->oid, base, tn_len, check_attr,
 				       batch, query);
-		strbuf_setlen(base, oldlen);
 	}
-done:
+	strbuf_setlen(base, oldlen);
+	strbuf_release(&prefix);
 	strbuf_release(&parent);
-	release_index(&index);
-	return matched;
+	return 1;
 }
 
 static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
@@ -4270,6 +4407,8 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		};
 		struct grep_tree_batch *batch_ptr = NULL;
 		struct tree_desc tree;
+		struct index_state index = INDEX_STATE_INIT(opt->repo);
+		struct index_state *revision_index = NULL;
 		void *data;
 		unsigned long size;
 		struct strbuf base;
@@ -4327,13 +4466,18 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 #endif
 			tree_begin = getnanotime();
 		}
-		if ((path && *path) ||
+		if ((!path || !*path) &&
+		    grep_revision_index_prepare(opt, pathspec, &actual_tree_oid,
+						&tree, query, &index))
+			revision_index = &index;
+		if (!revision_index ||
 		    !grep_tree_from_matching_index(opt, pathspec, &actual_tree_oid,
-						   &base, base.len,
-						   obj->type == OBJ_COMMIT,
-						   batch_ptr, query, &hit))
+						   &base, base.len, obj->type == OBJ_COMMIT,
+						   batch_ptr, query, revision_index, &hit))
 			hit = grep_tree(opt, pathspec, &tree, &base, base.len,
-					obj->type == OBJ_COMMIT, batch_ptr, query);
+					obj->type == OBJ_COMMIT, batch_ptr, query,
+					revision_index);
+		release_index(&index);
 		if (query->trace_enabled) {
 			query->tree_walk_ns += getnanotime() - tree_begin;
 			query->tree_walk_completed = 1;

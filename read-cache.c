@@ -2409,10 +2409,11 @@ static void set_new_index_sparsity(struct index_state *istate)
 static int do_read_index_with_options(struct index_state *istate,
 				      const char *path, int must_exist,
 				      unsigned int options,
-				      const struct object_id *expected_tree)
+				      int (*accept_tree)(struct index_state *, void *),
+				      void *accept_data)
 {
 	int fd;
-	int gentle = !!expected_tree;
+	int gentle = !!accept_tree;
 	int load_error = 0;
 	struct stat st;
 	unsigned long src_offset;
@@ -2444,7 +2445,7 @@ static int do_read_index_with_options(struct index_state *istate,
 	istate->index_file_has_sdir = 0;
 	fd = git_open(path);
 	if (fd < 0) {
-		if (!expected_tree && !must_exist && errno == ENOENT) {
+		if (!accept_tree && !must_exist && errno == ENOENT) {
 			if (!(options & READ_INDEX_NO_SIDE_EFFECTS))
 				set_new_index_sparsity(istate);
 			istate->initialized = 1;
@@ -2497,11 +2498,11 @@ static int do_read_index_with_options(struct index_state *istate,
 				      min_entry)
 			goto unmap;
 		entry_end_offset = read_eoie_extension(mmap, mmap_size);
-		if (expected_tree && !entry_end_offset)
+		if (accept_tree && !entry_end_offset)
 			goto unmap;
 	}
-	if (expected_tree) {
-		/* Check a framed TREE root before decoding the index entries. */
+	if (accept_tree) {
+		/* Let the caller inspect framed TREE data before decoding entries. */
 		istate->cache_nr = ntohl(hdr->hdr_entries);
 		p.istate = istate;
 		p.mmap = mmap;
@@ -2510,7 +2511,7 @@ static int do_read_index_with_options(struct index_state *istate,
 		p.gentle = 1;
 		p.error = 0;
 		load_index_extensions(&p);
-		if (p.error || !cache_tree_root_matches_index(istate, expected_tree))
+		if (p.error || !accept_tree(istate, accept_data))
 			goto unmap;
 		extensions_loaded = 1;
 	}
@@ -2671,7 +2672,7 @@ fail_fd:
 
 int do_read_index(struct index_state *istate, const char *path, int must_exist)
 {
-	return do_read_index_with_options(istate, path, must_exist, 0, NULL);
+	return do_read_index_with_options(istate, path, must_exist, 0, NULL, NULL);
 }
 
 /*
@@ -2690,7 +2691,8 @@ static void freshen_shared_index(const char *shared_index, int warn)
 
 static int read_index_from_with_options_internal(
 	struct index_state *istate, const char *path, const char *gitdir,
-	unsigned int options, const struct object_id *expected_tree)
+	unsigned int options, int (*accept_tree)(struct index_state *, void *),
+	void *accept_data)
 {
 	struct split_index *split_index;
 	unsigned int entry_changes_before_merge;
@@ -2700,22 +2702,22 @@ static int read_index_from_with_options_internal(
 
 	/* istate->initialized covers both .git/index and .git/sharedindex.xxx */
 	if (istate->initialized)
-		return expected_tree ? -1 : istate->cache_nr;
+		return accept_tree ? -1 : istate->cache_nr;
 
 	trace2_region_enter_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 	trace_performance_enter();
 	ret = do_read_index_with_options(istate, path, 0, options,
-					 expected_tree);
+					 accept_tree, accept_data);
 	trace_performance_leave("read cache %s", path);
 	trace2_region_leave_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
-	if (ret < 0 && expected_tree)
+	if (ret < 0 && accept_tree)
 		return ret;
 
 	split_index = istate->split_index;
 	if (!split_index || is_null_oid(&split_index->base_oid)) {
-		if (!expected_tree)
+		if (!accept_tree)
 			post_read_index_from(istate, options);
 		return ret;
 	}
@@ -2734,7 +2736,7 @@ static int read_index_from_with_options_internal(
 					the_repository, "%s", base_path);
 
 		ret = do_read_index_with_options(split_index->base, base_path,
-						 0, options, NULL);
+						 0, options, NULL, NULL);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					the_repository, "%s", base_path);
 	} else {
@@ -2745,7 +2747,7 @@ static int read_index_from_with_options_internal(
 		trace2_region_enter_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
 		ret = do_read_index_with_options(split_index->base, base_path2,
-						 1, options, NULL);
+						 1, options, NULL, NULL);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
 		free(base_path2);
@@ -2775,16 +2777,16 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 				 const char *gitdir, unsigned int options)
 {
 	return read_index_from_with_options_internal(istate, path, gitdir,
-						     options, NULL);
+						     options, NULL, NULL);
 }
 
-int read_index_from_if_matching_tree(struct index_state *istate,
-				     const char *path, const char *gitdir,
-				     const struct object_id *tree_oid)
+int read_index_from_if_tree_accepted(
+	struct index_state *istate, const char *path, const char *gitdir,
+	int (*accept_tree)(struct index_state *, void *), void *accept_data)
 {
 	return read_index_from_with_options_internal(
-		istate, path, gitdir,
-		READ_INDEX_NO_SIDE_EFFECTS, tree_oid);
+		istate, path, gitdir, READ_INDEX_NO_SIDE_EFFECTS,
+		accept_tree, accept_data);
 }
 
 int read_index_from(struct index_state *istate, const char *path,

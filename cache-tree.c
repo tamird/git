@@ -1651,6 +1651,33 @@ static size_t cache_tree_flat_find(struct cache_tree_flat *flat, size_t pos,
 	return pos;
 }
 
+int cache_tree_get_path(struct index_state *istate, const char *path,
+			struct object_id *oid)
+{
+	struct cache_tree *tree;
+
+	if (istate->cache_tree_data) {
+		struct cache_tree_record *record;
+		size_t pos;
+
+		if (prepare_cache_tree_flat(istate))
+			return -1;
+		pos = cache_tree_flat_find(istate->cache_tree_flat, 0, path);
+		if (pos == SIZE_MAX)
+			return -1;
+		record = &istate->cache_tree_flat->entries[pos].record;
+		if (record->entry_count < 0)
+			return -1;
+		oidread(oid, record->oid, istate->repo->hash_algo);
+		return record->entry_count;
+	}
+	tree = cache_tree_find(istate->cache_tree, path);
+	if (!tree || tree->entry_count < 0)
+		return -1;
+	oidcpy(oid, &tree->oid);
+	return tree->entry_count;
+}
+
 static size_t find_flat_from_traversal(struct cache_tree_flat *flat,
 				       struct traverse_info *info)
 {

@@ -6415,4 +6415,50 @@ test_expect_success 'revision grep falls back when staged contents change' '
 	)
 '
 
+test_expect_success 'revision grep reuses unchanged subtrees with broad coverage' '
+	test_create_repo revision-index-partial &&
+	(
+		cd revision-index-partial &&
+		git config index.recordendofindexentries true &&
+		mkdir -p a/deep b &&
+		echo needle-root >target.txt &&
+		echo needle-one >a/target.txt &&
+		echo needle-two >a/deep/target.txt &&
+		echo needle-three >a/deep/other.txt &&
+		echo needle-old >b/target.txt &&
+		git add . &&
+		git commit -m before &&
+		echo needle-new >b/target.txt &&
+		git add b/target.txt &&
+		git commit -m after &&
+		for version in 2 4
+		do
+			git update-index --index-version "$version" &&
+			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**"
+			do
+				GIT_INDEX_FILE="$PWD/missing-index" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD^ -- "$pathspec" >expect &&
+				rm -f partial.trace &&
+				GIT_TRACE2_EVENT="$PWD/partial.trace" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD^ -- "$pathspec" >actual 2>err &&
+				test_cmp expect actual &&
+				test_must_be_empty err || return 1
+				case "$pathspec" in
+				":!a/"*)
+					test_grep ! revision_index_reused partial.trace &&
+					test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+						partial.trace || return 1
+					;;
+				*)
+					test_trace2_data grep revision_index_reused 1 \
+						<partial.trace || return 1
+					;;
+				esac
+			done || return 1
+		done
+	)
+'
+
 test_done
