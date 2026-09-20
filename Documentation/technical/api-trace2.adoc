@@ -362,13 +362,16 @@ only present on the "start" and "atexit" events.
 ------------
 
 `"start"`::
-	This event contains the complete argv received by main().
+	This event contains the complete argv received by main() and the
+	initial working directory, before processing `-C` or repository setup.
+	The `cwd` field is omitted if the working directory cannot be obtained.
 +
 ------------
 {
 	"event":"start",
 	...
 	"t_abs":0.001227, # elapsed time in seconds
+	"cwd":"/home/user/project",
 	"argv":["git","version"]
 }
 ------------

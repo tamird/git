@@ -1011,6 +1011,10 @@ cc_library(
 cc_library(
     name = "setup",
     hdrs = ["setup.h"],
+    deps = [
+        ":refs",
+        ":string_list",
+    ],
 )
 
 cc_library(

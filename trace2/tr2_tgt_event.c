@@ -5,6 +5,7 @@
 #include "json-writer.h"
 #include "repository.h"
 #include "run-command.h"
+#include "setup.h"
 #include "version.h"
 #include "trace2/tr2_dst.h"
 #include "trace2/tr2_tbuf.h"
@@ -155,6 +156,8 @@ static void fn_start_fl(const char *file, int line,
 	jw_object_begin(&jw, 0);
 	event_fmt_prepare(event_name, file, line, NULL, &jw);
 	jw_object_double(&jw, "t_abs", 6, t_abs);
+	if (tmp_original_cwd)
+		jw_object_string(&jw, "cwd", tmp_original_cwd);
 	jw_object_inline_begin_array(&jw, "argv");
 	jw_array_argv(&jw, argv);
 	jw_end(&jw);

@@ -37,6 +37,24 @@ V=$(git version | sed -e 's/^git version //') && export V
 # We don't bother repeating the 001return and 002exit tests, since they
 # have coverage in the normal and perf targets.
 
+test_expect_success JSON_PP 'start records the initial cwd before -C' '
+	test_when_finished "rm -rf start-cwd trace.event actual expect" &&
+	mkdir -p start-cwd/sub &&
+	(
+		cd start-cwd &&
+		test-tool path-utils real_path "$PWD" >../expect &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/trace.event" \
+			PWD=/not/the/working/directory \
+			git -C sub rev-parse --show-prefix >../actual
+	) &&
+	test_grep "^start-cwd/sub/$" actual &&
+	perl -MJSON::PP -ne '\''
+		my $event = decode_json($_);
+		print "$event->{cwd}\n" if $event->{event} eq "start";
+	'\'' <trace.event >actual &&
+	test_cmp expect actual
+'
+
 # Verb 003error
 #
 # To the above, add multiple 'error <msg>' events

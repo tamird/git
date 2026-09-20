@@ -42,6 +42,7 @@ cc_library(
         "//:quote",
         "//:repository",
         "//:run_command",
+        "//:setup",
         "//:sigchain",
         "//:strbuf",
         "//:thread_utils",

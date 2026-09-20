@@ -75,9 +75,8 @@ void init_git(const char **argv)
 	attr_start();
 
 	trace2_initialize();
-	trace2_cmd_start(argv);
-	trace2_collect_process_info(TRACE2_PROCESS_INFO_STARTUP);
-
 	if (!strbuf_getcwd(&tmp))
 		tmp_original_cwd = strbuf_detach(&tmp, NULL);
+	trace2_cmd_start(argv);
+	trace2_collect_process_info(TRACE2_PROCESS_INFO_STARTUP);
 }
