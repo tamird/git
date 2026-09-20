@@ -78,8 +78,9 @@ struct grep_index_ipc_query_trace {
 
 /*
  * start() owns the serialized query and transport buffers. The repository,
- * input OIDs and optional trace must remain valid until finish(), which joins
- * every started thread and releases the request, including on failure.
+ * input OIDs and optional trace must remain valid until finish(). The OIDs must
+ * stay unchanged. finish() joins every started thread and releases the request,
+ * including on failure.
  * Only finish() writes results; failed requests leave the output untouched.
  */
 struct grep_index_ipc_query_request;

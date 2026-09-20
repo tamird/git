@@ -2383,6 +2383,7 @@ static struct grep_index_ipc_query_request *start_grep_index_ipc_query(
 	struct grep_index_ipc_query_trace *trace, int asynchronous)
 {
 	struct grep_index_ipc_query_request *request = xcalloc(1, sizeof(*request));
+	size_t sorted_nr;
 	int cpus;
 
 	request->repo = repo;
@@ -2413,20 +2414,28 @@ static struct grep_index_ipc_query_request *start_grep_index_ipc_query(
 			return request;
 	}
 
-	/* Repeated positions must not count as cache reuse in the daemon. */
-	CALLOC_ARRAY(request->entries, nr);
-	ALLOC_ARRAY(request->unique_oids, nr);
-	oidmap_init(&request->seen, nr);
-	for (size_t i = 0; i < nr; i++) {
-		struct grep_index_ipc_query_oid *entry;
+	for (sorted_nr = 1; sorted_nr < nr; sorted_nr++)
+		if (oidcmp(&oids[sorted_nr - 1], &oids[sorted_nr]) >= 0)
+			break;
+	if (sorted_nr == nr) {
+		/* Tree batches already removed duplicates; borrow their OIDs. */
+		request->unique_nr = nr;
+	} else {
+		/* Repeated positions must not count as cache reuse in the daemon. */
+		CALLOC_ARRAY(request->entries, nr);
+		ALLOC_ARRAY(request->unique_oids, nr);
+		oidmap_init(&request->seen, nr);
+		for (size_t i = 0; i < nr; i++) {
+			struct grep_index_ipc_query_oid *entry;
 
-		if (oidmap_get(&request->seen, &oids[i]))
-			continue;
-		entry = &request->entries[request->unique_nr];
-		oidcpy(&entry->entry.oid, &oids[i]);
-		entry->pos = request->unique_nr;
-		oidcpy(&request->unique_oids[request->unique_nr++], &oids[i]);
-		oidmap_put(&request->seen, entry);
+			if (oidmap_get(&request->seen, &oids[i]))
+				continue;
+			entry = &request->entries[request->unique_nr];
+			oidcpy(&entry->entry.oid, &oids[i]);
+			entry->pos = request->unique_nr;
+			oidcpy(&request->unique_oids[request->unique_nr++], &oids[i]);
+			oidmap_put(&request->seen, entry);
+		}
 	}
 	ALLOC_ARRAY(request->unique_maybe, request->unique_nr);
 
@@ -2485,7 +2494,9 @@ static struct grep_index_ipc_query_request *start_grep_index_ipc_query(
 		request->tasks[i].query = request->serialized.buf;
 		request->tasks[i].query_len = request->serialized.len;
 		request->tasks[i].hash_algo = repo->hash_algo;
-		request->tasks[i].oids = request->unique_oids + pos;
+		request->tasks[i].oids = request->unique_oids ?
+						 request->unique_oids + pos :
+						 oids + pos;
 		request->tasks[i].nr = task_nr;
 		request->tasks[i].maybe = request->unique_maybe + pos;
 		request->tasks[i].diagnostic_version = request->diagnostic_version;
@@ -2548,7 +2559,9 @@ int grep_index_ipc_query_finish(struct grep_index_ipc_query_request *request,
 			result = -1;
 			goto cleanup;
 		}
-	for (size_t i = 0; i < request->nr; i++) {
+	if (request->nr && !request->unique_oids)
+		memcpy(maybe, request->unique_maybe, request->nr);
+	for (size_t i = 0; request->unique_oids && i < request->nr; i++) {
 		struct grep_index_ipc_query_oid *entry =
 			oidmap_get(&request->seen, &request->oids[i]);
 
