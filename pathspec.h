@@ -40,6 +40,7 @@ struct pathspec {
 		unsigned magic;
 		int len, prefix;
 		int nowildcard_len;
+		int literal_suffix_len;
 		int flags;
 		int attr_match_nr;
 		struct attr_match {

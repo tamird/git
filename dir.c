@@ -247,6 +247,15 @@ int git_fnmatch(const struct pathspec_item *item,
 			ps_strcmp(item, pattern,
 				  string + string_len - pattern_len);
 	}
+	if (item->literal_suffix_len) {
+		int suffix_len = item->literal_suffix_len;
+		size_t string_len = strlen(string);
+
+		if (string_len < suffix_len ||
+		    memcmp(string + string_len - suffix_len,
+			   item->match + item->len - suffix_len, suffix_len))
+			return WM_NOMATCH;
+	}
 	if (item->magic & PATHSPEC_GLOB)
 		return wildmatch(pattern, string,
 				 WM_PATHNAME |

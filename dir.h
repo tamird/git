@@ -620,7 +620,8 @@ unsigned int fspathhash(const char *str);
 int paths_collide(const char *a, const char *b);
 
 /*
- * The prefix part of pattern must not contains wildcards.
+ * pattern is a tail of item->match retaining its full literal suffix.
+ * The prefix part of pattern must not contain wildcards.
  */
 struct pathspec_item;
 int git_fnmatch(const struct pathspec_item *item,

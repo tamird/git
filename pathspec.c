@@ -592,6 +592,21 @@ static void init_pathspec_item(struct pathspec_item *item, unsigned flags,
 			item->flags |= PATHSPEC_ONESTAR;
 	}
 
+	item->literal_suffix_len = 0;
+	if (item->nowildcard_len < item->len &&
+	    !(item->flags & PATHSPEC_ONESTAR) &&
+	    !(magic & PATHSPEC_ICASE)) {
+		int i = item->len;
+
+		/* Brackets contain literals; a double-star directory may be empty. */
+		while (i > item->nowildcard_len &&
+		       !is_glob_special(item->match[i - 1]) &&
+		       item->match[i - 1] != ']' &&
+		       item->match[i - 1] != '/')
+			i--;
+		item->literal_suffix_len = item->len - i;
+	}
+
 	/* sanity checks, pathspec matchers assume these are sane */
 	if (item->nowildcard_len > item->len ||
 	    item->prefix         > item->len) {
