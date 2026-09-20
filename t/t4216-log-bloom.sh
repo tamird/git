@@ -1268,6 +1268,35 @@ test_expect_success 'when writing commit graph, do not reuse changed-path of ano
 	test_filter_upgraded 0 trace2.txt
 '
 
+test_expect_success 'version 3 key limit accommodates basename keys' '
+	(
+		cd doublewrite &&
+		mkdir -p nested/alpha deep/one/two/three &&
+		test_commit eligible nested/alpha/beta &&
+		test_commit deep deep/one/two/three/file &&
+		for i in 1 2 3 4
+		do
+			echo "$i" >file$i || return 1
+		done &&
+		git add file1 file2 file3 file4 &&
+		git commit -m "over raw file limit" &&
+
+		for version in 2 3
+		do
+			# Three path keys become five with basenames. The deep
+			# path exceeds either key limit; four files exceed the
+			# unchanged raw-file limit.
+			rm .git/objects/info/commit-graph &&
+			GIT_TEST_BLOOM_SETTINGS_MAX_CHANGED_PATHS=3 \
+			GIT_TRACE2_EVENT="$(pwd)/trace-limit-$version" \
+				git -c commitGraph.changedPathsVersion=$version \
+				commit-graph write --reachable --changed-paths &&
+			test_filter_computed 4 trace-limit-$version &&
+			test_filter_trunc_large 2 trace-limit-$version || return 1
+		done
+	)
+'
+
 test_expect_success 'when writing commit graph, reuse changed-path of another version where possible' '
 	git init upgrade &&
 

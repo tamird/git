@@ -552,6 +552,11 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 		struct hashmap pathmap = HASHMAP_INIT(pathmap_cmp, NULL);
 		struct pathmap_hash_entry *e;
 		struct hashmap_iter iter;
+		uint64_t max_keys = settings->max_changed_paths;
+
+		/* Version 3 adds at most one basename per version 2 key. */
+		if (settings->hash_version == 3)
+			max_keys *= 2;
 
 		for (i = 0; i < diff_queued_diff.nr; i++) {
 			char *path = diff_queued_diff.queue[i]->two->path;
@@ -592,7 +597,7 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 			} while (*path);
 		}
 
-		if (hashmap_get_size(&pathmap) > settings->max_changed_paths) {
+		if (hashmap_get_size(&pathmap) > max_keys) {
 			init_truncated_large_filter(filter,
 						    settings->hash_version);
 			if (computed)

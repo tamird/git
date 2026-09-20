@@ -146,7 +146,7 @@ All multi-byte numbers are in network byte order.
 	value 2 which corresponds to the 32-bit version of the murmur3 hash
 	implemented exactly as described in
 	https://en.wikipedia.org/wiki/MurmurHash#Algorithm and the double
-	hashing technique using seed values 0x293ae76f and 0x7e646e2 as
+	hashing technique using seed values 0x293ae76f and 0x7e646e2c as
 	described in https://doi.org/10.1007/978-3-540-30494-4_26 "Bloom Filters
 	in Probabilistic Verification". Version 1 Bloom filters have a bug that appears
 	when char is signed and the repository has path names that have characters >=
@@ -158,12 +158,14 @@ All multi-byte numbers are in network byte order.
       - The number of times a path is hashed and hence the number of bit positions
 	      that cumulatively determine whether a file is present in the commit.
       - The minimum number of bits 'b' per entry in the Bloom filter. If the filter
-	      contains 'n' entries, then the filter size is the minimum number of 64-bit
-	      words that contain n*b bits.
+	      contains 'n' entries, then the filter size is the minimum number of
+	      bytes that contain n*b bits.
     * The rest of the chunk is the concatenation of all the computed Bloom
       filters for the commits in lexicographic order.
-    * Note: Commits with no changes or more than 512 changes have Bloom filters
-      of length one, with either all bits set to zero or one respectively.
+    * Commits with no changes have a one-byte filter with all bits set to zero.
+      Commits exceeding the generation limits have a one-byte filter with all
+      bits set to one. The default limits are 512 changed files and 512 keys
+      for versions 1 and 2, or 1024 keys for version 3 to accommodate basenames.
     * The BDAT chunk is present if and only if BIDX is present.
 
 ==== Base Graphs List (ID: {'B', 'A', 'S', 'E'}) [Optional]
