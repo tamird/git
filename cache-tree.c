@@ -1651,8 +1651,27 @@ static size_t cache_tree_flat_find(struct cache_tree_flat *flat, size_t pos,
 	return pos;
 }
 
+static size_t cache_tree_flat_node_count(struct cache_tree_flat *flat, size_t pos)
+{
+	struct cache_tree_flat_entry *entry = &flat->entries[pos];
+	size_t count = 1;
+
+	for (int i = 0; i < entry->record.subtree_nr; i++)
+		count += cache_tree_flat_node_count(flat, entry->children + i);
+	return count;
+}
+
+static size_t cache_tree_node_count(struct cache_tree *tree)
+{
+	size_t count = 1;
+
+	for (int i = 0; i < tree->subtree_nr; i++)
+		count += cache_tree_node_count(tree->down[i]->cache_tree);
+	return count;
+}
+
 int cache_tree_get_path(struct index_state *istate, const char *path,
-			struct object_id *oid)
+			struct object_id *oid, size_t *tree_count)
 {
 	struct cache_tree *tree;
 
@@ -1669,12 +1688,16 @@ int cache_tree_get_path(struct index_state *istate, const char *path,
 		if (record->entry_count < 0)
 			return -1;
 		oidread(oid, record->oid, istate->repo->hash_algo);
+		if (tree_count)
+			*tree_count = cache_tree_flat_node_count(istate->cache_tree_flat, pos);
 		return record->entry_count;
 	}
 	tree = cache_tree_find(istate->cache_tree, path);
 	if (!tree || tree->entry_count < 0)
 		return -1;
 	oidcpy(oid, &tree->oid);
+	if (tree_count)
+		*tree_count = cache_tree_node_count(tree);
 	return tree->entry_count;
 }
 

@@ -6420,12 +6420,18 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 	(
 		cd revision-index-partial &&
 		git config index.recordendofindexentries true &&
-		mkdir -p a/deep b &&
+		mkdir -p a/deep/child b &&
 		echo needle-root >target.txt &&
 		echo needle-one >a/target.txt &&
 		echo needle-two >a/deep/target.txt &&
 		echo needle-three >a/deep/other.txt &&
+		echo needle-child >a/deep/child/target.txt &&
 		echo needle-old >b/target.txt &&
+		# A small selected subtree should not justify decoding unrelated entries.
+		for n in $(test_seq 1 13)
+		do
+			>extra-$n || return 1
+		done &&
 		git add . &&
 		git commit -m before &&
 		echo needle-new >b/target.txt &&
@@ -6434,19 +6440,25 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		for version in 2 4
 		do
 			git update-index --index-version "$version" &&
-			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**"
+			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**" \
+				a a/deep a/deep/child target.txt
 			do
+				set -- "$pathspec" &&
+				case "$pathspec" in
+				a/deep) set -- a/deep a/deep/child ;;
+				a/deep/child) set -- "$pathspec" "$pathspec" ;;
+				esac &&
 				GIT_INDEX_FILE="$PWD/missing-index" \
 					git grep --text --no-content-index --threads=1 -n \
-						needle HEAD^ -- "$pathspec" >expect &&
+						needle HEAD^ -- "$@" >expect &&
 				rm -f partial.trace &&
 				GIT_TRACE2_EVENT="$PWD/partial.trace" \
 					git grep --text --no-content-index --threads=1 -n \
-						needle HEAD^ -- "$pathspec" >actual 2>err &&
+						needle HEAD^ -- "$@" >actual 2>err &&
 				test_cmp expect actual &&
 				test_must_be_empty err || return 1
 				case "$pathspec" in
-				":!a/"*)
+				":!a/"*|a/deep/child|target.txt)
 					test_grep ! revision_index_reused partial.trace &&
 					test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
 						partial.trace || return 1
@@ -6455,7 +6467,13 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 					test_trace2_data grep revision_index_reused 1 \
 						<partial.trace || return 1
 					;;
-				esac
+				esac &&
+				if test "$pathspec" = a/deep
+				then
+					# Read the ancestor, but reuse only the selected nested scope.
+					test_trace2_data grep content_index_tree_directories 1 \
+						<partial.trace || return 1
+				fi
 			done || return 1
 		done
 	)
