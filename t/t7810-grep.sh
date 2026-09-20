@@ -6301,4 +6301,118 @@ do
 	'
 done
 
+test_expect_success 'revision grep reuses a matching full index and falls back gently' '
+	test_create_repo revision-index &&
+	(
+		cd revision-index &&
+		mkdir -p a/deep b &&
+		git config index.recordendofindexentries true &&
+		echo needle-root >target.txt &&
+		echo needle-deep >a/deep/target.txt &&
+		echo needle-other >b/other.txt &&
+		git add . &&
+		git commit -m tree &&
+		tree=$(git rev-parse HEAD^{tree}) &&
+		cat >expect <<-EOF &&
+		HEAD:a/deep/target.txt:1:needle-deep
+		HEAD:target.txt:1:needle-root
+		EOF
+		GIT_INDEX_FILE="$PWD/missing-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- ":(glob)**/target.txt" \
+				>actual &&
+		test_cmp expect actual &&
+		for version in 2 4
+		do
+			git update-index --index-version "$version" &&
+			GIT_TRACE2_EVENT="$PWD/reused-$version.trace" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- ":(glob)**/target.txt" \
+					>actual &&
+			test_cmp expect actual &&
+			test_trace2_data grep revision_index_reused 1 \
+				<"reused-$version.trace" || return 1
+		done &&
+		GIT_TRACE2_EVENT="$PWD/tree.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle "$tree" -- ":(glob)**/target.txt" \
+				>actual-tree &&
+		sed "s/^HEAD:/$tree:/" expect >expect-tree &&
+		test_cmp expect-tree actual-tree &&
+		test_trace2_data grep revision_index_reused 1 <tree.trace &&
+		empty_tree=$(git mktree </dev/null) &&
+		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/other-tree.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle "$empty_tree" -- ":(glob)**/target.txt" &&
+		test_grep ! revision_index_reused other-tree.trace &&
+		test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+			other-tree.trace &&
+		printf bad-index >broken-index &&
+		GIT_INDEX_FILE="$PWD/broken-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- ":(glob)**/target.txt" \
+				>actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err
+	)
+'
+
+test_expect_success PERL 'revision grep ignores a malformed optional index entry or TREE' '
+	(
+		cd revision-index &&
+		perl - "$(test_oid rawsz)" .git/index <<-\EOF &&
+		use strict;
+		use warnings;
+		my ($rawsz, $source) = @ARGV;
+		open my $fh, "<", $source or die "$source: $!";
+		binmode $fh;
+		local $/;
+		my $index = <$fh>;
+		close $fh;
+		my $start = 12 + 40 + $rawsz + 2 + 1;
+		my $entry = $index;
+		substr($entry, $start, 1) eq "a" or die "first entry not a";
+		substr($entry, $start, 1) = "\0";
+		my $at = index($index, "TREE");
+		$at > 12 && $at == rindex($index, "TREE") or die "TREE not unique";
+		substr($index, $at + 8, 1) eq "\0" or die "TREE root absent";
+		my $tree = $index;
+		substr($tree, $at + 9, 1) = "x";
+		my $extension = $index;
+		substr($extension, $at + 4, 4) = pack("N", length($index));
+		for my $case (["broken-entry", $entry],
+			      ["broken-tree", $tree],
+			      ["broken-extension", $extension]) {
+			open my $out, ">", $case->[0] or die "$case->[0]: $!";
+			binmode $out;
+			print {$out} $case->[1] or die "write: $!";
+			close $out or die "close: $!";
+		}
+		EOF
+		for corrupt in broken-entry broken-tree broken-extension
+		do
+			GIT_INDEX_FILE="$PWD/$corrupt" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- ":(glob)**/target.txt" \
+					>actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err || return 1
+		done
+	)
+'
+
+test_expect_success 'revision grep falls back when staged contents change' '
+	(
+		cd revision-index &&
+		echo staged-only >target.txt &&
+		git add target.txt &&
+		GIT_TRACE2_EVENT="$PWD/changed.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- ":(glob)**/target.txt" \
+				>actual &&
+		test_cmp expect actual &&
+		test_grep ! revision_index_reused changed.trace
+	)
+'
+
 test_done

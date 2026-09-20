@@ -1102,8 +1102,9 @@ static int parse_int(const char **ptr, unsigned long *len_p, int *out)
 {
 	const char *s = *ptr;
 	unsigned long len = *len_p;
-	int ret = 0;
+	uint64_t ret = 0;
 	int sign = 1;
+	int digits = 0;
 
 	while (len && *s == '-') {
 		sign *= -1;
@@ -1112,20 +1113,30 @@ static int parse_int(const char **ptr, unsigned long *len_p, int *out)
 	}
 
 	while (len) {
+		unsigned digit;
+		uint64_t limit;
+
 		if (!isdigit(*s))
 			break;
-		ret *= 10;
-		ret += *s - '0';
+		digit = *s - '0';
+		limit = sign < 0 ? (uint64_t)INT_MAX + 1 : INT_MAX;
+		if (ret > (limit - digit) / 10)
+			return -1;
+		ret = ret * 10 + digit;
+		digits = 1;
 		s++;
 		len--;
 	}
 
-	if (s == *ptr)
+	if (!digits)
 		return -1;
 
 	*ptr = s;
 	*len_p = len;
-	*out = sign * ret;
+	if (ret == (uint64_t)INT_MAX + 1)
+		*out = INT_MIN;
+	else
+		*out = sign < 0 ? -(int)ret : (int)ret;
 	return 0;
 }
 
@@ -1168,6 +1179,30 @@ static int read_record(const char **buffer, unsigned long *size_p,
 	*buffer = buf;
 	*size_p = size;
 	return 0;
+}
+
+int cache_tree_root_matches_index(struct index_state *istate,
+				  const struct object_id *oid)
+{
+	if (istate->cache_tree_data) {
+		const char *data = istate->cache_tree_data;
+		unsigned long size;
+		struct cache_tree_record record;
+		struct object_id root_oid;
+
+		if (istate->cache_tree_data_size > ULONG_MAX)
+			return 0;
+		size = istate->cache_tree_data_size;
+		if (read_record(&data, &size, &record) || record.namelen ||
+		    record.entry_count != istate->cache_nr || !record.oid ||
+		    record.subtree_nr < 0)
+			return 0;
+		oidread(&root_oid, record.oid, istate->repo->hash_algo);
+		return oideq(&root_oid, oid);
+	}
+	return istate->cache_tree &&
+	       istate->cache_tree->entry_count == istate->cache_nr &&
+	       oideq(&istate->cache_tree->oid, oid);
 }
 
 static struct cache_tree *read_one(const char **buffer, unsigned long *size_p)

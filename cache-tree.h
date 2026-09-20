@@ -30,6 +30,7 @@ struct cache_tree {
 struct cache_tree *cache_tree(void);
 void cache_tree_free(struct cache_tree **);
 struct cache_tree *cache_tree_get(struct index_state *);
+int cache_tree_root_matches_index(struct index_state *, const struct object_id *);
 void cache_tree_discard(struct index_state *);
 void cache_tree_invalidate_path(struct index_state *, const char *);
 struct cache_tree_sub *cache_tree_sub(struct cache_tree *, const char *);

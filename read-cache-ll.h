@@ -304,6 +304,16 @@ int read_index_from(struct index_state *, const char *path,
 #define READ_INDEX_NO_SIDE_EFFECTS 1
 int read_index_from_with_options(struct index_state *, const char *path,
 				 const char *gitdir, unsigned int options);
+/*
+ * Optional read-only probe. Require a full index with EOIE, a matching
+ * bounded TREE root, and well-framed, ordered entries. Return -1 silently
+ * when these checks or required extension checks fail; decode with one
+ * thread and skip optional extension payloads. Ordinary readers retain
+ * their errors, post-read behavior and sparse-index conversion.
+ */
+int read_index_from_if_matching_tree(struct index_state *, const char *path,
+				     const char *gitdir,
+				     const struct object_id *tree_oid);
 int is_index_unborn(struct index_state *);
 
 /* For use with `write_locked_index()`. */

@@ -1754,7 +1754,8 @@ int verify_index_checksum;
 /* Allow fsck to force verification of the cache entry order. */
 int verify_ce_order;
 
-static int verify_hdr(const struct cache_header *hdr, unsigned long size)
+static int verify_hdr(const struct cache_header *hdr, unsigned long size,
+		      int gentle)
 {
 	struct git_hash_ctx c;
 	unsigned char hash[GIT_MAX_RAWSZ];
@@ -1763,10 +1764,10 @@ static int verify_hdr(const struct cache_header *hdr, unsigned long size)
 	struct object_id oid;
 
 	if (hdr->hdr_signature != htonl(CACHE_SIGNATURE))
-		return error(_("bad signature 0x%08x"), hdr->hdr_signature);
+		return gentle ? -1 : error(_("bad signature 0x%08x"), hdr->hdr_signature);
 	hdr_version = ntohl(hdr->hdr_version);
 	if (hdr_version < INDEX_FORMAT_LB || INDEX_FORMAT_UB < hdr_version)
-		return error(_("bad index version %d"), hdr_version);
+		return gentle ? -1 : error(_("bad index version %d"), hdr_version);
 
 	if (!verify_index_checksum)
 		return 0;
@@ -1781,7 +1782,7 @@ static int verify_hdr(const struct cache_header *hdr, unsigned long size)
 	git_hash_update(&c, hdr, size - the_hash_algo->rawsz);
 	git_hash_final(hash, &c);
 	if (!hasheq(hash, start, the_repository->hash_algo))
-		return error(_("bad index file sha1 signature"));
+		return gentle ? -1 : error(_("bad index file sha1 signature"));
 	return 0;
 }
 
@@ -1863,13 +1864,14 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 					    unsigned int version,
 					    const char *ondisk,
 					    unsigned long *ent_size,
-					    const struct cache_entry *previous_ce)
+					    const struct cache_entry *previous_ce,
+					    const char *end)
 {
 	struct cache_entry *ce;
 	size_t len;
 	const char *name;
 	const unsigned hashsz = the_hash_algo->rawsz;
-	const char *flagsp = ondisk + offsetof(struct ondisk_cache_entry, data) + hashsz;
+	const char *flagsp;
 	unsigned int flags;
 	size_t copy_len = 0;
 	/*
@@ -1881,16 +1883,28 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 	 */
 	int expand_name_field = version == 4;
 
+	if (end && (ondisk > end ||
+		    end - ondisk < offsetof(struct ondisk_cache_entry, data) +
+					   hashsz + sizeof(uint16_t)))
+		return NULL;
+	flagsp = ondisk + offsetof(struct ondisk_cache_entry, data) + hashsz;
+
 	/* On-disk flags are just 16 bits */
 	flags = get_be16(flagsp);
 	len = flags & CE_NAMEMASK;
 
 	if (flags & CE_EXTENDED) {
-		int extended_flags;
-		extended_flags = get_be16(flagsp + sizeof(uint16_t)) << 16;
+		unsigned int extended_flags;
+		if (end && end - flagsp < 2 * sizeof(uint16_t))
+			return NULL;
+		extended_flags = (unsigned int)get_be16(flagsp + sizeof(uint16_t)) << 16;
 		/* We do not yet understand any bit out of CE_EXTENDED_FLAGS */
-		if (extended_flags & ~CE_EXTENDED_FLAGS)
-			die(_("unknown index entry format 0x%08x"), extended_flags);
+		if (extended_flags & ~CE_EXTENDED_FLAGS) {
+			if (end)
+				return NULL;
+			else
+				die(_("unknown index entry format 0x%08x"), extended_flags);
+		}
 		flags |= extended_flags;
 		name = (const char *)(flagsp + 2 * sizeof(uint16_t));
 	}
@@ -1902,17 +1916,44 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 		uint64_t strip_len, previous_len;
 
 		/* If we're at the beginning of a block, ignore the previous name */
+		if (end) {
+			const unsigned char *last = (const unsigned char *)end;
+			const unsigned char *stop = cp;
+
+			while (stop < last && *stop & 0x80)
+				stop++;
+			if (stop == last || stop - cp >= 10)
+				return NULL;
+		}
 		strip_len = decode_varint(&cp);
+		if (end && (cp == (const unsigned char *)name ||
+			    (!previous_ce && strip_len)))
+			return NULL;
 		if (previous_ce) {
 			previous_len = previous_ce->ce_namelen;
-			if (previous_len < strip_len)
-				die(_("malformed name field in the index, near path '%s'"),
-					previous_ce->name);
+			if (previous_len < strip_len) {
+				if (end)
+					return NULL;
+				else
+					die(_("malformed name field in the index, near path '%s'"),
+					    previous_ce->name);
+			}
 			copy_len = previous_len - strip_len;
 		}
 		name = (const char *)cp;
 	}
 
+	if (end) {
+		const char *nul;
+		size_t suffix_len;
+
+		if (name >= end || !(nul = memchr(name, '\0', end - name)))
+			return NULL;
+		suffix_len = nul - name;
+		if (suffix_len > INT_MAX - copy_len ||
+		    (len != CE_NAMEMASK && len != suffix_len + copy_len))
+			return NULL;
+	}
 	if (len == CE_NAMEMASK) {
 		len = strlen(name);
 		if (expand_name_field)
@@ -1958,32 +1999,48 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 		memcpy(ce->name, name, len + 1);
 		*ent_size = ondisk_ce_size(ce);
 	}
+	if (end && !expand_name_field &&
+	    ondisk_ce_size(ce) > (size_t)(end - ondisk))
+		return NULL;
 	return ce;
 }
 
-static void check_ce_order(struct index_state *istate)
+static int check_ce_order(struct index_state *istate, int gentle)
 {
 	unsigned int i;
 
-	if (!verify_ce_order)
-		return;
+	if (!verify_ce_order && !gentle)
+		return 0;
 
 	for (i = 1; i < istate->cache_nr; i++) {
 		struct cache_entry *ce = istate->cache[i - 1];
 		struct cache_entry *next_ce = istate->cache[i];
 		int name_compare = strcmp(ce->name, next_ce->name);
 
-		if (0 < name_compare)
-			die(_("unordered stage entries in index"));
+		if (0 < name_compare) {
+			if (gentle)
+				return -1;
+			else
+				die(_("unordered stage entries in index"));
+		}
 		if (!name_compare) {
-			if (!ce_stage(ce))
-				die(_("multiple stage entries for merged file '%s'"),
-				    ce->name);
-			if (ce_stage(ce) > ce_stage(next_ce))
-				die(_("unordered stage entries for '%s'"),
-				    ce->name);
+			if (!ce_stage(ce)) {
+				if (gentle)
+					return -1;
+				else
+					die(_("multiple stage entries for merged file '%s'"),
+					    ce->name);
+			}
+			if (ce_stage(ce) > ce_stage(next_ce)) {
+				if (gentle)
+					return -1;
+				else
+					die(_("unordered stage entries for '%s'"),
+					    ce->name);
+			}
 		}
 	}
+	return 0;
 }
 
 static void tweak_untracked_cache(struct index_state *istate)
@@ -2029,7 +2086,7 @@ static void tweak_split_index(struct index_state *istate)
 static void post_read_index_from(struct index_state *istate, unsigned int options)
 {
 	trace2_region_enter("index", "post_read", istate->repo);
-	check_ce_order(istate);
+	check_ce_order(istate, 0);
 	if (!(options & READ_INDEX_NO_SIDE_EFFECTS)) {
 		tweak_untracked_cache(istate);
 		tweak_split_index(istate);
@@ -2079,6 +2136,8 @@ struct load_index_extensions
 	const char *mmap;
 	size_t mmap_size;
 	unsigned long src_offset;
+	int gentle;
+	int error;
 };
 
 static void *load_index_extensions(void *_data)
@@ -2117,13 +2176,35 @@ static void *load_index_extensions(void *_data)
 			extension_error = 1;
 			break;
 		}
-		if (read_index_extension(p->istate,
-					 p->mmap + src_offset,
-					 p->mmap + src_offset + 8,
-					 extsize, &untracked_state) < 0) {
+		if (p->gentle) {
+			const char *ext = p->mmap + src_offset;
+
+			switch (CACHE_EXT(ext)) {
+			case CACHE_EXT_TREE:
+				if (p->istate->cache_tree_data) {
+					extension_error = 1;
+					break;
+				}
+				p->istate->cache_tree_data = xmemdupz(ext + 8, extsize);
+				p->istate->cache_tree_data_size = extsize;
+				break;
+			case CACHE_EXT_LINK:
+			case CACHE_EXT_SPARSE_DIRECTORIES:
+				extension_error = 1;
+				break;
+			default:
+				/* Uppercase extensions may be ignored by index readers. */
+				if (*ext < 'A' || 'Z' < *ext)
+					extension_error = 1;
+			}
+		} else if (read_index_extension(p->istate,
+						p->mmap + src_offset,
+						p->mmap + src_offset + 8,
+						extsize, &untracked_state) < 0) {
 			extension_error = 1;
-			break;
 		}
+		if (extension_error)
+			break;
 		src_offset += 8 + extsize;
 	}
 	if (src_offset != end)
@@ -2131,6 +2212,10 @@ static void *load_index_extensions(void *_data)
 
 done:
 	if (extension_error) {
+		if (p->gentle) {
+			p->error = 1;
+			return NULL;
+		}
 		munmap((void *)p->mmap, p->mmap_size);
 		die(_("index file corrupt"));
 	}
@@ -2142,8 +2227,9 @@ done:
  * from the memory mapped file and add them to the given index.
  */
 static unsigned long load_cache_entry_block(struct index_state *istate,
-			struct mem_pool *ce_mem_pool, int offset, int nr, const char *mmap,
-			unsigned long start_offset, const struct cache_entry *previous_ce)
+					    struct mem_pool *ce_mem_pool, int offset, int nr, const char *mmap,
+					    unsigned long start_offset, const struct cache_entry *previous_ce,
+					    const char *end, int *error)
 {
 	int i;
 	unsigned long src_offset = start_offset;
@@ -2152,9 +2238,17 @@ static unsigned long load_cache_entry_block(struct index_state *istate,
 		struct cache_entry *ce;
 		unsigned long consumed;
 
+		if (end && (src_offset >= (size_t)(end - mmap))) {
+			*error = 1;
+			break;
+		}
 		ce = create_from_disk(ce_mem_pool, istate->version,
 				      mmap + src_offset,
-				      &consumed, previous_ce);
+				      &consumed, previous_ce, end);
+		if (end && (!ce || consumed > (size_t)(end - mmap) - src_offset)) {
+			*error = 1;
+			break;
+		}
 		set_index_entry(istate, i, ce);
 
 		src_offset += consumed;
@@ -2164,7 +2258,8 @@ static unsigned long load_cache_entry_block(struct index_state *istate,
 }
 
 static unsigned long load_all_cache_entries(struct index_state *istate,
-			const char *mmap, size_t mmap_size, unsigned long src_offset)
+					    const char *mmap, size_t mmap_size, unsigned long src_offset,
+					    const char *end, int *error)
 {
 	unsigned long consumed;
 
@@ -2178,7 +2273,8 @@ static unsigned long load_all_cache_entries(struct index_state *istate,
 	}
 
 	consumed = load_cache_entry_block(istate, istate->ce_mem_pool,
-					0, istate->cache_nr, mmap, src_offset, NULL);
+					  0, istate->cache_nr, mmap, src_offset, NULL,
+					  end, error);
 	return consumed;
 }
 
@@ -2216,7 +2312,8 @@ static void *load_cache_entries_thread(void *_data)
 	/* iterate across all ieot blocks assigned to this thread */
 	for (i = p->ieot_start; i < p->ieot_start + p->ieot_blocks; i++) {
 		p->consumed += load_cache_entry_block(p->istate, p->ce_mem_pool,
-			p->offset, p->ieot->entries[i].nr, p->mmap, p->ieot->entries[i].offset, NULL);
+						      p->offset, p->ieot->entries[i].nr, p->mmap, p->ieot->entries[i].offset,
+						      NULL, NULL, NULL);
 		p->offset += p->ieot->entries[i].nr;
 	}
 	return NULL;
@@ -2311,9 +2408,12 @@ static void set_new_index_sparsity(struct index_state *istate)
 /* remember to discard_cache() before reading a different cache! */
 static int do_read_index_with_options(struct index_state *istate,
 				      const char *path, int must_exist,
-				      unsigned int options)
+				      unsigned int options,
+				      const struct object_id *expected_tree)
 {
 	int fd;
+	int gentle = !!expected_tree;
+	int load_error = 0;
 	struct stat st;
 	unsigned long src_offset;
 	const struct cache_header *hdr;
@@ -2321,8 +2421,13 @@ static int do_read_index_with_options(struct index_state *istate,
 	size_t mmap_size;
 	struct load_index_extensions p;
 	size_t extension_offset = 0;
+	size_t entry_end_offset = 0;
 	int nr_threads, cpus;
+	int extensions_loaded = 0;
 	struct index_entry_offset_table *ieot = NULL;
+
+	if (gentle)
+		options |= READ_INDEX_NO_SIDE_EFFECTS;
 
 	if (istate->initialized)
 		return istate->cache_nr;
@@ -2339,32 +2444,76 @@ static int do_read_index_with_options(struct index_state *istate,
 	istate->index_file_has_sdir = 0;
 	fd = git_open(path);
 	if (fd < 0) {
-		if (!must_exist && errno == ENOENT) {
+		if (!expected_tree && !must_exist && errno == ENOENT) {
 			if (!(options & READ_INDEX_NO_SIDE_EFFECTS))
 				set_new_index_sparsity(istate);
 			istate->initialized = 1;
 			return 0;
 		}
+		if (gentle)
+			return -1;
 		die_errno(_("%s: index file open failed"), path);
 	}
 
-	if (fstat(fd, &st))
-		die_errno(_("%s: cannot stat the open index"), path);
+	if (fstat(fd, &st)) {
+		if (gentle)
+			goto fail_fd;
+		else
+			die_errno(_("%s: cannot stat the open index"), path);
+	}
 	istate->index_file_stat = st;
 	istate->index_file_stat_valid = 1;
 
+	if (gentle && (st.st_size < 0 || (uintmax_t)st.st_size > SIZE_MAX))
+		goto fail_fd;
 	mmap_size = xsize_t(st.st_size);
-	if (mmap_size < sizeof(struct cache_header) + the_hash_algo->rawsz)
-		die(_("%s: index file smaller than expected"), path);
+	if (mmap_size < sizeof(struct cache_header) + the_hash_algo->rawsz) {
+		if (gentle)
+			goto fail_fd;
+		else
+			die(_("%s: index file smaller than expected"), path);
+	}
 
 	mmap = xmmap_gently(NULL, mmap_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (mmap == MAP_FAILED)
-		die_errno(_("%s: unable to map index file%s"), path,
-			mmap_os_err());
+	if (mmap == MAP_FAILED) {
+		if (gentle)
+			goto fail_fd;
+		else
+			die_errno(_("%s: unable to map index file%s"), path,
+				  mmap_os_err());
+	}
 
 	hdr = (const struct cache_header *)mmap;
-	if (verify_hdr(hdr, mmap_size) < 0)
+	if (verify_hdr(hdr, mmap_size, gentle) < 0)
 		goto unmap;
+	if (gentle) {
+		/* Later entry positions and counts use int. Bound allocations too. */
+		size_t min_entry = offsetof(struct ondisk_cache_entry, data) +
+				   the_hash_algo->rawsz + sizeof(uint16_t) + 2;
+		uint32_t entries = ntohl(hdr->hdr_entries);
+
+		if (entries > INT_MAX ||
+		    entries > (mmap_size - sizeof(*hdr) - the_hash_algo->rawsz) /
+				      min_entry)
+			goto unmap;
+		entry_end_offset = read_eoie_extension(mmap, mmap_size);
+		if (expected_tree && !entry_end_offset)
+			goto unmap;
+	}
+	if (expected_tree) {
+		/* Check a framed TREE root before decoding the index entries. */
+		istate->cache_nr = ntohl(hdr->hdr_entries);
+		p.istate = istate;
+		p.mmap = mmap;
+		p.mmap_size = mmap_size;
+		p.src_offset = entry_end_offset;
+		p.gentle = 1;
+		p.error = 0;
+		load_index_extensions(&p);
+		if (p.error || !cache_tree_root_matches_index(istate, expected_tree))
+			goto unmap;
+		extensions_loaded = 1;
+	}
 
 	oidread(&istate->oid, (const unsigned char *)hdr + mmap_size - the_hash_algo->rawsz,
 		the_repository->hash_algo);
@@ -2394,17 +2543,22 @@ static int do_read_index_with_options(struct index_state *istate,
 	}
 	istate->version = ntohl(hdr->hdr_version);
 	istate->cache_nr = ntohl(hdr->hdr_entries);
-	istate->cache_alloc = alloc_nr(istate->cache_nr);
+	/* The optional reader does not insert entries or need spare slots. */
+	istate->cache_alloc = gentle ? istate->cache_nr : alloc_nr(istate->cache_nr);
 	CALLOC_ARRAY(istate->cache, istate->cache_alloc);
 	istate->initialized = 1;
 
 	p.istate = istate;
 	p.mmap = mmap;
 	p.mmap_size = mmap_size;
+	p.gentle = gentle;
+	p.error = 0;
 
 	src_offset = sizeof(*hdr);
 
-	if (repo_config_get_index_threads(the_repository, &nr_threads))
+	if (gentle)
+		nr_threads = 1;
+	else if (repo_config_get_index_threads(the_repository, &nr_threads))
 		nr_threads = 1;
 
 	/* TODO: does creating more threads than cores help? */
@@ -2444,8 +2598,16 @@ static int do_read_index_with_options(struct index_state *istate,
 		src_offset += load_cache_entries_threaded(istate, mmap, mmap_size, nr_threads, ieot);
 		free(ieot);
 	} else {
-		src_offset += load_all_cache_entries(istate, mmap, mmap_size, src_offset);
+		src_offset += load_all_cache_entries(
+			istate, mmap, mmap_size, src_offset,
+			gentle ? mmap + (entry_end_offset ? entry_end_offset :
+							    mmap_size - the_hash_algo->rawsz) :
+				 NULL,
+			gentle ? &load_error : NULL);
 	}
+	if (load_error || (gentle && entry_end_offset &&
+			   src_offset != entry_end_offset))
+		goto unmap;
 	if ((extension_offset ? extension_offset :
 				read_eoie_extension(mmap, mmap_size)) == src_offset) {
 		istate->index_file_entries_end = src_offset;
@@ -2460,10 +2622,13 @@ static int do_read_index_with_options(struct index_state *istate,
 		int ret = pthread_join(p.pthread, NULL);
 		if (ret)
 			die(_("unable to join load_index_extensions thread: %s"), strerror(ret));
-	} else {
+	} else if (!extensions_loaded) {
 		p.src_offset = src_offset;
 		load_index_extensions(&p);
 	}
+	if (p.error || (gentle && (istate->sparse_index != INDEX_EXPANDED ||
+				   check_ce_order(istate, 1))))
+		goto unmap;
 	istate->index_file_parsed_generation_valid = 1;
 	munmap((void *)mmap, mmap_size);
 
@@ -2491,12 +2656,22 @@ unmap:
 	if (fd >= 0)
 		close(fd);
 	munmap((void *)mmap, mmap_size);
+	if (gentle) {
+		/* Partial cache[] slots must not be validated as live entries. */
+		istate->initialized = 0;
+		discard_index(istate);
+		return -1;
+	}
 	die(_("index file corrupt"));
+
+fail_fd:
+	close(fd);
+	return -1;
 }
 
 int do_read_index(struct index_state *istate, const char *path, int must_exist)
 {
-	return do_read_index_with_options(istate, path, must_exist, 0);
+	return do_read_index_with_options(istate, path, must_exist, 0, NULL);
 }
 
 /*
@@ -2513,8 +2688,9 @@ static void freshen_shared_index(const char *shared_index, int warn)
 	trace2_region_leave("index", "shared/freshen", the_repository);
 }
 
-int read_index_from_with_options(struct index_state *istate, const char *path,
-				 const char *gitdir, unsigned int options)
+static int read_index_from_with_options_internal(
+	struct index_state *istate, const char *path, const char *gitdir,
+	unsigned int options, const struct object_id *expected_tree)
 {
 	struct split_index *split_index;
 	unsigned int entry_changes_before_merge;
@@ -2524,19 +2700,23 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 
 	/* istate->initialized covers both .git/index and .git/sharedindex.xxx */
 	if (istate->initialized)
-		return istate->cache_nr;
+		return expected_tree ? -1 : istate->cache_nr;
 
 	trace2_region_enter_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
 	trace_performance_enter();
-	ret = do_read_index_with_options(istate, path, 0, options);
+	ret = do_read_index_with_options(istate, path, 0, options,
+					 expected_tree);
 	trace_performance_leave("read cache %s", path);
 	trace2_region_leave_printf("index", "do_read_index", istate->repo,
 				   "%s", path);
+	if (ret < 0 && expected_tree)
+		return ret;
 
 	split_index = istate->split_index;
 	if (!split_index || is_null_oid(&split_index->base_oid)) {
-		post_read_index_from(istate, options);
+		if (!expected_tree)
+			post_read_index_from(istate, options);
 		return ret;
 	}
 
@@ -2554,7 +2734,7 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 					the_repository, "%s", base_path);
 
 		ret = do_read_index_with_options(split_index->base, base_path,
-						 0, options);
+						 0, options, NULL);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					the_repository, "%s", base_path);
 	} else {
@@ -2565,7 +2745,7 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 		trace2_region_enter_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
 		ret = do_read_index_with_options(split_index->base, base_path2,
-						 1, options);
+						 1, options, NULL);
 		trace2_region_leave_printf("index", "shared/do_read_index",
 					   the_repository, "%s", base_path2);
 		free(base_path2);
@@ -2589,6 +2769,22 @@ int read_index_from_with_options(struct index_state *istate, const char *path,
 	trace_performance_leave("read cache %s", base_path);
 	free(base_path);
 	return ret;
+}
+
+int read_index_from_with_options(struct index_state *istate, const char *path,
+				 const char *gitdir, unsigned int options)
+{
+	return read_index_from_with_options_internal(istate, path, gitdir,
+						     options, NULL);
+}
+
+int read_index_from_if_matching_tree(struct index_state *istate,
+				     const char *path, const char *gitdir,
+				     const struct object_id *tree_oid)
+{
+	return read_index_from_with_options_internal(
+		istate, path, gitdir,
+		READ_INDEX_NO_SIDE_EFFECTS, tree_oid);
 }
 
 int read_index_from(struct index_state *istate, const char *path,
@@ -3357,8 +3553,8 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 	}
 
 	/*
-	 * CACHE_EXT_ENDOFINDEXENTRIES must be written as the last entry before the SHA1
-	 * so that it can be found and processed before all the index entries are
+	 * CACHE_EXT_ENDOFINDEXENTRIES must be written as the last entry before the
+	 * index checksum so that it can be found and processed before all the index entries are
 	 * read.  Write it out regardless of the strip_extensions parameter as we need it
 	 * when loading the shared index.
 	 */
@@ -3937,8 +4133,8 @@ int should_validate_cache_entries(void)
 	return validate_index_cache_entries;
 }
 
-#define EOIE_SIZE (4 + GIT_SHA1_RAWSZ) /* <4-byte offset> + <20-byte hash> */
-#define EOIE_SIZE_WITH_HEADER (4 + 4 + EOIE_SIZE) /* <4-byte signature> + <4-byte length> + EOIE_SIZE */
+#define EOIE_SIZE	      (sizeof(uint32_t) + the_hash_algo->rawsz)
+#define EOIE_SIZE_WITH_HEADER (2 * sizeof(uint32_t) + EOIE_SIZE)
 
 static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 {
@@ -3949,7 +4145,7 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	 * "EOIE"
 	 * <4-byte length>
 	 * <4-byte offset>
-	 * <20-byte hash>
+	 * <hash-algorithm-width hash>
 	 */
 	const char *index, *eoie;
 	uint32_t extsize;
@@ -3990,7 +4186,7 @@ static size_t read_eoie_extension(const char *mmap, size_t mmap_size)
 	 * long, "REUC" extension that is M-bytes long, followed by "EOIE",
 	 * then the hash would be:
 	 *
-	 * SHA-1("TREE" + <binary representation of N> +
+	 * Hash("TREE" + <binary representation of N> +
 	 *	 "REUC" + <binary representation of M>)
 	 */
 	src_offset = offset;

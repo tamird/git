@@ -46,6 +46,8 @@
 #include "path.h"
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
+#include "cache-tree.h"
+#include "replace-object.h"
 #include "trace.h"
 #include "trace2.h"
 #include "wrapper.h"
@@ -3636,6 +3638,55 @@ static void flush_grep_tree_batch_before_die(struct grep_tree_batch *batch)
 		wait_all();
 }
 
+static int poll_grep_tree_batch(struct grep_tree_batch *batch)
+{
+	int hit = 0;
+
+	if (batch && batch->pending.nr &&
+	    !(++batch->readiness_checks % 256) &&
+	    grep_index_ipc_query_ready(batch->pending.request)) {
+		hit |= finish_grep_tree_batch(batch);
+		if (!batch->enabled)
+			hit |= flush_grep_tree_batch(batch);
+	}
+	return hit;
+}
+
+/* Both tree and matching-index walks feed the same ordered blob batch. */
+static int grep_tree_blob(struct grep_opt *opt, const struct object_id *oid,
+			  struct strbuf *base, int tn_len, int check_attr,
+			  struct grep_tree_batch *batch,
+			  struct grep_tree_query_context *query)
+{
+	int hit = 0;
+
+	if (batch && batch->enabled) {
+		struct grep_tree_batch_item *item;
+		size_t filename_bytes = base->len + 1;
+		size_t batch_max_bytes = batch->query->batch_max_bytes;
+
+		if (filename_bytes > batch_max_bytes ||
+		    (batch->filling.nr &&
+		     filename_bytes > batch_max_bytes - batch->filling.filename_bytes))
+			hit |= flush_grep_tree_batch(batch);
+		if (batch->enabled && filename_bytes <= batch_max_bytes) {
+			ALLOC_GROW(batch->filling.items, batch->filling.nr + 1,
+				   batch->filling.alloc);
+			item = &batch->filling.items[batch->filling.nr++];
+			oidcpy(&item->oid, oid);
+			item->filename = xstrdup(base->buf);
+			batch->filling.filename_bytes += filename_bytes;
+			if (batch->filling.nr == batch->query->batch_size ||
+			    batch->filling.filename_bytes >= batch_max_bytes)
+				hit |= start_grep_tree_batch(batch);
+			return hit;
+		}
+	}
+	return hit | grep_oid(opt, oid, base->buf, tn_len,
+			      check_attr ? base->buf + tn_len : NULL,
+			      0, SIZE_MAX, query && query->bypassed);
+}
+
 /*
  * Unlike shared tree walkers, grep does not report directory entries.
  * A default-wildcard double-star exclusion covers child trees once the
@@ -3703,13 +3754,7 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 		int te_len;
 
 		/* Bound first-output delay without locking for every tree entry. */
-		if (batch && batch->pending.nr &&
-		    !(++batch->readiness_checks % 256) &&
-		    grep_index_ipc_query_ready(batch->pending.request)) {
-			hit |= finish_grep_tree_batch(batch);
-			if (!batch->enabled)
-				hit |= flush_grep_tree_batch(batch);
-		}
+		hit |= poll_grep_tree_batch(batch);
 
 		if (batch) {
 			struct tree_desc next = *tree;
@@ -3855,47 +3900,8 @@ static int grep_tree(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (S_ISREG(entry.mode)) {
 			/* Tree entries have no position in a sparse index. */
-			if (batch && batch->enabled) {
-				struct grep_tree_batch_item *item;
-				size_t filename_bytes = strlen(base->buf) + 1;
-				size_t batch_max_bytes =
-					batch->query->batch_max_bytes;
-
-				if (filename_bytes > batch_max_bytes ||
-				    (batch->filling.nr &&
-				     filename_bytes >
-					     batch_max_bytes -
-						     batch->filling.filename_bytes))
-					hit |= flush_grep_tree_batch(batch);
-				if (!batch->enabled ||
-				    filename_bytes > batch_max_bytes) {
-					hit |= grep_oid(
-						opt, &entry.oid, base->buf, tn_len,
-						check_attr ?
-							base->buf + tn_len :
-							NULL,
-						0, SIZE_MAX,
-						query && query->bypassed);
-				} else {
-					ALLOC_GROW(batch->filling.items, batch->filling.nr + 1,
-						   batch->filling.alloc);
-					item = &batch->filling.items[batch->filling.nr++];
-					oidcpy(&item->oid, &entry.oid);
-					item->filename = xstrdup(base->buf);
-					batch->filling.filename_bytes += filename_bytes;
-					if (batch->filling.nr ==
-						    batch->query->batch_size ||
-					    batch->filling.filename_bytes >=
-						    batch_max_bytes)
-						hit |=
-							start_grep_tree_batch(batch);
-				}
-			} else {
-				hit |= grep_oid(opt, &entry.oid, base->buf, tn_len,
-						check_attr ? base->buf + tn_len : NULL,
-						0, SIZE_MAX,
-						query && query->bypassed);
-			}
+			hit |= grep_tree_blob(opt, &entry.oid, base, tn_len,
+					      check_attr, batch, query);
 		} else if (S_ISDIR(entry.mode)) {
 			enum object_type type;
 			struct tree_desc sub;
@@ -4175,6 +4181,81 @@ static int grep_tree_pageins_sample(uint64_t *pageins)
 
 #endif
 
+/* Keep the tree walker as the fallback when the optional index is unsuitable. */
+static int grep_tree_from_matching_index(
+	struct grep_opt *opt, const struct pathspec *pathspec,
+	const struct object_id *tree_oid, struct strbuf *base,
+	int tn_len, int check_attr, struct grep_tree_batch *batch,
+	struct grep_tree_query_context *query, int *hit)
+{
+	struct index_state index = INDEX_STATE_INIT(opt->repo);
+	struct strbuf parent = STRBUF_INIT;
+	int matched = 0;
+
+	if (!query->recursive_basename_all_directories ||
+	    opt->status_only || recurse_submodules ||
+	    opt->repo != the_repository || opt->repo->submodule_prefix ||
+	    repo_has_promisor_remote(opt->repo))
+		return 0;
+	if (replace_refs_enabled(opt->repo)) {
+		prepare_replace_object(opt->repo);
+		if (oidmap_get_size(&opt->repo->objects->replace_map))
+			return 0;
+	}
+
+	index.lazy_cache_tree = 1;
+	if (read_index_from_if_matching_tree(
+		    &index, repo_get_index_file(opt->repo),
+		    repo_get_git_dir(opt->repo), tree_oid) < 0)
+		goto done;
+	for (unsigned int i = 0; i < index.cache_nr; i++)
+		if (index.cache[i]->ce_flags &
+		    (CE_STAGEMASK | CE_INTENT_TO_ADD | CE_REMOVE))
+			goto done;
+	/* As with cached diff, a matching TREE root permits skipping child trees. */
+	matched = 1;
+	if (query->trace_enabled)
+		trace2_data_intmax("grep", opt->repo,
+				   "revision_index_reused", 1);
+	for (unsigned int i = 0; i < index.cache_nr; i++) {
+		const struct cache_entry *ce = index.cache[i];
+		const char *slash = strrchr(ce->name, '/');
+		struct name_entry entry = {
+			.path = slash ? slash + 1 : ce->name,
+			.mode = ce->ce_mode,
+		};
+		enum interesting interest;
+		int oldlen;
+
+		*hit |= poll_grep_tree_batch(batch);
+		if (!S_ISREG(entry.mode))
+			continue;
+		entry.pathlen = strlen(entry.path);
+		oidcpy(&entry.oid, &ce->oid);
+		strbuf_reset(&parent);
+		if (slash)
+			strbuf_add(&parent, ce->name, slash - ce->name + 1);
+		if (query->trace_enabled)
+			query->pathspec_checks++;
+		interest = tree_entry_interesting(opt->repo->index, &entry,
+						  &parent, pathspec);
+		if (interest <= entry_not_interesting) {
+			if (query->trace_enabled)
+				query->pathspec_rejected++;
+			continue;
+		}
+		oldlen = base->len;
+		strbuf_addstr(base, ce->name);
+		*hit |= grep_tree_blob(opt, &ce->oid, base, tn_len, check_attr,
+				       batch, query);
+		strbuf_setlen(base, oldlen);
+	}
+done:
+	strbuf_release(&parent);
+	release_index(&index);
+	return matched;
+}
+
 static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		       struct object *obj, const char *name, const char *path,
 		       struct grep_tree_query_context *query)
@@ -4192,14 +4273,15 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		void *data;
 		unsigned long size;
 		struct strbuf base;
+		struct object_id actual_tree_oid;
 		uint64_t tree_begin = 0;
 #ifdef __APPLE__
 		uint64_t pageins_begin = 0, pageins_end = 0;
 #endif
-		int hit, len;
+		int hit = 0, len;
 
 		data = odb_read_object_peeled(opt->repo->objects, &obj->oid,
-					      OBJ_TREE, &size, NULL);
+					      OBJ_TREE, &size, &actual_tree_oid);
 		if (!data) {
 			if (threads_started)
 				wait_all();
@@ -4245,8 +4327,13 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 #endif
 			tree_begin = getnanotime();
 		}
-		hit = grep_tree(opt, pathspec, &tree, &base, base.len,
-				obj->type == OBJ_COMMIT, batch_ptr, query);
+		if ((path && *path) ||
+		    !grep_tree_from_matching_index(opt, pathspec, &actual_tree_oid,
+						   &base, base.len,
+						   obj->type == OBJ_COMMIT,
+						   batch_ptr, query, &hit))
+			hit = grep_tree(opt, pathspec, &tree, &base, base.len,
+					obj->type == OBJ_COMMIT, batch_ptr, query);
 		if (query->trace_enabled) {
 			query->tree_walk_ns += getnanotime() - tree_begin;
 			query->tree_walk_completed = 1;
