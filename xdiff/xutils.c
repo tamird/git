@@ -318,7 +318,7 @@ uint64_t xdl_hash_record_verbatim(uint8_t const **data, uint8_t const *top) {
 	}
 	*data = ptr < top ? ptr + 1: ptr;
 #else
-	/* Process two characters per iteration. */
+	/* Process up to four characters per iteration. */
 	if (top - ptr >= 2) do {
 		if ((c0 = ptr[0]) == '\n') {
 			*data = ptr + 1;
@@ -330,6 +330,15 @@ uint64_t xdl_hash_record_verbatim(uint8_t const **data, uint8_t const *top) {
 			REASSOC_FENCE(c0, ha);
 			ha = ha * 32 + c0;
 			return ha;
+		}
+		if (top - ptr >= 4 && ptr[2] != '\n' && ptr[3] != '\n') {
+			uint64_t chunk = c0 * (33 * 33 * 33) +
+					 c1 * (33 * 33) + (uint64_t)ptr[2] * 33 + ptr[3];
+
+			REASSOC_FENCE(chunk, ha);
+			ha = ha * (33 * 33 * 33 * 33) + chunk;
+			ptr += 4;
+			continue;
 		}
 		/*
 		 * Combine characters C0 and C1 into the hash HA. We have

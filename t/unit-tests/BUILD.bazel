@@ -31,6 +31,7 @@ CLAR_TEST_SUITES = [
     "u-trailer.c",
     "u-urlmatch-normalization.c",
     "u-utf8-width.c",
+    "u-xdiff.c",
 ]
 
 genrule(
