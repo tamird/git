@@ -1135,7 +1135,9 @@ int repo_find_oid_in_commit_graph(struct repository *r,
 	return g && search_commit_pos_in_graph(oid, g, &pos);
 }
 
-struct commit *lookup_commit_in_graph(struct repository *repo, const struct object_id *id)
+static struct commit *lookup_commit_in_graph_internal(struct repository *repo,
+						      const struct object_id *id,
+						      int parse_parents)
 {
 	static int commit_graph_paranoia = -1;
 	struct commit_graph *g;
@@ -1159,10 +1161,30 @@ struct commit *lookup_commit_in_graph(struct repository *repo, const struct obje
 	if (commit->object.parsed)
 		return commit;
 
-	if (!fill_commit_in_graph(commit, g, pos))
-		return NULL;
+	if (parse_parents) {
+		if (!fill_commit_in_graph(commit, g, pos))
+			return NULL;
+	} else {
+		fill_commit_graph_info(commit, g, pos);
+	}
 
 	return commit;
+}
+
+struct commit *lookup_commit_in_graph(struct repository *repo, const struct object_id *id)
+{
+	return lookup_commit_in_graph_internal(repo, id, 1);
+}
+
+int lookup_commit_date_in_graph(struct repository *repo,
+				const struct object_id *id, timestamp_t *date)
+{
+	struct commit *commit = lookup_commit_in_graph_internal(repo, id, 0);
+
+	if (!commit)
+		return 0;
+	*date = commit->date;
+	return 1;
 }
 
 static int parse_commit_in_graph_one(struct commit_graph *g,

@@ -2756,18 +2756,21 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err,
 	if (ref_filter_object_metadata_enabled && !metadata &&
 	    ref_filter_object_metadata_entries <
 		    REF_FILTER_OBJECT_METADATA_MAX_ENTRIES) {
-		struct commit *commit;
+		timestamp_t commit_date;
+		int found_in_graph;
 		int has_object = 0;
 
 		/* Include any paranoia existence check performed by the lookup. */
 		if (trace_population)
 			trace2_timer_start(
 				TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_GRAPH_LOOKUP);
-		commit = lookup_commit_in_graph(the_repository, &ref->objectname);
+		found_in_graph = lookup_commit_date_in_graph(the_repository,
+							     &ref->objectname,
+							     &commit_date);
 		if (trace_population)
 			trace2_timer_stop(
 				TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_GRAPH_LOOKUP);
-		if (commit) {
+		if (found_in_graph) {
 			if (trace_population)
 				trace2_timer_start(
 					TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_POPULATE_OBJECT_EXISTS);
@@ -2781,7 +2784,7 @@ static int populate_value(struct ref_array_item *ref, struct strbuf *err,
 			CALLOC_ARRAY(metadata, 1);
 			oidcpy(&metadata->ent.oid, &ref->objectname);
 			metadata->type = OBJ_COMMIT;
-			metadata->committerdate = commit->date;
+			metadata->committerdate = commit_date;
 			oidmap_put(&ref_filter_object_metadata, metadata);
 			ref_filter_object_metadata_entries++;
 		}
@@ -3755,9 +3758,9 @@ static int preload_ref_object_metadata(const struct object_id *oid, void *data)
 {
 	struct ref_filter_preload_stats *stats = data;
 	struct ref_filter_object_metadata *metadata;
-	struct commit *commit;
+	timestamp_t commit_date;
 	enum odb_has_object_flags flags = 0;
-	int has_object;
+	int found_in_graph, has_object;
 
 	stats->unique++;
 	if (oidmap_get(&ref_filter_object_metadata, oid))
@@ -3766,11 +3769,12 @@ static int preload_ref_object_metadata(const struct object_id *oid, void *data)
 	if (stats->trace)
 		trace2_timer_start(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_GRAPH_LOOKUP);
-	commit = lookup_commit_in_graph(the_repository, oid);
+	found_in_graph = lookup_commit_date_in_graph(the_repository, oid,
+						     &commit_date);
 	if (stats->trace)
 		trace2_timer_stop(
 			TRACE2_TIMER_ID_REF_FILTER_MATERIALIZED_SORT_PRELOAD_GRAPH_LOOKUP);
-	if (!commit)
+	if (!found_in_graph)
 		return 0;
 	stats->graph_hits++;
 	/* Probe neighboring OIDs first, then sample the sorted lookup stream. */
@@ -3796,7 +3800,7 @@ static int preload_ref_object_metadata(const struct object_id *oid, void *data)
 	CALLOC_ARRAY(metadata, 1);
 	oidcpy(&metadata->ent.oid, oid);
 	metadata->type = OBJ_COMMIT;
-	metadata->committerdate = commit->date;
+	metadata->committerdate = commit_date;
 	oidmap_put(&ref_filter_object_metadata, metadata);
 	ref_filter_object_metadata_entries++;
 	return 0;

@@ -71,12 +71,18 @@ int repo_find_oid_in_commit_graph(struct repository *r,
 				  const struct object_id *oid);
 
 /*
- * Look up the given commit ID in the commit-graph. This will only return a
- * commit if the ID exists both in the graph and in the object database such
- * that we don't return commits whose object has been pruned. Otherwise, this
- * function returns `NULL`.
+ * Look up and parse the given commit ID in the commit-graph, or return NULL.
+ * Object availability is checked only with GIT_COMMIT_GRAPH_PARANOIA enabled.
  */
 struct commit *lookup_commit_in_graph(struct repository *repo, const struct object_id *id);
+
+/*
+ * Return non-zero and set date if the commit is in the graph, without parsing
+ * its parents. Like lookup_commit_in_graph(), this checks object availability
+ * only with GIT_COMMIT_GRAPH_PARANOIA enabled.
+ */
+int lookup_commit_date_in_graph(struct repository *repo,
+				const struct object_id *id, timestamp_t *date);
 
 /*
  * It is possible that we loaded commit contents from the commit buffer,
