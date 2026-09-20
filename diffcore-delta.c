@@ -102,9 +102,13 @@ static struct span_sample_state span_sample;
 
 static size_t spanhash_bytes(const struct spanhash_top *value)
 {
+	size_t nr = 0;
+
+	/* Cached tables only need the finalized prefix and its terminator. */
+	while (value->data[nr].cnt)
+		nr++;
 	return st_add(sizeof(*value),
-		      st_mult(sizeof(value->data[0]),
-			      (size_t)1 << value->alloc_log2));
+		      st_mult(sizeof(value->data[0]), st_add(nr, 1)));
 }
 
 static size_t span_cache_bucket(const struct object_id *oid,
