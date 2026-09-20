@@ -2124,8 +2124,12 @@ static int index_path_exists(struct dir_struct *dir, struct index_state *istate,
 				return 1;
 			if (probe == INDEX_ICASE_PROBE_ABSENT)
 				return 0;
+		} else {
+			trace2_counter_add(TRACE2_COUNTER_ID_DIR_NAME_HASH_EXACT_LIMIT, 1);
 		}
 	}
+	if (!istate->name_hash_initialized)
+		trace2_counter_add(TRACE2_COUNTER_ID_DIR_NAME_HASH_FILE, 1);
 	return !!index_file_exists(istate, path, len, ignore_case);
 }
 
@@ -2182,27 +2186,32 @@ static enum exist_status directory_exists_in_index_icase(struct dir_struct *dir,
 	struct cache_entry *ce;
 
 	if (len > 0 && !istate->sparse_index &&
-	    !istate->name_hash_initialized &&
-	    dir->internal.exact_lookup_budget_used < DIR_EXACT_LOOKUP_LIMIT) {
-		enum index_icase_probe_result probe;
+	    !istate->name_hash_initialized) {
+		if (dir->internal.exact_lookup_budget_used < DIR_EXACT_LOOKUP_LIMIT) {
+			enum index_icase_probe_result probe;
 
-		dir->internal.exact_lookup_budget_used++;
-		if (index_dir_exists_exact(istate, dirname, len))
-			return index_directory;
-		probe = index_dir_exists_icase_probe(
-			istate, dirname, len,
-			&dir->internal.icase_scan_budget_used,
-			DIR_ICASE_SCAN_LIMIT);
-		if (probe == INDEX_ICASE_PROBE_PRESENT)
-			return index_directory;
-		if (probe == INDEX_ICASE_PROBE_ABSENT &&
-		    index_file_exists_icase_probe(
-			    istate, dirname, len,
-			    &dir->internal.icase_scan_budget_used,
-			    DIR_ICASE_SCAN_LIMIT) == INDEX_ICASE_PROBE_ABSENT)
-			return index_nonexistent;
+			dir->internal.exact_lookup_budget_used++;
+			if (index_dir_exists_exact(istate, dirname, len))
+				return index_directory;
+			probe = index_dir_exists_icase_probe(
+				istate, dirname, len,
+				&dir->internal.icase_scan_budget_used,
+				DIR_ICASE_SCAN_LIMIT);
+			if (probe == INDEX_ICASE_PROBE_PRESENT)
+				return index_directory;
+			if (probe == INDEX_ICASE_PROBE_ABSENT &&
+			    index_file_exists_icase_probe(
+				    istate, dirname, len,
+				    &dir->internal.icase_scan_budget_used,
+				    DIR_ICASE_SCAN_LIMIT) == INDEX_ICASE_PROBE_ABSENT)
+				return index_nonexistent;
+		} else {
+			trace2_counter_add(TRACE2_COUNTER_ID_DIR_NAME_HASH_EXACT_LIMIT, 1);
+		}
 	}
 
+	if (!istate->name_hash_initialized)
+		trace2_counter_add(TRACE2_COUNTER_ID_DIR_NAME_HASH_DIRECTORY, 1);
 	if (index_dir_exists(istate, dirname, len))
 		return index_directory;
 
@@ -2623,6 +2632,8 @@ static int get_index_dtype(struct index_state *istate,
 	int pos;
 	const struct cache_entry *ce;
 
+	if (!istate->name_hash_initialized)
+		trace2_counter_add(TRACE2_COUNTER_ID_DIR_NAME_HASH_DTYPE, 1);
 	ce = index_file_exists(istate, path, len, 0);
 	if (ce) {
 		if (!ce_uptodate(ce))

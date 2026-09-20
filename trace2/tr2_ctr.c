@@ -518,6 +518,23 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "packed/lookup/fallback-ns",
 	},
 
+	[TRACE2_COUNTER_ID_DIR_NAME_HASH_FILE] = {
+		.category = "dir",
+		.name = "name-hash-init/file-check",
+	},
+	[TRACE2_COUNTER_ID_DIR_NAME_HASH_DIRECTORY] = {
+		.category = "dir",
+		.name = "name-hash-init/directory-check",
+	},
+	[TRACE2_COUNTER_ID_DIR_NAME_HASH_DTYPE] = {
+		.category = "dir",
+		.name = "name-hash-init/dtype",
+	},
+	[TRACE2_COUNTER_ID_DIR_NAME_HASH_EXACT_LIMIT] = {
+		.category = "dir",
+		.name = "name-hash-init/exact-lookup-limit",
+	},
+
 	[TRACE2_COUNTER_ID_ICASE_PROBE_EMPTY_NAME] = {
 		.category = "index",
 		.name = "icase-probe/empty-name",
