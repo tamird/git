@@ -585,6 +585,21 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "racy-check",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK] = {
+		.category = "index-pack",
+		.name = "delta/work-lock",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD] = {
+		.category = "index-pack",
+		.name = "delta/base-cache-rebuild",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA] = {
+		.category = "index-pack",
+		.name = "delta/resolve",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_INDEX_NAME_HASH_INIT] = {
 		.category = "index",
 		.name = "name-hash-init",

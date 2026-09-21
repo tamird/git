@@ -497,6 +497,14 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "grep",
 		.name = "source/selected",
 	},
+	[TRACE2_COUNTER_ID_INDEX_PACK_BASE_CACHE_EVICTIONS] = {
+		.category = "index-pack",
+		.name = "delta/base-cache-evictions",
+	},
+	[TRACE2_COUNTER_ID_INDEX_PACK_BASE_CACHE_EVICTED_BYTES] = {
+		.category = "index-pack",
+		.name = "delta/base-cache-evicted-bytes",
+	},
 	[TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID] = {
 		.category = "grep",
 		.name = "packed/lookup/invalid",

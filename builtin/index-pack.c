@@ -197,7 +197,6 @@ static pthread_mutex_t counter_mutex;
 
 static pthread_mutex_t work_mutex;
 static pthread_cond_t work_cond;
-#define work_lock()		lock_mutex(&work_mutex)
 #define work_unlock()		unlock_mutex(&work_mutex)
 
 static pthread_mutex_t deepest_delta_mutex;
@@ -216,6 +215,31 @@ static inline void unlock_mutex(pthread_mutex_t *mutex)
 {
 	if (threads_active)
 		pthread_mutex_unlock(mutex);
+}
+
+static void delta_timer_start(enum trace2_timer_id timer)
+{
+	int saved_errno = errno;
+
+	trace2_timer_start(timer);
+	errno = saved_errno;
+}
+
+static void delta_timer_stop(enum trace2_timer_id timer)
+{
+	int saved_errno = errno;
+
+	trace2_timer_stop(timer);
+	errno = saved_errno;
+}
+
+static void work_lock(void)
+{
+	if (!threads_active)
+		return;
+	delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
+	pthread_mutex_lock(&work_mutex);
+	delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
 }
 
 /*
@@ -511,6 +535,17 @@ static void free_base_data(struct base_data *c)
 	}
 }
 
+static void evict_base_data(struct base_data *c)
+{
+	const uint64_t values[] = { 1, c->size };
+	int saved_errno = errno;
+
+	trace2_counter_add_many(TRACE2_COUNTER_ID_INDEX_PACK_BASE_CACHE_EVICTIONS,
+				values, ARRAY_SIZE(values));
+	errno = saved_errno;
+	free_base_data(c);
+}
+
 static void prune_base_data(struct base_data *retain)
 {
 	struct list_head *pos;
@@ -523,7 +558,7 @@ static void prune_base_data(struct base_data *retain)
 		if (b->retain_data || b == retain)
 			continue;
 		if (b->data) {
-			free_base_data(b);
+			evict_base_data(b);
 			if (base_cache_used <= base_cache_limit)
 				return;
 		}
@@ -534,7 +569,7 @@ static void prune_base_data(struct base_data *retain)
 		if (b->retain_data || b == retain)
 			continue;
 		if (b->data) {
-			free_base_data(b);
+			evict_base_data(b);
 			if (base_cache_used <= base_cache_limit)
 				return;
 		}
@@ -1267,7 +1302,11 @@ static void process_deltas(struct object_entry *preloaded_obj,
 			 * limit is exceeded, so in the typical case, this does
 			 * not happen.
 			 */
-			get_base_data(parent);
+			if (!parent->data) {
+				delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
+				get_base_data(parent);
+				delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
+			}
 			parent->retain_data++;
 		}
 		if (threads_active && child_obj) {
@@ -1279,7 +1318,9 @@ static void process_deltas(struct object_entry *preloaded_obj,
 
 		if (child_obj) {
 			if (parent) {
+				delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
 				child = resolve_delta(child_obj, parent);
+				delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
 				if (!child->children_remaining)
 					FREE_AND_NULL(child->data);
 			} else{
@@ -1360,7 +1401,19 @@ static void *threaded_second_pass(void *data)
 {
 	if (data)
 		set_thread_data(data);
+	if (threads_active) {
+		int saved_errno = errno;
+
+		trace2_thread_start("index-pack-delta");
+		errno = saved_errno;
+	}
 	process_deltas(NULL, NULL);
+	if (threads_active) {
+		int saved_errno = errno;
+
+		trace2_thread_exit();
+		errno = saved_errno;
+	}
 	return NULL;
 }
 
