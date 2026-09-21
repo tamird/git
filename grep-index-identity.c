@@ -142,13 +142,18 @@ static int compute_identity(struct repository *repo,
 {
 	struct strbuf entries = STRBUF_INIT;
 	struct strbuf oids = STRBUF_INIT;
+	unsigned char entries_hash[GIT_SHA256_RAWSZ];
 	struct git_hash_ctx entries_ctx;
 	struct git_hash_ctx oids_ctx;
 	int result = -1;
 
 	grep_index_identity_oid_sequence_init(
 		repo, &oids_ctx, istate->cache_nr);
-	git_hash_init(&entries_ctx, repo->hash_algo);
+	/*
+	 * Hash the large stream with SHA-256, then use the repository hash to
+	 * retain its key width and, for SHA-1, collision detection.
+	 */
+	git_hash_init(&entries_ctx, &hash_algos[GIT_HASH_SHA256]);
 	git_hash_update(&entries_ctx, "grep-worktree-index-v2", 22);
 	hash_uint32(&entries_ctx, repo->hash_algo->format_id);
 	hash_string(&entries_ctx, repo_get_work_tree(repo));
@@ -180,6 +185,11 @@ static int compute_identity(struct repository *repo,
 	git_hash_update(&oids_ctx, oids.buf, oids.len);
 	git_hash_final_oid(&identity->oid_sequence, &oids_ctx);
 	git_hash_update(&entries_ctx, entries.buf, entries.len);
+	git_hash_final(entries_hash, &entries_ctx);
+	git_hash_init(&entries_ctx, repo->hash_algo);
+	git_hash_update(&entries_ctx, "grep-worktree-index-sha256-v1",
+			sizeof("grep-worktree-index-sha256-v1") - 1);
+	git_hash_update(&entries_ctx, entries_hash, sizeof(entries_hash));
 	git_hash_final_oid(&identity->worktree, &entries_ctx);
 	result = 0;
 

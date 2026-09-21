@@ -4271,7 +4271,12 @@ test_expect_success 'content index prunes cached worktree blobs' '
 			    .git/index.grep-worktree-generation \
 			    .git/index.grep-worktree-recovery \
 			    .git/index.grep-worktree.save \
+			    .git/opaque-worktree-key \
+			    .git/opaque-worktree-checksum \
+			    .git/index.grep-token.rekey \
+			    .git/index.grep-worktree.rekey \
 			    exact-lookup.trace \
+			    opaque-lookup.trace \
 			    recovery-lookup.trace token-*.trace &&
 			    git rm -f --ignore-unmatch ordinary-shift &&
 			    git update-index --no-fsmonitor &&
@@ -4291,6 +4296,32 @@ test_expect_success 'content index prunes cached worktree blobs' '
 	test_path_is_file .git/index.grep-worktree &&
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/exact-lookup.trace" \
 		git grep "absent cached worktree" -- ordinary &&
+	test_path_is_file .git/index.grep-token &&
+	rawsz=$(test_oid rawsz) &&
+	printf "opaque legacy worktree key" |
+		test-tool "$(test_oid algo)" -b >.git/opaque-worktree-key &&
+	for spec in ".git/index.grep-token:$((92 + 3 * rawsz))" \
+		".git/index.grep-worktree:20"
+	do
+		file=${spec%:*} &&
+		offset=${spec##*:} &&
+		size=$(test_file_size "$file") &&
+		dd if="$file" of="$file.rekey" bs=1 \
+			count=$((size - rawsz)) 2>/dev/null &&
+		dd if=.git/opaque-worktree-key of="$file.rekey" bs=1 \
+			seek="$offset" conv=notrunc 2>/dev/null &&
+		test-tool "$(test_oid algo)" -b \
+			<"$file.rekey" >.git/opaque-worktree-checksum &&
+		cat .git/opaque-worktree-checksum >>"$file.rekey" &&
+		chmod 0444 "$file.rekey" &&
+		mv "$file.rekey" "$file" || return 1
+	done &&
+	test_must_fail env GIT_TRACE2_EVENT="$PWD/opaque-lookup.trace" \
+		git --no-optional-locks grep "absent cached worktree" -- ordinary &&
+	test_trace2_data grep index_identity/token_read_outcome 0 \
+		<opaque-lookup.trace &&
+	test_trace2_data grep worktree_blob/load_result 1 \
+		<opaque-lookup.trace &&
 	echo "ordinary shift" >ordinary-shift &&
 	test-tool chmtime =-5 ordinary-shift &&
 	git add ordinary-shift &&
