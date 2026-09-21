@@ -6462,7 +6462,9 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		cd revision-index-partial &&
 		git config index.recordendofindexentries true &&
 		mkdir -p a/deep/child b &&
+		echo needle-first >0-target.txt &&
 		echo needle-root >target.txt &&
+		echo needle-last >z-target.txt &&
 		echo needle-one >a/target.txt &&
 		echo needle-two >a/deep/target.txt &&
 		echo needle-three >a/deep/other.txt &&
@@ -6482,12 +6484,13 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		do
 			git update-index --index-version "$version" &&
 			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**" \
-				a a/deep a/deep/child target.txt
+				a a/deep a/deep/child mixed target.txt a/deep/target.txt
 			do
 				set -- "$pathspec" &&
 				case "$pathspec" in
 				a/deep) set -- a/deep a/deep/child ;;
 				a/deep/child) set -- "$pathspec" "$pathspec" ;;
+				mixed) set -- 0-target.txt a z-target.txt ;;
 				esac &&
 				GIT_INDEX_FILE="$PWD/missing-index" \
 					git grep --text --no-content-index --threads=1 -n \
@@ -6499,7 +6502,7 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 				test_cmp expect actual &&
 				test_must_be_empty err || return 1
 				case "$pathspec" in
-				":!a/"*|a/deep/child|target.txt)
+				":!a/"*|a/deep/child|target.txt|a/deep/target.txt)
 					test_grep ! revision_index_reused partial.trace &&
 					test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
 						partial.trace || return 1
@@ -6509,6 +6512,11 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 						<partial.trace || return 1
 					;;
 				esac &&
+				case "$pathspec" in
+				target.txt|a/deep/target.txt)
+					test_region ! index do_read_index partial.trace || return 1
+					;;
+				esac &&
 				if test "$pathspec" = a/deep
 				then
 					# Read the ancestor, but reuse only the selected nested scope.
@@ -6516,7 +6524,14 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 						<partial.trace || return 1
 				fi
 			done || return 1
-		done
+		done &&
+		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/missing-literal.trace" \
+			git grep --text --no-content-index \
+				--threads=1 -n needle HEAD^ -- a/deep/missing.txt \
+				>actual 2>err &&
+		test_must_be_empty actual &&
+		test_must_be_empty err &&
+		test_region ! index do_read_index missing-literal.trace
 	)
 '
 
