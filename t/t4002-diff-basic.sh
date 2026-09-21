@@ -410,4 +410,40 @@ test_expect_success 'diff can read from stdin' '
 	test_cmp .test-a .test-b
 '
 
+test_expect_success 'cached diff with many literal pathspecs' '
+	test_create_repo literal-path-diff &&
+	(
+		cd literal-path-diff &&
+		mkdir -p a q &&
+		test_write_lines old >a/child &&
+		test_write_lines old >a/other &&
+		test_write_lines old >a.sibling &&
+		test_write_lines old >gone &&
+		test_write_lines old >q/child &&
+		git add a a.sibling gone q &&
+		git commit -m base &&
+		git update-index --add --cacheinfo 160000,$(git rev-parse HEAD),link &&
+		git commit -m link &&
+		test_write_lines new >a/child &&
+		test_write_lines new >a/other &&
+		test_write_lines new >a.sibling &&
+		test_write_lines new >q/child &&
+		git add a/child a/other a.sibling q/child &&
+		git update-index --force-remove gone &&
+		git update-index --cacheinfo 160000,$(git rev-parse HEAD),link &&
+		cat >expect <<-\EOF &&
+		a/child
+		a/other
+		gone
+		link
+		EOF
+		git diff-index --cached --name-only HEAD -- \
+			a a/child a. gone link/ missing2 missing3 missing4 >actual &&
+		test_cmp expect actual &&
+		git diff-index --cached --name-only HEAD -- \
+			"a*" ":!a.sibling" gone link/ missing1 missing2 missing3 missing4 >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_done

@@ -468,6 +468,92 @@ static int show_modified(struct rev_info *revs,
 	return 0;
 }
 
+struct diff_literal_prefix {
+	const char *match;
+	size_t len;
+};
+
+struct diff_cache_data {
+	struct rev_info *revs;
+	struct diff_literal_prefix *prefixes;
+	size_t prefixes_nr;
+};
+
+static int diff_literal_prefix_cmp(const void *va, const void *vb)
+{
+	const struct diff_literal_prefix *a = va, *b = vb;
+	size_t len = a->len < b->len ? a->len : b->len;
+	int cmp = memcmp(a->match, b->match, len);
+
+	return cmp ? cmp : (a->len > b->len) - (a->len < b->len);
+}
+
+static void diff_cache_prepare_literal_prefixes(struct diff_cache_data *data)
+{
+	const struct pathspec *ps = &data->revs->prune_data;
+	int i;
+
+	if (ps->nr < 8 ||
+	    (ps->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL)))
+		return;
+
+	for (i = 0; i < ps->nr; i++) {
+		const struct pathspec_item *item = &ps->items[i];
+
+		if (!item->len || item->nowildcard_len != item->len)
+			return;
+	}
+
+	ALLOC_ARRAY(data->prefixes, ps->nr);
+	for (i = 0; i < ps->nr; i++) {
+		const struct pathspec_item *item = &ps->items[i];
+		size_t len = item->len;
+
+		/* A trailing slash can also match a gitlink without the slash. */
+		while (len && item->match[len - 1] == '/')
+			len--;
+		if (!len) {
+			FREE_AND_NULL(data->prefixes);
+			return;
+		}
+		data->prefixes[i] = (struct diff_literal_prefix){ item->match, len };
+	}
+
+	QSORT(data->prefixes, ps->nr, diff_literal_prefix_cmp);
+	for (i = 0; i < ps->nr; i++) {
+		struct diff_literal_prefix candidate = data->prefixes[i];
+
+		/* This is a superset of real path matches; the matcher checks those. */
+		if (data->prefixes_nr &&
+		    candidate.len >= data->prefixes[data->prefixes_nr - 1].len &&
+		    !memcmp(candidate.match,
+			    data->prefixes[data->prefixes_nr - 1].match,
+			    data->prefixes[data->prefixes_nr - 1].len))
+			continue;
+		data->prefixes[data->prefixes_nr++] = candidate;
+	}
+}
+
+static int diff_cache_may_match_literal(const struct diff_cache_data *data,
+					const char *name)
+{
+	size_t lo = 0, hi = data->prefixes_nr;
+
+	if (!hi)
+		return 1;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		const struct diff_literal_prefix *prefix = &data->prefixes[mid];
+
+		if (strncmp(name, prefix->match, prefix->len) < 0)
+			hi = mid;
+		else
+			lo = mid + 1;
+	}
+	return lo && !strncmp(name, data->prefixes[lo - 1].match,
+			      data->prefixes[lo - 1].len);
+}
+
 /*
  * This gets a mix of an existing index and a tree, one pathname entry
  * at a time. The index entry may be a single stage-0 one, but it could
@@ -478,7 +564,8 @@ static void do_oneway_diff(struct unpack_trees_options *o,
 			   const struct cache_entry *idx,
 			   const struct cache_entry *tree)
 {
-	struct rev_info *revs = o->unpack_data;
+	struct diff_cache_data *data = o->unpack_data;
+	struct rev_info *revs = data->revs;
 	int match_missing, cached;
 
 	/*
@@ -552,7 +639,8 @@ static int oneway_diff(const struct cache_entry * const *src,
 {
 	const struct cache_entry *idx = src[0];
 	const struct cache_entry *tree = src[1];
-	struct rev_info *revs = o->unpack_data;
+	struct diff_cache_data *data = o->unpack_data;
+	struct rev_info *revs = data->revs;
 
 	/*
 	 * Unpack-trees generates a DF/conflict entry if
@@ -578,7 +666,8 @@ static int oneway_diff(const struct cache_entry * const *src,
 		    revs->diffopt.prefix_length))
 		return 0;
 
-	if (ce_path_match(revs->diffopt.repo->index,
+	if (diff_cache_may_match_literal(data, (idx ? idx : tree)->name) &&
+	    ce_path_match(revs->diffopt.repo->index,
 			  idx ? idx : tree,
 			  &revs->prune_data, NULL)) {
 		do_oneway_diff(o, idx, tree);
@@ -645,6 +734,7 @@ static int diff_cache(struct rev_info *revs,
 	struct tree *tree;
 	struct tree_desc t;
 	struct unpack_trees_options opts;
+	struct diff_cache_data data = { .revs = revs };
 	int ret;
 
 	tree = repo_parse_tree_indirect(the_repository, tree_oid);
@@ -665,18 +755,20 @@ static int diff_cache(struct rev_info *revs,
 				      !revs->diffopt.flags.find_copies_harder);
 	opts.merge = 1;
 	opts.fn = oneway_diff;
-	opts.unpack_data = revs;
+	opts.unpack_data = &data;
 	opts.src_index = revs->diffopt.repo->index;
 	opts.dst_index = NULL;
 	opts.pathspec = &revs->diffopt.pathspec;
 	opts.pathspec->recursive = 1;
 	if (revs->diffopt.max_depth_valid)
 		die(_("max-depth is not supported for index diffs"));
+	diff_cache_prepare_literal_prefixes(&data);
 
 	if (opts.diff_index_cached)
 		trace_cache_tree_root(opts.src_index, &tree->object.oid);
 	init_tree_desc(&t, &tree->object.oid, tree->buffer, tree->size);
 	ret = unpack_trees(1, &t, &opts);
+	free(data.prefixes);
 	trace2_data_intmax("diff", the_repository, "index/cached-traversal",
 			   opts.diff_index_cached);
 	return ret;
