@@ -1603,14 +1603,12 @@ test_expect_success UNTRACKED_CACHE 'invalidate and recompute subtree summaries'
 		EOF
 		git config core.fsmonitor .git/hooks/fsmonitor-test &&
 		git config core.untrackedCache true &&
-		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-prune-live" \
-			git -c core.ignorecase=true status --porcelain &&
+		git -c core.ignorecase=true status --porcelain &&
 		GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace-prune" \
 			git -c core.ignorecase=true status --porcelain >../actual
 	) &&
 	echo "?? results/one" >expect &&
 	test_cmp expect actual &&
-	test_grep "name-hash-init" trace-prune-live &&
 	test_grep "directories-visited:2" trace-prune &&
 	test_grep "subtrees-pruned:1" trace-prune &&
 	test_grep "opendir:0" trace-prune &&

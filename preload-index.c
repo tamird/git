@@ -22,12 +22,15 @@
 #include "config.h"
 
 /*
- * Mostly randomly chosen maximum thread counts: we
- * cap the parallelism to 20 threads, and we want
- * to have at least 500 lstat's per thread for it to
- * be worth starting a thread.
+ * Eight workers outperformed twenty on a large macOS index refresh.
+ * Other platforms retain the existing cap. Normal preloads budget at
+ * least 500 index entries per worker before path and fsmonitor filtering.
  */
-#define MAX_PARALLEL (20)
+#ifdef __APPLE__
+# define MAX_PARALLEL (8)
+#else
+# define MAX_PARALLEL (20)
+#endif
 #define THREAD_COST (500)
 
 struct progress_data {
