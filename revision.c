@@ -1940,6 +1940,10 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 	unsigned cherry_flag;
 	int saved_errno;
 
+	saved_errno = errno;
+	trace2_region_enter("revision", "cherry_pick_list", revs->repo);
+	errno = saved_errno;
+
 	/* First count the commits on the left and on the right */
 	for (p = list; p; p = p->next) {
 		struct commit *commit = p->item;
@@ -1951,15 +1955,8 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 		else
 			right_count++;
 	}
-	saved_errno = errno;
-	trace2_data_intmax("revision", revs->repo, "cherry_pick/left_count",
-			   left_count);
-	trace2_data_intmax("revision", revs->repo, "cherry_pick/right_count",
-			   right_count);
-	errno = saved_errno;
-
 	if (!left_count || !right_count)
-		return;
+		goto trace_exit;
 
 	left_first = left_count < right_count;
 	init_patch_ids(revs->repo, &ids);
@@ -2014,6 +2011,15 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 	}
 
 	free_patch_ids(&ids);
+
+trace_exit:
+	saved_errno = errno;
+	trace2_region_leave("revision", "cherry_pick_list", revs->repo);
+	trace2_data_intmax("revision", revs->repo, "cherry_pick/left_count",
+			   left_count);
+	trace2_data_intmax("revision", revs->repo, "cherry_pick/right_count",
+			   right_count);
+	errno = saved_errno;
 }
 
 /* How many extra uninteresting commits we want to see.. */
@@ -2218,15 +2224,8 @@ static int limit_list(struct rev_info *revs)
 	saved_errno = errno;
 	trace2_region_leave("revision", "limit_list_walk", revs->repo);
 	errno = saved_errno;
-	if (revs->cherry_pick || revs->cherry_mark) {
-		saved_errno = errno;
-		trace2_region_enter("revision", "cherry_pick_list", revs->repo);
-		errno = saved_errno;
+	if (revs->cherry_pick || revs->cherry_mark)
 		cherry_pick_list(newlist, revs);
-		saved_errno = errno;
-		trace2_region_leave("revision", "cherry_pick_list", revs->repo);
-		errno = saved_errno;
-	}
 
 	if (revs->left_only || revs->right_only)
 		limit_left_right(newlist, revs);
