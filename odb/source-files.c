@@ -519,6 +519,12 @@ static void add_repack_incremental_option(struct strvec *args)
 	strvec_push(args, "--no-write-bitmap-index");
 }
 
+static bool geometric_repack_is_full(const struct pack_geometry *geometry)
+{
+	return geometry->split == geometry->pack_nr &&
+	       geometry->promisor_split == geometry->promisor_pack_nr;
+}
+
 bool odb_source_files_optimize_required(struct odb_source *source,
 					const struct odb_optimize_options *opts)
 {
@@ -572,14 +578,24 @@ bool odb_source_files_optimize_required(struct odb_source *source,
 		pack_geometry_init(&geometry, &existing_packs, &po_args);
 		pack_geometry_split(&geometry);
 
-		/*
-		 * When we'd merge at least two packs with one another we always
-		 * perform the repack.
-		 */
-		if (geometry.split || geometry.promisor_split) {
-			ret = true;
-			goto out;
+		/* Keep full repacks independent of incremental MIDX protection. */
+		if (repo->settings.core_multi_pack_index &&
+		    !geometric_repack_is_full(&geometry)) {
+			struct pack_geometry incremental = {
+				.split_factor = geometry.split_factor,
+				.midx_layer_threshold = repack_midx_new_layer_threshold(repo),
+				.midx_layer_threshold_set = true,
+			};
+
+			pack_geometry_init(&incremental, &existing_packs, &po_args);
+			pack_geometry_split(&incremental);
+			ret = incremental.split || incremental.promisor_split;
+			pack_geometry_release(&incremental);
+		} else {
+			ret = geometry.split || geometry.promisor_split;
 		}
+		if (ret)
+			goto out;
 
 		/*
 		 * Otherwise, we estimate the number of loose objects to determine
@@ -710,15 +726,16 @@ int odb_source_files_optimize(struct odb_source *source,
 		pack_geometry_init(&geometry, &existing_packs, &po_args);
 		pack_geometry_split(&geometry);
 
-		if (geometry.split < geometry.pack_nr ||
-		    geometry.promisor_split < geometry.promisor_pack_nr) {
+		if (!geometric_repack_is_full(&geometry)) {
 			strvec_pushf(&repack_cmd.args, "--geometric=%d",
 				     geometry.split_factor);
+			if (repo->settings.core_multi_pack_index)
+				strvec_push(&repack_cmd.args, "--write-midx=incremental");
 		} else {
 			add_repack_all_option(repo, opts, NULL, &repack_cmd.args);
+			if (repo->settings.core_multi_pack_index)
+				strvec_push(&repack_cmd.args, "--write-midx");
 		}
-		if (repo->settings.core_multi_pack_index)
-			strvec_push(&repack_cmd.args, "--write-midx");
 
 		existing_packs_release(&existing_packs);
 		pack_geometry_release(&geometry);

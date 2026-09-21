@@ -1,5 +1,7 @@
 #include "git-compat-util.h"
+#include "config.h"
 #include "dir.h"
+#include "gettext.h"
 #include "midx.h"
 #include "odb.h"
 #include "packfile.h"
@@ -8,6 +10,17 @@
 #include "repository.h"
 #include "run-command.h"
 #include "tempfile.h"
+
+int repack_midx_new_layer_threshold(struct repository *repo)
+{
+	int threshold = 8;
+
+	repo_config_get_int(repo, "repack.midxNewLayerThreshold", &threshold);
+	if (threshold < 1)
+		die(_("invalid value for %s: %d"), "--midx-new-layer-threshold",
+		    threshold);
+	return threshold;
+}
 
 void prepare_pack_objects(struct child_process *cmd,
 			  const struct pack_objects_args *args,

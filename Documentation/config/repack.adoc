@@ -59,7 +59,8 @@ layer. Must be at least 2. Defaults to 2.
 repack.midxNewLayerThreshold::
 	The minimum number of packs in the tip MIDX layer before those
 	packs are considered as candidates for geometric repacking
-	during `git repack --write-midx=incremental`.
+	during `git repack --write-midx=incremental` and the
+	`geometric-repack` maintenance task when `core.multiPackIndex` is enabled.
 +
 When the tip layer has fewer packs than this threshold, those packs are
 excluded from the geometric repack entirely, and are thus left

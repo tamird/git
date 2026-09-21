@@ -56,6 +56,8 @@ int finish_pack_objects_cmd(const struct git_hash_algo *algop,
 struct repository;
 struct packed_git;
 
+int repack_midx_new_layer_threshold(struct repository *repo);
+
 struct existing_packs {
 	struct repository *repo;
 	struct odb_source *source;
@@ -156,7 +158,6 @@ struct repack_write_midx_opts {
 	int write_bitmaps;
 	int midx_must_contain_cruft;
 	int midx_split_factor;
-	int midx_new_layer_threshold;
 	enum repack_write_midx_mode mode;
 };
 

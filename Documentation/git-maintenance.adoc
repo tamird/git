@@ -167,6 +167,15 @@ incremental-repack::
 	which is a special case that attempts to repack all pack-files
 	into a single pack-file.
 
+geometric-repack::
+	Combine packfiles according to the geometric progression described by
+	`git repack --geometric`. With `core.multiPackIndex` enabled, geometric
+	repacks write incremental multi-pack-index layers and retain packs
+	protected by older layers or `repack.midxNewLayerThreshold`. The
+	`--auto` check uses the same eligible packs. If the complete pack
+	geometry calls for combining all packs, the task instead performs a
+	full repack with cruft cleanup and writes a flat multi-pack-index.
+
 pack-refs::
 	The `pack-refs` task collects the loose reference files and
 	collects them into a single file. This speeds up operations that

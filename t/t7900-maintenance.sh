@@ -595,9 +595,9 @@ run_and_verify_geometric_pack () {
 	# Verify that we perform a geometric repack.
 	rm -f "trace2.txt" &&
 	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
-		git maintenance run --task=geometric-repack 2>/dev/null &&
+		git maintenance run --task=geometric-repack &&
 	test_subcommand git repack -d -l -q --geometric=2 \
-		--write-midx <trace2.txt &&
+		--write-midx=incremental <trace2.txt &&
 
 	# Verify that the number of packfiles matches our expectation.
 	ls -l .git/objects/pack/*.pack >packfiles &&
@@ -614,7 +614,8 @@ run_and_verify_geometric_pack () {
 	ls .git/objects/pack/pack-*.idx .git/objects/pack/pack-*.pack |
 	sed "s/\.pack$/.idx/" |
 	sort | uniq -u >orphaned-idx &&
-	test_must_be_empty orphaned-idx
+	test_must_be_empty orphaned-idx &&
+	git multi-pack-index verify
 }
 
 pack_promisor () {
@@ -630,6 +631,7 @@ test_expect_success 'geometric repacking task' '
 	(
 		cd repo &&
 		git config set maintenance.auto false &&
+		git config set repack.midxNewLayerThreshold 1 &&
 		test_commit initial &&
 
 		# The initial repack causes an all-into-one repack.
@@ -725,7 +727,7 @@ test_expect_success 'geometric repacking task handles promisor packs' '
 		ls .git/objects/pack/*.promisor | sort >promisors.after &&
 
 		test_subcommand git repack -d -l -q --geometric=2 \
-			--write-midx <trace2.txt &&
+			--write-midx=incremental <trace2.txt &&
 		test_line_count = 2 promisors.after &&
 
 		printf ".git/objects/pack/pack-%s.promisor\n" "$A" "$B" |
@@ -790,6 +792,35 @@ test_expect_success 'geometric repacking with --auto' '
 	)
 '
 
+test_expect_success 'geometric auto respects protected MIDX tip packs' '
+	test_when_finished "rm -rf repo" &&
+	git init repo &&
+	(
+		cd repo &&
+		git config set maintenance.auto false &&
+		git config set maintenance.geometric-repack.auto 9000 &&
+		packdir=.git/objects/pack &&
+		test_commit_bulk --message="base" 6 &&
+		git repack -d &&
+		git multi-pack-index write --incremental &&
+		test_commit tip &&
+		echo HEAD^..HEAD | git pack-objects --revs "$packdir/pack" >/dev/null &&
+		git prune-packed &&
+		git multi-pack-index write --incremental &&
+		test_commit unpacked &&
+		echo HEAD^..HEAD | git pack-objects --revs "$packdir/pack" >/dev/null &&
+		git prune-packed &&
+		test_line_count = 2 .git/objects/pack/multi-pack-index.d/multi-pack-index-chain &&
+		! git maintenance is-needed --auto --task=geometric-repack &&
+		git -c repack.midxNewLayerThreshold=1 maintenance is-needed --auto --task=geometric-repack &&
+		git -c core.multiPackIndex=false maintenance is-needed --auto --task=geometric-repack &&
+		test_oid_init &&
+		test_commit "$(test_oid blob17_1)" &&
+		test_commit "$(test_oid blob17_2)" &&
+		git -c maintenance.geometric-repack.auto=256 maintenance is-needed --auto --task=geometric-repack
+	)
+'
+
 test_expect_success 'geometric repacking with --auto handles promisor packs' '
 	test_when_finished "rm -rf repo" &&
 	git init repo &&
@@ -841,7 +872,7 @@ test_expect_success 'geometric repacking honors configured split factor' '
 
 		test_geometric_repack_needed false splitFactor=2 &&
 		test_geometric_repack_needed true splitFactor=3 &&
-		test_subcommand git repack -d -l -q --geometric=3 --write-midx <trace2.txt
+		test_subcommand git repack -d -l -q --geometric=3 --write-midx=incremental <trace2.txt
 	)
 '
 

@@ -51,13 +51,11 @@ static const char incremental_bitmap_conflict_error[] = N_(
 );
 
 #define DEFAULT_MIDX_SPLIT_FACTOR 2
-#define DEFAULT_MIDX_NEW_LAYER_THRESHOLD 8
 
 struct repack_config_ctx {
 	struct pack_objects_args *po_args;
 	struct pack_objects_args *cruft_po_args;
 	int midx_split_factor;
-	int midx_new_layer_threshold;
 };
 
 static int repack_config(const char *var, const char *value,
@@ -110,11 +108,6 @@ static int repack_config(const char *var, const char *value,
 	if (!strcmp(var, "repack.midxsplitfactor")) {
 		repack_ctx->midx_split_factor = git_config_int(var, value,
 							       ctx->kvi);
-		return 0;
-	}
-	if (!strcmp(var, "repack.midxnewlayerthreshold")) {
-		repack_ctx->midx_new_layer_threshold = git_config_int(var, value,
-								      ctx->kvi);
 		return 0;
 	}
 	return git_default_config(var, value, ctx, cb);
@@ -270,7 +263,6 @@ int cmd_repack(int argc,
 	config_ctx.po_args = &po_args;
 	config_ctx.cruft_po_args = &cruft_po_args;
 	config_ctx.midx_split_factor = DEFAULT_MIDX_SPLIT_FACTOR;
-	config_ctx.midx_new_layer_threshold = DEFAULT_MIDX_NEW_LAYER_THRESHOLD;
 
 	repo_config(repo, repack_config, &config_ctx);
 
@@ -433,9 +425,7 @@ int cmd_repack(int argc,
 	if (config_ctx.midx_split_factor < 2)
 		die(_("invalid value for %s: %d"), "--midx-split-factor",
 		    config_ctx.midx_split_factor);
-	if (config_ctx.midx_new_layer_threshold < 1)
-		die(_("invalid value for %s: %d"), "--midx-new-layer-threshold",
-		    config_ctx.midx_new_layer_threshold);
+	geometry.midx_layer_threshold = repack_midx_new_layer_threshold(repo);
 
 	if (write_midx != REPACK_WRITE_MIDX_NONE && write_bitmaps) {
 		struct strbuf path = STRBUF_INIT;
@@ -460,10 +450,8 @@ int cmd_repack(int argc,
 	if (geometry.split_factor) {
 		if (pack_everything)
 			die(_("options '%s' and '%s' cannot be used together"), "--geometric", "-A/-a");
-		if (write_midx == REPACK_WRITE_MIDX_INCREMENTAL) {
-			geometry.midx_layer_threshold = config_ctx.midx_new_layer_threshold;
+		if (write_midx == REPACK_WRITE_MIDX_INCREMENTAL)
 			geometry.midx_layer_threshold_set = true;
-		}
 		pack_geometry_init(&geometry, &existing, &po_args);
 		pack_geometry_split(&geometry);
 	}
@@ -733,7 +721,6 @@ int cmd_repack(int argc,
 			.write_bitmaps = write_bitmaps > 0,
 			.midx_must_contain_cruft = midx_must_contain_cruft,
 			.midx_split_factor = config_ctx.midx_split_factor,
-			.midx_new_layer_threshold = config_ctx.midx_new_layer_threshold,
 			.mode = write_midx,
 		};
 

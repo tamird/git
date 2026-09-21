@@ -98,10 +98,15 @@ maintenance.geometric-repack.auto::
 	then the `geometric-repack` task will not run with the `--auto`
 	option. A negative value will force the task to run every time.
 	Otherwise, a positive value implies the command should run either when
-	there are packfiles that need to be merged together to retain the
+	there are eligible packfiles that need to be merged together to retain the
 	geometric progression, or when there are at least this many loose
 	objects that would be written into a new packfile. The default value is
 	6700.
++
+When `core.multiPackIndex` is enabled, geometric repacks use incremental
+multi-pack-index layers and honor `repack.midxNewLayerThreshold` when
+selecting packs. Full repacks and cruft cleanup still consider the
+complete pack geometry.
 
 maintenance.geometric-repack.splitFactor::
 	This integer config option controls the factor used for the geometric
