@@ -4207,9 +4207,10 @@ struct grep_revision_index_probe {
 	struct tree_desc tree;
 	struct string_list *paths;
 	struct strbuf excluded;
+	int root_only;
 };
 
-/* Only admit pathspecs whose coverage can be estimated without tree reads. */
+/* Select scopes whose coverage can be estimated without tree reads. */
 static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 					struct grep_tree_query_context *query,
 					struct grep_revision_index_probe *probe)
@@ -4217,8 +4218,6 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 	int positive = 0, universal = 0;
 	struct strbuf path = STRBUF_INIT;
 
-	if (pathspec->magic & PATHSPEC_MAXDEPTH)
-		return 0;
 	if (query->recursive_basename_all_directories || !pathspec->nr)
 		return 1;
 	for (int i = 0; i < pathspec->nr; i++) {
@@ -4284,6 +4283,8 @@ static int grep_revision_index_accept(struct index_state *index, void *data)
 	uintmax_t trees = 0;
 	int accepted = 0;
 
+	if (probe->root_only)
+		return cache_tree_root_matches_index(index, probe->tree_oid);
 	if (!probe->paths->nr && !probe->excluded.len &&
 	    cache_tree_root_matches_index(index, probe->tree_oid))
 		return 1;
@@ -4348,6 +4349,7 @@ static int grep_revision_index_prepare(
 	int usable = 0;
 
 	if (opt->status_only || recurse_submodules ||
+	    pathspec->magic & PATHSPEC_MAXDEPTH ||
 	    opt->repo != the_repository || opt->repo->submodule_prefix ||
 	    repo_has_promisor_remote(opt->repo))
 		return 0;
@@ -4356,8 +4358,12 @@ static int grep_revision_index_prepare(
 		if (oidmap_get_size(&opt->repo->objects->replace_map))
 			return 0;
 	}
-	if (!grep_revision_index_pathspec(pathspec, query, &probe))
-		goto done;
+	if (!grep_revision_index_pathspec(pathspec, query, &probe)) {
+		/* Broad suffix selectors require walking every directory. */
+		if (!query->onestar_suffix_pathspec)
+			goto done;
+		probe.root_only = 1;
+	}
 	index->lazy_cache_tree = 1;
 	if (read_index_from_if_tree_accepted(
 		    index, repo_get_index_file(opt->repo), repo_get_git_dir(opt->repo),

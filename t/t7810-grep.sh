@@ -6357,6 +6357,47 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 	)
 '
 
+test_expect_success 'revision grep reuses an exact index for wildcard pathspecs' '
+	(
+		cd revision-index &&
+		for selection in one overlapping
+		do
+			case "$selection" in
+			one) set -- "*target.txt" ;;
+			overlapping) set -- "*target.txt" "*other.txt" "*.txt" ;;
+			esac &&
+			GIT_INDEX_FILE="$PWD/missing-index" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- "$@" >expect-wildcard &&
+			GIT_TRACE2_EVENT="$PWD/wildcard-$selection.trace" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- "$@" >actual-wildcard 2>err-wildcard &&
+			test_cmp expect-wildcard actual-wildcard &&
+			test_must_be_empty err-wildcard &&
+			test_trace2_data grep revision_index_reused 1 \
+				<"wildcard-$selection.trace" || return 1
+		done &&
+		GIT_TRACE2_EVENT="$PWD/wildcard-narrow.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- "a/*.txt" >actual-wildcard 2>err-wildcard &&
+		echo "HEAD:a/deep/target.txt:1:needle-deep" >expect-wildcard &&
+		test_cmp expect-wildcard actual-wildcard &&
+		test_must_be_empty err-wildcard &&
+		test_grep ! revision_index_reused wildcard-narrow.trace &&
+		test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+			wildcard-narrow.trace &&
+		empty_tree=$(git mktree </dev/null) &&
+		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/wildcard-mismatch.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle "$empty_tree" -- "*target.txt" >actual-wildcard 2>err-wildcard &&
+		test_must_be_empty actual-wildcard &&
+		test_must_be_empty err-wildcard &&
+		test_grep ! revision_index_reused wildcard-mismatch.trace &&
+		test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+			wildcard-mismatch.trace
+	)
+'
+
 test_expect_success PERL 'revision grep ignores a malformed optional index entry or TREE' '
 	(
 		cd revision-index &&
