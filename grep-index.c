@@ -1484,6 +1484,69 @@ static int grep_index_posix_class_end(const char *pattern, size_t start,
 	return 0;
 }
 
+/*
+ * Extract a required prefix from every alternative, skipping nested suffixes.
+ * The caller owns any partial alternatives on failure.
+ */
+static int grep_index_ere_group_prefixes(struct grep_index_query_group *group,
+					 const struct grep_index_query *query,
+					 const char *pattern, size_t len)
+{
+	struct grep_index_query budget = {
+		.ignore_case = query->ignore_case,
+		.trigrams_nr = query->trigrams_nr,
+	};
+	size_t alternatives_left = GREP_INDEX_MAX_QUERY_ALTERNATIVES -
+				   query->clauses_nr - query->alternatives_nr;
+	size_t start = 0, prefix_end = 0;
+	int depth = 0;
+
+	for (size_t i = 0; i <= len; i++) {
+		unsigned char ch = i < len ? pattern[i] : 0;
+
+		if (i == len || (ch == '|' && !depth)) {
+			struct grep_index_query_clause alternative = { 0 };
+
+			if (depth || prefix_end - start < 3 ||
+			    group->alternatives_nr == alternatives_left ||
+			    grep_index_query_clause_add_literal(
+				    &alternative, &budget,
+				    (const unsigned char *)pattern + start,
+				    prefix_end - start))
+				return -1;
+			ALLOC_GROW(group->alternatives, group->alternatives_nr + 1,
+				   group->alternatives_alloc);
+			group->alternatives[group->alternatives_nr++] = alternative;
+			start = prefix_end = i + 1;
+			continue;
+		}
+
+		/* Stop at the first nonliteral, excluding a quantified final byte. */
+		if (i == prefix_end) {
+			if (ch >= ' ' && ch < 0x7f && !is_regex_special(ch) &&
+			    ch != ']' && ch != '}')
+				prefix_end++;
+			else if (prefix_end > start && strchr("*+?{", ch))
+				prefix_end--;
+		}
+		if (ch == '\\') {
+			if (++i == len)
+				return -1;
+		} else if (ch == '[') {
+			if (grep_index_posix_class_end(pattern, i, len,
+						       GREP_PATTERN_TYPE_ERE, &i))
+				return -1;
+		} else if (ch == '(') {
+			depth++;
+		} else if (ch == ')') {
+			if (!depth)
+				return -1;
+			depth--;
+		}
+	}
+	return budget.trigrams_nr - query->trigrams_nr;
+}
+
 /* Only peel parentheses that enclose the entire ERE. */
 static int grep_index_ere_outer_group(const char *pattern, size_t len,
 				      size_t *body_start, size_t *body_end)
@@ -1867,6 +1930,7 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						struct strbuf literal = STRBUF_INIT;
 						struct strbuf fragment = STRBUF_INIT;
 						int alternative_is_literal = 1;
+						int prefix_trigrams_nr = -1;
 						size_t alternatives_left =
 							GREP_INDEX_MAX_QUERY_ALTERNATIVES -
 							group_query->clauses_nr -
@@ -2078,7 +2142,18 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 						}
 						strbuf_release(&literal);
 						strbuf_release(&fragment);
-						if (candidate_simple) {
+						if (!candidate_simple && enrich_boundaries) {
+							boundaries_nr = group_boundaries_start;
+							grep_index_query_group_clear(&group);
+							group = (struct grep_index_query_group){ 0 };
+							prefix_trigrams_nr = grep_index_ere_group_prefixes(
+								&group, group_query,
+								p->pattern + candidate_start,
+								i - candidate_start);
+							if (prefix_trigrams_nr >= 0)
+								trigrams_nr = prefix_trigrams_nr;
+						}
+						if (candidate_simple || prefix_trigrams_nr >= 0) {
 							for (size_t j =
 								     group_boundaries_start;
 							     j < boundaries_nr; j++)

@@ -5321,6 +5321,70 @@ test_expect_success 'content index combines middle ERE literals and groups' '
 	test_cmp expect actual
 '
 
+test_expect_success 'required ERE branch prefixes survive nested suffix groups' '
+	pattern="(^|[[:space:]])(from([[:space:]]|_).*|file([[:space:]]|_).*|import([[:space:]]|_).*)" &&
+	git grep --cached -E "$pattern" -- structured-from structured-import >actual &&
+	cat >expect <<-\EOF &&
+	structured-from:from present.private
+	structured-import:import ordinary.internal
+	EOF
+	test_cmp expect actual &&
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" -- ordinary 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'ERE prefix alternatives skip literal bars' '
+	pattern="(^|[[:space:]])(pipe_left\\|(pipe_right)|from[ |](present.private))" &&
+	git grep --cached -E "$pattern" -- \
+		escaped-literal-positive structured-from >actual &&
+	cat >expect <<-\EOF &&
+	escaped-literal-positive:pipe_left|pipe_right
+	structured-from:from present.private
+	EOF
+	test_cmp expect actual &&
+	oid=$(git rev-parse :ordinary) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" -- ordinary 2>err &&
+	test_must_be_empty err
+'
+
+test_expect_success 'optional ERE branch prefixes still read matching blobs' '
+	pattern="(^|[[:space:]])(from([[:space:]]|_).*|file([[:space:]]|_).*|import([[:space:]]|_).*)?x" &&
+	git grep --cached -E "$pattern" -- short >actual &&
+	echo "short:x" >expect &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :short) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -E \
+		"(^|[[:space:]])(from([[:space:]]|_).*|file([[:space:]]|_).*|import([[:space:]]|_).*|x)" \
+		-- short 2>err &&
+	test_grep "unable to read" err
+'
+
+test_expect_success 'quantified final ERE prefix byte keeps possible matches' '
+	pattern="(^|[[:space:]])(fro?m([[:space:]]|_).*|file([[:space:]]|_).*)" &&
+	git grep --cached -E "$pattern" -- structured-optional >actual &&
+	echo "structured-optional:frm present" >expect &&
+	test_cmp expect actual &&
+	oid=$(git rev-parse :structured-optional) &&
+	object=.git/objects/$(test_oid_to_path "$oid") &&
+	mv "$object" "$object.save" &&
+	test_when_finished "mv \"$object.save\" \"$object\"" &&
+	test_must_fail git grep --cached -E "$pattern" \
+		-- structured-optional 2>err &&
+	test_grep "unable to read" err
+'
+
 test_expect_success 'optional ERE branch literal uses normal blob reads' '
 	git grep --cached -E "fro?m (present|ordinary)" \
 	-- structured-optional >actual &&
