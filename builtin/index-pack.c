@@ -217,7 +217,7 @@ static inline void unlock_mutex(pthread_mutex_t *mutex)
 		pthread_mutex_unlock(mutex);
 }
 
-static void delta_timer_start(enum trace2_timer_id timer)
+static void index_pack_timer_start(enum trace2_timer_id timer)
 {
 	int saved_errno = errno;
 
@@ -225,7 +225,7 @@ static void delta_timer_start(enum trace2_timer_id timer)
 	errno = saved_errno;
 }
 
-static void delta_timer_stop(enum trace2_timer_id timer)
+static void index_pack_timer_stop(enum trace2_timer_id timer)
 {
 	int saved_errno = errno;
 
@@ -237,9 +237,9 @@ static void work_lock(void)
 {
 	if (!threads_active)
 		return;
-	delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
+	index_pack_timer_start(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
 	pthread_mutex_lock(&work_mutex);
-	delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
+	index_pack_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_WORK_LOCK);
 }
 
 /*
@@ -1303,9 +1303,11 @@ static void process_deltas(struct object_entry *preloaded_obj,
 			 * not happen.
 			 */
 			if (!parent->data) {
-				delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
+				index_pack_timer_start(
+					TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
 				get_base_data(parent);
-				delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
+				index_pack_timer_stop(
+					TRACE2_TIMER_ID_INDEX_PACK_BASE_CACHE_REBUILD);
 			}
 			parent->retain_data++;
 		}
@@ -1318,9 +1320,9 @@ static void process_deltas(struct object_entry *preloaded_obj,
 
 		if (child_obj) {
 			if (parent) {
-				delta_timer_start(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
+				index_pack_timer_start(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
 				child = resolve_delta(child_obj, parent);
-				delta_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
+				index_pack_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_RESOLVE_DELTA);
 				if (!child->children_remaining)
 					FREE_AND_NULL(child->data);
 			} else{
@@ -1653,6 +1655,8 @@ static struct object_entry *append_obj_to_pack(struct hashfile *f,
 	unsigned long s = size;
 	int n = 0;
 	unsigned char c = (type << 4) | (s & 15);
+
+	index_pack_timer_start(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_APPEND);
 	s >>= 4;
 	while (s) {
 		header[n++] = c | 0x80;
@@ -1671,6 +1675,7 @@ static struct object_entry *append_obj_to_pack(struct hashfile *f,
 	obj[0].idx.crc32 = crc32_end(f);
 	hashflush(f);
 	oidread(&obj->idx.oid, sha1, the_repository->hash_algo);
+	index_pack_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_APPEND);
 	return obj;
 }
 
@@ -1731,14 +1736,18 @@ static void fix_unresolved_deltas(struct hashfile *f)
 
 		if (objects[d->obj_no].real_type != OBJ_REF_DELTA)
 			continue;
+		index_pack_timer_start(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_READ);
 		data = odb_read_object(the_repository->objects, &d->oid,
 				       &type, &size);
+		index_pack_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_READ);
 		if (!data)
 			continue;
 
+		index_pack_timer_start(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_VERIFY);
 		if (check_object_signature(the_repository, &d->oid, data, size,
 					   type) < 0)
 			die(_("local object %s is corrupt"), oid_to_hex(&d->oid));
+		index_pack_timer_stop(TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_VERIFY);
 
 		/*
 		 * Add this as an object to the objects array and call
@@ -1747,7 +1756,11 @@ static void fix_unresolved_deltas(struct hashfile *f)
 		 * admission and pruning still allow later pack-file reloads.
 		 */
 		base_obj = append_obj_to_pack(f, d->oid.hash, data, size, type);
+		index_pack_timer_start(
+			TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_PROCESS_DELTAS);
 		process_deltas(base_obj, data);
+		index_pack_timer_stop(
+			TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_PROCESS_DELTAS);
 
 		display_progress(progress, nr_resolved_deltas);
 	}

@@ -600,6 +600,26 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "delta/resolve",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_READ] = {
+		.category = "index-pack",
+		.name = "thin-base/read",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_VERIFY] = {
+		.category = "index-pack",
+		.name = "thin-base/verify",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_APPEND] = {
+		.category = "index-pack",
+		.name = "thin-base/append",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_INDEX_PACK_THIN_BASE_PROCESS_DELTAS] = {
+		.category = "index-pack",
+		.name = "thin-base/process-deltas",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_TIMER_ID_INDEX_NAME_HASH_INIT] = {
 		.category = "index",
 		.name = "name-hash-init",
