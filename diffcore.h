@@ -97,6 +97,8 @@ struct diff_size_read_sample {
 	uint64_t eligible;
 	/* A NULL result reports the read immediately following a timed sample. */
 	void (*report)(const struct odb_read_result *, const struct odb_source_info *, void *);
+	/* Every successful size-only ODB read when sampling is enabled. */
+	void (*record_oid)(struct repository *, const struct object_id *);
 	void *data;
 };
 

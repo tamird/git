@@ -4824,6 +4824,12 @@ object_read:
 						  options->size_read_sample->data);
 		errno = saved_errno;
 	}
+	if (size_only && options && options->size_read_sample &&
+	    options->size_read_sample->record_oid) {
+		saved_errno = errno;
+		options->size_read_sample->record_oid(r, &s->oid);
+		errno = saved_errno;
+	}
 		s->size = cast_size_t_to_ulong(size_st);
 		s->zero_size_known = size_only && !s->size;
 		if (size_only || check_binary) {

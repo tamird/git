@@ -127,6 +127,124 @@ struct inexact_size_read_stats {
 	off_t previous_offset;
 };
 
+/* Sample OIDs deterministically so repeated reads stay in the sample. */
+#define SIZE_OID_SAMPLE_MODULUS	     64
+#define SIZE_OID_SAMPLE_BUCKETS	     (1u << 13)
+#define SIZE_OID_SAMPLE_MAX_KEYS     (1u << 16)
+#define SIZE_OID_SAMPLE_MAX_SELECTED (1u << 18)
+
+struct size_oid_sample_entry {
+	struct size_oid_sample_entry *next;
+	int repo_id;
+	struct object_id oid;
+};
+
+static struct {
+	struct size_oid_sample_entry **buckets;
+	uint64_t selected, first, repeat;
+	size_t keys;
+	int invalid, truncated, registered;
+} size_oid_sample;
+static pthread_mutex_t size_oid_sample_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void report_size_oid_sample(void)
+{
+	int saved_errno = errno;
+	uint64_t selected, first, repeat;
+	int invalid, truncated;
+
+	pthread_mutex_lock(&size_oid_sample_mutex);
+	selected = size_oid_sample.selected;
+	first = size_oid_sample.first;
+	repeat = size_oid_sample.repeat;
+	invalid = size_oid_sample.invalid;
+	truncated = size_oid_sample.truncated;
+	pthread_mutex_unlock(&size_oid_sample_mutex);
+
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/modulus",
+			   SIZE_OID_SAMPLE_MODULUS);
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/valid", !invalid);
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/truncated", truncated);
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/selected", selected);
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/first", first);
+	trace2_data_intmax("diff", NULL, "rename/size-oid-sample/repeat", repeat);
+	errno = saved_errno;
+}
+
+static void record_size_oid_sample(struct repository *repo,
+				   const struct object_id *oid)
+{
+	struct size_oid_sample_entry *entry;
+	struct object_id key;
+	size_t bucket;
+
+	if (!trace2_is_enabled() ||
+	    (oid->hash[0] & (SIZE_OID_SAMPLE_MODULUS - 1)))
+		return;
+
+	pthread_mutex_lock(&size_oid_sample_mutex);
+	if (size_oid_sample.invalid)
+		goto unlock;
+	if (!size_oid_sample.registered) {
+		if (atexit(report_size_oid_sample)) {
+			size_oid_sample.invalid = 1;
+			goto unlock;
+		}
+		size_oid_sample.registered = 1;
+	}
+	/* Trace2 IDs remain distinct when repository storage is reused. */
+	if (!repo->trace2_repo_id ||
+	    (oid->algo && oid->algo != hash_algo_by_ptr(repo->hash_algo))) {
+		size_oid_sample.invalid = 1;
+		goto unlock;
+	}
+	if (!size_oid_sample.buckets) {
+		size_oid_sample.buckets = calloc(SIZE_OID_SAMPLE_BUCKETS,
+						 sizeof(*size_oid_sample.buckets));
+		if (!size_oid_sample.buckets) {
+			size_oid_sample.invalid = 1;
+			goto unlock;
+		}
+	}
+	if (size_oid_sample.selected == SIZE_OID_SAMPLE_MAX_SELECTED) {
+		size_oid_sample.invalid = size_oid_sample.truncated = 1;
+		goto unlock;
+	}
+
+	oidcpy(&key, oid);
+	if (!key.algo)
+		key.algo = hash_algo_by_ptr(repo->hash_algo);
+	/* Keep the bucket independent of the byte used to select the sample. */
+	bucket = get_be32(key.hash + 1) & (SIZE_OID_SAMPLE_BUCKETS - 1);
+	for (entry = size_oid_sample.buckets[bucket]; entry; entry = entry->next)
+		if (entry->repo_id == repo->trace2_repo_id &&
+		    entry->oid.algo == key.algo &&
+		    oideq(&entry->oid, &key))
+			break;
+	if (entry) {
+		size_oid_sample.repeat++;
+	} else {
+		if (size_oid_sample.keys == SIZE_OID_SAMPLE_MAX_KEYS) {
+			size_oid_sample.invalid = size_oid_sample.truncated = 1;
+			goto unlock;
+		}
+		entry = malloc(sizeof(*entry));
+		if (!entry) {
+			size_oid_sample.invalid = 1;
+			goto unlock;
+		}
+		entry->repo_id = repo->trace2_repo_id;
+		oidcpy(&entry->oid, &key);
+		entry->next = size_oid_sample.buckets[bucket];
+		size_oid_sample.buckets[bucket] = entry;
+		size_oid_sample.keys++;
+		size_oid_sample.first++;
+	}
+	size_oid_sample.selected++;
+unlock:
+	pthread_mutex_unlock(&size_oid_sample_mutex);
+}
+
 static void size_sample_add(uint64_t *sum, uint64_t value, int *invalid)
 {
 	if (*invalid)
@@ -1868,6 +1986,7 @@ void diffcore_rename_extended(struct diff_options *options,
 	struct inexact_size_read_stats size_read_stats;
 	struct diff_size_read_sample size_read_sample = {
 		.report = record_size_read_sample,
+		.record_oid = record_size_oid_sample,
 		.data = &size_read_stats,
 	};
 	struct progress *progress = NULL;
