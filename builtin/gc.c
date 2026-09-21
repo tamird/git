@@ -288,6 +288,22 @@ struct count_reflog_entries_data {
 	int prepared;
 };
 
+static int count_reflog_expiry_candidates(const char *refname UNUSED,
+					  struct object_id *old_oid UNUSED,
+					  struct object_id *new_oid UNUSED,
+					  const char *committer UNUSED,
+					  timestamp_t timestamp,
+					  int tz UNUSED, const char *msg UNUSED,
+					  void *cb_data)
+{
+	struct count_reflog_entries_data *data = cb_data;
+
+	if (timestamp < data->policy.opts.expire_total ||
+	    timestamp < data->policy.opts.expire_unreachable)
+		data->count++;
+	return data->count >= data->limit;
+}
+
 static int count_reflog_entries(const char *refname,
 				struct object_id *old_oid, struct object_id *new_oid,
 				const char *committer, timestamp_t timestamp,
@@ -327,11 +343,18 @@ static int reflog_expire_condition(struct gc_config *cfg UNUSED)
 	repo_config(the_repository, reflog_expire_config, &data.policy.opts);
 
 	reflog_expire_options_set_refname(&data.policy.opts, "HEAD");
+	/* An entry newer than both cutoffs cannot expire. */
+	if (!refs_for_each_reflog_ent(get_main_ref_store(the_repository), "HEAD",
+				      count_reflog_expiry_candidates, &data) &&
+	    data.count < data.limit)
+		goto cleanup;
+	data.count = 0;
 	refs_for_each_reflog_ent(get_main_ref_store(the_repository), "HEAD",
 				 count_reflog_entries, &data);
 
 	if (data.prepared)
 		reflog_expiry_cleanup(&data.policy);
+cleanup:
 	reflog_clear_expire_config(&data.policy.opts);
 	return data.count >= data.limit;
 }

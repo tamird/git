@@ -1048,6 +1048,11 @@ test_expect_success 'reflog-expire auto accounts for HEAD reachability' '
 		git config gc.reflogExpire 90.days.ago &&
 		git config gc.reflogExpireUnreachable 30.days.ago &&
 		git config maintenance.reflog-expire.auto 1 &&
+		test_must_fail git -c maintenance.reflog-expire.auto=3 \
+			maintenance is-needed --auto --task=reflog-expire &&
+		git -c gc.reflogExpire=30.days.ago \
+			-c gc.reflogExpireUnreachable=90.days.ago \
+			maintenance is-needed --auto --task=reflog-expire &&
 		GIT_TRACE2_EVENT="$PWD/reachable.trace" \
 			git maintenance run --auto --task=reflog-expire &&
 		test_subcommand ! git reflog expire --all <reachable.trace &&
