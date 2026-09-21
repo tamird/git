@@ -6333,6 +6333,33 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 			test_trace2_data grep revision_index_reused 1 \
 				<"reused-$version.trace" || return 1
 		done &&
+		for selection in reusable pruned prefixless
+		do
+			case "$selection" in
+			reusable)
+				set -- ":!a/deep/ta*g?t.txt" ":!a/deep/target.txt" \
+					":!b/other.txt" ;;
+			pruned) set -- ":!a/**" ":!b/**" ;;
+			prefixless) set -- ":!*.md" ;;
+			esac &&
+			GIT_INDEX_FILE="$PWD/missing-index" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- "$@" >expect-exclusions &&
+			GIT_TRACE2_EVENT="$PWD/exclusions-$selection.trace" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- "$@" >actual-exclusions 2>err-exclusions &&
+			test_cmp expect-exclusions actual-exclusions &&
+			test_must_be_empty err-exclusions &&
+			case "$selection" in
+			reusable)
+				test_trace2_data grep revision_index_reused 1 \
+					<"exclusions-$selection.trace" ;;
+			*)
+				test_grep ! revision_index_reused "exclusions-$selection.trace" &&
+				test_grep ! '"category":"index","key":"read/cache_nr"' \
+					"exclusions-$selection.trace" ;;
+			esac || return 1
+		done &&
 		GIT_TRACE2_EVENT="$PWD/tree.trace" \
 			git grep --text --no-content-index --threads=1 -n \
 				needle "$tree" -- ":(glob)**/target.txt" \

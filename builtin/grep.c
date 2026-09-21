@@ -4136,7 +4136,8 @@ struct grep_revision_index_probe {
 	const struct object_id *tree_oid;
 	struct tree_desc tree;
 	struct string_list *paths;
-	struct strbuf excluded;
+	/* Directory scopes in which an exclusion might prune tree reads. */
+	struct string_list excluded;
 };
 
 enum grep_revision_index_state {
@@ -4186,17 +4187,45 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 			/* Default leading wildcards require visiting every directory. */
 			positive++;
 			universal = 1;
-		} else if (!probe->excluded.len &&
-			   item->magic == PATHSPEC_EXCLUDE && item->len > 3 &&
-			   item->nowildcard_len == item->len - 2 &&
-			   !memcmp(item->match + item->len - 3, "/**", 3)) {
-			strbuf_add(&probe->excluded, item->match, item->len - 2);
+		} else if (item->magic == PATHSPEC_EXCLUDE) {
+			size_t len = item->nowildcard_len;
+			const char *escape = memchr(item->match, '\\', len);
+
+			if (escape)
+				len = escape - item->match;
+			while (len && item->match[len - 1] != '/')
+				len--;
+			if (!len) {
+				strbuf_release(&path);
+				return 0;
+			}
+			strbuf_reset(&path);
+			strbuf_add(&path, item->match, len);
+			string_list_append(&probe->excluded, path.buf);
 		} else {
 			strbuf_release(&path);
 			return 0;
 		}
 	}
 	strbuf_release(&path);
+	string_list_sort(&probe->excluded);
+	{
+		size_t kept = 0;
+
+		for (size_t i = 0; i < probe->excluded.nr; i++) {
+			struct string_list_item *item = &probe->excluded.items[i];
+
+			if (kept && starts_with(item->string,
+						probe->excluded.items[kept - 1].string)) {
+				free(item->string);
+				continue;
+			}
+			if (kept != i)
+				probe->excluded.items[kept] = *item;
+			kept++;
+		}
+		probe->excluded.nr = kept;
+	}
 	if (universal)
 		string_list_clear(probe->paths, 0);
 	else
@@ -4205,24 +4234,32 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 }
 
 /* Count a selected directory only after its root child is proved unchanged. */
-static size_t grep_revision_index_trees(struct index_state *index,
-					struct grep_revision_index_probe *probe,
-					const char *path)
+static int grep_revision_index_add_trees(struct index_state *index,
+					 struct grep_revision_index_probe *probe,
+					 const char *path, uintmax_t *total)
 {
 	struct object_id oid;
-	size_t count, excluded;
+	size_t count;
 
-	if (probe->excluded.len && starts_with(path, probe->excluded.buf))
-		return 0;
 	if (cache_tree_get_path(index, path, &oid, &count) <= 0)
 		return 0;
-	if (probe->excluded.len && starts_with(probe->excluded.buf, path)) {
-		if (cache_tree_get_path(index, probe->excluded.buf, &oid, &excluded) < 0 ||
-		    excluded > count)
+	for (size_t i = 0; i < probe->excluded.nr; i++) {
+		const char *scope = probe->excluded.items[i].string;
+		size_t excluded;
+
+		if (starts_with(path, scope))
 			return 0;
-		count -= excluded;
+		if (starts_with(scope, path)) {
+			if (cache_tree_get_path(index, scope, &oid, &excluded) <= 0 ||
+			    excluded > count)
+				return 0;
+			count -= excluded;
+		}
 	}
-	return count;
+	if (count > UINTMAX_MAX - *total)
+		return -1;
+	*total += count;
+	return 0;
 }
 
 static int grep_revision_index_accept_entries(struct index_state *index,
@@ -4236,7 +4273,7 @@ static int grep_revision_index_accept_entries(struct index_state *index,
 	uintmax_t trees = 0;
 	int accepted = 0;
 
-	if (!probe->paths->nr && !probe->excluded.len &&
+	if (!probe->paths->nr && !probe->excluded.nr &&
 	    cache_tree_root_matches_index(index, probe->tree_oid))
 		return 1;
 	/*
@@ -4258,20 +4295,26 @@ static int grep_revision_index_accept_entries(struct index_state *index,
 		strbuf_addstr(&path, entry.path);
 		strbuf_addch(&path, '/');
 		if (!probe->paths->nr) {
-			trees += grep_revision_index_trees(index, probe, path.buf);
+			if (grep_revision_index_add_trees(index, probe,
+							  path.buf, &trees))
+				goto done;
 			continue;
 		}
 		for (size_t i = 0; i < probe->paths->nr; i++) {
 			const char *selected = probe->paths->items[i].string;
 
 			if (starts_with(path.buf, selected)) {
-				trees += grep_revision_index_trees(index, probe, path.buf);
+				if (grep_revision_index_add_trees(index, probe,
+								  path.buf, &trees))
+					goto done;
 				break;
 			}
 			if (!starts_with(selected, path.buf) ||
 			    (previous && starts_with(selected, previous)))
 				continue;
-			trees += grep_revision_index_trees(index, probe, selected);
+			if (grep_revision_index_add_trees(index, probe,
+							  selected, &trees))
+				goto done;
 			previous = selected;
 		}
 	}
@@ -4502,7 +4545,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		struct grep_revision_index index = {
 			.index = INDEX_STATE_INIT(opt->repo),
 			.paths = STRING_LIST_INIT_DUP,
-			.probe.excluded = STRBUF_INIT,
+			.probe.excluded = STRING_LIST_INIT_DUP,
 		};
 		struct grep_revision_index *revision_index = NULL;
 		void *data;
@@ -4578,7 +4621,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 		release_index(&index.index);
 		release_index_tree_window(index.window);
 		string_list_clear(&index.paths, 0);
-		strbuf_release(&index.probe.excluded);
+		string_list_clear(&index.probe.excluded, 0);
 		if (query->trace_enabled) {
 			query->tree_walk_ns += getnanotime() - tree_begin;
 			query->tree_walk_completed = 1;
