@@ -7,6 +7,7 @@
 #include "odb.h"
 #include "oidset.h"
 #include "pack-bitmap.h"
+#include "packfile.h"
 #include "path.h"
 #include "refs.h"
 #include "run-command.h"
@@ -71,73 +72,45 @@ void midx_snapshot_refs(struct repository *repo, struct tempfile *f)
 	oidset_clear(&data.seen);
 }
 
+static void collect_pack_names(struct string_list *names,
+			       struct packed_git **packs, uint32_t nr)
+{
+	struct strbuf buf = STRBUF_INIT;
+
+	for (uint32_t i = 0; i < nr; i++) {
+		strbuf_reset(&buf);
+		strbuf_addstr(&buf, pack_basename(packs[i]));
+		strbuf_strip_suffix(&buf, ".pack");
+		strbuf_addstr(&buf, ".idx");
+		string_list_insert(names, buf.buf);
+	}
+	strbuf_release(&buf);
+}
+
 static int midx_has_unknown_packs(struct string_list *include,
-				  struct pack_geometry *geometry,
+				  struct string_list *repacked,
 				  struct existing_packs *existing)
 {
 	struct string_list_item *item;
-
-	string_list_sort(include);
+	struct strbuf buf = STRBUF_INIT;
+	int ret = 0;
 
 	for_each_string_list_item(item, &existing->midx_packs) {
-		const char *pack_name = item->string;
+		strbuf_reset(&buf);
+		strbuf_addstr(&buf, item->string);
+		strbuf_strip_suffix(&buf, ".pack");
+		strbuf_addstr(&buf, ".idx");
 
-		/*
-		 * Determine whether or not each MIDX'd pack from the existing
-		 * MIDX (if any) is represented in the new MIDX. For each pack
-		 * in the MIDX, it must either be:
-		 *
-		 *  - In the "include" list of packs to be included in the new
-		 *    MIDX. Note this function is called before the include
-		 *    list is populated with any cruft pack(s).
-		 *
-		 *  - Below the geometric split line (if using pack geometry),
-		 *    indicating that the pack won't be included in the new
-		 *    MIDX, but its contents were rolled up as part of the
-		 *    geometric repack.
-		 *
-		 *  - In the existing non-kept packs list (if not using pack
-		 *    geometry), and marked as non-deleted.
-		 */
-		if (string_list_has_string(include, pack_name)) {
-			continue;
-		} else if (geometry) {
-			struct strbuf buf = STRBUF_INIT;
-			uint32_t j;
-
-			for (j = 0; j < geometry->split; j++) {
-				strbuf_reset(&buf);
-				strbuf_addstr(&buf, pack_basename(geometry->pack[j]));
-				strbuf_strip_suffix(&buf, ".pack");
-				strbuf_addstr(&buf, ".idx");
-
-				if (!strcmp(pack_name, buf.buf)) {
-					strbuf_release(&buf);
-					break;
-				}
-			}
-
-			strbuf_release(&buf);
-
-			if (j < geometry->split)
-				continue;
-		} else {
-			struct string_list_item *item;
-
-			item = string_list_lookup(&existing->non_kept_packs,
-						  pack_name);
-			if (item && !existing_pack_is_marked_for_deletion(item))
-				continue;
+		/* Each indexed pack must survive or have been repacked. */
+		if (!string_list_has_string(include, buf.buf) &&
+		    !string_list_has_string(repacked, buf.buf)) {
+			ret = 1;
+			break;
 		}
-
-		/*
-		 * If we got to this point, the MIDX includes some pack that we
-		 * don't know about.
-		 */
-		return 1;
 	}
 
-	return 0;
+	strbuf_release(&buf);
+	return ret;
 }
 
 static void midx_included_packs(struct string_list *include,
@@ -146,6 +119,7 @@ static void midx_included_packs(struct string_list *include,
 	struct existing_packs *existing = opts->existing;
 	struct pack_geometry *geometry = opts->geometry;
 	struct string_list *names = opts->names;
+	struct string_list repacked = STRING_LIST_INIT_DUP;
 	struct string_list_item *item;
 	struct strbuf buf = STRBUF_INIT;
 
@@ -161,43 +135,22 @@ static void midx_included_packs(struct string_list *include,
 		string_list_insert(include, buf.buf);
 	}
 
-	if (geometry->split_factor) {
-		uint32_t i;
+	collect_pack_names(&repacked, geometry->pack, geometry->split);
+	collect_pack_names(&repacked, geometry->promisor_pack,
+			   geometry->promisor_split);
 
-		for (i = geometry->split; i < geometry->pack_nr; i++) {
-			struct packed_git *p = geometry->pack[i];
+	for_each_string_list_item(item, &existing->non_kept_packs) {
+		if (existing_pack_is_marked_for_deletion(item))
+			continue;
 
-			/*
-			 * The multi-pack index never refers to packfiles part
-			 * of an alternate object database, so we skip these.
-			 * While git-multi-pack-index(1) would silently ignore
-			 * them anyway, this allows us to skip executing the
-			 * command completely when we have only non-local
-			 * packfiles.
-			 */
-			if (!p->pack_local)
-				continue;
-
-			strbuf_reset(&buf);
-			strbuf_addstr(&buf, pack_basename(p));
-			strbuf_strip_suffix(&buf, ".pack");
-			strbuf_addstr(&buf, ".idx");
-
+		strbuf_reset(&buf);
+		strbuf_addf(&buf, "%s.idx", item->string);
+		if (!string_list_has_string(&repacked, buf.buf))
 			string_list_insert(include, buf.buf);
-		}
-	} else {
-		for_each_string_list_item(item, &existing->non_kept_packs) {
-			if (existing_pack_is_marked_for_deletion(item))
-				continue;
-
-			strbuf_reset(&buf);
-			strbuf_addf(&buf, "%s.idx", item->string);
-			string_list_insert(include, buf.buf);
-		}
 	}
 
 	if (opts->midx_must_contain_cruft ||
-	    midx_has_unknown_packs(include, geometry, existing)) {
+	    midx_has_unknown_packs(include, &repacked, existing)) {
 		/*
 		 * If there are one or more unknown pack(s) present (see
 		 * midx_has_unknown_packs() for what makes a pack
@@ -247,6 +200,7 @@ static void midx_included_packs(struct string_list *include,
 		;
 	}
 
+	string_list_clear(&repacked, 0);
 	strbuf_release(&buf);
 }
 
@@ -426,6 +380,8 @@ static const char *midx_compaction_step_base(const struct midx_compaction_step *
 
 static int midx_compaction_step_exec_copy(struct midx_compaction_step *step)
 {
+	if (link_midx_to_chain(step->u.copy) < 0)
+		return -1;
 	step->csum = xstrdup(midx_get_checksum_hex(step->u.copy));
 	return 0;
 }
@@ -609,6 +565,8 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 {
 	struct odb_source_files *files = odb_source_files_downcast(opts->existing->source);
 	struct multi_pack_index *m;
+	struct packed_git *p, *preferred = pack_geometry_preferred_pack(opts->geometry);
+	struct string_list include = STRING_LIST_INIT_DUP;
 	struct midx_compaction_step *steps = NULL;
 	struct midx_compaction_step step = { 0 };
 	struct strbuf buf = STRBUF_INIT;
@@ -632,108 +590,49 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 
 	trace2_region_enter("repack", "steps:write", opts->existing->repo);
 
-	/*
-	 * The first MIDX in the resulting chain is always going to be
-	 * new.
-	 *
-	 * At a minimum, it will include all of the newly written packs.
-	 * If there is an existing MIDX whose tip layer contains packs
-	 * that were repacked, it will also include any of its packs
-	 * which were *not* rolled up as part of the geometric repack
-	 * (if any), and the previous tip will be replaced.
-	 *
-	 * It may grow to include the packs from zero or more MIDXs from
-	 * the old chain, beginning either at the old tip (if the MIDX
-	 * was *not* rewritten) or the old tip's base MIDX layer
-	 * (otherwise).
-	 */
+	/* Replace a rewritten tip; otherwise retain it as the new layer's base. */
+	if (opts->geometry->midx_tip_rewritten)
+		m = m->base_midx;
+
 	step.type = MIDX_COMPACTION_STEP_WRITE;
 	string_list_init_dup(&step.u.write);
+	midx_included_packs(&include, opts);
 
-	for (i = 0; i < opts->names->nr; i++) {
-		strbuf_reset(&buf);
-		strbuf_addf(&buf, "pack-%s.idx", opts->names->items[i].string);
-		string_list_append(&step.u.write, buf.buf);
-
-		trace2_data_string("repack", opts->existing->repo,
-				   "include:fresh",
-				   step.u.write.items[step.u.write.nr - 1].string);
-	}
-	for (i = 0; i < opts->geometry->split; i++) {
-		struct packed_git *p = opts->geometry->pack[i];
-		if (unsigned_add_overflows(step.objects_nr, p->num_objects)) {
-			ret = error(_("too many objects in MIDX compaction step"));
-			goto out;
-		}
-
-		step.objects_nr += p->num_objects;
-	}
-	trace2_data_intmax("repack", opts->existing->repo,
-			   "include:fresh:objects_nr",
-			   (uintmax_t)step.objects_nr);
-
-	/*
-	 * Now handle any existing packs which were *not* rewritten.
-	 *
-	 * The list of packs in opts->geometry only contains MIDX'd
-	 * packs from the newest layer when that layer has more than
-	 * 'repack.midxNewLayerThreshold' number of packs.
-	 *
-	 * If the MIDX tip was rewritten (that is, one or more of those
-	 * packs appear below the split line), then add all packs above
-	 * the split line to the new layer, as the old one is no longer
-	 * usable.
-	 *
-	 * If the MIDX tip was not rewritten (that is, all MIDX'd packs
-	 * from the youngest layer appear below the split line, or were
-	 * not included in the geometric repack at all because there
-	 * were too few of them), ignore them since we'll retain the
-	 * existing layer as-is.
-	 */
-	for (i = opts->geometry->split; i < opts->geometry->pack_nr; i++) {
-		struct packed_git *p = opts->geometry->pack[i];
+	/* Reuse the flat writer's pack selection, excluding retained layers. */
+	repo_for_each_pack(opts->existing->repo, p)
+	{
 		struct string_list_item *item;
 
+		if (!p->pack_local)
+			continue;
 		strbuf_reset(&buf);
 		strbuf_addstr(&buf, pack_basename(p));
 		strbuf_strip_suffix(&buf, ".pack");
 		strbuf_addstr(&buf, ".idx");
 
-		if (p->multi_pack_index &&
-		    !opts->geometry->midx_tip_rewritten) {
-			trace2_data_string("repack", opts->existing->repo,
-					   "exclude:unmodified", buf.buf);
+		if (!string_list_has_string(&include, buf.buf) ||
+		    midx_contains_pack(m, buf.buf))
 			continue;
+		if (open_pack_index(p)) {
+			ret = error(_("could not open pack index for %s"),
+				    pack_basename(p));
+			goto out;
 		}
-
-		trace2_data_string("repack", opts->existing->repo,
-				   "include:unmodified", buf.buf);
-		trace2_data_string("repack", opts->existing->repo,
-				   "include:unmodified:midx",
-				   p->multi_pack_index ? "true" : "false");
-
-		item = string_list_append(&step.u.write, buf.buf);
-		if (p->multi_pack_index || i == opts->geometry->pack_nr - 1)
-			item->util = (void *)1; /* mark as preferred */
-
 		if (unsigned_add_overflows(step.objects_nr, p->num_objects)) {
 			ret = error(_("too many objects in MIDX compaction step"));
 			goto out;
 		}
 
 		step.objects_nr += p->num_objects;
+		item = string_list_append(&step.u.write, buf.buf);
+		if (p == preferred)
+			item->util = (void *)1; /* mark as preferred */
+
+		trace2_data_string("repack", opts->existing->repo,
+				   "include:pack", buf.buf);
 	}
 	trace2_data_intmax("repack", opts->existing->repo,
-			   "include:unmodified:objects_nr",
-			   (uintmax_t)step.objects_nr);
-
-	/*
-	 * If the MIDX tip was rewritten, then we no longer consider it
-	 * a candidate for compaction, since it will not exist in the
-	 * MIDX chain being built.
-	 */
-	if (opts->geometry->midx_tip_rewritten)
-		m = m->base_midx;
+			   "include:objects_nr", (uintmax_t)step.objects_nr);
 
 	trace2_data_string("repack", opts->existing->repo, "midx:rewrote-tip",
 			   opts->geometry->midx_tip_rewritten ? "true" : "false");
@@ -745,7 +644,7 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 	 * the merging condition is violated.
 	 */
 	while (m) {
-		uint32_t preferred_pack_idx;
+		uint32_t preferred_pack_idx = UINT32_MAX;
 
 		trace2_data_string("repack", opts->existing->repo,
 				   "candidate", midx_get_checksum_hex(m));
@@ -771,7 +670,8 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 			break;
 		}
 
-		if (midx_preferred_pack(m, &preferred_pack_idx) < 0) {
+		if (opts->write_bitmaps &&
+		    midx_preferred_pack(m, &preferred_pack_idx) < 0) {
 			ret = error(_("could not find preferred pack for MIDX "
 				      "%s"), midx_get_checksum_hex(m));
 			goto out;
@@ -804,6 +704,11 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 		m = m->base_midx;
 	}
 
+	trace2_data_intmax("repack", opts->existing->repo,
+			   "step:objects_nr", (uintmax_t)step.objects_nr);
+	trace2_data_intmax("repack", opts->existing->repo,
+			   "step:packs_nr", (uintmax_t)step.u.write.nr);
+
 	if (step.u.write.nr > 0) {
 		/*
 		 * As long as there is at least one new pack to write
@@ -811,12 +716,8 @@ static int repack_make_midx_compaction_plan(struct repack_write_midx_opts *opts,
 		 */
 		ALLOC_GROW(steps, steps_nr + 1, steps_alloc);
 		steps[steps_nr++] = step;
+		memset(&step, 0, sizeof(step));
 	}
-
-	trace2_data_intmax("repack", opts->existing->repo,
-			   "step:objects_nr", (uintmax_t)step.objects_nr);
-	trace2_data_intmax("repack", opts->existing->repo,
-			   "step:packs_nr", (uintmax_t)step.u.write.nr);
 
 	trace2_region_leave("repack", "compact", opts->existing->repo);
 	trace2_region_leave("repack", "steps:write", opts->existing->repo);
@@ -930,6 +831,8 @@ out:
 	*steps_p = steps;
 	*steps_nr_p = steps_nr;
 
+	midx_compaction_step_release(&step);
+	string_list_clear(&include, 0);
 	strbuf_release(&buf);
 
 	trace2_region_leave("repack", "make_midx_compaction_plan",

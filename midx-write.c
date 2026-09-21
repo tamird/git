@@ -17,6 +17,7 @@
 #include "list-objects.h"
 #include "path.h"
 #include "pack-revindex.h"
+#include "tempfile.h"
 
 #define PACK_EXPIRED UINT_MAX
 #define BITMAP_POS_UNKNOWN (~((uint32_t)0))
@@ -1067,7 +1068,54 @@ static struct {
 	{MIDX_EXT_REV, MIDX_EXT_REV},
 };
 
-static int link_midx_to_chain(struct multi_pack_index *m)
+static int link_midx_file(const char *from, const char *to, int optional)
+{
+	struct stat src, dst;
+	struct strbuf template = STRBUF_INIT;
+	struct tempfile *tmp = NULL;
+	int saved_errno, ret = -1;
+
+	if (lstat(from, &src))
+		return optional && errno == ENOENT ? 0 : -1;
+	if (!S_ISREG(src.st_mode)) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (!link(from, to))
+		return 0;
+	if (errno != EEXIST)
+		return -1;
+	if (lstat(to, &dst))
+		return -1;
+	if (!S_ISREG(dst.st_mode)) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (src.st_dev == dst.st_dev && src.st_ino == dst.st_ino)
+		return 0;
+
+	/* Keep the flat file until the chain is published, even on a retry. */
+	strbuf_addf(&template, "%s.XXXXXX", to);
+	tmp = mks_tempfile_m(template.buf, 0666);
+	if (!tmp)
+		goto done;
+	if (close_tempfile_gently(tmp) ||
+	    unlink(get_tempfile_path(tmp)) ||
+	    link(from, get_tempfile_path(tmp)) ||
+	    rename_tempfile(&tmp, to))
+		goto done;
+	ret = 0;
+
+done:
+	saved_errno = errno;
+	if (tmp)
+		delete_tempfile(&tmp);
+	strbuf_release(&template);
+	errno = saved_errno;
+	return ret;
+}
+
+int link_midx_to_chain(struct multi_pack_index *m)
 {
 	struct strbuf from = STRBUF_INIT;
 	struct strbuf to = STRBUF_INIT;
@@ -1091,7 +1139,7 @@ static int link_midx_to_chain(struct multi_pack_index *m)
 		get_split_midx_filename_ext(m->source, &to, hash,
 					    midx_exts[i].split);
 
-		if (link(from.buf, to.buf) < 0 && errno != ENOENT) {
+		if (link_midx_file(from.buf, to.buf, i)) {
 			ret = error_errno(_("unable to link '%s' to '%s'"),
 					  from.buf, to.buf);
 			goto done;

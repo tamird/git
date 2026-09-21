@@ -43,23 +43,32 @@ create_geometric_packs () {
 		--write-bitmap-index
 }
 
-# create_layer <test_commit_bulk args>
+# create_layer [--[no-]bitmap] <test_commit_bulk args>
 #
 # Creates a new MIDX layer with the contents of "test_commit_bulk $@".
-create_layer () {
+create_layer () (
+	case "$1" in
+	--bitmap|--no-bitmap)
+		bitmap_mode=$1
+		shift
+		;;
+	*)
+		bitmap_mode=--bitmap
+		;;
+	esac
 	test_commit_bulk "$@" &&
 
-	git multi-pack-index write --incremental --bitmap
-}
+	git multi-pack-index write --incremental "$bitmap_mode"
+)
 
-# create_layers
+# create_layers [--[no-]bitmap]
 #
 # Reads lines of "<message> <nr>" from stdin and creates a new MIDX
 # layer for each line. See create_layer above for more.
 create_layers () {
 	while read msg nr
 	do
-		create_layer --message="$msg" "$nr" || return 1
+		create_layer "$@" --message="$msg" "$nr" || return 1
 	done
 }
 
@@ -103,15 +112,45 @@ test_expect_success 'failed chain publication preserves the flat MIDX' '
 		cd failed-chain-publication &&
 		git config maintenance.auto false &&
 		test_commit first &&
+		test_commit second &&
 		git repack -d --write-midx --write-bitmap-index &&
 		cp $packdir/multi-pack-index before &&
-		test_commit second &&
+		hash=$(test-tool read-midx --checksum "$objdir") &&
+		test_path_is_file "$packdir/multi-pack-index-$hash.bitmap" &&
 		mkdir -p $midx_chain &&
 
 		test_must_fail git repack --write-midx=incremental 2>err &&
 		test_grep "unable to commit multi-pack-index chain file" err &&
 		test_cmp before $packdir/multi-pack-index &&
 		git multi-pack-index verify &&
+		git fsck &&
+
+		# The failed write has already linked the flat layer. A
+		# second failed publication must accept those hardlinks.
+		test_path_is_file "$midxdir/multi-pack-index-$hash.midx" &&
+		test_must_fail git repack --write-midx=incremental 2>err &&
+		test_grep "unable to commit multi-pack-index chain file" err &&
+		test_cmp before $packdir/multi-pack-index &&
+		rmdir "$midx_chain" &&
+
+		# Rewriting the same flat MIDX after removing its bitmap
+		# changes its inode but not its checksum. The retry must
+		# replace the old hardlinks before publishing the chain.
+		rm "$packdir/multi-pack-index-$hash.bitmap" &&
+		git multi-pack-index write --bitmap &&
+		test_cmp before $packdir/multi-pack-index &&
+		test_path_is_file "$packdir/multi-pack-index-$hash.bitmap" &&
+		git repack --write-midx=incremental &&
+		test_path_is_missing "$packdir/multi-pack-index" &&
+		test_path_is_file "$midxdir/multi-pack-index-$hash.midx" &&
+		test_path_is_file "$midxdir/multi-pack-index-$hash.bitmap" &&
+		printf "%s\n" "$hash" >expect &&
+		head -n 1 "$midx_chain" >actual &&
+		test_cmp expect actual &&
+		test-tool read-midx "$objdir" "$hash" >actual &&
+		git multi-pack-index verify &&
+		git rev-list --test-bitmap HEAD 2>bitmap.err &&
+		test_grep "Located via MIDX .*${hash}" bitmap.err &&
 		git fsck
 	)
 '
@@ -189,6 +228,12 @@ test_expect_success 'geometric promisor rollup replaces its MIDX tip' '
 		cd geometric-promisor-tip-rollup &&
 		git config maintenance.auto false &&
 		git config repack.midxNewLayerThreshold 2 &&
+		# The large pack survives while the two small packs roll up.
+		test_commit_bulk --message=base 6 &&
+		git repack -d &&
+		survivor=$(ls $packdir/pack-*.idx) &&
+		cp "$survivor" survivor.idx.before &&
+		cp "${survivor%.idx}.pack" survivor.pack.before &&
 		test_commit first &&
 		git repack -d &&
 		test_commit second &&
@@ -198,12 +243,20 @@ test_expect_success 'geometric promisor rollup replaces its MIDX tip' '
 			: >"${pack%.pack}.promisor" || return 1
 		done &&
 		ls $packdir/pack-*.promisor >promisors &&
-		test_line_count = 2 promisors &&
+		test_line_count = 3 promisors &&
 		git multi-pack-index write --incremental &&
 		test_line_count = 1 "$midx_chain" &&
 		git repack --geometric=2 -d --write-midx=incremental &&
 		ls $packdir/pack-*.promisor >promisors &&
-		test_line_count = 1 promisors &&
+		test_line_count = 2 promisors &&
+		test_path_is_file "${survivor%.idx}.promisor" &&
+		test_cmp survivor.idx.before "$survivor" &&
+		test_cmp survivor.pack.before "${survivor%.idx}.pack" &&
+		sed -e "s|.*/||" -e "s/\\.promisor$/.idx/" promisors |
+			sort >expect.packs &&
+		test-tool read-midx "$objdir" >actual &&
+		grep "^pack-.*\\.idx$" actual | sort >actual.packs &&
+		test_cmp expect.packs actual.packs &&
 		git multi-pack-index verify &&
 		git fsck
 	)
@@ -281,45 +334,63 @@ test_expect_success 'above layer threshold, tip packs preserved' '
 '
 
 test_expect_success 'new tip absorbs multiple layers' '
-	git init new-tip-absorbs-multiple-layers &&
-	(
-		cd new-tip-absorbs-multiple-layers &&
+	for bitmap_option in --write-bitmap-index --no-write-bitmap-index
+	do
+		git init "new-tip-absorbs-multiple-layers-$bitmap_option" &&
+		(
+			cd "new-tip-absorbs-multiple-layers-$bitmap_option" &&
 
-		git config maintenance.auto false &&
-		git config repack.midxnewlayerthreshold 1 &&
-		git config repack.midxsplitfactor 2 &&
+			git config maintenance.auto false &&
+			git config repack.midxnewlayerthreshold 1 &&
+			git config repack.midxsplitfactor 2 &&
 
-		# Build a 4-layer chain where each layer is too small to
-		# absorb the one below it. The sizes must satisfy L(n) <
-		# L(n-1)/2 for each adjacent pair:
-		#
-		#   L0 (oldest): 75 obj (25 commits)
-		#   L1:          21 obj  (7 commits, 21 < 75/2)
-		#   L2:           9 obj  (3 commits,  9 < 21/2)
-		#   L3 (tip):     3 obj  (1 commit,   3 <  9/2)
-		create_layers <<-\EOF &&
-		L0 25
-		L1 7
-		L2 3
-		L3 1
-		EOF
+			# Build a 4-layer chain where each layer is too small to
+			# absorb the one below it. The sizes must satisfy L(n) <
+			# L(n-1)/2 for each adjacent pair:
+			#
+			#   L0 (oldest): 75 obj (25 commits)
+			#   L1:          21 obj  (7 commits, 21 < 75/2)
+			#   L2:           9 obj  (3 commits,  9 < 21/2)
+			#   L3 (tip):     3 obj  (1 commit,   3 <  9/2)
+			if test "$bitmap_option" = --no-write-bitmap-index
+			then
+				layer_bitmap_mode=--no-bitmap
+			else
+				layer_bitmap_mode=--bitmap
+			fi &&
+			create_layers "$layer_bitmap_mode" <<-\EOF &&
+			L0 25
+			L1 7
+			L2 3
+			L3 1
+			EOF
 
-		test_line_count = 4 "$midx_chain" &&
-		cp $midx_chain $midx_chain.before &&
+			test_line_count = 4 "$midx_chain" &&
+			if test "$layer_bitmap_mode" = --no-bitmap
+			then
+				while read hash
+				do
+					test_path_is_missing "$midxdir/multi-pack-index-$hash.bitmap" &&
+					test_path_is_missing "$midxdir/multi-pack-index-$hash.rev" ||
+						return 1
+				done <"$midx_chain"
+			fi &&
+			cp $midx_chain $midx_chain.before &&
 
-		# Now add a new commit. The merging condition is
-		# satisfied between L3-L1, but violated at L0, which is
-		# too large relative to the accumulated size.
-		#
-		# As a result, the chain shrinks from 4 to 2 layers.
-		test_commit new &&
-		git repack --geometric=2 -d --write-midx=incremental \
-			--write-bitmap-index &&
+			# Now add a new commit. The merging condition is
+			# satisfied between L3-L1, but violated at L0, which is
+			# too large relative to the accumulated size.
+			#
+			# As a result, the chain shrinks from 4 to 2 layers.
+			test_commit new &&
+			git repack --geometric=2 -d --write-midx=incremental \
+				"$bitmap_option" &&
 
-		! test_cmp $midx_chain.before $midx_chain &&
-		test_line_count = 2 "$midx_chain" &&
-		git multi-pack-index verify
-	)
+			! test_cmp $midx_chain.before $midx_chain &&
+			test_line_count = 2 "$midx_chain" &&
+			git multi-pack-index verify
+		) || return 1
+	done
 '
 
 test_expect_success 'compaction of older layers' '
@@ -403,16 +474,22 @@ test_expect_success 'kept packs are excluded from repack' '
 		keep=$(ls $packdir/pack-*.idx | head -n 1) &&
 		touch "${keep%.idx}.keep" &&
 
-		# The kept pack is excluded as a repacking candidate
-		# entirely, so no rollup occurs as there is only one
-		# non-kept pack. A new MIDX layer is written containing
-		# that pack.
+		# The kept pack is not a repacking candidate, but both
+		# surviving packs still belong in the MIDX.
+		ls $packdir/pack-*.idx | sort >packs.before &&
+		cp "$keep" kept.idx.before &&
+		cp "${keep%.idx}.pack" kept.pack.before &&
 		git repack --geometric=2 -d --write-midx=incremental &&
 
+		ls $packdir/pack-*.idx | sort >packs.after &&
+		test_cmp packs.before packs.after &&
+		test_path_is_file "${keep%.idx}.keep" &&
+		test_cmp kept.idx.before "$keep" &&
+		test_cmp kept.pack.before "${keep%.idx}.pack" &&
+		sed "s|.*/||" packs.before >expect.packs &&
 		test-tool read-midx $objdir >actual &&
-		grep "^pack-.*\.idx$" actual >actual.packs &&
-		test_line_count = 1 actual.packs &&
-		test_grep ! "$keep" actual.packs &&
+		grep "^pack-.*\.idx$" actual | sort >actual.packs &&
+		test_cmp expect.packs actual.packs &&
 
 		git multi-pack-index verify &&
 
@@ -478,6 +555,43 @@ test_expect_success 'noop repack preserves valid MIDX chain' '
 
 		git multi-pack-index verify &&
 		git fsck
+	)
+'
+
+test_expect_success 'noop incremental repack converts a flat MIDX' '
+	git init noop-repack-converts-flat-midx &&
+	(
+		cd noop-repack-converts-flat-midx &&
+		git config maintenance.auto false &&
+		test_commit first &&
+		git repack -d --write-midx --write-bitmap-index &&
+		test_path_is_file "$packdir/multi-pack-index" &&
+		hash=$(test-tool read-midx --checksum "$objdir") &&
+		test_path_is_file "$packdir/multi-pack-index-$hash.bitmap" &&
+		test_path_is_missing "$midxdir/multi-pack-index-$hash.midx" &&
+		git rev-list --objects --all >objects.before &&
+
+		git repack --geometric=2 -d --write-midx=incremental \
+			--write-bitmap-index &&
+		test_path_is_missing "$packdir/multi-pack-index" &&
+		printf "%s\n" "$hash" >expect &&
+		test_cmp expect "$midx_chain" &&
+		test_path_is_file "$midxdir/multi-pack-index-$hash.midx" &&
+		test_path_is_file "$midxdir/multi-pack-index-$hash.bitmap" &&
+		test-tool read-midx --checksum "$objdir" >actual &&
+		test_cmp expect actual &&
+		git multi-pack-index verify &&
+		git rev-list --test-bitmap HEAD 2>bitmap.err &&
+		test_grep "Located via MIDX .*${hash}" bitmap.err &&
+		git rev-list --objects --all >objects.after &&
+		test_cmp objects.before objects.after &&
+		git fsck &&
+
+		git repack --geometric=2 -d --write-midx=incremental \
+			--write-bitmap-index &&
+		test_cmp expect "$midx_chain" &&
+		test_path_is_file "$midxdir/multi-pack-index-$hash.midx" &&
+		git multi-pack-index verify
 	)
 '
 

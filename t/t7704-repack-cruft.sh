@@ -758,6 +758,11 @@ test_expect_success 'repack --write-midx excludes cruft where possible' '
 		test-tool read-midx --show-objects $objdir >midx &&
 		cruft="$(ls $packdir/*.mtimes)" &&
 		test_grep ! "$(basename "$cruft" .mtimes).idx" midx &&
+		git repack -d --geometric=2 --write-midx=incremental \
+			--write-bitmap-index &&
+		test-tool read-midx --show-objects $objdir >midx &&
+		test_grep ! "$(basename "$cruft" .mtimes).idx" midx &&
+		git multi-pack-index verify &&
 
 		git rev-list --all --objects --no-object-names >reachable.raw &&
 		sort reachable.raw >reachable.objects &&
@@ -793,8 +798,11 @@ test_expect_success 'repack --write-midx includes cruft when necessary' '
 	(
 		cd exclude-cruft-when-necessary &&
 
-		test_path_is_file $(ls $packdir/pack-*.mtimes) &&
+		cruft="$(ls "$packdir"/pack-*.mtimes)" &&
+		test_path_is_file "$cruft" &&
 		( cd $packdir && ls pack-*.idx ) | sort >packs.all &&
+		test_line_count = 2 packs.all &&
+		indexed_normal="$(grep -v -F "$(basename "$cruft" .mtimes).idx" packs.all)" &&
 		git multi-pack-index write --stdin-packs --bitmap <packs.all &&
 
 		test_commit five &&
@@ -808,7 +816,19 @@ test_expect_success 'repack --write-midx includes cruft when necessary' '
 		test_cmp expect.objects midx.objects &&
 
 		grep "^pack-" midx >midx.packs &&
-		test_line_count = "$(($(wc -l <packs.all) + 1))" midx.packs
+		test_line_count = "$(($(wc -l <packs.all) + 1))" midx.packs &&
+
+		# Replacing the indexed tip must carry its cruft pack forward.
+		test_commit six &&
+		echo HEAD^..HEAD | git pack-objects --revs "$packdir/pack" >/dev/null &&
+		git prune-packed &&
+		git -c repack.midxNewLayerThreshold=1 repack -d --geometric=2 \
+			--write-midx=incremental --write-bitmap-index &&
+		test_path_is_missing "$packdir/$indexed_normal" &&
+		test_path_is_file "$cruft" &&
+		test-tool read-midx --show-objects "$objdir" >midx &&
+		test_grep -F "$(basename "$cruft" .mtimes).idx" midx &&
+		git multi-pack-index verify
 	)
 '
 

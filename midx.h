@@ -101,6 +101,7 @@ void get_midx_chain_dirname(struct odb_source_packed *source, struct strbuf *out
 void get_midx_chain_filename(struct odb_source_packed *source, struct strbuf *out);
 void get_split_midx_filename_ext(struct odb_source_packed *source, struct strbuf *buf,
 				 const unsigned char *hash, const char *ext);
+int link_midx_to_chain(struct multi_pack_index *m);
 
 struct multi_pack_index *get_multi_pack_index(struct odb_source_packed *source);
 struct multi_pack_index *load_multi_pack_index(struct odb_source_packed *source);
