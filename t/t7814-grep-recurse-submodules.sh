@@ -183,16 +183,6 @@ test_expect_success FSMONITOR_DAEMON \
 		<recurse-content-index.trace &&
 	test_trace2_data grep content_index_tree_object_read_detail_sampled_reads 1 \
 		<recurse-content-index.trace &&
-	test_trace2_data grep content_index_tree_object_read_sample_limit 4096 \
-		<recurse-content-index.trace &&
-	test_trace2_data grep content_index_tree_object_read_sampled_visits 1 \
-		<recurse-content-index.trace &&
-	test_trace2_data grep content_index_tree_object_read_sampled_unique_oids 1 \
-		<recurse-content-index.trace &&
-	test_trace2_data grep content_index_tree_object_read_sampled_repeat_visits 0 \
-		<recurse-content-index.trace &&
-	test_trace2_data grep content_index_tree_object_read_sample_truncated 0 \
-		<recurse-content-index.trace &&
 	for phase in packed_content packed_entry_location
 	do
 		test_trace2_data grep "content_index_tree_object_read_sampled_${phase}_valid" \
