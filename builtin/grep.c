@@ -1522,9 +1522,10 @@ static int grep_tree_recursive_basename(const struct pathspec_item *item,
 
 	if (grep_recursive_basename(item, basename))
 		return 1;
+	/* A slash in a bracket expression need not separate path components. */
 	if (item->prefix || item->magic != PATHSPEC_GLOB ||
 	    !starts_with(item->match, "**/") ||
-	    strchr(item->match, '\\'))
+	    strchr(item->match, '\\') || strchr(item->match, '['))
 		return 0;
 	slash = strrchr(item->match, '/');
 	if (!slash || !slash[1])

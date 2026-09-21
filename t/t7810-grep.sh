@@ -6426,6 +6426,21 @@ test_expect_success 'revision grep reuses an exact index for wildcard pathspecs'
 	)
 '
 
+test_expect_success 'revision grep does not split a basename inside a bracket expression' '
+	(
+		cd revision-index &&
+		echo "HEAD:a/deep/target.txt:1:needle-deep" >expect-bracket &&
+		for index in .git/index missing-index
+		do
+			GIT_INDEX_FILE="$PWD/$index" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD -- ":(glob)**/a/deep/[t/x]arget.txt" \
+					>actual-bracket &&
+			test_cmp expect-bracket actual-bracket || return 1
+		done
+	)
+'
+
 test_expect_success PERL 'revision grep ignores a malformed optional index entry or TREE' '
 	(
 		cd revision-index &&
