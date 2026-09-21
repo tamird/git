@@ -572,6 +572,8 @@ int cmd_repack(int argc,
 
 			fprintf(in, "%c%s\n", marker, basename);
 		}
+		for (i = 0; i < geometry.protected_pack_nr; i++)
+			fprintf(in, "^%s\n", pack_basename(geometry.protected_pack[i]));
 		fclose(in);
 	}
 

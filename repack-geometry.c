@@ -36,25 +36,6 @@ void pack_geometry_init(struct pack_geometry *geometry,
 	struct multi_pack_index *m = get_multi_pack_index(files->packed);
 
 	repo_for_each_pack(existing->repo, p) {
-		if (geometry->midx_layer_threshold_set && m &&
-		    p->multi_pack_index) {
-			/*
-			 * When writing MIDX layers incrementally,
-			 * ignore packs unless they are in the most
-			 * recent MIDX layer *and* there are at least
-			 * 'midx_layer_threshold' packs in that layer.
-			 *
-			 * Otherwise 'p' is either in an older layer, or
-			 * the youngest layer does not have enough packs
-			 * to consider its packs as candidates for
-			 * repacking. In either of those cases we want
-			 * to ignore the pack.
-			 */
-			if (m->num_packs < geometry->midx_layer_threshold ||
-			    !midx_layer_contains_pack(m, pack_basename(p)))
-				continue;
-		}
-
 		if (args->local && !p->pack_local)
 			/*
 			 * When asked to only repack local packfiles we skip
@@ -87,6 +68,23 @@ void pack_geometry_init(struct pack_geometry *geometry,
 		}
 		if (p->is_cruft)
 			continue;
+		if (geometry->midx_layer_threshold_set && m &&
+		    p->multi_pack_index &&
+		    (m->num_packs < geometry->midx_layer_threshold ||
+		     !midx_layer_contains_pack(m, pack_basename(p)))) {
+			/*
+			 * Packs in older layers, or a tip below the threshold,
+			 * remain outside the rollup. Local normal packs also
+			 * bound pack-objects' walk through their history.
+			 */
+			if (p->pack_local && !p->pack_promisor) {
+				ALLOC_GROW(geometry->protected_pack,
+					   geometry->protected_pack_nr + 1,
+					   geometry->protected_pack_alloc);
+				geometry->protected_pack[geometry->protected_pack_nr++] = p;
+			}
+			continue;
+		}
 
 		if (p->pack_promisor) {
 			ALLOC_GROW(geometry->promisor_pack,
@@ -292,4 +290,5 @@ void pack_geometry_release(struct pack_geometry *geometry)
 
 	free(geometry->pack);
 	free(geometry->promisor_pack);
+	free(geometry->protected_pack);
 }

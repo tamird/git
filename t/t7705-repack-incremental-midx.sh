@@ -188,7 +188,42 @@ test_expect_success 'below layer threshold, tip packs excluded' '
 		test_line_count = 2 "$midx_chain" &&
 		head -n 1 "$midx_chain.before" >expect &&
 		head -n 1 "$midx_chain" >actual &&
-		test_cmp expect actual
+		test_cmp expect actual &&
+
+		# Two equal-sized packs force a rollup. Each also contains
+		# commits from the protected base and tip layers, which must
+		# stay out of the new pack.
+		cp packs.after packs.protected &&
+		>new.objects &&
+		for name in duplicate-one duplicate-two
+		do
+			test_commit "$name" &&
+			git rev-parse HEAD HEAD^{tree} "HEAD:$name.t" >input &&
+			cat input >>new.objects &&
+			git rev-parse small extra >>input &&
+			git pack-objects "$packdir/pack" <input >packname &&
+			sort input >expect.input &&
+			git show-index <"$packdir/pack-$(cat packname).idx" |
+				cut -d" " -f2 | sort >actual.input &&
+			test_cmp expect.input actual.input || return 1
+		done &&
+		sort new.objects >expect.objects &&
+		git prune-packed &&
+		ls $packdir/pack-*.idx | sort >packs.before &&
+		git repack --geometric=2 -d --write-midx=incremental \
+			--write-bitmap-index &&
+		ls $packdir/pack-*.idx | sort >packs.after &&
+		comm -13 packs.before packs.after >packs.new &&
+		test_line_count = 1 packs.new &&
+		git show-index <"$(cat packs.new)" |
+			cut -d" " -f2 | sort >actual.objects &&
+		test_cmp expect.objects actual.objects &&
+		while read -r pack
+		do
+			test_path_is_file "$pack" &&
+			test_path_is_file "${pack%.idx}.pack" || return 1
+		done <packs.protected &&
+		git multi-pack-index verify
 	)
 '
 

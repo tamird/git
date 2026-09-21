@@ -114,6 +114,8 @@ struct pack_geometry {
 	struct packed_git **promisor_pack;
 	uint32_t promisor_pack_nr, promisor_pack_alloc;
 	uint32_t promisor_split;
+	struct packed_git **protected_pack;
+	uint32_t protected_pack_nr, protected_pack_alloc;
 
 	uint32_t midx_layer_threshold;
 	bool midx_layer_threshold_set;
