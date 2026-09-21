@@ -183,6 +183,32 @@ test_expect_success 'above layer threshold, tip packs repacked' '
 	)
 '
 
+test_expect_success 'geometric promisor rollup replaces its MIDX tip' '
+	git init geometric-promisor-tip-rollup &&
+	(
+		cd geometric-promisor-tip-rollup &&
+		git config maintenance.auto false &&
+		git config repack.midxNewLayerThreshold 2 &&
+		test_commit first &&
+		git repack -d &&
+		test_commit second &&
+		git repack -d &&
+		for pack in $packdir/pack-*.pack
+		do
+			: >"${pack%.pack}.promisor" || return 1
+		done &&
+		ls $packdir/pack-*.promisor >promisors &&
+		test_line_count = 2 promisors &&
+		git multi-pack-index write --incremental &&
+		test_line_count = 1 "$midx_chain" &&
+		git repack --geometric=2 -d --write-midx=incremental &&
+		ls $packdir/pack-*.promisor >promisors &&
+		test_line_count = 1 promisors &&
+		git multi-pack-index verify &&
+		git fsck
+	)
+'
+
 test_expect_success 'above layer threshold, tip layer preserved' '
 	git init above-layer-threshold-tip-layer-preserved &&
 	(
