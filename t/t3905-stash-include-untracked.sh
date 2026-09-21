@@ -255,12 +255,18 @@ test_expect_success 'stash -u -- <untracked> leaves rest of working tree in plac
 '
 
 test_expect_success 'stash -u -- <tracked> <untracked> clears changes in both' '
-	>tracked &&
+	echo tracked >tracked &&
 	git add tracked &&
-	>untracked &&
+	echo untracked >untracked &&
 	git stash push -u -- tracked untracked &&
 	test_path_is_missing tracked &&
-	test_path_is_missing untracked
+	test_path_is_missing untracked &&
+	echo tracked >expect &&
+	git show stash:tracked >actual &&
+	test_cmp expect actual &&
+	echo untracked >expect &&
+	git show stash^3:untracked >actual &&
+	test_cmp expect actual
 '
 
 test_expect_success 'stash --all -- <ignored> stashes ignored file' '

@@ -1496,6 +1496,7 @@ done:
 	return ret;
 }
 
+/* Return 1 for no changes, 0 for a created stash, and -1 on failure. */
 static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_buf,
 			   int include_untracked, int patch_mode,
 			   struct interactive_options *interactive_opts,
@@ -1587,6 +1588,7 @@ static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_b
 						     "worktree state"));
 			goto done;
 		} else if (ret > 0) {
+			ret = -1;
 			goto done;
 		}
 	} else if (only_staged) {
@@ -1597,6 +1599,7 @@ static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_b
 						     "staged state"));
 			goto done;
 		} else if (ret > 0) {
+			ret = -1;
 			goto done;
 		}
 	} else {
@@ -1674,7 +1677,6 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 	struct stash_info info = STASH_INFO_INIT;
 	struct strbuf patch = STRBUF_INIT;
 	struct strbuf stash_msg_buf = STRBUF_INIT;
-	struct strbuf untracked_files = STRBUF_INIT;
 	struct strbuf out = STRBUF_INIT;
 
 	if (patch_mode && keep_index == -1)
@@ -1723,7 +1725,14 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 		goto done;
 	}
 
-	if (!check_changes(ps, include_untracked, &untracked_files)) {
+	if (stash_msg)
+		strbuf_addstr(&stash_msg_buf, stash_msg);
+	ret = do_create_stash(ps, &stash_msg_buf, include_untracked, patch_mode,
+			      interactive_opts, only_staged, &info, &patch, quiet);
+	if (ret < 0)
+		goto done;
+	if (ret > 0) {
+		ret = 0;
 		if (!quiet)
 			printf_ln(_("No local changes to save"));
 		goto done;
@@ -1733,14 +1742,6 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 		ret = -1;
 		if (!quiet)
 			fprintf_ln(stderr, _("Cannot initialize stash"));
-		goto done;
-	}
-
-	if (stash_msg)
-		strbuf_addstr(&stash_msg_buf, stash_msg);
-	if (do_create_stash(ps, &stash_msg_buf, include_untracked, patch_mode,
-			    interactive_opts, only_staged, &info, &patch, quiet)) {
-		ret = -1;
 		goto done;
 	}
 
@@ -1896,7 +1897,6 @@ done:
 	strbuf_release(&out);
 	free_stash_info(&info);
 	strbuf_release(&stash_msg_buf);
-	strbuf_release(&untracked_files);
 	return ret;
 }
 
