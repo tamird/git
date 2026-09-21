@@ -2096,7 +2096,7 @@ static struct dir_entry *dir_entry_new(const char *pathname, int len)
 }
 
 #define DIR_ICASE_SCAN_LIMIT 1024
-#define DIR_EXACT_LOOKUP_LIMIT 1024
+#define DIR_EXACT_LOOKUP_LIMIT 4096
 
 /* Only directory traversal needs an existence result, not an index entry. */
 static int index_path_exists(struct dir_struct *dir, struct index_state *istate,
