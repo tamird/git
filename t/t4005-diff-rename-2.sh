@@ -247,6 +247,30 @@ test_expect_success 'size rejection populates sizes without hashing or comparing
 	test_grep ! "spanhash/" rename-size.trace
 '
 
+test_expect_success 'a bounded ODB candidate needs no content population' '
+	mv zz-bound zz-bound.saved &&
+	test_when_finished "mv zz-bound.saved zz-bound" &&
+	printf "C#\tCOPYING\tCOPYING.1\nD\tzz-bound\n" >expected-odb-bound &&
+	GIT_TRACE2_EVENT=0 GIT_TRACE2_PERF=0 GIT_TRACE2=0 \
+		git diff-index --name-status -l4 -C --find-copies-harder "$tree" \
+			>untraced-odb-bound 2>untraced-odb-bound.err &&
+	sed -e "s/^C[0-9][0-9]*	/C#	/" \
+		<untraced-odb-bound >normalized-odb-bound &&
+	test_cmp expected-odb-bound normalized-odb-bound &&
+	test_must_be_empty untraced-odb-bound.err &&
+	GIT_TRACE2_EVENT="$PWD/rename-odb-bound.trace" \
+		git diff-index --name-status -l4 -C --find-copies-harder "$tree" \
+			>traced-odb-bound 2>traced-odb-bound.err &&
+	test_cmp untraced-odb-bound traced-odb-bound &&
+	test_cmp untraced-odb-bound.err traced-odb-bound.err &&
+	test_trace2_data diff rename/inexact/content_compared 4 \
+		<rename-odb-bound.trace &&
+	test_trace2_data diff rename/inexact/candidate_floor_skipped 1 \
+		<rename-odb-bound.trace &&
+	test_trace2_data diff rename/populate/full-count 5 \
+		<rename-odb-bound.trace
+'
+
 test_expect_success 'inexact rename with a rehashed span table' '
 	test_create_repo rehash &&
 	(

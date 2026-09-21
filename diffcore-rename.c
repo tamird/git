@@ -495,6 +495,13 @@ static int populate_similarity_filespec(struct repository *r,
 	return ret;
 }
 
+static int filespec_size_is_stable(struct repository *r,
+				   struct diff_filespec *s)
+{
+	return !s->populate_failed &&
+	       (s->cnt_data || s->data || diff_filespec_can_reuse_spanhash(r, s));
+}
+
 static int estimate_similarity(struct repository *r,
 			       struct diff_filespec *src,
 			       struct diff_filespec *dst,
@@ -575,6 +582,22 @@ static int estimate_similarity(struct repository *r,
 
 	score_bound.src_size = src->size;
 	score_bound.dst_size = dst->size;
+	score_bound.score = max_size ?
+				    (int)(base_size * MAX_SCORE / max_size) :
+				    0;
+	/*
+	 * ODB sizes and populated inputs cannot grow during hashing.  As with
+	 * the minimum-score size check, do not read content that cannot win.
+	 * Worktree conversion can change a size, so keep its population below.
+	 */
+	if (candidate_score_floor > 0 &&
+	    score_bound.score < candidate_score_floor &&
+	    filespec_size_is_stable(r, src) &&
+	    filespec_size_is_stable(r, dst)) {
+		if (stats)
+			stats->candidate_floor_skipped++;
+		return 0;
+	}
 	dpf_opt->check_size_only = 0;
 	diffcore_reuse_cached_spanhash(r, src);
 	if (!src->cnt_data && populate_similarity_filespec(r, src, dpf_opt)) {
@@ -598,8 +621,6 @@ static int estimate_similarity(struct repository *r,
 		 * copied bytes cannot exceed the smaller input.  Use the
 		 * final score's expression and cast, not the size inequality.
 		 */
-		score_bound.score = max_size ?
-			(int)(base_size * MAX_SCORE / max_size) : 0;
 		score_bound.valid = 1;
 	}
 
