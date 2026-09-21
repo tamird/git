@@ -1661,6 +1661,8 @@ struct repository *repo UNUSED)
 	const char *cache_untracked_reason = NULL;
 	int cache_untracked_attempted = 0;
 	int collect_untracked, pending_untracked_cache;
+	int invalid_untracked_cache;
+	struct untracked_cache *untracked;
 	int fd;
 	int optional_locks;
 	struct object_id oid;
@@ -1751,13 +1753,17 @@ struct repository *repo UNUSED)
 	if (!optional_locks)
 		the_repository->index->lazy_cache_tree = 1;
 	repo_read_index(the_repository);
-	pending_untracked_cache = the_repository->index->untracked &&
-				  (!the_repository->index->untracked->root ||
-				   the_repository->index->untracked->fsmonitor_resync);
-	/* Restore missing or pending trees early to reuse their tracked bitmaps. */
+	untracked = the_repository->index->untracked;
+	pending_untracked_cache = untracked &&
+				  (!untracked->root || untracked->fsmonitor_resync);
+	/* Keep freshly invalidated subtrees for the incremental scan. */
+	invalid_untracked_cache = untracked && untracked->root &&
+				  !untracked->root->valid && !untracked->dir_invalidated &&
+				  !untracked->gitignore_invalidated;
+	/* Restore trees early to reuse their tracked bitmaps. */
 	if (!s.pathspec.nr && s.show_ignored_mode == SHOW_NO_IGNORED &&
 	    ((collect_untracked &&
-	      (!optional_locks || pending_untracked_cache)) ||
+	      (!optional_locks || pending_untracked_cache || invalid_untracked_cache)) ||
 	     (s.show_untracked_files == SHOW_NO_UNTRACKED_FILES &&
 	      pending_untracked_cache))) {
 		cache_untracked_attempted = 1;

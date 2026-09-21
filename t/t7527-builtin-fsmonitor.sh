@@ -3424,7 +3424,7 @@ test_expect_success MACOS 'worktree binding rejects same-gitdir aliases' '
 	git -C binding-a fsmonitor--daemon stop
 '
 
-test_expect_success 'failed edit commit reuses an untracked snapshot' '
+test_expect_success 'failed edit commit snapshot is reused by commit and status' '
 	test_when_finished "stop_daemon_delete_repo test_commit_snapshot" &&
 	git init test_commit_snapshot &&
 	(
@@ -3470,9 +3470,50 @@ test_expect_success 'failed edit commit reuses an untracked snapshot' '
 			<../commit-snapshot-second.trace &&
 		git rev-parse HEAD >../commit-snapshot-after.head &&
 		test_cmp ../commit-snapshot.head ../commit-snapshot-after.head &&
-		git status --porcelain >../commit-snapshot.actual &&
-		test_grep "^M  tracked$" ../commit-snapshot.actual &&
-		test_grep "^?? nested/$" ../commit-snapshot.actual
+		test-tool dump-untracked-cache >../commit-snapshot.cache &&
+		test_grep "^/ " ../commit-snapshot.cache &&
+		test_grep ! "^/ .* valid$" ../commit-snapshot.cache &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-uno.trace" \
+			git status --porcelain -uno >../commit-snapshot.actual &&
+		printf "M  tracked\n" >../commit-snapshot.expect &&
+		test_cmp ../commit-snapshot.expect ../commit-snapshot.actual &&
+		test_trace2_data status untracked-cache/restore-attempted 0 \
+			<../commit-snapshot-uno.trace &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-status.trace" \
+			git status --porcelain >../commit-snapshot.actual &&
+		printf "M  tracked\n?? nested/\n" >../commit-snapshot.expect &&
+		test_cmp ../commit-snapshot.expect ../commit-snapshot.actual &&
+		test_trace2_data status index/optional-lock acquired \
+			<../commit-snapshot-status.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore hit \
+			<../commit-snapshot-status.trace &&
+		test_trace2_data status untracked/cache-root-valid 1 \
+			<../commit-snapshot-status.trace &&
+		test_trace2_data status untracked/cache-opendir 0 \
+			<../commit-snapshot-status.trace &&
+
+		echo partial >partial &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-partial.trace" \
+			git status --porcelain >../commit-snapshot.actual &&
+		printf "?? partial\n" >>../commit-snapshot.expect &&
+		test_cmp ../commit-snapshot.expect ../commit-snapshot.actual &&
+		test_trace2_data status untracked-cache/restore-attempted 0 \
+			<../commit-snapshot-partial.trace &&
+		test_trace2_data status untracked/cache-directory-invalidated "[1-9][0-9]*" \
+			<../commit-snapshot-partial.trace &&
+
+		echo fresh >fresh &&
+		echo changed-again >>tracked &&
+		git add tracked &&
+		GIT_TRACE2_EVENT="$PWD/../commit-snapshot-stale.trace" \
+			git status --porcelain >../commit-snapshot.actual &&
+		printf "M  tracked\n?? fresh\n?? nested/\n?? partial\n" \
+			>../commit-snapshot.expect &&
+		test_cmp ../commit-snapshot.expect ../commit-snapshot.actual &&
+		test_trace2_data fsmonitor untracked-cache/restore miss \
+			<../commit-snapshot-stale.trace &&
+		test_trace2_data status untracked/cache-opendir "[1-9][0-9]*" \
+			<../commit-snapshot-stale.trace
 	)
 '
 
