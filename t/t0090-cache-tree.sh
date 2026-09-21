@@ -558,6 +558,7 @@ test_expect_success 'reset reuses unchanged cache-tree subtrees' '
 	git init reset-cache-tree &&
 	(
 		cd reset-cache-tree &&
+		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
 		mkdir -p changed/deep unchanged/deep removed/deep &&
 		echo before >changed/deep/file &&
 		echo unchanged >unchanged/deep/file &&
@@ -590,7 +591,34 @@ test_expect_success 'reset reuses unchanged cache-tree subtrees' '
 		test-tool dump-cache-tree >.git/reset-remove.cache-tree &&
 		test_grep "unchanged/deep/" .git/reset-remove.cache-tree &&
 		test_grep ! "removed/" .git/reset-remove.cache-tree &&
-		test "$(git rev-parse HEAD^{tree})" = "$(git write-tree)"
+		test "$(git rev-parse HEAD^{tree})" = "$(git write-tree)" &&
+
+		# An empty subtree cannot be reconstructed from index entries.
+		# Prime must rebuild its ancestors while retaining matching children.
+		empty_tree=$(git mktree </dev/null) &&
+		git ls-tree "$after:changed" >.git/changed.entries &&
+		printf "040000 tree %s\tz-empty\n" "$empty_tree" >>.git/changed.entries &&
+		changed_tree=$(git mktree <.git/changed.entries) &&
+		printf "040000 tree %s\tchanged\n" "$changed_tree" >.git/target.entries &&
+		git ls-tree "$after^{tree}" -- unchanged >>.git/target.entries &&
+		target_tree=$(git mktree <.git/target.entries) &&
+		target=$(git commit-tree "$target_tree" -p "$after" -m with-empty) &&
+		git reset --hard "$before" &&
+		# The test-only checker reconstructs trees from index entries and
+		# cannot represent the empty child of this otherwise valid tree.
+		GIT_TEST_CHECK_CACHE_TREE=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/reset-partial.trace" \
+			git reset --hard "$target" &&
+		test_path_is_missing removed &&
+		test_path_is_missing changed/z-empty &&
+		test "$(cat changed/deep/file)" = after &&
+		test "$(git rev-parse HEAD^{tree})" = "$target_tree" &&
+		test "$(git write-tree)" = "$target_tree" &&
+		test_region cache-tree prime_cache_tree .git/reset-partial.trace &&
+		test_trace2_data cache_tree prime/reused-subtrees 2 \
+			<.git/reset-partial.trace &&
+		test_trace2_data cache_tree prime/rebuilt-subtrees 2 \
+			<.git/reset-partial.trace
 	)
 '
 

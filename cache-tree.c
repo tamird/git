@@ -1511,10 +1511,17 @@ static void prime_cache_tree_sparse_dir(struct cache_tree *it,
 	it->entry_count = 1;
 }
 
+struct prime_cache_tree_stats {
+	uintmax_t reused;
+	uintmax_t rebuilt;
+};
+
 static void prime_cache_tree_rec(struct repository *r,
 				 struct cache_tree *it,
 				 struct tree *tree,
-				 struct strbuf *tree_path)
+				 struct strbuf *tree_path,
+				 struct cache_tree *old,
+				 struct prime_cache_tree_stats *stats)
 {
 	struct tree_desc desc;
 	struct name_entry entry;
@@ -1530,12 +1537,27 @@ static void prime_cache_tree_rec(struct repository *r,
 			cnt++;
 		else {
 			struct cache_tree_sub *sub;
-			struct tree *subtree = lookup_tree(r, &entry.oid);
+			struct cache_tree_sub *old_sub =
+				old ? find_subtree(old, entry.path, entry.pathlen, 0) : NULL;
+			struct tree *subtree;
 
+			sub = cache_tree_sub(it, entry.path);
+			if (old_sub && old_sub->cache_tree &&
+			    oideq(&old_sub->cache_tree->oid, &entry.oid) &&
+			    cache_tree_fully_valid(old_sub->cache_tree)) {
+				/* Transfer ownership before freeing the old root. */
+				sub->cache_tree = old_sub->cache_tree;
+				old_sub->cache_tree = NULL;
+				stats->reused++;
+				cnt += sub->cache_tree->entry_count;
+				continue;
+			}
+
+			subtree = lookup_tree(r, &entry.oid);
 			if (repo_parse_tree(the_repository, subtree) < 0)
 				exit(128);
-			sub = cache_tree_sub(it, entry.path);
 			sub->cache_tree = cache_tree();
+			stats->rebuilt++;
 
 			/*
 			 * Recursively-constructed subtree path is only needed when working
@@ -1559,7 +1581,10 @@ static void prime_cache_tree_rec(struct repository *r,
 			    index_entry_exists(r->index, tree_path->buf, tree_path->len))
 				prime_cache_tree_sparse_dir(sub->cache_tree, subtree);
 			else
-				prime_cache_tree_rec(r, sub->cache_tree, subtree, tree_path);
+				prime_cache_tree_rec(r, sub->cache_tree, subtree,
+						     tree_path,
+						     old_sub ? old_sub->cache_tree : NULL,
+						     stats);
 			cnt += sub->cache_tree->entry_count;
 		}
 	}
@@ -1572,30 +1597,40 @@ void prime_cache_tree(struct repository *r,
 		      struct tree *tree)
 {
 	struct strbuf tree_path = STRBUF_INIT;
-	struct cache_tree *root;
+	struct cache_tree *root = NULL, *old = NULL;
+	struct prime_cache_tree_stats stats = { 0 };
 
 	/*
 	 * Repair and validation still use the main repository's object
 	 * database. Reuse its full, non-promisor indexes only when repair
-	 * proves the cache tree is valid and matches the target tree.
+	 * succeeds. An exact root match can return directly; otherwise its
+	 * valid matching descendants can populate the replacement tree.
 	 */
 	if (r == the_repository && istate->repo == r &&
 	    !istate->sparse_index && !repo_has_promisor_remote(r) &&
 	    cache_tree_get(istate) &&
-	    !cache_tree_update(istate, WRITE_TREE_SILENT |
-			       WRITE_TREE_REPAIR | WRITE_TREE_MISSING_OK) &&
-	    (root = cache_tree_get(istate)) &&
-	    cache_tree_fully_valid(root) &&
-	    oideq(&root->oid, &tree->object.oid))
-		return;
+	    !cache_tree_update(istate,
+			       WRITE_TREE_SILENT | WRITE_TREE_REPAIR |
+				       WRITE_TREE_MISSING_OK) &&
+	    (root = cache_tree_get(istate))) {
+		if (oideq(&root->oid, &tree->object.oid) &&
+		    cache_tree_fully_valid(root))
+			return;
+		old = root;
+		istate->cache_tree = NULL;
+	}
 
 	trace2_region_enter("cache-tree", "prime_cache_tree", r);
 	cache_tree_discard(istate);
 	istate->cache_tree = cache_tree();
 
-	prime_cache_tree_rec(r, istate->cache_tree, tree, &tree_path);
+	prime_cache_tree_rec(r, istate->cache_tree, tree, &tree_path, old,
+			     &stats);
+	cache_tree_free(&old);
 	strbuf_release(&tree_path);
 	istate->cache_changed |= CACHE_TREE_CHANGED;
+	trace2_data_intmax("cache_tree", r, "prime/reused-subtrees", stats.reused);
+	trace2_data_intmax("cache_tree", r, "prime/rebuilt-subtrees", stats.rebuilt);
 	trace2_region_leave("cache-tree", "prime_cache_tree", r);
 }
 
