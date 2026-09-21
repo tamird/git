@@ -4141,6 +4141,10 @@ static void read_stdin_packs(struct repository *repo,
 	 */
 	revs.no_kept_objects = 1;
 	revs.keep_pack_cache_flags |= KEPT_PACK_IN_CORE;
+	if (mode == STDIN_PACKS_MODE_STANDARD) {
+		revs.include_check = stdin_packs_include_check;
+		revs.include_check_obj = stdin_packs_include_check_obj;
+	}
 	revs.blob_objects = 1;
 	revs.tree_objects = 1;
 	revs.tag_objects = 1;
