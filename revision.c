@@ -1938,6 +1938,7 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 	int left_first;
 	struct patch_ids ids;
 	unsigned cherry_flag;
+	int saved_errno;
 
 	/* First count the commits on the left and on the right */
 	for (p = list; p; p = p->next) {
@@ -1950,6 +1951,12 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 		else
 			right_count++;
 	}
+	saved_errno = errno;
+	trace2_data_intmax("revision", revs->repo, "cherry_pick/left_count",
+			   left_count);
+	trace2_data_intmax("revision", revs->repo, "cherry_pick/right_count",
+			   right_count);
+	errno = saved_errno;
 
 	if (!left_count || !right_count)
 		return;
@@ -2154,6 +2161,7 @@ static void limit_left_right(struct commit_list *list, struct rev_info *revs)
 static int limit_list(struct rev_info *revs)
 {
 	int slop = SLOP;
+	int saved_errno;
 	timestamp_t date = TIME_MAX;
 	struct commit_list *original_list = revs->commits;
 	struct commit_list *newlist = NULL;
@@ -2168,6 +2176,9 @@ static int limit_list(struct rev_info *revs)
 			die("--ancestry-path given but there are no bottom commits");
 	}
 
+	saved_errno = errno;
+	trace2_region_enter("revision", "limit_list_walk", revs->repo);
+	errno = saved_errno;
 	while (original_list) {
 		struct commit *commit = pop_commit(&original_list);
 		prio_queue_put(&queue, commit);
@@ -2183,6 +2194,9 @@ static int limit_list(struct rev_info *revs)
 			obj->flags |= UNINTERESTING;
 		if (process_parents(revs, commit, &queue) < 0) {
 			clear_prio_queue(&queue);
+			saved_errno = errno;
+			trace2_region_leave("revision", "limit_list_walk", revs->repo);
+			errno = saved_errno;
 			return -1;
 		}
 		if (obj->flags & UNINTERESTING) {
@@ -2201,8 +2215,18 @@ static int limit_list(struct rev_info *revs)
 		date = commit->date;
 		p = &commit_list_insert(commit, p)->next;
 	}
-	if (revs->cherry_pick || revs->cherry_mark)
+	saved_errno = errno;
+	trace2_region_leave("revision", "limit_list_walk", revs->repo);
+	errno = saved_errno;
+	if (revs->cherry_pick || revs->cherry_mark) {
+		saved_errno = errno;
+		trace2_region_enter("revision", "cherry_pick_list", revs->repo);
+		errno = saved_errno;
 		cherry_pick_list(newlist, revs);
+		saved_errno = errno;
+		trace2_region_leave("revision", "cherry_pick_list", revs->repo);
+		errno = saved_errno;
+	}
 
 	if (revs->left_only || revs->right_only)
 		limit_left_right(newlist, revs);
