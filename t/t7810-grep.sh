@@ -6479,6 +6479,7 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 	(
 		cd revision-index-partial &&
 		git config index.recordendofindexentries true &&
+		git config index.threads 4 &&
 		mkdir -p a/deep/child b &&
 		echo needle-first >0-target.txt &&
 		echo needle-root >target.txt &&
@@ -6493,6 +6494,12 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		do
 			>extra-$n || return 1
 		done &&
+		for n in $(test_seq 1 12)
+		do
+			>a/deep/extra-$n || return 1
+		done &&
+		echo needle-low >a/deep/extra-1 &&
+		echo needle-high >a/deep/extra-9 &&
 		git add . &&
 		git commit -m before &&
 		echo needle-new >b/target.txt &&
@@ -6500,7 +6507,8 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		git commit -m after &&
 		for version in 2 4
 		do
-			git update-index --index-version "$version" &&
+			GIT_TEST_INDEX_THREADS=4 \
+				git update-index --index-version "$version" --force-write-index &&
 			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**" \
 				a a/deep a/deep/child mixed target.txt a/deep/target.txt \
 				"*target.txt" "*arg?t*" "*oth[er]*" "*deep*"
@@ -6521,10 +6529,17 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 				test_cmp expect actual &&
 				test_must_be_empty err || return 1
 				case "$pathspec" in
-				":!a/"*|a/deep/child|target.txt|a/deep/target.txt)
+				":!a/"*|target.txt|a/deep/target.txt)
 					test_grep ! revision_index_reused partial.trace &&
 					test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
 						partial.trace || return 1
+					;;
+				a/deep|a/deep/child)
+					if test_have_prereq PTHREADS
+					then
+						test_trace2_data grep revision_index_reused 1 \
+							<partial.trace || return 1
+					fi
 					;;
 				*)
 					test_trace2_data grep revision_index_reused 1 \
@@ -6536,14 +6551,29 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 					test_region ! index do_read_index partial.trace || return 1
 					;;
 				esac &&
-				if test "$pathspec" = a/deep
+				if test "$pathspec" = a/deep && test_have_prereq PTHREADS
 				then
 					# Read the ancestor, but reuse only the selected nested scope.
 					test_trace2_data grep content_index_tree_directories 1 \
-						<partial.trace || return 1
+						<partial.trace &&
+					test_grep "a/deep/extra-1" actual &&
+					test_grep "a/deep/extra-9" actual &&
+					test_grep read/window_entries partial.trace &&
+					test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+						partial.trace || return 1
 				fi
 			done || return 1
 		done &&
+		GIT_TEST_INDEX_THREADS=1 git update-index --force-write-index &&
+		GIT_INDEX_FILE="$PWD/missing-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- a/deep >expect-no-ieot &&
+		GIT_TRACE2_EVENT="$PWD/no-ieot.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- a/deep >actual-no-ieot 2>err-no-ieot &&
+		test_cmp expect-no-ieot actual-no-ieot &&
+		test_must_be_empty err-no-ieot &&
+		test_grep ! read/window_entries no-ieot.trace &&
 		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/missing-literal.trace" \
 			git grep --text --no-content-index \
 				--threads=1 -n needle HEAD^ -- a/deep/missing.txt \
@@ -6551,6 +6581,40 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		test_must_be_empty actual &&
 		test_must_be_empty err &&
 		test_region ! index do_read_index missing-literal.trace
+	)
+'
+
+test_expect_success PERL,PTHREADS 'revision grep ignores malformed optional IEOT' '
+	(
+		cd revision-index-partial &&
+		GIT_TEST_INDEX_THREADS=4 git update-index --force-write-index &&
+		perl - .git/index broken-ieot <<-\EOF &&
+		use strict;
+		use warnings;
+		my ($source, $dest) = @ARGV;
+		open my $fh, "<", $source or die "$source: $!";
+		binmode $fh;
+		local $/;
+		my $index = <$fh>;
+		close $fh;
+		my $at = index($index, "IEOT");
+		$at > 12 && $at == rindex($index, "IEOT") or die "IEOT not unique";
+		substr($index, $at + 12, 4) = pack("N", 13);
+		open my $out, ">", $dest or die "$dest: $!";
+		binmode $out;
+		print {$out} $index or die "write: $!";
+		close $out or die "close: $!";
+		EOF
+		GIT_INDEX_FILE="$PWD/missing-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- a/deep >expect-broken-ieot &&
+		GIT_INDEX_FILE="$PWD/broken-ieot" \
+		GIT_TRACE2_EVENT="$PWD/broken-ieot.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- a/deep >actual-broken-ieot 2>err-broken-ieot &&
+		test_cmp expect-broken-ieot actual-broken-ieot &&
+		test_must_be_empty err-broken-ieot &&
+		test_grep ! read/window_entries broken-ieot.trace
 	)
 '
 

@@ -4147,6 +4147,7 @@ enum grep_revision_index_state {
 
 struct grep_revision_index {
 	struct index_state index;
+	struct index_tree_window *window;
 	/* Trailing slashes make overlapping directory scopes sort together. */
 	struct string_list paths;
 	/* The root descriptor and OID borrow the grep_object() call's storage. */
@@ -4224,7 +4225,8 @@ static size_t grep_revision_index_trees(struct index_state *index,
 	return count;
 }
 
-static int grep_revision_index_accept(struct index_state *index, void *data)
+static int grep_revision_index_accept_entries(struct index_state *index,
+					      size_t decoded_entries, void *data)
 {
 	struct grep_revision_index_probe *probe = data;
 	struct tree_desc tree = probe->tree;
@@ -4276,12 +4278,18 @@ static int grep_revision_index_accept(struct index_state *index, void *data)
 	/*
 	 * Tree object reads cost much more than decoding an index entry. Keep
 	 * small selections on the tree walker: require one avoided directory
-	 * read per sixteen index entries before paying for a full index read.
+	 * read per sixteen entries we would decode from this index.
 	 */
-	accepted = trees && trees >= index->cache_nr / 16 + !!(index->cache_nr % 16);
+	accepted = trees && trees >= decoded_entries / 16 +
+					!!(decoded_entries % 16);
 done:
 	strbuf_release(&path);
 	return accepted;
+}
+
+static int grep_revision_index_accept(struct index_state *index, void *data)
+{
+	return grep_revision_index_accept_entries(index, index->cache_nr, data);
 }
 
 static int grep_revision_index_load(struct repository *repo,
@@ -4289,6 +4297,20 @@ static int grep_revision_index_load(struct repository *repo,
 {
 	struct index_state *index = &revision->index;
 	struct grep_revision_index_probe *probe = &revision->probe;
+	int window_result = INDEX_TREE_WINDOW_FULL;
+
+	if (revision->paths.nr) {
+		window_result = read_index_tree_window_if_tree_accepted(
+			repo, repo_get_index_file(repo), &revision->paths,
+			grep_revision_index_accept_entries, probe,
+			&revision->window);
+		if (window_result == INDEX_TREE_WINDOW_READY) {
+			revision->state = GREP_REVISION_INDEX_ACTIVE;
+			return 1;
+		}
+		if (window_result == INDEX_TREE_WINDOW_SKIPPED)
+			goto fail;
+	}
 
 	index->lazy_cache_tree = 1;
 	if (read_index_from_if_tree_accepted(
@@ -4303,6 +4325,8 @@ static int grep_revision_index_load(struct repository *repo,
 	return 1;
 
 fail:
+	release_index_tree_window(revision->window);
+	revision->window = NULL;
 	discard_index(index);
 	revision->state = GREP_REVISION_INDEX_DISABLED;
 	return 0;
@@ -4364,6 +4388,7 @@ static int grep_tree_from_matching_index(
 	struct index_state *index = &revision->index;
 	struct strbuf parent = STRBUF_INIT;
 	struct strbuf prefix = STRBUF_INIT;
+	const struct cache_entry *const *matching_entries;
 	struct object_id oid;
 	unsigned int first = 0, count;
 	int entries, pos, oldlen = base->len;
@@ -4385,10 +4410,21 @@ static int grep_tree_from_matching_index(
 		if (!selected)
 			return 0;
 	}
-	if (base->len == tn_len) {
+	if (revision->window) {
+		if (base->len == tn_len)
+			return 0;
+		strbuf_addstr(&prefix, base->buf + tn_len);
+		strbuf_addch(&prefix, '/');
+		if (!index_tree_window_entries(revision->window, prefix.buf,
+					       tree_oid, &matching_entries, &count)) {
+			strbuf_release(&prefix);
+			return 0;
+		}
+	} else if (base->len == tn_len) {
 		if (!cache_tree_root_matches_index(index, tree_oid))
 			return 0;
 		count = index->cache_nr;
+		matching_entries = (const struct cache_entry *const *)index->cache;
 	} else {
 		entries = cache_tree_get_path(index, base->buf + tn_len, &oid, NULL);
 		if (entries <= 0 || !oideq(tree_oid, &oid))
@@ -4407,12 +4443,13 @@ static int grep_tree_from_matching_index(
 			strbuf_release(&prefix);
 			return 0;
 		}
+		matching_entries = (const struct cache_entry *const *)(index->cache + first);
 	}
 	if (query->trace_enabled)
 		trace2_data_intmax("grep", opt->repo,
 				   "revision_index_reused", 1);
-	for (unsigned int i = first; i < first + count; i++) {
-		const struct cache_entry *ce = index->cache[i];
+	for (unsigned int i = 0; i < count; i++) {
+		const struct cache_entry *ce = matching_entries[i];
 		const char *slash = strrchr(ce->name, '/');
 		struct name_entry entry = {
 			.path = slash ? slash + 1 : ce->name,
@@ -4539,6 +4576,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 					obj->type == OBJ_COMMIT, batch_ptr, query,
 					revision_index);
 		release_index(&index.index);
+		release_index_tree_window(index.window);
 		string_list_clear(&index.paths, 0);
 		strbuf_release(&index.probe.excluded);
 		if (query->trace_enabled) {

@@ -40,6 +40,7 @@
 #include "trace2.h"
 #include "varint.h"
 #include "split-index.h"
+#include "string-list.h"
 #include "symlinks.h"
 #include "utf8.h"
 #include "fsmonitor.h"
@@ -1865,7 +1866,7 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 					    const char *ondisk,
 					    unsigned long *ent_size,
 					    const struct cache_entry *previous_ce,
-					    const char *end)
+					    const char *end, int ieot_restart)
 {
 	struct cache_entry *ce;
 	size_t len;
@@ -1927,7 +1928,7 @@ static struct cache_entry *create_from_disk(struct mem_pool *ce_mem_pool,
 		}
 		strip_len = decode_varint(&cp);
 		if (end && (cp == (const unsigned char *)name ||
-			    (!previous_ce && strip_len)))
+			    (!previous_ce && strip_len && !ieot_restart)))
 			return NULL;
 		if (previous_ce) {
 			previous_len = previous_ce->ce_namelen;
@@ -2123,6 +2124,8 @@ struct index_entry_offset_table
 	struct index_entry_offset entries[FLEX_ARRAY];
 };
 
+#define IEOT_VERSION (1)
+
 static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset);
 static void write_ieot_extension(struct strbuf *sb, struct index_entry_offset_table *ieot);
 
@@ -2244,7 +2247,7 @@ static unsigned long load_cache_entry_block(struct index_state *istate,
 		}
 		ce = create_from_disk(ce_mem_pool, istate->version,
 				      mmap + src_offset,
-				      &consumed, previous_ce, end);
+				      &consumed, previous_ce, end, 0);
 		if (end && (!ce || consumed > (size_t)(end - mmap) - src_offset)) {
 			*error = 1;
 			break;
@@ -2787,6 +2790,299 @@ int read_index_from_if_tree_accepted(
 	return read_index_from_with_options_internal(
 		istate, path, gitdir, READ_INDEX_NO_SIDE_EFFECTS,
 		accept_tree, accept_data);
+}
+
+struct index_tree_window_block {
+	size_t offset;
+	unsigned int nr, first, selected_first;
+	const char *first_name;
+	unsigned int selected : 1;
+};
+
+struct index_tree_window {
+	/* Header and TREE only; this index_state never has a cache[]. */
+	struct index_state tree;
+	struct mem_pool pool;
+	struct index_tree_window_block *blocks;
+	size_t block_nr;
+	struct cache_entry **entries;
+	unsigned int entries_nr;
+};
+
+void release_index_tree_window(struct index_tree_window *window)
+{
+	if (!window)
+		return;
+	cache_tree_discard(&window->tree);
+	mem_pool_discard(&window->pool, 0);
+	free(window->entries);
+	free(window->blocks);
+	free(window);
+}
+
+static int index_window_same_stat(const struct stat *a, const struct stat *b)
+{
+	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+	       a->st_size == b->st_size &&
+	       a->st_mtime == b->st_mtime &&
+	       ST_MTIME_NSEC(*a) == ST_MTIME_NSEC(*b) &&
+	       a->st_ctime == b->st_ctime &&
+	       ST_CTIME_NSEC(*a) == ST_CTIME_NSEC(*b);
+}
+
+static int index_window_read_blocks(struct index_tree_window *window,
+				    const char *map, size_t size, size_t entry_end)
+{
+	const char *body = NULL;
+	size_t body_size = 0;
+	size_t offset = entry_end;
+	size_t extensions_end = size - 2 * the_hash_algo->rawsz -
+				3 * sizeof(uint32_t);
+	unsigned int first = 0;
+	size_t min_entry = offsetof(struct ondisk_cache_entry, data) +
+			   the_hash_algo->rawsz + sizeof(uint16_t) + 1;
+
+	while (offset < extensions_end) {
+		size_t len = get_be32(map + offset + 4);
+
+		/* EOIE has already checked every extension header and length. */
+		if (CACHE_EXT((map + offset)) == CACHE_EXT_INDEXENTRYOFFSETTABLE) {
+			if (body)
+				return -1;
+			body = map + offset + 8;
+			body_size = len;
+		}
+		offset += 8 + len;
+	}
+	if (!body || body_size < 12 || (body_size - 4) % 8 ||
+	    get_be32(body) != IEOT_VERSION ||
+	    (body_size - 4) / 8 > window->tree.cache_nr)
+		return -1;
+	window->block_nr = (body_size - 4) / 8;
+	CALLOC_ARRAY(window->blocks, window->block_nr);
+	for (size_t i = 0; i < window->block_nr; i++) {
+		struct index_tree_window_block *block = &window->blocks[i];
+		size_t end;
+		unsigned long consumed;
+		struct cache_entry *ce;
+
+		block->offset = get_be32(body + 4 + 8 * i);
+		block->nr = get_be32(body + 8 + 8 * i);
+		end = i + 1 < window->block_nr ?
+			get_be32(body + 4 + 8 * (i + 1)) : entry_end;
+		if (!block->nr || block->nr > window->tree.cache_nr - first ||
+		    block->offset < sizeof(struct cache_header) ||
+		    (i == 0 && block->offset != sizeof(struct cache_header)) ||
+		    end > entry_end || end <= block->offset ||
+		    block->nr > (end - block->offset) / min_entry)
+			return -1;
+		block->first = first;
+		first += block->nr;
+		ce = create_from_disk(&window->pool, window->tree.version,
+				      map + block->offset, &consumed, NULL,
+				      map + end, i != 0);
+		if (!ce || consumed > end - block->offset ||
+		    (i && strcmp(window->blocks[i - 1].first_name, ce->name) > 0))
+			return -1;
+		block->first_name = ce->name;
+	}
+	return first == window->tree.cache_nr ? 0 : -1;
+}
+
+static int index_window_select_blocks(struct index_tree_window *window,
+				      const struct string_list *prefixes)
+{
+	for (size_t p = 0; p < prefixes->nr; p++) {
+		const char *prefix = prefixes->items[p].string;
+		size_t len = strlen(prefix);
+
+		if (!len || prefix[len - 1] != '/')
+			return -1;
+		for (size_t i = 0; i < window->block_nr; i++) {
+			struct index_tree_window_block *block = &window->blocks[i];
+			int cmp = strcmp(block->first_name, prefix);
+
+			/* The block before the first prefix is a boundary block. */
+			if (cmp > 0 && !starts_with(block->first_name, prefix))
+				continue;
+			if (i + 1 < window->block_nr &&
+			    strcmp(window->blocks[i + 1].first_name, prefix) < 0)
+				continue;
+			block->selected = 1;
+		}
+	}
+	for (size_t i = 0; i < window->block_nr; i++) {
+		struct index_tree_window_block *block = &window->blocks[i];
+
+		if (!block->selected)
+			continue;
+		block->selected_first = window->entries_nr;
+		window->entries_nr += block->nr;
+	}
+	return window->entries_nr ? 0 : -1;
+}
+
+static int index_window_decode_blocks(struct index_tree_window *window,
+				      const char *map, size_t entry_end)
+{
+	struct cache_entry *previous = NULL;
+
+	CALLOC_ARRAY(window->entries, window->entries_nr);
+	for (size_t i = 0; i < window->block_nr; i++) {
+		struct index_tree_window_block *block = &window->blocks[i];
+		size_t offset = block->offset;
+		size_t end = i + 1 < window->block_nr ?
+			window->blocks[i + 1].offset : entry_end;
+		struct cache_entry *prev_in_block = NULL;
+
+		if (!block->selected)
+			continue;
+		for (unsigned int j = 0; j < block->nr; j++) {
+			unsigned long consumed;
+			struct cache_entry *ce;
+
+			if (offset >= end)
+				return -1;
+			ce = create_from_disk(&window->pool, window->tree.version,
+					      map + offset, &consumed,
+					      prev_in_block, map + end,
+					      i && j == 0);
+			if (!ce || consumed > end - offset ||
+			    ce->ce_flags & (CE_STAGEMASK | CE_INTENT_TO_ADD | CE_REMOVE) ||
+			    S_ISSPARSEDIR(ce->ce_mode) ||
+			    (previous && strcmp(previous->name, ce->name) >= 0))
+				return -1;
+			window->entries[block->selected_first + j] = ce;
+			offset += consumed;
+			previous = prev_in_block = ce;
+		}
+		if (offset != end ||
+		    strcmp(window->entries[block->selected_first]->name,
+			   block->first_name) ||
+		    (i + 1 < window->block_nr &&
+		     strcmp(previous->name, window->blocks[i + 1].first_name) >= 0))
+			return -1;
+	}
+	return 0;
+}
+
+int read_index_tree_window_if_tree_accepted(
+	struct repository *repo, const char *path,
+	const struct string_list *prefixes,
+	int (*accept_tree)(struct index_state *, size_t, void *),
+	void *accept_data, struct index_tree_window **result)
+{
+	struct index_tree_window *window = NULL;
+	struct load_index_extensions extensions = { 0 };
+	struct stat before, after;
+	const char *map = MAP_FAILED;
+	size_t size, entry_end;
+	int fd = -1, ret = INDEX_TREE_WINDOW_UNAVAILABLE;
+
+	*result = NULL;
+	if (repo != the_repository || !prefixes->nr ||
+	    (fd = git_open(path)) < 0 || fstat(fd, &before) ||
+	    before.st_size < 0 || (uintmax_t)before.st_size > SIZE_MAX)
+		goto done;
+	size = (size_t)before.st_size;
+	if (size < sizeof(struct cache_header) + the_hash_algo->rawsz)
+		goto done;
+	map = xmmap_gently(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (map == MAP_FAILED ||
+	    verify_hdr((const struct cache_header *)map, size, 1) < 0)
+		goto done;
+	entry_end = read_eoie_extension(map, size);
+	if (!entry_end)
+		goto done;
+	CALLOC_ARRAY(window, 1);
+	index_state_init(&window->tree, repo);
+	mem_pool_init(&window->pool, 0);
+	window->tree.version = get_be32(map + 4);
+	window->tree.cache_nr = get_be32(map + 8);
+	if (!window->tree.cache_nr || window->tree.cache_nr > INT_MAX)
+		goto done;
+	if (index_window_read_blocks(window, map, size, entry_end) ||
+	    index_window_select_blocks(window, prefixes))
+		goto done;
+	if (window->entries_nr == window->tree.cache_nr) {
+		ret = INDEX_TREE_WINDOW_FULL;
+		goto done;
+	}
+	extensions.istate = &window->tree;
+	extensions.mmap = map;
+	extensions.mmap_size = size;
+	extensions.src_offset = entry_end;
+	extensions.gentle = 1;
+	load_index_extensions(&extensions);
+	if (extensions.error || !window->tree.cache_tree_data)
+		goto done;
+	if (!accept_tree(&window->tree, window->entries_nr, accept_data)) {
+		ret = INDEX_TREE_WINDOW_SKIPPED;
+		goto done;
+	}
+	if (index_window_decode_blocks(window, map, entry_end) ||
+	    fstat(fd, &after) || !index_window_same_stat(&before, &after))
+		goto done;
+	trace2_data_intmax("index", repo, "read/window_entries", window->entries_nr);
+	*result = window;
+	window = NULL;
+	ret = INDEX_TREE_WINDOW_READY;
+done:
+	if (map != MAP_FAILED)
+		munmap((void *)map, size);
+	if (fd >= 0)
+		close(fd);
+	release_index_tree_window(window);
+	return ret;
+}
+
+static unsigned int index_window_ordinal(struct index_tree_window *window,
+					 size_t pos)
+{
+	for (size_t i = 0; i < window->block_nr; i++) {
+		const struct index_tree_window_block *block = &window->blocks[i];
+
+		if (block->selected && pos >= block->selected_first &&
+		    pos - block->selected_first < block->nr)
+			return block->first + pos - block->selected_first;
+	}
+	BUG("selected index entry has no IEOT block");
+}
+
+int index_tree_window_entries(struct index_tree_window *window,
+			      const char *prefix, const struct object_id *tree_oid,
+			      const struct cache_entry *const **entries, unsigned int *nr)
+{
+	struct object_id oid;
+	size_t lo = 0, hi = window->entries_nr, first;
+	int count;
+
+	if (!*prefix || !ends_with(prefix, "/"))
+		return 0;
+	count = cache_tree_get_path(&window->tree, prefix, &oid, NULL);
+	if (count <= 0 || !oideq(tree_oid, &oid))
+		return 0;
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+
+		if (strcmp(window->entries[mid]->name, prefix) < 0)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	first = lo;
+	if (count > window->entries_nr - first ||
+	    !starts_with(window->entries[first]->name, prefix) ||
+	    !starts_with(window->entries[first + count - 1]->name, prefix) ||
+	    (first && starts_with(window->entries[first - 1]->name, prefix)) ||
+	    (first + count < window->entries_nr &&
+	     starts_with(window->entries[first + count]->name, prefix)) ||
+	    index_window_ordinal(window, first + count - 1) -
+	    index_window_ordinal(window, first) + 1 != count)
+		return 0;
+	*entries = (const struct cache_entry *const *)(window->entries + first);
+	*nr = count;
+	return 1;
 }
 
 int read_index_from(struct index_state *istate, const char *path,
@@ -4238,8 +4534,6 @@ static void write_eoie_extension(struct strbuf *sb, struct git_hash_ctx *eoie_co
 	git_hash_final(hash, eoie_context);
 	strbuf_add(sb, hash, the_hash_algo->rawsz);
 }
-
-#define IEOT_VERSION	(1)
 
 static struct index_entry_offset_table *read_ieot_extension(const char *mmap, size_t mmap_size, size_t offset)
 {

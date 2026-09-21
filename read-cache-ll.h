@@ -314,6 +314,30 @@ int read_index_from_with_options(struct index_state *, const char *path,
 int read_index_from_if_tree_accepted(
 	struct index_state *, const char *path, const char *gitdir,
 	int (*accept_tree)(struct index_state *, void *), void *accept_data);
+struct index_tree_window;
+struct string_list;
+enum index_tree_window_result {
+	INDEX_TREE_WINDOW_UNAVAILABLE = -1,
+	INDEX_TREE_WINDOW_SKIPPED = -2,
+	INDEX_TREE_WINDOW_FULL = 0,
+	INDEX_TREE_WINDOW_READY = 1,
+};
+/*
+ * An optional, read-only index view for selected directory prefixes. The
+ * callback sees only the index header and TREE extension, never a partial
+ * cache[]. Missing metadata permits the normal full reader; SKIPPED means
+ * the selected directories cannot repay even the bounded entry decode.
+ * READY alone supplies an owned window; all other outcomes leave it NULL.
+ */
+int read_index_tree_window_if_tree_accepted(
+	struct repository *, const char *path, const struct string_list *prefixes,
+	int (*accept_tree)(struct index_state *, size_t decoded_entries, void *),
+	void *accept_data, struct index_tree_window **window);
+int index_tree_window_entries(
+	struct index_tree_window *, const char *prefix,
+	const struct object_id *tree_oid,
+	const struct cache_entry *const **entries, unsigned int *nr);
+void release_index_tree_window(struct index_tree_window *);
 int is_index_unborn(struct index_state *);
 
 /* For use with `write_locked_index()`. */
