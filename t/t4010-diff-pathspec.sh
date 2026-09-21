@@ -150,4 +150,29 @@ test_expect_success 'diff-cache ignores trailing slash on submodule path' '
 	test_cmp expect actual
 '
 
+test_expect_success 'worktree diff combines literal paths in index order' '
+	echo changed >>file0 &&
+	echo changed >>path1/file1 &&
+	echo changed >>path2/file1 &&
+	echo decoy >file0-extra &&
+	git add file0-extra &&
+	echo changed >>file0-extra &&
+	cat >expect <<-\EOF &&
+	file0
+	path1/file1
+	path2/file1
+	EOF
+	git diff --name-only -- path2/file1 path1/file1 file0 path1 >actual &&
+	test_cmp expect actual &&
+	git diff --name-only -- ":(literal)path2/file1" path1 file0 >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'worktree diff trailing slash matches dirty gitlink' '
+	( cd submod && test_commit third ) &&
+	echo submod >expect &&
+	git diff --name-only --ignore-submodules=none -- submod/ >actual &&
+	test_cmp expect actual
+'
+
 test_done

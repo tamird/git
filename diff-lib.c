@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "hex.h"
 #include "object-name.h"
+#include "pathspec.h"
 #include "preload-index.h"
 #include "read-cache.h"
 #include "revision.h"
@@ -117,6 +118,8 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 	unsigned int preload_candidates = 0;
 	uint64_t start = getnanotime();
 	struct index_state *istate = revs->diffopt.repo->index;
+	struct pathspec_index_range *ranges = NULL;
+	size_t ranges_nr = 0, range_pos = 0;
 
 	if (revs->diffopt.max_depth_valid)
 		die(_("max-depth is not supported for worktree diffs"));
@@ -128,13 +131,27 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 	if (diff_unmerged_stage < 0)
 		diff_unmerged_stage = 2;
 	entries = istate->cache_nr;
+	/* Keep exclusion matches visible to ps_matched outside positive ranges. */
+	if (istate->sparse_index == INDEX_EXPANDED &&
+	    !(revs->prune_data.magic & PATHSPEC_EXCLUDE))
+		ranges = pathspec_literal_index_ranges(istate, &revs->prune_data,
+						       &ranges_nr);
 	for (i = 0; i < entries; i++) {
 		unsigned int oldmode, newmode;
-		struct cache_entry *ce = istate->cache[i];
+		struct cache_entry *ce;
 		int changed;
 		unsigned dirty_submodule = 0;
 		const struct object_id *old_oid, *new_oid;
 
+		if (ranges) {
+			while (range_pos < ranges_nr && i >= ranges[range_pos].end)
+				range_pos++;
+			if (range_pos == ranges_nr)
+				break;
+			if (i < ranges[range_pos].first)
+				i = ranges[range_pos].first;
+		}
+		ce = istate->cache[i];
 		if (diff_can_quit_early(&revs->diffopt))
 			break;
 
@@ -302,6 +319,7 @@ void run_diff_files(struct rev_info *revs, unsigned int option)
 			    ce->name, 0, dirty_submodule);
 
 	}
+	free(ranges);
 	diffcore_std(&revs->diffopt);
 	diff_flush(&revs->diffopt);
 	trace_performance_since(start, "diff-files");

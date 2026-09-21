@@ -87,6 +87,17 @@ test_expect_success 'diff-files -3' '
 	test_cmp diff-files-3.expect diff-files-3.actual
 '
 
+test_expect_success 'literal path ranges keep all unmerged outputs' '
+	cat >expect <<-\EOF &&
+	oox
+	oxx
+	oxx
+	xoo
+	EOF
+	git diff-files --name-only -- xoo oxx oox >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'diff --stat' '
 	for path in $paths
 	do

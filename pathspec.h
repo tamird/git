@@ -56,6 +56,21 @@ struct pathspec {
 	} *items;
 };
 
+struct pathspec_index_range {
+	size_t first, end;
+};
+
+/*
+ * Return sorted, coalesced candidate ranges for case-sensitive literal
+ * pathspecs. For a complete candidate set, callers require a full index and
+ * must still apply the pathspec matcher.
+ * NULL means a full scan is required; a non-NULL result may have zero ranges.
+ * The caller owns the returned array.
+ */
+struct pathspec_index_range *pathspec_literal_index_ranges(
+	struct index_state *istate, const struct pathspec *pathspec,
+	size_t *ranges_nr);
+
 int pathspec_item_get_recursive_basename(
 	const struct pathspec_item *item, const char **basename);
 

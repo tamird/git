@@ -42,6 +42,73 @@ static int literal_pathspec_prefix_len(const struct pathspec *pathspec)
 	return len;
 }
 
+static int pathspec_index_range_cmp(const void *va, const void *vb)
+{
+	const struct pathspec_index_range *a = va, *b = vb;
+
+	return (a->first > b->first) - (a->first < b->first);
+}
+
+struct pathspec_index_range *pathspec_literal_index_ranges(
+	struct index_state *istate, const struct pathspec *pathspec,
+	size_t *ranges_nr)
+{
+	struct pathspec_index_range *ranges;
+	size_t nr = 0;
+
+	if (!pathspec->nr ||
+	    (pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL |
+				 PATHSPEC_MAXDEPTH | PATHSPEC_EXCLUDE)))
+		return NULL;
+	for (size_t i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+
+		if (item->nowildcard_len != item->len ||
+		    (!(item->magic & PATHSPEC_EXCLUDE) && !item->len))
+			return NULL;
+	}
+
+	ALLOC_ARRAY(ranges, pathspec->nr);
+	for (size_t i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+		size_t first, end, low, prefix_len;
+		int pos;
+
+		if (item->magic & PATHSPEC_EXCLUDE)
+			continue;
+		prefix_len = item->len;
+		/* A trailing slash also matches a gitlink without that slash. */
+		if (prefix_len > 1 && item->match[prefix_len - 1] == '/')
+			prefix_len--;
+		pos = index_name_pos_sparse(istate, item->match, prefix_len);
+		first = pos < 0 ? -pos - 1 : pos;
+		end = istate->cache_nr;
+		for (low = first; low < end;) {
+			size_t mid = low + (end - low) / 2;
+
+			if (!strncmp(istate->cache[mid]->name, item->match,
+				     prefix_len))
+				low = mid + 1;
+			else
+				end = mid;
+		}
+		if (first < end)
+			ranges[nr++] = (struct pathspec_index_range){ first, end };
+	}
+	QSORT(ranges, nr, pathspec_index_range_cmp);
+	*ranges_nr = 0;
+	for (size_t i = 0; i < nr; i++) {
+		if (*ranges_nr &&
+		    ranges[i].first <= ranges[*ranges_nr - 1].end) {
+			if (ranges[i].end > ranges[*ranges_nr - 1].end)
+				ranges[*ranges_nr - 1].end = ranges[i].end;
+		} else {
+			ranges[(*ranges_nr)++] = ranges[i];
+		}
+	}
+	return ranges;
+}
+
 /*
  * Finds which of the given pathspecs match items in the index.
  *

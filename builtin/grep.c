@@ -1544,72 +1544,6 @@ static int grep_tree_literal_path_matches(const struct pathspec_item *item,
 	       !memcmp(item->match + base_len, path, path_len);
 }
 
-struct grep_index_range {
-	size_t first, end;
-};
-
-static int grep_index_range_cmp(const void *va, const void *vb)
-{
-	const struct grep_index_range *a = va, *b = vb;
-
-	return (a->first > b->first) - (a->first < b->first);
-}
-
-static struct grep_index_range *grep_literal_index_ranges(
-	struct index_state *istate, const struct pathspec *pathspec,
-	size_t *ranges_nr)
-{
-	struct grep_index_range *ranges;
-	size_t nr = 0;
-
-	if (!pathspec->nr ||
-	    (pathspec->magic & ~(PATHSPEC_FROMTOP | PATHSPEC_LITERAL |
-				 PATHSPEC_MAXDEPTH | PATHSPEC_EXCLUDE)))
-		return NULL;
-	for (size_t i = 0; i < pathspec->nr; i++) {
-		const struct pathspec_item *item = &pathspec->items[i];
-
-		if (item->nowildcard_len != item->len ||
-		    (!(item->magic & PATHSPEC_EXCLUDE) && !item->len))
-			return NULL;
-	}
-
-	ALLOC_ARRAY(ranges, pathspec->nr);
-	for (size_t i = 0; i < pathspec->nr; i++) {
-		const struct pathspec_item *item = &pathspec->items[i];
-		size_t first, end, low;
-		int pos;
-
-		if (item->magic & PATHSPEC_EXCLUDE)
-			continue;
-		pos = index_name_pos_sparse(istate, item->match, item->len);
-		first = pos < 0 ? -pos - 1 : pos;
-		end = istate->cache_nr;
-		for (low = first; low < end;) {
-			size_t mid = low + (end - low) / 2;
-
-			if (starts_with(istate->cache[mid]->name, item->match))
-				low = mid + 1;
-			else
-				end = mid;
-		}
-		if (first < end)
-			ranges[nr++] = (struct grep_index_range){ first, end };
-	}
-	QSORT(ranges, nr, grep_index_range_cmp);
-	*ranges_nr = 0;
-	for (size_t i = 0; i < nr; i++) {
-		if (*ranges_nr &&
-		    ranges[i].first <= ranges[*ranges_nr - 1].end) {
-			if (ranges[i].end > ranges[*ranges_nr - 1].end)
-				ranges[*ranges_nr - 1].end = ranges[i].end;
-		} else {
-			ranges[(*ranges_nr)++] = ranges[i];
-		}
-	}
-	return ranges;
-}
-
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1712,8 +1646,8 @@ static int grep_cache(struct grep_opt *opt,
 			"GIT_TEST_GREP_UNTRACKED_SCOPE_MIN_PATHS",
 			GREP_UNTRACKED_SCOPE_MIN_PATHS);
 		uint64_t eligible_paths = 0;
-		struct grep_index_range full_index = { 0, repo->index->cache_nr };
-		struct grep_index_range *ranges = &full_index;
+		struct pathspec_index_range full_index = { 0, repo->index->cache_nr };
+		struct pathspec_index_range *ranges = &full_index;
 		size_t ranges_nr = 1, range_pos = 0, range_offset = 0;
 		size_t candidate_nr = repo->index->cache_nr;
 		size_t entries_examined = 0;
@@ -1728,9 +1662,9 @@ static int grep_cache(struct grep_opt *opt,
 			sample_nr = match_budget / pathspec_cost;
 		/* Only build ranges when the comparison budget can qualify. */
 		if (min_paths && sample_nr >= min_paths) {
-			struct grep_index_range *literal_ranges =
-				grep_literal_index_ranges(repo->index, pathspec,
-							  &ranges_nr);
+			struct pathspec_index_range *literal_ranges =
+				pathspec_literal_index_ranges(repo->index, pathspec,
+							      &ranges_nr);
 
 			if (literal_ranges) {
 				ranges = literal_ranges;
