@@ -414,7 +414,7 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 					    struct cache_tree_validation_stats *stats)
 {
 	struct cache_tree_oid_order order = { 0 };
-	size_t i;
+	size_t i, checks = 0;
 	uint64_t ordered_object_check_ns = 0;
 	uint64_t selected_checks = 0;
 	int trace_packed = trace2_is_enabled();
@@ -436,14 +436,18 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 			ODB_HAS_OBJECT_RECHECK_PACKED |
 			ODB_HAS_OBJECT_FETCH_PROMISOR;
 
+		if (i && oideq(&order.nodes[i - 1]->oid, &order.nodes[i]->oid))
+			continue;
+
 		/* Cover short validations, then sample every 64th ordered check. */
 		if (trace_packed &&
-		    (i < CACHE_TREE_OID_ORDER_PROBE_PREFIX ||
-		     !((i - CACHE_TREE_OID_ORDER_PROBE_PREFIX) %
+		    (checks < CACHE_TREE_OID_ORDER_PROBE_PREFIX ||
+		     !((checks - CACHE_TREE_OID_ORDER_PROBE_PREFIX) %
 		       CACHE_TREE_OID_ORDER_PROBE_INTERVAL))) {
 			check_flags |= ODB_HAS_OBJECT_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP;
 			selected_checks++;
 		}
+		checks++;
 		if (stats && stats->time_object_checks) {
 			saved_errno = errno;
 			trace2_timer_start(TRACE2_TIMER_ID_CACHE_TREE_OBJECT_CHECK);
@@ -473,12 +477,12 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 	}
 	if (i < order.nr) {
 		if (stats) {
-			stats->object_checks += i + 1;
+			stats->object_checks += checks;
 			stats->object_check_ns += ordered_object_check_ns;
 		}
 		saved_errno = errno;
 		trace2_data_intmax("cache_tree", the_repository,
-				   "validate/oid-order/probes", i + 1);
+				   "validate/oid-order/probes", checks);
 		trace2_data_intmax("cache_tree", the_repository,
 				   "validate/oid-order/fallback", 1);
 		errno = saved_errno;
@@ -486,12 +490,12 @@ static int cache_tree_fully_valid_oid_order(struct cache_tree *it,
 	}
 	if (stats) {
 		stats->nodes += order.nr;
-		stats->object_checks += order.nr;
+		stats->object_checks += checks;
 		stats->object_check_ns += ordered_object_check_ns;
 	}
 	saved_errno = errno;
 	trace2_data_intmax("cache_tree", the_repository,
-			   "validate/oid-order/probes", order.nr);
+			   "validate/oid-order/probes", checks);
 	errno = saved_errno;
 	free(order.nodes);
 	return 1;

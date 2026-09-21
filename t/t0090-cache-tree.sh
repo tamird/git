@@ -1043,9 +1043,11 @@ test_expect_success 'cache-tree update and ordered validation sample packed chec
 		cd update-probes &&
 		sane_unset GIT_TEST_SPLIT_INDEX GIT_TEST_SPARSE_INDEX &&
 		blob=$(git rev-parse HEAD:b/file) &&
-		test_seq -f "d%04d/file" 1 1100 |
-			sed "s|^|100644 $blob	|" |
-			git update-index --index-info &&
+		{
+			test_seq -f "d%04d" 1 1100 |
+				sed "s|.*|100644 $blob	&/&|" &&
+			printf "100644 %s\tduplicate/file\n" "$blob"
+		} | git update-index --index-info &&
 		git commit -m many-directories &&
 		git rev-parse HEAD^{tree} >.git/expected.tree &&
 		snapshot_cache_tree_validation_state &&
@@ -1054,6 +1056,10 @@ test_expect_success 'cache-tree update and ordered validation sample packed chec
 			git write-tree --validate-cache-tree-only >.git/loose-validated.tree &&
 		test_cmp .git/expected.tree .git/loose-validated.tree &&
 		test_cache_tree_validation_state_unchanged &&
+		test_trace2_data cache_tree validate/nodes-total 1104 <.git/loose-validate.trace &&
+		test_trace2_data cache_tree validate/object-checks-total 1103 <.git/loose-validate.trace &&
+		test_trace2_data cache_tree validate/oid-order/probes 1103 <.git/loose-validate.trace &&
+		test_cache_tree_object_check_time .git/loose-validate.trace 1103 &&
 		test_trace2_data cache_tree validate/oid-order/packed-lookup-selected-checks-total 1026 \
 			<.git/loose-validate.trace &&
 		test_trace2_data cache_tree validate/oid-order/packed-midx-searches-total 0 \
@@ -1082,6 +1088,10 @@ test_expect_success 'cache-tree update and ordered validation sample packed chec
 			git write-tree --validate-cache-tree-only >.git/validated.tree &&
 		test_cmp .git/expected.tree .git/validated.tree &&
 		test_cache_tree_validation_state_unchanged &&
+		test_trace2_data cache_tree validate/nodes-total 1104 <.git/validate.trace &&
+		test_trace2_data cache_tree validate/object-checks-total 1103 <.git/validate.trace &&
+		test_trace2_data cache_tree validate/oid-order/probes 1103 <.git/validate.trace &&
+		test_cache_tree_object_check_time .git/validate.trace 1103 &&
 		test_trace2_data cache_tree validate/oid-order/packed-lookup-selected-checks-total 1026 \
 			<.git/validate.trace &&
 		test_grep ! "\"key\":\"update/reuse-packed-attempts-total\"" \
@@ -1118,7 +1128,7 @@ test_expect_success 'cache-tree update and ordered validation sample packed chec
 		run_cache_tree_update_trace "$PWD/.git/update.trace" .git/actual \
 			git write-tree &&
 		git cat-file -e "$(cat .git/actual)^{tree}" &&
-		test_trace2_data cache_tree update/reuse-object-checks-total 1101 <.git/update.trace &&
+		test_trace2_data cache_tree update/reuse-object-checks-total 1102 <.git/update.trace &&
 		test_trace2_data cache_tree update/reuse-object-probed-checks-total 1026 <.git/update.trace &&
 		if test_have_prereq ODB_MONOTONIC_CLOCK
 		then
