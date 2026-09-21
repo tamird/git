@@ -6360,11 +6360,12 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 test_expect_success 'revision grep reuses an exact index for wildcard pathspecs' '
 	(
 		cd revision-index &&
-		for selection in one overlapping
+		for selection in one overlapping multiple
 		do
 			case "$selection" in
 			one) set -- "*target.txt" ;;
 			overlapping) set -- "*target.txt" "*other.txt" "*.txt" ;;
+			multiple) set -- "*arg?t*" "*oth[er]*" "*deep*" ;;
 			esac &&
 			GIT_INDEX_FILE="$PWD/missing-index" \
 				git grep --text --no-content-index --threads=1 -n \
@@ -6442,17 +6443,34 @@ test_expect_success PERL 'revision grep ignores a malformed optional index entry
 	)
 '
 
-test_expect_success 'revision grep falls back when staged contents change' '
+test_expect_success 'revision grep reuses valid children of an invalid cache tree' '
 	(
 		cd revision-index &&
 		echo staged-only >target.txt &&
-		git add target.txt &&
-		GIT_TRACE2_EVENT="$PWD/changed.trace" \
-			git grep --text --no-content-index --threads=1 -n \
-				needle HEAD -- ":(glob)**/target.txt" \
-				>actual &&
-		test_cmp expect actual &&
-		test_grep ! revision_index_reused changed.trace
+		echo staged-only >b/other.txt &&
+		git add target.txt b/other.txt &&
+		for version in 2 4
+		do
+			git update-index --index-version "$version" &&
+			test-tool dump-cache-tree >cache-tree &&
+			test_grep "^invalid  *(" cache-tree &&
+			test_grep "^invalid  *b/" cache-tree &&
+			test_grep "^$OID_REGEX a/" cache-tree &&
+			for pathspec in ":(glob)**/*.txt" "*target.txt" "*oth[er]*" "*deep*"
+			do
+				GIT_INDEX_FILE="$PWD/missing-index" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD -- "$pathspec" >expect-staged &&
+				rm -f changed.trace &&
+				GIT_TRACE2_EVENT="$PWD/changed.trace" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD -- "$pathspec" >actual 2>err &&
+				test_cmp expect-staged actual &&
+				test_must_be_empty err &&
+				test_trace2_data grep revision_index_reused 1 \
+					<changed.trace || return 1
+			done || return 1
+		done
 	)
 '
 
@@ -6484,7 +6502,8 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		do
 			git update-index --index-version "$version" &&
 			for pathspec in ":" ":(glob)**/target.txt" ":!b/**" ":!a/**" ":!a/deep/**" \
-				a a/deep a/deep/child mixed target.txt a/deep/target.txt
+				a a/deep a/deep/child mixed target.txt a/deep/target.txt \
+				"*target.txt" "*arg?t*" "*oth[er]*" "*deep*"
 			do
 				set -- "$pathspec" &&
 				case "$pathspec" in

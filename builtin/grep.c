@@ -4137,7 +4137,6 @@ struct grep_revision_index_probe {
 	struct tree_desc tree;
 	struct string_list *paths;
 	struct strbuf excluded;
-	int root_only;
 };
 
 enum grep_revision_index_state {
@@ -4179,6 +4178,13 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 			strbuf_add(&path, item->match, item->len);
 			strbuf_complete(&path, '/');
 			string_list_append(probe->paths, path.buf);
+		} else if (!item->magic && !item->prefix &&
+			   !item->nowildcard_len && item->len &&
+			   item->match[0] == '*' && !strchr(item->match, '/') &&
+			   !strchr(item->match, '\\')) {
+			/* Default leading wildcards require visiting every directory. */
+			positive++;
+			universal = 1;
 		} else if (!probe->excluded.len &&
 			   item->magic == PATHSPEC_EXCLUDE && item->len > 3 &&
 			   item->nowildcard_len == item->len - 2 &&
@@ -4228,14 +4234,13 @@ static int grep_revision_index_accept(struct index_state *index, void *data)
 	uintmax_t trees = 0;
 	int accepted = 0;
 
-	if (probe->root_only)
-		return cache_tree_root_matches_index(index, probe->tree_oid);
 	if (!probe->paths->nr && !probe->excluded.len &&
 	    cache_tree_root_matches_index(index, probe->tree_oid))
 		return 1;
-	if (cache_tree_get_path(index, "", &oid, NULL) != index->cache_nr)
-		return 0;
-	/* The actual root is already read. Inspect its children without I/O. */
+	/*
+	 * An invalid cache-tree root can retain valid children. The requested
+	 * root is already read, so inspect its children without further I/O.
+	 */
 	tree.flags |= TREE_DESC_SILENT_ERRORS;
 	while (tree.size) {
 		const char *previous = NULL;
@@ -4319,13 +4324,8 @@ static int grep_revision_index_prepare(
 		if (oidmap_get_size(&opt->repo->objects->replace_map))
 			return 0;
 	}
-	if (!grep_revision_index_pathspec(pathspec, query, probe)) {
-		/* Broad suffix selectors require walking every directory. */
-		if (!query->onestar_suffix_pathspec)
-			return 0;
-		probe->root_only = 1;
-		string_list_clear(&revision->paths, 0);
-	}
+	if (!grep_revision_index_pathspec(pathspec, query, probe))
+		return 0;
 	if (revision->paths.nr) {
 		/* A file-shaped literal scope cannot reuse a child tree. */
 		revision->state = GREP_REVISION_INDEX_DEFERRED;
