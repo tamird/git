@@ -4019,31 +4019,12 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 			"overlay present needle 7818" -- "$@" >actual &&
 	test_cmp expect actual &&
 	test_path_is_missing .git/index.grep-token &&
-	test_region grep load_worktree_cache overlay-literal.trace &&
-	test_region grep query_content_index_ipc overlay-literal.trace &&
+	test_region ! grep load_worktree_cache overlay-literal.trace &&
+	test_region ! grep query_content_index_ipc overlay-literal.trace &&
 	test_region ! grep query_content_index_overlay overlay-literal.trace &&
-	test_trace2_data grep index_identity/computations 1 \
-		<overlay-literal.trace &&
 	test_trace2_data grep literal_path_candidates 42 \
 		<overlay-literal.trace &&
-	test_trace2_data grep content_index_literal_path_queried 2 \
-		<overlay-literal.trace &&
-	test_trace2_data grep content_index_literal_path_candidates 41 \
-		<overlay-literal.trace &&
-	test_trace2_data grep content_index_literal_path_rejected 1 \
-		<overlay-literal.trace &&
-	test_grep_timer overlay-literal.trace content-index/select-oids 1 &&
-	test_grep \
-		"\"event\":\"data_json\".*\"key\":\"content_index_selected_oid_ipc_intervals\"" \
-		overlay-literal.trace >actual &&
-	test_line_count = 1 actual &&
-	test_grep \
-		"\"batch_0\":{\"outcome\":0,\"requests_planned\":1,\"requests_started\":1,\"clock_invalid\":[01]" \
-		actual &&
-	test_grep "\"probe\":{\"outcome\":1,\"attempts\":1,\"diagnostic_version\":2" actual &&
-	test_grep "\"request_0\":{\"objects\":2,\"outcome\":0" actual &&
-	test_grep "\"query\":{\"unique_objects\":2,\"requests_validated\":1" actual &&
-	test_grep "\"server\":{\"timing_invalid\":[01]" actual &&
+	! test_grep "content_index_literal_path_" overlay-literal.trace &&
 	echo "overlay absent worktree needle 7818" >overlay-worktree &&
 	git status --porcelain >/dev/null &&
 	echo "overlay-worktree:overlay absent worktree needle 7818" >expect &&
@@ -4086,7 +4067,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon overlays stale persistent index' '
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'selected OID unknowns skip preparation for 82 objects' '
+	'selected OID unknowns skip preparation for 90 objects' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git rm -f --ignore-unmatch -- \
 				literal-candidate-direct-present \
@@ -4102,7 +4083,7 @@ test_expect_success FSMONITOR_DAEMON \
 		>literal-candidate-direct-present &&
 	echo "literal fallback unrelated contents" \
 		>literal-candidate-direct-absent &&
-	test_seq -f "literal-candidate-direct-extra-%02g" 1 80 |
+	test_seq -f "literal-candidate-direct-extra-%02g" 1 88 |
 	while read path
 	do
 		printf "literal fallback unknown %s\n" "$path" >"$path" ||
@@ -4112,6 +4093,18 @@ test_expect_success FSMONITOR_DAEMON \
 		literal-candidate-direct-absent \
 		literal-candidate-direct-extra-* &&
 	git status --porcelain >/dev/null &&
+	echo "literal-candidate-direct-present:literal fallback present needle 7818" \
+		>expect &&
+	GIT_TRACE2_EVENT="$PWD/literal-direct-compact.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback present needle 7818" -- \
+			literal-candidate-direct-* >actual &&
+	test_cmp expect actual &&
+	test_trace2_data grep literal_path_candidates 90 \
+		<literal-direct-compact.trace &&
+	test_region ! grep load_worktree_cache literal-direct-compact.trace &&
+	test_region ! grep load_content_index literal-direct-compact.trace &&
+	test_region ! grep query_content_index_ipc literal-direct-compact.trace &&
 	set -- literal-candidate-* &&
 	git grep --no-content-index -F \
 		"literal fallback present needle 7818" -- "$@" >expect &&
@@ -4121,7 +4114,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-present.trace 122 122 1 82 40 0 &&
+	test_content_index_ipc_query literal-direct-present.trace 130 130 1 90 40 0 &&
 	test_region grep load_content_index literal-direct-present.trace &&
 	test_region ! grep prepare_content_index literal-direct-present.trace &&
 	GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
@@ -4131,7 +4124,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-prepared.trace 122 122 1 82 40 0 &&
+	test_content_index_ipc_query literal-direct-prepared.trace 130 130 1 90 40 0 &&
 	test_region grep load_content_index literal-direct-prepared.trace &&
 	test_region grep prepare_content_index literal-direct-prepared.trace &&
 	test_must_fail git grep --no-content-index -F \
@@ -4143,7 +4136,7 @@ test_expect_success FSMONITOR_DAEMON \
 			>actual 2>err &&
 	test_cmp expect actual &&
 	test_must_be_empty err &&
-	test_content_index_ipc_query literal-direct-absent.trace 122 122 1 82 -1 -1 &&
+	test_content_index_ipc_query literal-direct-absent.trace 130 130 1 90 -1 -1 &&
 	test_region grep load_content_index literal-direct-absent.trace &&
 	test_region ! grep prepare_content_index literal-direct-absent.trace &&
 	test_must_fail env GIT_TEST_GREP_CONTENT_INDEX_DIRECT_MAX_OIDS=9 \
@@ -4154,9 +4147,22 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expect actual &&
 	test_must_be_empty err &&
 	test_content_index_ipc_query literal-direct-absent-prepared.trace \
-		122 122 1 82 -1 -1 &&
+		130 130 1 90 -1 -1 &&
 	test_region grep load_content_index literal-direct-absent-prepared.trace &&
-	test_region grep prepare_content_index literal-direct-absent-prepared.trace
+	test_region grep prepare_content_index literal-direct-absent-prepared.trace &&
+	echo "literal fallback absent needle 7818" \
+		>literal-candidate-direct-absent &&
+	git status --porcelain >/dev/null &&
+	git grep --no-content-index -F \
+		"literal fallback absent needle 7818" -- "$@" >expect &&
+	GIT_TRACE2_EVENT="$PWD/literal-direct-dirty.trace" \
+		git --no-optional-locks grep -F \
+			"literal fallback absent needle 7818" -- "$@" \
+			>actual 2>err &&
+	test_cmp expect actual &&
+	test_must_be_empty err &&
+	test_region grep load_worktree_cache literal-direct-dirty.trace &&
+	test_region grep query_content_index_ipc literal-direct-dirty.trace
 '
 
 test_expect_success 'content index prunes impossible blobs' '
@@ -4807,7 +4813,7 @@ test_expect_success FSMONITOR_DAEMON \
 '
 
 test_expect_success FSMONITOR_DAEMON \
-	'content index prunes literal path candidates' '
+	'compact literal path candidates bypass content index' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git checkout -- literal-candidate-a-01 &&
 			    rm -f .git/index.grep-worktree \
@@ -4853,12 +4859,9 @@ test_expect_success FSMONITOR_DAEMON \
 	test_cmp expected actual &&
 	test_trace2_data grep literal_path_candidates 40 \
 		<candidate-literal-mixed.trace &&
-	test_trace2_data grep content_index_literal_path_queried 38 \
-		<candidate-literal-mixed.trace &&
-	test_trace2_data grep content_index_literal_path_candidates 3 \
-		<candidate-literal-mixed.trace &&
-	test_trace2_data grep content_index_literal_path_rejected 37 \
-		<candidate-literal-mixed.trace
+	test_region ! grep load_worktree_cache candidate-literal-mixed.trace &&
+	test_region ! grep query_content_index_ipc candidate-literal-mixed.trace &&
+	! test_grep "content_index_literal_path_" candidate-literal-mixed.trace
 '
 
 test_expect_success 'content index prunes impossible multiple patterns' '

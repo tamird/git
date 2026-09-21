@@ -299,6 +299,7 @@ static void trace_worker_target_growth(void)
 #define GREP_TREE_INDEX_BATCH_MAX_BYTES	  (16U * 1024 * 1024)
 #define GREP_TREE_INDEX_MAX_REQUESTS	  2
 #define GREP_MIN_FILES_FOR_THREADS 32
+#define GREP_LITERAL_PATH_MAX_FILES   128
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
 #define GREP_INDEX_DIRECT_UNKNOWN_MAX_OIDS 128
 
@@ -1975,9 +1976,7 @@ static int grep_cache(struct grep_opt *opt,
 						   "rooted_glob_path_candidates" :
 						   "literal_path_candidates",
 					   selected_nr);
-			if (selected_nr < GREP_MIN_FILES_FOR_THREADS ||
-			    (selected_nr < 2 * GREP_MIN_FILES_FOR_THREADS &&
-			     pathspec->nr < GREP_MIN_FILES_FOR_THREADS)) {
+			if (selected_nr <= GREP_LITERAL_PATH_MAX_FILES) {
 				uint64_t selected_bytes = 0;
 
 				skip_cache_setup = 1;
