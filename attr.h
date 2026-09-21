@@ -133,6 +133,15 @@ struct git_attr;
 /* opaque structures used internally for attribute collection */
 struct all_attrs_item;
 struct attr_stack;
+struct cache_entry;
+struct repository;
+
+/* A read-only indexed source covering every path queried through this check. */
+struct attr_index_source {
+	struct repository *repo;
+	const struct cache_entry *(*find)(void *data, const char *path);
+	void *data;
+};
 
 /*
  * The textual object name for the tree-ish used by git_check_attr()
@@ -190,6 +199,7 @@ struct attr_check {
 	int all_attrs_nr;
 	struct all_attrs_item *all_attrs;
 	struct attr_stack *stack;
+	const struct attr_index_source *index_source;
 	unsigned int trace_query_count;
 };
 
@@ -216,6 +226,8 @@ const char *git_attr_name(const struct git_attr *);
 void git_check_attr(struct index_state *istate,
 		    const char *path,
 		    struct attr_check *check);
+void git_check_attr_with_source(struct index_state *, const char *,
+				struct attr_check *, const struct attr_index_source *);
 
 /*
  * Retrieve all attributes that apply to the specified path.

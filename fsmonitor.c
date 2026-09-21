@@ -2,10 +2,12 @@
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
+#include "abspath.h"
 #include "config.h"
 #include "dir.h"
 #include "environment.h"
 #include "ewah/ewok.h"
+#include "ewah/ewok_rlw.h"
 #include "fsmonitor.h"
 #include "fsmonitor-ipc.h"
 #include "name-hash.h"
@@ -64,45 +66,84 @@ static int fsmonitor_hook_version(void)
 	return -1;
 }
 
-int read_fsmonitor_extension(struct index_state *istate, const void *data,
-	unsigned long sz)
+static int parse_fsmonitor_extension(const void *data, size_t sz,
+				     char **token, struct ewah_bitmap **dirty)
 {
 	const char *index = data;
-	uint32_t hdr_version;
-	uint32_t ewah_size;
+	const char *end = index + sz;
+	uint32_t hdr_version, ewah_size, words;
 	struct ewah_bitmap *fsmonitor_dirty;
-	int ret;
 	uint64_t timestamp;
 	struct strbuf last_update = STRBUF_INIT;
+	size_t expanded = 0, last_rlw = 0;
 
 	if (sz < sizeof(uint32_t) + 1 + sizeof(uint32_t))
-		return error("corrupt fsmonitor extension (too short)");
+		return -1;
 
 	hdr_version = get_be32(index);
 	index += sizeof(uint32_t);
 	if (hdr_version == INDEX_EXTENSION_VERSION1) {
+		if (end - index < sizeof(uint64_t) + sizeof(uint32_t))
+			goto fail;
 		timestamp = get_be64(index);
 		strbuf_addf(&last_update, "%"PRIu64"", timestamp);
 		index += sizeof(uint64_t);
 	} else if (hdr_version == INDEX_EXTENSION_VERSION2) {
-		strbuf_addstr(&last_update, index);
+		const char *nul = memchr(index, 0, end - index);
+
+		if (!nul || nul == index)
+			goto fail;
+		strbuf_add(&last_update, index, nul - index);
 		index += last_update.len + 1;
 	} else {
-		return error("bad fsmonitor version %d", hdr_version);
+		goto fail;
 	}
-
-	istate->fsmonitor_last_update = strbuf_detach(&last_update, NULL);
-
+	if (end - index < sizeof(uint32_t))
+		goto fail;
 	ewah_size = get_be32(index);
 	index += sizeof(uint32_t);
+	if (ewah_size != end - index || ewah_size < 12)
+		goto fail;
+	words = get_be32(index + 4);
+	if (!words || words > (ewah_size - 12) / 8 ||
+	    12 + (size_t)words * 8 != ewah_size)
+		goto fail;
+	/* Bound both the compressed reads and the expanded iteration. */
+	for (size_t i = 0; i < words;) {
+		eword_t rlw = get_be64(index + 8 + i * 8);
+		size_t literals = rlw_get_literal_words(&rlw);
+		size_t run = rlw_get_running_len(&rlw);
+		size_t limit = DIV_ROUND_UP((uint64_t)get_be32(index), BITS_IN_EWORD);
 
-	fsmonitor_dirty = ewah_new();
-	ret = ewah_read_mmap(fsmonitor_dirty, index, ewah_size);
-	if (ret != ewah_size) {
-		ewah_free(fsmonitor_dirty);
-		return error("failed to parse ewah bitmap reading fsmonitor index extension");
+		last_rlw = i++;
+		if (literals > words - i || expanded > limit ||
+		    run > limit - expanded || literals > limit - expanded - run)
+			goto fail;
+		expanded += run + literals;
+		i += literals;
 	}
-	istate->fsmonitor_dirty = fsmonitor_dirty;
+	if (get_be32(index + 8 + (size_t)words * 8) != last_rlw ||
+	    expanded != DIV_ROUND_UP((uint64_t)get_be32(index), BITS_IN_EWORD))
+		goto fail;
+	fsmonitor_dirty = ewah_new();
+	if (ewah_read_mmap(fsmonitor_dirty, index, ewah_size) != ewah_size) {
+		ewah_free(fsmonitor_dirty);
+		goto fail;
+	}
+	*token = strbuf_detach(&last_update, NULL);
+	*dirty = fsmonitor_dirty;
+	return 0;
+fail:
+	strbuf_release(&last_update);
+	return -1;
+}
+
+int read_fsmonitor_extension(struct index_state *istate, const void *data,
+			     unsigned long sz)
+{
+	if (parse_fsmonitor_extension(data, sz, &istate->fsmonitor_last_update,
+				      &istate->fsmonitor_dirty))
+		return error("corrupt fsmonitor extension");
 
 	if (!istate->split_index)
 		assert_index_minimum(istate, istate->fsmonitor_dirty->bit_size);
@@ -915,6 +956,143 @@ int fsmonitor_trivial_generation_cause(const struct strbuf *query_result,
 	return code;
 }
 
+static int query_fsmonitor_ipc(const char *token, enum fsmonitor_query_kind kind,
+			       struct strbuf *result, struct strbuf *new_token, size_t *bol, int *trivial)
+{
+	const char *nul;
+
+	if (fsmonitor_ipc__send_query(token ? token : "builtin:fake", result, kind))
+		return -1;
+	nul = memchr(result->buf, 0, result->len);
+	if (!nul || nul == result->buf || result->buf[result->len - 1])
+		return -1;
+	strbuf_add(new_token, result->buf, nul - result->buf);
+	*bol = nul - result->buf + 1;
+	*trivial = *bol < result->len && result->buf[*bol] == '/';
+	return 0;
+}
+
+struct fsmonitor_selected_apply {
+	struct index_window_entry *entries;
+	size_t nr;
+	unsigned int full_count;
+	int invalid;
+};
+
+static void fsmonitor_selected_dirty(size_t pos, void *data)
+{
+	struct fsmonitor_selected_apply *apply = data;
+	size_t lo = 0, hi = apply->nr;
+
+	if (pos >= apply->full_count) {
+		apply->invalid = 1;
+		return;
+	}
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+
+		if (apply->entries[mid].ordinal < pos)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	if (lo < apply->nr && apply->entries[lo].ordinal == pos)
+		apply->entries[lo].ce->ce_flags &= ~CE_FSMONITOR_VALID;
+}
+
+static int fsmonitor_selected_name_cmp(const void *a, const void *b)
+{
+	const struct cache_entry *const *left = a, *const *right = b;
+
+	return fspathcmp((*left)->name, (*right)->name);
+}
+
+int fsmonitor_refresh_selected(struct repository *repo, const void *extension,
+			       size_t extension_size, unsigned int full_count,
+			       struct index_window_entry *entries, size_t nr)
+{
+	struct fsmonitor_selected_apply apply = { entries, nr, full_count, 0 };
+	struct ewah_bitmap *dirty = NULL;
+	struct strbuf result = STRBUF_INIT, new_token = STRBUF_INIT;
+	char *token = NULL;
+	struct cache_entry **by_name = NULL;
+	size_t bol;
+	int trivial, ret = -1;
+
+	for (size_t i = 0; i < nr; i++)
+		entries[i].ce->ce_flags &= ~CE_FSMONITOR_VALID;
+	if (fsm_settings__get_mode(repo) != FSMONITOR_MODE_IPC || !extension ||
+	    parse_fsmonitor_extension(extension, extension_size, &token, &dirty) ||
+	    dirty->bit_size > full_count)
+		goto done;
+	for (size_t i = 0; i < nr; i++) {
+		if (entries[i].ordinal >= full_count ||
+		    (i && entries[i - 1].ordinal >= entries[i].ordinal))
+			goto done;
+		if (!S_ISGITLINK(entries[i].ce->ce_mode))
+			entries[i].ce->ce_flags |= CE_FSMONITOR_VALID;
+	}
+	ewah_each_bit(dirty, fsmonitor_selected_dirty, &apply);
+	if (apply.invalid || query_fsmonitor_ipc(token, FSMONITOR_QUERY_AUXILIARY, &result, &new_token, &bol, &trivial) ||
+	    trivial)
+		goto done;
+	ALLOC_ARRAY(by_name, nr);
+	for (size_t i = 0; i < nr; i++)
+		by_name[i] = entries[i].ce;
+	QSORT(by_name, nr, fsmonitor_selected_name_cmp);
+	while (bol < result.len) {
+		char *path = result.buf + bol;
+		size_t len = strlen(path);
+		size_t lo = 0, hi = nr;
+
+		bol += len + 1;
+		if (!len)
+			goto done;
+		if (path[len - 1] == '/')
+			path[--len] = 0;
+		if (!len || is_absolute_path(path))
+			goto done;
+		for (size_t begin = 0, end = 0; end <= len; end++) {
+			if (end < len && path[end] != '/')
+				continue;
+			if (begin == end ||
+			    (end - begin == 1 && path[begin] == '.') ||
+			    (end - begin == 2 && path[begin] == '.' && path[begin + 1] == '.'))
+				goto done;
+			begin = end + 1;
+		}
+		/* A directory event may omit its trailing slash. Match all aliases. */
+		while (lo < hi) {
+			size_t mid = lo + (hi - lo) / 2;
+
+			if (fspathcmp(by_name[mid]->name, path) < 0)
+				lo = mid + 1;
+			else
+				hi = mid;
+		}
+		for (size_t i = lo; i < nr; i++) {
+			struct cache_entry *ce = by_name[i];
+
+			if (ce_namelen(ce) < len || fspathncmp(ce->name, path, len))
+				break;
+			if (ce_namelen(ce) == len || ce->name[len] == '/')
+				ce->ce_flags &= ~CE_FSMONITOR_VALID;
+		}
+	}
+	ret = 0;
+done:
+	if (ret)
+		for (size_t i = 0; i < nr; i++)
+			entries[i].ce->ce_flags &= ~CE_FSMONITOR_VALID;
+	if (dirty)
+		ewah_free(dirty);
+	free(token);
+	free(by_name);
+	strbuf_release(&result);
+	strbuf_release(&new_token);
+	return ret;
+}
+
 void refresh_fsmonitor(struct index_state *istate)
 {
 	static int warn_once = 0;
@@ -957,25 +1135,10 @@ void refresh_fsmonitor(struct index_state *istate)
 	trace_printf_key(&trace_fsmonitor, "refresh fsmonitor");
 
 	if (fsm_mode == FSMONITOR_MODE_IPC) {
-		query_success = !fsmonitor_ipc__send_query(
-			istate->fsmonitor_last_update ?
-				istate->fsmonitor_last_update :
-				"builtin:fake",
-			&query_result, FSMONITOR_QUERY_INDEX);
+		query_success = !query_fsmonitor_ipc(istate->fsmonitor_last_update,
+						     FSMONITOR_QUERY_INDEX, &query_result, &last_update_token,
+						     &bol, &is_trivial);
 		if (query_success) {
-			/*
-			 * The response contains a series of nul terminated
-			 * strings.  The first is the new token.
-			 *
-			 * Use `char *buf` as an interlude to trick the CI
-			 * static analysis to let us use `strbuf_addstr()`
-			 * here (and only copy the token) rather than
-			 * `strbuf_addbuf()`.
-			 */
-			buf = query_result.buf;
-			strbuf_addstr(&last_update_token, buf);
-			bol = last_update_token.len + 1;
-			is_trivial = query_result.buf[bol] == '/';
 			if (is_trivial) {
 				struct fsmonitor_trivial_result result =
 					fsmonitor_classify_trivial_response(

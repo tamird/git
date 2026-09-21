@@ -314,13 +314,25 @@ int read_index_from_with_options(struct index_state *, const char *path,
 int read_index_from_if_tree_accepted(
 	struct index_state *, const char *path, const char *gitdir,
 	int (*accept_tree)(struct index_state *, void *), void *accept_data);
-struct index_tree_window;
+struct index_window;
 struct string_list;
-enum index_tree_window_result {
-	INDEX_TREE_WINDOW_UNAVAILABLE = -1,
-	INDEX_TREE_WINDOW_SKIPPED = -2,
-	INDEX_TREE_WINDOW_FULL = 0,
-	INDEX_TREE_WINDOW_READY = 1,
+/* Exact on-disk generation, independent of any decoded cache[] array. */
+struct index_file_snapshot {
+	struct stat stat;
+	struct object_id oid;
+	size_t entries_end;
+	unsigned int nr, version;
+	unsigned int used_ieot:1;
+};
+struct index_window_entry {
+	struct cache_entry *ce;
+	unsigned int ordinal;
+};
+enum index_window_result {
+	INDEX_WINDOW_UNAVAILABLE = -1,
+	INDEX_WINDOW_SKIPPED = -2,
+	INDEX_WINDOW_FULL = 0,
+	INDEX_WINDOW_READY = 1,
 };
 /*
  * An optional, read-only index view for selected directory prefixes. The
@@ -332,12 +344,26 @@ enum index_tree_window_result {
 int read_index_tree_window_if_tree_accepted(
 	struct repository *, const char *path, const struct string_list *prefixes,
 	int (*accept_tree)(struct index_state *, size_t decoded_entries, void *),
-	void *accept_data, struct index_tree_window **window);
+	void *accept_data, struct index_window **window);
 int index_tree_window_entries(
-	struct index_tree_window *, const char *prefix,
+	struct index_window *, const char *prefix,
 	const struct object_id *tree_oid,
 	const struct cache_entry *const **entries, unsigned int *nr);
-void release_index_tree_window(struct index_tree_window *);
+void release_index_window(struct index_window *);
+/*
+ * Directory selectors end in '/'; all other selectors are exact index paths.
+ * The returned window owns its CEs and never installs them in repo->index.
+ * It remains valid until release_index_window().
+ */
+int read_index_window(struct repository *, const char *path,
+		      const struct string_list *selectors,
+		      int (*accept)(const struct index_file_snapshot *, size_t decoded_entries, void *),
+		      void *data, struct index_window **);
+const struct index_file_snapshot *index_window_snapshot(const struct index_window *);
+const void *index_window_fsmonitor(const struct index_window *, size_t *size);
+unsigned int index_window_size(const struct index_window *);
+struct index_window_entry index_window_entry(struct index_window *, unsigned int pos);
+const struct cache_entry *index_window_find(struct index_window *, const char *path);
 int is_index_unborn(struct index_state *);
 
 /* For use with `write_locked_index()`. */

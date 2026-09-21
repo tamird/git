@@ -35,6 +35,13 @@ struct grep_worktree_cache *grep_worktree_cache_load(
 	struct repository *repo, struct index_state *istate,
 	struct grep_index_identity *identity,
 	int *sidecar_loaded);
+/* Read existing exact observations; new negatives invalidate their generation. */
+struct grep_worktree_cache *grep_worktree_cache_load_selected(
+	struct repository *, unsigned int full_count,
+	const struct grep_index_identity *);
+enum grep_worktree_cache_result grep_worktree_cache_lookup_entry(
+	struct grep_worktree_cache *, const struct cache_entry *, size_t ordinal,
+	enum grep_worktree_cache_miss_reason *);
 enum grep_worktree_cache_result grep_worktree_cache_lookup(
 	struct grep_worktree_cache *cache, size_t pos);
 enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(

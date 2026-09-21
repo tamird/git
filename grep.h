@@ -232,6 +232,7 @@ int grep_next_match(struct grep_opt *opt,
 		    enum grep_header_field field, int eflags);
 
 struct grep_source {
+	const struct attr_index_source *attr_source;
 	char *name;
 
 	enum grep_source_type {

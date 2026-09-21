@@ -12,6 +12,7 @@
 #include "attr.h"
 #include "environment.h"
 #include "fsmonitor-ipc.h"
+#include "fsmonitor.h"
 #include "fsmonitor-settings.h"
 #include "gettext.h"
 #include "hex.h"
@@ -21,6 +22,7 @@
 #include "tree-walk.h"
 #include "parse-options.h"
 #include "string-list.h"
+#include "symlinks.h"
 #include "run-command.h"
 #include "grep.h"
 #include "grep-index.h"
@@ -89,6 +91,9 @@ static struct object_id content_index_negative_identity;
 static enum worktree_blob_cache_mode worktree_blob_cache_mode =
 	WORKTREE_BLOB_CACHE_ALWAYS;
 static struct grep_worktree_cache *worktree_cache;
+/* Sources queued to workers retain this view until wait_all() completes. */
+static struct index_window *worktree_window;
+static struct attr_index_source worktree_attr_source;
 
 enum grep_producer_scope {
 	GREP_PRODUCER_CACHE_LOCK,
@@ -1113,6 +1118,8 @@ static int grep_oid(struct grep_opt *opt, const struct object_id *oid,
 
 	grep_source_name(opt, filename, tree_name_len, &pathbuf);
 	grep_source_init_oid(&gs, pathbuf.buf, path, oid, opt->repo);
+	if (worktree_window && opt->repo == the_repository)
+		gs.attr_source = &worktree_attr_source;
 	if (fallback_to_file)
 		gs.type = GREP_SOURCE_OID_OR_FILE;
 	strbuf_release(&pathbuf);
@@ -1157,6 +1164,8 @@ static int grep_file(struct grep_opt *opt, const char *filename,
 		start_threads(opt);
 	grep_source_name(opt, filename, 0, &buf);
 	grep_source_init_file(&gs, buf.buf, filename);
+	if (worktree_window && opt->repo == the_repository)
+		gs.attr_source = &worktree_attr_source;
 	if (ce) {
 		gs.repo = opt->repo;
 		oidcpy(&gs.worktree_blob_oid, &ce->oid);
@@ -1329,9 +1338,8 @@ static int grep_submodule(struct grep_opt *opt,
 static int grep_cache_entry_uses_oid(struct repository *repo,
 				     const struct pathspec *pathspec,
 				     int cached, int literal_selected,
-				     size_t pos)
+				     const struct cache_entry *ce, size_t pos)
 {
-	const struct cache_entry *ce = repo->index->cache[pos];
 	int use_oid = cached || (ce->ce_flags & CE_VALID);
 
 	if ((!cached && ce_skip_worktree(ce)) ||
@@ -1346,7 +1354,7 @@ static int grep_cache_entry_uses_oid(struct repository *repo,
 		return use_oid;
 	if (threads_started)
 		grep_lock();
-	use_oid = grep_worktree_cache_lookup(worktree_cache, pos) ==
+	use_oid = grep_worktree_cache_lookup_entry(worktree_cache, ce, pos, NULL) ==
 		  GREP_WORKTREE_CACHE_EQUAL;
 	if (threads_started)
 		grep_unlock();
@@ -1361,7 +1369,9 @@ static int grep_cache_query_content_index_oids(
 	struct repository *repo, const struct pathspec *pathspec,
 	int cached, int literal_selected,
 	int **selected, size_t *selected_nr, size_t *selected_alloc,
-	int *use_selected, size_t *queried_nr)
+	int *use_selected, size_t *queried_nr,
+	const struct index_window_entry *window_entries, size_t window_nr,
+	unsigned int full_count)
 {
 	struct grep_index_ipc_query_trace ipc_trace;
 	struct object_id *oids = NULL;
@@ -1371,7 +1381,9 @@ static int grep_cache_query_content_index_oids(
 	size_t unknown_oids = 0;
 	size_t oids_alloc = 0;
 	size_t positions_alloc = 0;
-	size_t limit = literal_selected ? *selected_nr : repo->index->cache_nr;
+	size_t limit = window_entries	? window_nr :
+		       literal_selected ? *selected_nr :
+					  repo->index->cache_nr;
 	uint64_t ipc_begin = 0, ipc_end;
 	int trace_enabled = trace2_is_enabled();
 	int saved_errno;
@@ -1385,11 +1397,14 @@ static int grep_cache_query_content_index_oids(
 		errno = saved_errno;
 	}
 	for (size_t pos = 0; pos < limit; pos++) {
-		size_t i = literal_selected ? (*selected)[pos] : pos;
-		const struct cache_entry *ce = repo->index->cache[i];
+		size_t i = window_entries   ? window_entries[pos].ordinal :
+			   literal_selected ? (*selected)[pos] :
+					      pos;
+		const struct cache_entry *ce = window_entries ? window_entries[pos].ce :
+								repo->index->cache[i];
 
 		if (!grep_cache_entry_uses_oid(
-			    repo, pathspec, cached, literal_selected, i))
+			    repo, pathspec, cached, literal_selected, ce, i))
 			continue;
 		ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
 		ALLOC_GROW(positions, nr_oids + 1, positions_alloc);
@@ -1406,7 +1421,7 @@ static int grep_cache_query_content_index_oids(
 		goto cleanup;
 
 	ALLOC_ARRAY(maybe, nr_oids);
-	content_index_ipc_nr = repo->index->cache_nr;
+	content_index_ipc_nr = window_entries ? full_count : repo->index->cache_nr;
 	CALLOC_ARRAY(content_index_ipc_result, content_index_ipc_nr);
 	if (trace_enabled) {
 		saved_errno = errno;
@@ -1545,6 +1560,229 @@ static int grep_tree_literal_path_matches(const struct pathspec_item *item,
 	       !memcmp(item->match + base_len, path, path_len);
 }
 
+static int grep_cache_entry(struct grep_opt *opt, const struct cache_entry *ce,
+			    size_t pos, const char *name, int cached, int include_untracked,
+			    int used_index_ipc, uint64_t *ipc_worktree_blob_rejected_after_pathspec)
+{
+	int hit;
+	enum grep_worktree_cache_result cache_result =
+		GREP_WORKTREE_CACHE_UNKNOWN;
+	const struct cache_entry *cache_candidate = NULL;
+	int can_cache =
+		opt->repo == the_repository && !cached &&
+		!opt->allow_textconv &&
+		grep_worktree_cache_entry_eligible(ce) &&
+		worktree_cache;
+	int use_worktree_blob;
+
+	if (can_cache && threads_started) {
+		uint64_t started = 0;
+		int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOCK,
+						&started);
+
+		grep_lock();
+		if (timed)
+			grep_producer_end(GREP_PRODUCER_CACHE_LOCK, started);
+	}
+	if (can_cache) {
+		uint64_t started = 0;
+		int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOOKUP,
+						&started);
+
+		cache_result = grep_worktree_cache_lookup_entry(
+			worktree_cache, ce, pos, NULL);
+		if (timed)
+			grep_producer_end(GREP_PRODUCER_CACHE_LOOKUP, started);
+	}
+	if (can_cache && threads_started)
+		grep_unlock();
+	use_worktree_blob =
+		cache_result == GREP_WORKTREE_CACHE_EQUAL;
+	if (cache_result == GREP_WORKTREE_CACHE_UNKNOWN)
+		cache_candidate = ce;
+
+	/*
+	 * Normal worktree grep treats CE_VALID as proof that the
+	 * index and worktree match. --untracked still searches the
+	 * worktree so local changes to these paths remain visible. It
+	 * may use the blob only when a previous scan observed equality
+	 * and fsmonitor reports no subsequent change.
+	 */
+	if (use_worktree_blob ||
+	    (!include_untracked &&
+	     (cached || (ce->ce_flags & CE_VALID)))) {
+		if (ce_stage(ce) || ce_intent_to_add(ce))
+			return 0;
+		if (content_index_ipc_result &&
+		    pos < content_index_ipc_nr &&
+		    content_index_ipc_result[pos] ==
+			    GREP_INDEX_IPC_IMPOSSIBLE) {
+			if (use_worktree_blob)
+				(*ipc_worktree_blob_rejected_after_pathspec)++;
+			return 0;
+		}
+		hit = grep_oid(opt, &ce->oid, name,
+			       0, name, use_worktree_blob, pos,
+			       used_index_ipc ||
+				       (content_index_ipc_result &&
+					pos <
+						content_index_ipc_nr &&
+					content_index_ipc_result
+						[pos]));
+	} else {
+		hit = grep_file(opt, name,
+				can_cache ? cache_candidate : NULL,
+				pos);
+	}
+	return hit;
+}
+
+static const struct cache_entry *grep_window_attr_find(void *data, const char *path)
+{
+	return index_window_find(data, path);
+}
+
+struct grep_window_proof {
+	struct repository *repo;
+	struct grep_worktree_cache *cache;
+};
+
+static int grep_window_accept(const struct index_file_snapshot *snapshot,
+			      size_t decoded_entries, void *data)
+{
+	struct grep_window_proof *proof = data;
+	struct grep_index_identity identity;
+
+	/* Broad scopes are cheaper in the ordinary parallel index reader. */
+	if (decoded_entries > snapshot->nr / 8)
+		return 0;
+	if (grep_index_identity_from_snapshot(proof->repo, snapshot, &identity))
+		return 0;
+	proof->cache = grep_worktree_cache_load_selected(proof->repo, snapshot->nr, &identity);
+	return !!proof->cache;
+}
+
+/* Return false before producing output whenever the scoped proof is unavailable. */
+static int grep_cache_window(struct grep_opt *opt, const struct pathspec *pathspec,
+			     int cached, int include_untracked, int *hit)
+{
+	struct repository *repo = opt->repo;
+	struct repo_config_values *cfg;
+	struct string_list selectors = STRING_LIST_INIT_DUP;
+	struct strbuf prefix = STRBUF_INIT, attr_path = STRBUF_INIT;
+	struct index_window *window = NULL;
+	struct index_window_entry *entries = NULL;
+	struct grep_worktree_cache *cache = NULL;
+	struct grep_window_proof proof = { .repo = repo };
+	const struct index_file_snapshot *snapshot;
+	const void *fsmn;
+	size_t fsmn_size, nr = 0, alloc = 0;
+	uint64_t rejected = 0;
+	int used = 0, result = 0, read_result;
+
+	if (cached || include_untracked || recurse_submodules || opt->allow_textconv ||
+	    repo != the_repository || repo->index->initialized ||
+	    worktree_blob_cache_mode != WORKTREE_BLOB_CACHE_ALWAYS ||
+	    pathspec->nr != 1 || pathspec->magic || pathspec->has_wildcard ||
+	    pathspec->max_depth != -1 ||
+	    !pathspec->items[0].len || fsm_settings__get_mode(repo) != FSMONITOR_MODE_IPC)
+		return 0;
+	cfg = repo_config_values(repo);
+	strbuf_addstr(&prefix, pathspec->items[0].match);
+	strbuf_trim_trailing_dir_sep(&prefix);
+	if (!prefix.len || !is_directory(prefix.buf))
+		goto done;
+	strbuf_addch(&prefix, '/');
+	string_list_append(&selectors, prefix.buf);
+	string_list_append(&selectors, GITATTRIBUTES_FILE);
+	for (size_t i = 0; i < prefix.len; i++) {
+		if (prefix.buf[i] != '/')
+			continue;
+		strbuf_reset(&attr_path);
+		strbuf_add(&attr_path, prefix.buf, i + 1);
+		strbuf_addstr(&attr_path, GITATTRIBUTES_FILE);
+		string_list_append(&selectors, attr_path.buf);
+	}
+	read_result = read_index_window(repo, repo_get_index_file(repo), &selectors,
+					grep_window_accept, &proof, &window);
+	cache = proof.cache;
+	if (read_result != INDEX_WINDOW_READY)
+		goto done;
+	snapshot = index_window_snapshot(window);
+	for (unsigned int i = 0; i < index_window_size(window); i++) {
+		struct index_window_entry entry = index_window_entry(window, i);
+		struct cache_entry *ce = entry.ce;
+
+		if (!starts_with(ce->name, prefix.buf))
+			continue;
+		if (!S_ISREG(ce->ce_mode))
+			continue;
+		if (ce_skip_worktree(ce) && cfg->apply_sparse_checkout &&
+		    !cfg->sparse_expect_files_outside_of_patterns) {
+			struct stat st;
+
+			if (has_symlink_leading_path(ce->name, ce_namelen(ce)))
+				goto done;
+			if (!lstat(ce->name, &st))
+				ce->ce_flags &= ~CE_SKIP_WORKTREE;
+		}
+		if (ce_skip_worktree(ce))
+			continue;
+		ALLOC_GROW(entries, nr + 1, alloc);
+		entries[nr++] = entry;
+	}
+	if (!nr)
+		goto done;
+	fsmn = index_window_fsmonitor(window, &fsmn_size);
+	if (fsmonitor_refresh_selected(repo, fsmn, fsmn_size, snapshot->nr, entries, nr))
+		goto done;
+
+	/* All fallback decisions precede installing state used by queued sources. */
+	worktree_cache = cache;
+	cache = NULL;
+	worktree_window = window;
+	window = NULL;
+	worktree_attr_source.repo = repo;
+	worktree_attr_source.find = grep_window_attr_find;
+	worktree_attr_source.data = worktree_window;
+	if (content_index_query && grep_index_ipc_is_available(repo)) {
+		int *selected = NULL, use_selected = 0;
+		size_t selected_nr = 0, selected_alloc = 0, queried_nr;
+
+		used = grep_cache_query_content_index_oids(repo, pathspec, 0, 1,
+							   &selected, &selected_nr, &selected_alloc, &use_selected, &queried_nr,
+							   entries, nr, snapshot->nr);
+		free(selected);
+	}
+	if (num_threads > 1 && threads_auto) {
+		size_t candidates = 0;
+
+		for (size_t i = 0; i < nr; i++)
+			if (!content_index_ipc_result ||
+			    content_index_ipc_result[entries[i].ordinal] != GREP_INDEX_IPC_IMPOSSIBLE)
+				candidates++;
+		if (candidates < GREP_MIN_FILES_FOR_THREADS)
+			num_threads = 1;
+	}
+	trace2_data_intmax("grep", repo, "worktree_index_window/selected", nr);
+	for (size_t i = 0; i < nr; i++) {
+		*hit |= grep_cache_entry(opt, entries[i].ce, entries[i].ordinal,
+					 entries[i].ce->name, 0, 0, used, &rejected);
+		if (*hit && opt->status_only)
+			break;
+	}
+	trace2_data_intmax("grep", repo, "worktree_index_window/rejected", rejected);
+	result = 1;
+done:
+	grep_worktree_cache_free(cache);
+	release_index_window(window);
+	free(entries);
+	string_list_clear(&selectors, 0);
+	strbuf_release(&prefix);
+	strbuf_release(&attr_path);
+	return result;
+}
+
 static int grep_cache(struct grep_opt *opt,
 		      const struct pathspec *pathspec, int cached,
 		      int include_untracked, int use_exclude)
@@ -1579,6 +1817,8 @@ static int grep_cache(struct grep_opt *opt,
 	int has_recursive_basename = 0;
 	struct strbuf name = STRBUF_INIT;
 	int name_base_len = 0;
+	if (grep_cache_window(opt, pathspec, cached, include_untracked, &hit))
+		return hit;
 	if (repo->submodule_prefix) {
 		name_base_len = strlen(repo->submodule_prefix);
 		strbuf_addstr(&name, repo->submodule_prefix);
@@ -2162,7 +2402,7 @@ static int grep_cache(struct grep_opt *opt,
 		handled_selected_oid_query = grep_cache_query_content_index_oids(
 			repo, pathspec, cached, literal_selected,
 			&selected, &selected_nr, &selected_alloc,
-			&use_selected, &queried_nr);
+			&use_selected, &queried_nr, NULL, 0, 0);
 		if (handled_selected_oid_query && queried_nr) {
 			for (size_t i = 0; i < selected_nr; i++)
 				if (content_index_ipc_result &&
@@ -2253,7 +2493,7 @@ static int grep_cache(struct grep_opt *opt,
 					      (1u << (i & 7))) ||
 					    !grep_cache_entry_uses_oid(
 						    repo, pathspec, cached,
-						    literal_selected, i))
+						    literal_selected, ce, i))
 						continue;
 					ALLOC_GROW(oids, nr_oids + 1, oids_alloc);
 					ALLOC_GROW(positions, nr_oids + 1,
@@ -2574,7 +2814,7 @@ static int grep_cache(struct grep_opt *opt,
 		grep_cache_query_content_index_oids(
 			repo, pathspec, cached, literal_selected,
 			&selected, &selected_nr, &selected_alloc,
-			&use_selected, &queried_nr);
+			&use_selected, &queried_nr, NULL, 0, 0);
 	}
 
 	nr = 0;
@@ -2645,75 +2885,9 @@ static int grep_cache(struct grep_opt *opt,
 						   (S_ISDIR(ce->ce_mode) ||
 						    S_ISGITLINK(
 							    ce->ce_mode))))) {
-			enum grep_worktree_cache_result cache_result =
-				GREP_WORKTREE_CACHE_UNKNOWN;
-			const struct cache_entry *cache_candidate = NULL;
-			int can_cache =
-				repo == the_repository && !cached &&
-				!opt->allow_textconv &&
-				grep_worktree_cache_entry_eligible(ce) &&
-				worktree_cache;
-			int use_worktree_blob;
-
-			if (can_cache && threads_started) {
-				uint64_t started = 0;
-				int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOCK,
-							       &started);
-
-				grep_lock();
-				if (timed)
-					grep_producer_end(GREP_PRODUCER_CACHE_LOCK, started);
-			}
-			if (can_cache) {
-				uint64_t started = 0;
-				int timed = grep_producer_begin(GREP_PRODUCER_CACHE_LOOKUP,
-							       &started);
-
-				cache_result = grep_worktree_cache_lookup(
-					worktree_cache, pos);
-				if (timed)
-					grep_producer_end(GREP_PRODUCER_CACHE_LOOKUP, started);
-			}
-			if (can_cache && threads_started)
-				grep_unlock();
-			use_worktree_blob =
-				cache_result == GREP_WORKTREE_CACHE_EQUAL;
-			if (cache_result == GREP_WORKTREE_CACHE_UNKNOWN)
-				cache_candidate = ce;
-
-			/*
-			 * Normal worktree grep treats CE_VALID as proof that the
-			 * index and worktree match. --untracked still searches the
-			 * worktree so local changes to these paths remain visible. It
-			 * may use the blob only when a previous scan observed equality
-			 * and fsmonitor reports no subsequent change.
-			 */
-			if (use_worktree_blob ||
-			    (!include_untracked &&
-			     (cached || (ce->ce_flags & CE_VALID)))) {
-				if (ce_stage(ce) || ce_intent_to_add(ce))
-					continue;
-				if (content_index_ipc_result &&
-				    pos < content_index_ipc_nr &&
-				    content_index_ipc_result[pos] ==
-					    GREP_INDEX_IPC_IMPOSSIBLE) {
-					if (use_worktree_blob)
-						ipc_worktree_blob_rejected_after_pathspec++;
-					continue;
-				}
-				hit |= grep_oid(opt, &ce->oid, name.buf,
-						0, name.buf, use_worktree_blob, pos,
-						used_index_ipc ||
-							(content_index_ipc_result &&
-							 pos <
-								 content_index_ipc_nr &&
-							 content_index_ipc_result
-								 [pos]));
-			} else {
-				hit |= grep_file(opt, name.buf,
-						 can_cache ? cache_candidate : NULL,
-						 pos);
-			}
+			hit |= grep_cache_entry(opt, ce, pos, name.buf, cached,
+						include_untracked, used_index_ipc,
+						&ipc_worktree_blob_rejected_after_pathspec);
 		} else if (recurse_submodules && S_ISGITLINK(ce->ce_mode) &&
 			   submodule_path_match(repo->index, pathspec, name.buf, NULL)) {
 			hit |= grep_submodule(opt, pathspec, NULL, ce->name,
@@ -4148,7 +4322,7 @@ enum grep_revision_index_state {
 
 struct grep_revision_index {
 	struct index_state index;
-	struct index_tree_window *window;
+	struct index_window *window;
 	/* Trailing slashes make overlapping directory scopes sort together. */
 	struct string_list paths;
 	/* The root descriptor and OID borrow the grep_object() call's storage. */
@@ -4340,18 +4514,18 @@ static int grep_revision_index_load(struct repository *repo,
 {
 	struct index_state *index = &revision->index;
 	struct grep_revision_index_probe *probe = &revision->probe;
-	int window_result = INDEX_TREE_WINDOW_FULL;
+	int window_result = INDEX_WINDOW_FULL;
 
 	if (revision->paths.nr) {
 		window_result = read_index_tree_window_if_tree_accepted(
 			repo, repo_get_index_file(repo), &revision->paths,
 			grep_revision_index_accept_entries, probe,
 			&revision->window);
-		if (window_result == INDEX_TREE_WINDOW_READY) {
+		if (window_result == INDEX_WINDOW_READY) {
 			revision->state = GREP_REVISION_INDEX_ACTIVE;
 			return 1;
 		}
-		if (window_result == INDEX_TREE_WINDOW_SKIPPED)
+		if (window_result == INDEX_WINDOW_SKIPPED)
 			goto fail;
 	}
 
@@ -4368,7 +4542,7 @@ static int grep_revision_index_load(struct repository *repo,
 	return 1;
 
 fail:
-	release_index_tree_window(revision->window);
+	release_index_window(revision->window);
 	revision->window = NULL;
 	discard_index(index);
 	revision->state = GREP_REVISION_INDEX_DISABLED;
@@ -4619,7 +4793,7 @@ static int grep_object(struct grep_opt *opt, const struct pathspec *pathspec,
 					obj->type == OBJ_COMMIT, batch_ptr, query,
 					revision_index);
 		release_index(&index.index);
-		release_index_tree_window(index.window);
+		release_index_window(index.window);
 		string_list_clear(&index.paths, 0);
 		string_list_clear(&index.probe.excluded, 0);
 		if (query->trace_enabled) {
@@ -5535,6 +5709,8 @@ out:
 		trace2_timer_stop(TRACE2_TIMER_ID_GREP_WORKTREE_CACHE_WRITE);
 	grep_worktree_cache_free(worktree_cache);
 	worktree_cache = NULL;
+	release_index_window(worktree_window);
+	worktree_window = NULL;
 	clear_pathspec(&pathspec);
 	string_list_clear(&path_list, 0);
 	free_grep_patterns(&opt);

@@ -2792,24 +2792,27 @@ int read_index_from_if_tree_accepted(
 		accept_tree, accept_data);
 }
 
-struct index_tree_window_block {
+struct index_window_block {
 	size_t offset;
 	unsigned int nr, first, selected_first;
 	const char *first_name;
 	unsigned int selected : 1;
 };
 
-struct index_tree_window {
+struct index_window {
 	/* Header and TREE only; this index_state never has a cache[]. */
 	struct index_state tree;
 	struct mem_pool pool;
-	struct index_tree_window_block *blocks;
+	struct index_window_block *blocks;
 	size_t block_nr;
 	struct cache_entry **entries;
 	unsigned int entries_nr;
+	struct index_file_snapshot snapshot;
+	void *fsmonitor;
+	size_t fsmonitor_size;
 };
 
-void release_index_tree_window(struct index_tree_window *window)
+void release_index_window(struct index_window *window)
 {
 	if (!window)
 		return;
@@ -2817,6 +2820,7 @@ void release_index_tree_window(struct index_tree_window *window)
 	mem_pool_discard(&window->pool, 0);
 	free(window->entries);
 	free(window->blocks);
+	free(window->fsmonitor);
 	free(window);
 }
 
@@ -2830,7 +2834,7 @@ static int index_window_same_stat(const struct stat *a, const struct stat *b)
 	       ST_CTIME_NSEC(*a) == ST_CTIME_NSEC(*b);
 }
 
-static int index_window_read_blocks(struct index_tree_window *window,
+static int index_window_read_blocks(struct index_window *window,
 				    const char *map, size_t size, size_t entry_end)
 {
 	const char *body = NULL;
@@ -2861,7 +2865,7 @@ static int index_window_read_blocks(struct index_tree_window *window,
 	window->block_nr = (body_size - 4) / 8;
 	CALLOC_ARRAY(window->blocks, window->block_nr);
 	for (size_t i = 0; i < window->block_nr; i++) {
-		struct index_tree_window_block *block = &window->blocks[i];
+		struct index_window_block *block = &window->blocks[i];
 		size_t end;
 		unsigned long consumed;
 		struct cache_entry *ce;
@@ -2889,21 +2893,22 @@ static int index_window_read_blocks(struct index_tree_window *window,
 	return first == window->tree.cache_nr ? 0 : -1;
 }
 
-static int index_window_select_blocks(struct index_tree_window *window,
+static int index_window_select_blocks(struct index_window *window,
 				      const struct string_list *prefixes)
 {
 	for (size_t p = 0; p < prefixes->nr; p++) {
 		const char *prefix = prefixes->items[p].string;
 		size_t len = strlen(prefix);
 
-		if (!len || prefix[len - 1] != '/')
+		if (!len)
 			return -1;
 		for (size_t i = 0; i < window->block_nr; i++) {
-			struct index_tree_window_block *block = &window->blocks[i];
+			struct index_window_block *block = &window->blocks[i];
 			int cmp = strcmp(block->first_name, prefix);
 
 			/* The block before the first prefix is a boundary block. */
-			if (cmp > 0 && !starts_with(block->first_name, prefix))
+			if (cmp > 0 && (prefix[len - 1] != '/' ||
+					!starts_with(block->first_name, prefix)))
 				continue;
 			if (i + 1 < window->block_nr &&
 			    strcmp(window->blocks[i + 1].first_name, prefix) < 0)
@@ -2912,7 +2917,7 @@ static int index_window_select_blocks(struct index_tree_window *window,
 		}
 	}
 	for (size_t i = 0; i < window->block_nr; i++) {
-		struct index_tree_window_block *block = &window->blocks[i];
+		struct index_window_block *block = &window->blocks[i];
 
 		if (!block->selected)
 			continue;
@@ -2922,14 +2927,14 @@ static int index_window_select_blocks(struct index_tree_window *window,
 	return window->entries_nr ? 0 : -1;
 }
 
-static int index_window_decode_blocks(struct index_tree_window *window,
+static int index_window_decode_blocks(struct index_window *window,
 				      const char *map, size_t entry_end)
 {
 	struct cache_entry *previous = NULL;
 
 	CALLOC_ARRAY(window->entries, window->entries_nr);
 	for (size_t i = 0; i < window->block_nr; i++) {
-		struct index_tree_window_block *block = &window->blocks[i];
+		struct index_window_block *block = &window->blocks[i];
 		size_t offset = block->offset;
 		size_t end = i + 1 < window->block_nr ?
 			window->blocks[i + 1].offset : entry_end;
@@ -2966,18 +2971,19 @@ static int index_window_decode_blocks(struct index_tree_window *window,
 	return 0;
 }
 
-int read_index_tree_window_if_tree_accepted(
+static int read_index_window_internal(
 	struct repository *repo, const char *path,
 	const struct string_list *prefixes,
 	int (*accept_tree)(struct index_state *, size_t, void *),
-	void *accept_data, struct index_tree_window **result)
+	int (*accept_file)(const struct index_file_snapshot *, size_t, void *),
+	void *accept_data, struct index_window **result)
 {
-	struct index_tree_window *window = NULL;
+	struct index_window *window = NULL;
 	struct load_index_extensions extensions = { 0 };
 	struct stat before, after;
 	const char *map = MAP_FAILED;
 	size_t size, entry_end;
-	int fd = -1, ret = INDEX_TREE_WINDOW_UNAVAILABLE;
+	int fd = -1, ret = INDEX_WINDOW_UNAVAILABLE;
 
 	*result = NULL;
 	if (repo != the_repository || !prefixes->nr ||
@@ -3005,7 +3011,19 @@ int read_index_tree_window_if_tree_accepted(
 	    index_window_select_blocks(window, prefixes))
 		goto done;
 	if (window->entries_nr == window->tree.cache_nr) {
-		ret = INDEX_TREE_WINDOW_FULL;
+		ret = INDEX_WINDOW_FULL;
+		goto done;
+	}
+	window->snapshot.stat = before;
+	window->snapshot.nr = window->tree.cache_nr;
+	window->snapshot.version = window->tree.version;
+	window->snapshot.entries_end = entry_end;
+	window->snapshot.used_ieot = 1;
+	oidread(&window->snapshot.oid,
+		(const unsigned char *)map + size - repo->hash_algo->rawsz,
+		repo->hash_algo);
+	if (accept_file && !accept_file(&window->snapshot, window->entries_nr, accept_data)) {
+		ret = INDEX_WINDOW_SKIPPED;
 		goto done;
 	}
 	extensions.istate = &window->tree;
@@ -3014,11 +3032,25 @@ int read_index_tree_window_if_tree_accepted(
 	extensions.src_offset = entry_end;
 	extensions.gentle = 1;
 	load_index_extensions(&extensions);
-	if (extensions.error || !window->tree.cache_tree_data)
+	if (extensions.error || (accept_tree && !window->tree.cache_tree_data))
 		goto done;
-	if (!accept_tree(&window->tree, window->entries_nr, accept_data)) {
-		ret = INDEX_TREE_WINDOW_SKIPPED;
+	if (accept_tree && !accept_tree(&window->tree, window->entries_nr, accept_data)) {
+		ret = INDEX_WINDOW_SKIPPED;
 		goto done;
+	}
+	if (!accept_tree) {
+		for (size_t offset = entry_end;
+		     offset < size - repo->hash_algo->rawsz;) {
+			size_t len = get_be32(map + offset + 4);
+
+			if (CACHE_EXT((map + offset)) == CACHE_EXT_FSMONITOR) {
+				if (window->fsmonitor)
+					goto done;
+				window->fsmonitor = xmemdupz(map + offset + 8, len);
+				window->fsmonitor_size = len;
+			}
+			offset += 8 + len;
+		}
 	}
 	if (index_window_decode_blocks(window, map, entry_end) ||
 	    fstat(fd, &after) || !index_window_same_stat(&before, &after))
@@ -3026,21 +3058,60 @@ int read_index_tree_window_if_tree_accepted(
 	trace2_data_intmax("index", repo, "read/window_entries", window->entries_nr);
 	*result = window;
 	window = NULL;
-	ret = INDEX_TREE_WINDOW_READY;
+	ret = INDEX_WINDOW_READY;
 done:
 	if (map != MAP_FAILED)
 		munmap((void *)map, size);
 	if (fd >= 0)
 		close(fd);
-	release_index_tree_window(window);
+	release_index_window(window);
 	return ret;
 }
 
-static unsigned int index_window_ordinal(struct index_tree_window *window,
+int read_index_tree_window_if_tree_accepted(
+	struct repository *repo, const char *path,
+	const struct string_list *prefixes,
+	int (*accept_tree)(struct index_state *, size_t, void *),
+	void *accept_data, struct index_window **result)
+{
+	for (size_t i = 0; i < prefixes->nr; i++)
+		if (!ends_with(prefixes->items[i].string, "/")) {
+			*result = NULL;
+			return INDEX_WINDOW_UNAVAILABLE;
+		}
+	return read_index_window_internal(repo, path, prefixes, accept_tree,
+					  NULL, accept_data, result);
+}
+
+int read_index_window(struct repository *repo, const char *path,
+		      const struct string_list *selectors,
+		      int (*accept)(const struct index_file_snapshot *, size_t, void *),
+		      void *data, struct index_window **result)
+{
+	return read_index_window_internal(repo, path, selectors, NULL, accept, data, result);
+}
+
+const struct index_file_snapshot *index_window_snapshot(const struct index_window *window)
+{
+	return &window->snapshot;
+}
+
+const void *index_window_fsmonitor(const struct index_window *window, size_t *size)
+{
+	*size = window->fsmonitor_size;
+	return window->fsmonitor;
+}
+
+unsigned int index_window_size(const struct index_window *window)
+{
+	return window->entries_nr;
+}
+
+static unsigned int index_window_ordinal(struct index_window *window,
 					 size_t pos)
 {
 	for (size_t i = 0; i < window->block_nr; i++) {
-		const struct index_tree_window_block *block = &window->blocks[i];
+		const struct index_window_block *block = &window->blocks[i];
 
 		if (block->selected && pos >= block->selected_first &&
 		    pos - block->selected_first < block->nr)
@@ -3049,7 +3120,36 @@ static unsigned int index_window_ordinal(struct index_tree_window *window,
 	BUG("selected index entry has no IEOT block");
 }
 
-int index_tree_window_entries(struct index_tree_window *window,
+struct index_window_entry index_window_entry(struct index_window *window, unsigned int pos)
+{
+	struct index_window_entry entry;
+
+	if (pos >= window->entries_nr)
+		BUG("index window position out of range");
+	entry.ce = window->entries[pos];
+	entry.ordinal = index_window_ordinal(window, pos);
+	return entry;
+}
+
+const struct cache_entry *index_window_find(struct index_window *window, const char *path)
+{
+	size_t lo = 0, hi = window->entries_nr;
+
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		int cmp = strcmp(window->entries[mid]->name, path);
+
+		if (!cmp)
+			return window->entries[mid];
+		if (cmp < 0)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return NULL;
+}
+
+int index_tree_window_entries(struct index_window *window,
 			      const char *prefix, const struct object_id *tree_oid,
 			      const struct cache_entry *const **entries, unsigned int *nr)
 {

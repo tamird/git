@@ -161,6 +161,8 @@ enum grep_worktree_write_abort_reason {
  * authorization is only a best-effort optimization.
  */
 struct grep_worktree_cache {
+	unsigned int selected_full_count;
+	unsigned int selected_only:1;
 	struct repository *repo;
 	struct index_state *istate;
 	struct grep_worktree_entry_identity entry_identity;
@@ -403,6 +405,11 @@ static size_t bitmap_size(size_t nr)
 	return nr / 8 + !!(nr & 7);
 }
 
+static unsigned int cache_entry_count(const struct grep_worktree_cache *cache)
+{
+	return cache->selected_only ? cache->selected_full_count : cache->istate->cache_nr;
+}
+
 static int load_cache(struct grep_worktree_cache *cache,
 		      unsigned char *equal,
 		      unsigned char *different,
@@ -492,7 +499,7 @@ static int load_cache(struct grep_worktree_cache *cache,
 		cache->repo->hash_algo);
 	cache->compact_loaded = 1;
 	oidcpy(&cache->recovery_checksum, &map_recovery_checksum);
-	if (map_nr == cache->istate->cache_nr &&
+	if (map_nr == cache_entry_count(cache) &&
 	    hasheq(map + GREP_WORKTREE_CACHE_HEADER_SIZE,
 		   cache->state_oid.hash, cache->repo->hash_algo)) {
 		memcpy(equal, map_equal, cache->bitmap_size);
@@ -778,7 +785,7 @@ static int split_base_position(struct grep_worktree_cache *cache,
 			       size_t pos, size_t *split_base_pos)
 {
 	const struct cache_entry *ce;
-	struct split_index *si = cache->istate->split_index;
+	struct split_index *si = cache->istate ? cache->istate->split_index : NULL;
 
 	if (!si || !si->base || pos >= cache->istate->cache_nr)
 		return 0;
@@ -900,21 +907,49 @@ disable:
 	return NULL;
 }
 
-enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(
-	struct grep_worktree_cache *cache, size_t pos,
+struct grep_worktree_cache *grep_worktree_cache_load_selected(
+	struct repository *repo, unsigned int full_count,
+	const struct grep_index_identity *identity)
+{
+	struct grep_worktree_cache *cache = xcalloc(1, sizeof(*cache));
+	struct object_id generation;
+
+	cache->repo = repo;
+	cache->selected_only = 1;
+	cache->selected_full_count = full_count;
+	cache->bitmap_size = bitmap_size(full_count);
+	if (!full_count || invalidation_marker_exists(repo) ||
+	    load_observation_generation(repo, &cache->observation_generation))
+		goto fail;
+	oidcpy(&cache->state_oid, &identity->worktree);
+	oidcpy(&cache->worktree_scope, &identity->worktree_scope);
+	allocate_cache_bitmaps(cache);
+	cache->load_result = load_cache(cache, cache->equal, cache->different, NULL);
+	if (!(cache->load_result & GREP_WORKTREE_CACHE_EXACT) ||
+	    load_observation_generation(repo, &generation) ||
+	    !oideq(&generation, &cache->observation_generation) ||
+	    invalidation_marker_exists(repo))
+		goto fail;
+	return cache;
+fail:
+	grep_worktree_cache_free(cache);
+	return NULL;
+}
+
+enum grep_worktree_cache_result grep_worktree_cache_lookup_entry(
+	struct grep_worktree_cache *cache, const struct cache_entry *ce, size_t pos,
 	enum grep_worktree_cache_miss_reason *reason)
 {
 	unsigned char mask;
 	size_t split_base_pos;
 
 	record_cache_miss(reason, GREP_WORKTREE_CACHE_MISS_NONE);
-	if (!cache || !cache->equal || pos >= cache->istate->cache_nr) {
+	if (!cache || !cache->equal || pos >= cache_entry_count(cache)) {
 		record_cache_miss(reason,
 				 GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE);
 		return GREP_WORKTREE_CACHE_UNKNOWN;
 	}
-	if (!grep_worktree_cache_entry_eligible(
-		    cache->istate->cache[pos])) {
+	if (!grep_worktree_cache_entry_eligible(ce)) {
 		record_cache_miss(reason,
 				 GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE);
 		return GREP_WORKTREE_CACHE_UNKNOWN;
@@ -932,6 +967,8 @@ enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(
 			cache->split_base_changed = 1;
 		return GREP_WORKTREE_CACHE_EQUAL;
 	}
+	if (cache->selected_only)
+		return GREP_WORKTREE_CACHE_UNKNOWN;
 	if (split_base_position(cache, pos, &split_base_pos) &&
 	    cache->split_base_equal[split_base_pos >> 3] &
 		    (1u << (split_base_pos & 7))) {
@@ -950,6 +987,22 @@ enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(
 	return GREP_WORKTREE_CACHE_UNKNOWN;
 }
 
+enum grep_worktree_cache_result grep_worktree_cache_lookup_with_reason(
+	struct grep_worktree_cache *cache, size_t pos,
+	enum grep_worktree_cache_miss_reason *reason)
+{
+	const struct cache_entry *ce = cache && cache->istate &&
+						       pos < cache->istate->cache_nr ?
+					       cache->istate->cache[pos] :
+					       NULL;
+
+	if (!ce) {
+		record_cache_miss(reason, GREP_WORKTREE_CACHE_MISS_LOOKUP_UNAVAILABLE);
+		return GREP_WORKTREE_CACHE_UNKNOWN;
+	}
+	return grep_worktree_cache_lookup_entry(cache, ce, pos, reason);
+}
+
 enum grep_worktree_cache_result grep_worktree_cache_lookup(
 	struct grep_worktree_cache *cache, size_t pos)
 {
@@ -962,9 +1015,11 @@ void grep_worktree_cache_record(struct grep_worktree_cache *cache, size_t pos,
 	int record_negative = 0;
 	size_t split_base_pos;
 
-	if (!cache || !cache->equal || pos >= cache->istate->cache_nr)
+	if (!cache || !cache->equal || pos >= cache_entry_count(cache))
 		return;
 	if (equal) {
+		if (cache->selected_only)
+			return;
 		if (!grep_worktree_cache_entry_eligible(
 			    cache->istate->cache[pos]))
 			return;
@@ -1224,6 +1279,14 @@ void grep_worktree_cache_write(struct grep_worktree_cache *cache)
 
 	if (!cache)
 		return;
+	if (cache->selected_only) {
+		/* No full index is available for remapping or recovery publication. */
+		if (cache->recorded_different && cache->exact_changed &&
+		    invalidate_observation_generation(cache) &&
+		    write_invalidation_marker(cache))
+			die_errno(_("unable to invalidate grep worktree cache"));
+		return;
+	}
 	cache->write_outcome = GREP_WORKTREE_WRITE_ABORTED;
 	cache->recovery_write_outcome =
 		GREP_WORKTREE_RECOVERY_WRITE_NOT_REQUESTED;

@@ -6955,4 +6955,148 @@ test_expect_success 'main-thread CPU detail preserves grep output with and witho
 	)
 '
 
+test_worktree_window () {
+	test_trace2_data grep worktree_index_window/selected "$2" <"$1"
+}
+
+test_expect_success FSMONITOR_DAEMON,PTHREADS 'scoped worktree index preserves content-index proofs' '
+	test_create_repo scoped-worktree &&
+	test_atexit "test_might_fail git -C scoped-worktree fsmonitor--daemon stop" &&
+	(
+		cd scoped-worktree &&
+		git config fsmonitor.socketDir "$grep_index_socket_dir" &&
+		git config core.ignorecase true &&
+		git config index.threads 32 &&
+		git config index.recordEndOfIndexEntries true &&
+		git config grep.worktreeBlobCache true &&
+		git update-index --index-version 4 &&
+		mkdir -p a-outside m-scope/deep z-outside &&
+		for dir in a-outside z-outside
+		do
+			test_seq 1 3000 | while read i
+			do
+				echo "outside contents" >"$dir/$i" || exit 1
+			done || exit 1
+		done &&
+		test_seq 1 300 | while read i
+		do
+			echo "window absent contents" >"m-scope/deep/p-$i" || exit 1
+		done &&
+		echo "*.root -diff" >.gitattributes &&
+		echo "*.parent -diff" >m-scope/.gitattributes &&
+		echo "*.local -diff" >m-scope/deep/.gitattributes &&
+		for suffix in root parent local txt
+		do
+			echo "window needle" >"m-scope/deep/hit.$suffix" || exit 1
+		done &&
+		test-tool chmtime =-5 a-outside/* z-outside/* m-scope/deep/* &&
+		git add . &&
+		git commit -qm "scoped grep fixture" &&
+		git grep-index --no-progress &&
+		git config core.fsmonitor true &&
+		git fsmonitor--daemon start &&
+		git status --porcelain >/dev/null &&
+		git grep --no-content-index "window needle" -- "m-scope/deep/*" >.git/expect &&
+		cp .git/index .git/index.before &&
+		GIT_TRACE2_EVENT="$PWD/.git/window.trace" \
+			git --no-optional-locks grep "window needle" -- m-scope/deep >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/index.before .git/index &&
+		test_worktree_window .git/window.trace 305 &&
+		test_trace2_data grep worktree_index_window/rejected 301 <.git/window.trace
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON,PTHREADS 'scoped worktree attributes survive missing files and queued workers' '
+	(
+		cd scoped-worktree &&
+		rm .gitattributes m-scope/.gitattributes m-scope/deep/.gitattributes &&
+		GIT_TRACE2_EVENT="$PWD/.git/attrs.trace" \
+			git --no-optional-locks grep --threads=2 "window needle" -- m-scope/deep >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_cmp .git/index.before .git/index &&
+		test_worktree_window .git/attrs.trace 305 &&
+		test_grep_workers .git/attrs.trace 2
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON,PTHREADS 'scoped worktree invalidations retain daemon history' '
+	(
+		cd scoped-worktree &&
+		echo "window fresh needle" >m-scope/deep/p-1 &&
+		echo "m-scope/deep/p-1:window fresh needle" >.git/changed-expect &&
+		for attempt in 1 2
+		do
+			GIT_TRACE2_EVENT="$PWD/.git/changed-$attempt.trace" \
+				git --no-optional-locks grep "window fresh needle" -- m-scope/deep >.git/actual &&
+			test_cmp .git/changed-expect .git/actual &&
+			test_worktree_window .git/changed-$attempt.trace 305 || exit 1
+		done &&
+		test_cmp .git/index.before .git/index &&
+		if test_have_prereq CASE_INSENSITIVE_FS
+		then
+			mv m-scope/deep m-scope/DEEP &&
+			echo "window alias needle" >m-scope/DEEP/p-1 &&
+			echo "m-scope/deep/p-1:window alias needle" >.git/alias-expect &&
+			GIT_TRACE2_EVENT="$PWD/.git/alias.trace" \
+				git --no-optional-locks grep "window alias needle" -- m-scope/deep >.git/actual &&
+			test_cmp .git/alias-expect .git/actual &&
+			test_worktree_window .git/alias.trace 305 &&
+			mv m-scope/DEEP m-scope/deep || exit 1
+		fi &&
+		mkdir m-scope/replacement &&
+		echo "window ancestor needle" >m-scope/replacement/p-2 &&
+		mv m-scope/deep m-scope/old &&
+		mv m-scope/replacement m-scope/deep &&
+		echo "m-scope/deep/p-2:window ancestor needle" >.git/ancestor-expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/ancestor.trace" \
+			git --no-optional-locks grep "window ancestor needle" -- m-scope/deep >.git/actual &&
+		test_cmp .git/ancestor-expect .git/actual &&
+		test_worktree_window .git/ancestor.trace 305 &&
+		rm -rf m-scope/deep &&
+		mv m-scope/old m-scope/deep
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON,PTHREADS 'scoped worktree depth and stale identity fall back before output' '
+	(
+		cd scoped-worktree &&
+		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/.git/depth.trace" \
+			git --no-optional-locks grep --max-depth=0 "window needle" -- m-scope >.git/actual &&
+		test_must_be_empty .git/actual &&
+		test_grep ! worktree_index_window/selected .git/depth.trace &&
+		echo "new indexed window needle" >m-scope/deep/hit.txt &&
+		git add m-scope/deep/hit.txt &&
+		echo "m-scope/deep/hit.txt:new indexed window needle" >.git/stale-expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/stale.trace" \
+			git --no-optional-locks grep "new indexed window needle" -- m-scope/deep >.git/actual &&
+		test_cmp .git/stale-expect .git/actual &&
+		test_grep ! worktree_index_window/selected .git/stale.trace
+	)
+'
+
+test_expect_success FSMONITOR_DAEMON,PTHREADS 'scoped raw-byte mismatch fences old equality observations' '
+	(
+		cd scoped-worktree &&
+		echo "*.converted text eol=crlf" >.gitattributes &&
+		printf "window raw needle\r\n" >m-scope/deep/raw.converted &&
+		test-tool chmtime =-5 m-scope/deep/raw.converted &&
+		git add .gitattributes m-scope/deep/raw.converted &&
+		git status --porcelain >/dev/null &&
+		test_expect_code 1 git grep --no-content-index "absent warmup" -- "a-outside/*" &&
+		cp .git/index .git/negative-index.before &&
+		cp .git/index.grep-worktree .git/negative-cache.before &&
+		cp .git/index.grep-worktree-generation .git/negative-generation.before &&
+		printf "m-scope/deep/raw.converted:window raw needle\r\n" >.git/negative-expect &&
+		GIT_TRACE2_EVENT="$PWD/.git/negative.trace" \
+			git --no-optional-locks grep --no-content-index "window raw needle" -- m-scope/deep >.git/actual &&
+		test_cmp .git/negative-expect .git/actual &&
+		test_worktree_window .git/negative.trace 306 &&
+		test_trace2_data grep worktree_blob/recorded_different 1 <.git/negative.trace &&
+		test_cmp .git/negative-index.before .git/index &&
+		test_cmp .git/negative-cache.before .git/index.grep-worktree &&
+		! test_cmp .git/negative-generation.before .git/index.grep-worktree-generation
+	)
+'
+
 test_done

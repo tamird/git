@@ -2440,6 +2440,7 @@ static void grep_source_init_buf(struct grep_source *gs,
 	gs->buf = buf;
 	gs->size = size;
 	gs->driver = NULL;
+	gs->attr_source = NULL;
 	gs->identifier = NULL;
 	gs->repo = NULL;
 	gs->worktree_blob_candidate = 0;
@@ -2471,6 +2472,7 @@ void grep_source_init_file(struct grep_source *gs, const char *name,
 	gs->buf = NULL;
 	gs->size = 0;
 	gs->driver = NULL;
+	gs->attr_source = NULL;
 	gs->identifier = NULL;
 	gs->repo = NULL;
 	gs->worktree_blob_candidate = 0;
@@ -2490,6 +2492,7 @@ void grep_source_init_oid(struct grep_source *gs, const char *name,
 	gs->buf = NULL;
 	gs->size = 0;
 	gs->driver = NULL;
+	gs->attr_source = NULL;
 	gs->identifier = oiddup(oid);
 	gs->repo = repo;
 	gs->worktree_blob_candidate = 0;
@@ -2635,7 +2638,7 @@ void grep_source_load_driver(struct grep_source *gs,
 
 	grep_attr_lock();
 	if (gs->path)
-		gs->driver = userdiff_find_by_path(istate, gs->path);
+		gs->driver = userdiff_find_by_path_with_source(istate, gs->path, gs->attr_source);
 	if (!gs->driver)
 		gs->driver = userdiff_find_by_name("default");
 	grep_attr_unlock();

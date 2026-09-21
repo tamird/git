@@ -43,6 +43,9 @@ int userdiff_config(const char *k, const char *v);
 struct userdiff_driver *userdiff_find_by_name(const char *name);
 struct userdiff_driver *userdiff_find_by_path(struct index_state *istate,
 					      const char *path);
+struct attr_index_source;
+struct userdiff_driver *userdiff_find_by_path_with_source(struct index_state *,
+							  const char *, const struct attr_index_source *);
 
 /*
  * Initialize any textconv-related fields in the driver and return it, or NULL

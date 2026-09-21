@@ -26,6 +26,13 @@ static inline int is_fsmonitor_refreshed(const struct index_state *istate)
 void fsmonitor_apply_snapshot_delta(struct index_state *istate,
 				    char *paths, size_t paths_len,
 				    const char *new_token);
+/*
+ * Project persisted and live invalidations onto privately owned, ordered CEs.
+ * This does not advance the index token or alter repo->index. Failure leaves
+ * every selected entry dirty.
+ */
+int fsmonitor_refresh_selected(struct repository *, const void *, size_t,
+			       unsigned int full_count, struct index_window_entry *, size_t nr);
 
 /*
  * Set the given cache entries CE_FSMONITOR_VALID bit. This should be

@@ -794,12 +794,27 @@ static struct attr_stack *read_attr_from_blob(struct index_state *istate,
 }
 
 static struct attr_stack *read_attr_from_index(struct index_state *istate,
-					       const char *path, unsigned flags)
+					       const char *path, unsigned flags,
+					       const struct attr_index_source *source)
 {
 	struct attr_stack *stack = NULL;
 	char *buf;
 	unsigned long size;
 	int sparse_dir_pos = -1;
+
+	if (source) {
+		const struct cache_entry *ce = source->find(source->data, path);
+		enum object_type type;
+		size_t blob_size;
+
+		if (!ce || ce_stage(ce))
+			return NULL;
+		buf = odb_read_object(source->repo->objects, &ce->oid, &type, &blob_size);
+		if (buf && type == OBJ_BLOB)
+			return read_attr_from_buf(buf, blob_size, path, flags);
+		free(buf);
+		return NULL;
+	}
 
 	if (!istate)
 		return NULL;
@@ -845,17 +860,18 @@ static struct attr_stack *read_attr_from_index(struct index_state *istate,
 
 static struct attr_stack *read_attr(struct index_state *istate,
 				    const struct object_id *tree_oid,
-				    const char *path, unsigned flags)
+				    const char *path, unsigned flags,
+				    const struct attr_index_source *source)
 {
 	struct attr_stack *res = NULL;
 
 	if (direction == GIT_ATTR_INDEX) {
-		res = read_attr_from_index(istate, path, flags);
+		res = read_attr_from_index(istate, path, flags, source);
 	} else if (tree_oid) {
 		res = read_attr_from_blob(istate, tree_oid, path, flags);
 	} else if (!is_bare_repository(the_repository)) {
 		if (direction == GIT_ATTR_CHECKOUT) {
-			res = read_attr_from_index(istate, path, flags);
+			res = read_attr_from_index(istate, path, flags, source);
 			if (!res)
 				res = read_attr_from_file(path, flags);
 		} else if (direction == GIT_ATTR_CHECKIN) {
@@ -867,7 +883,7 @@ static struct attr_stack *read_attr(struct index_state *istate,
 				 * We allow operation in a sparsely checked out
 				 * work tree, so read from it.
 				 */
-				res = read_attr_from_index(istate, path, flags);
+				res = read_attr_from_index(istate, path, flags, source);
 		}
 	}
 
@@ -914,7 +930,8 @@ static void push_stack(struct attr_stack **attr_stack_p,
 
 static void bootstrap_attr_stack(struct index_state *istate,
 				 const struct object_id *tree_oid,
-				 struct attr_stack **stack)
+				 struct attr_stack **stack,
+				 const struct attr_index_source *source)
 {
 	struct attr_stack *e;
 	unsigned flags = READ_ATTR_MACRO_OK;
@@ -939,7 +956,7 @@ static void bootstrap_attr_stack(struct index_state *istate,
 	}
 
 	/* root directory */
-	e = read_attr(istate, tree_oid, GITATTRIBUTES_FILE, flags | READ_ATTR_NOFOLLOW);
+	e = read_attr(istate, tree_oid, GITATTRIBUTES_FILE, flags | READ_ATTR_NOFOLLOW, source);
 	push_stack(stack, e, xstrdup(""), 0);
 
 	/* info frame */
@@ -955,7 +972,8 @@ static void bootstrap_attr_stack(struct index_state *istate,
 static void prepare_attr_stack(struct index_state *istate,
 			       const struct object_id *tree_oid,
 			       const char *path, int dirlen,
-			       struct attr_stack **stack)
+			       struct attr_stack **stack,
+			       const struct attr_index_source *source)
 {
 	struct attr_stack *info;
 	struct strbuf pathbuf = STRBUF_INIT;
@@ -975,7 +993,7 @@ static void prepare_attr_stack(struct index_state *istate,
 	 * .gitattributes in deeper directories to shallower ones,
 	 * and finally use the built-in set as the default.
 	 */
-	bootstrap_attr_stack(istate, tree_oid, stack);
+	bootstrap_attr_stack(istate, tree_oid, stack, source);
 
 	/*
 	 * Pop the "info" one that is always at the top of the stack.
@@ -1030,7 +1048,7 @@ static void prepare_attr_stack(struct index_state *istate,
 		strbuf_add(&pathbuf, path + pathbuf.len, (len - pathbuf.len));
 		strbuf_addf(&pathbuf, "/%s", GITATTRIBUTES_FILE);
 
-		next = read_attr(istate, tree_oid, pathbuf.buf, READ_ATTR_NOFOLLOW);
+		next = read_attr(istate, tree_oid, pathbuf.buf, READ_ATTR_NOFOLLOW, source);
 
 		/* reset the pathbuf to not include "/.gitattributes" */
 		strbuf_setlen(&pathbuf, len);
@@ -1216,7 +1234,7 @@ static void collect_some_attrs(struct index_state *istate,
 		trace2_timer_start(TRACE2_TIMER_ID_ATTR_PREPARE);
 		errno = saved_errno;
 	}
-	prepare_attr_stack(istate, tree_oid, path, dirlen, &check->stack);
+	prepare_attr_stack(istate, tree_oid, path, dirlen, &check->stack, check->index_source);
 	if (sample) {
 		saved_errno = errno;
 		trace2_timer_stop(TRACE2_TIMER_ID_ATTR_PREPARE);
@@ -1317,7 +1335,8 @@ static const char *interned_mode_string(unsigned int mode)
 	BUG("Unsupported mode 0%o", mode);
 }
 
-static const char *builtin_object_mode_attr(struct index_state *istate, const char *path)
+static const char *builtin_object_mode_attr(struct index_state *istate, const char *path,
+					    const struct attr_index_source *source)
 {
 	unsigned int mode;
 
@@ -1334,10 +1353,13 @@ static const char *builtin_object_mode_attr(struct index_state *istate, const ch
 			 * or it does not exist in the index yet and we need to
 			 * check if we can resolve to a ref.
 			*/
-			int pos = index_name_pos(istate, path, strlen(path));
-			if (pos >= 0) {
-				 if (S_ISGITLINK(istate->cache[pos]->ce_mode))
-					 mode = istate->cache[pos]->ce_mode;
+			int pos = source ? -1 : index_name_pos(istate, path, strlen(path));
+			const struct cache_entry *ce = source	? source->find(source->data, path) :
+						       pos >= 0 ? istate->cache[pos] :
+								  NULL;
+			if (ce) {
+				if (S_ISGITLINK(ce->ce_mode))
+					mode = ce->ce_mode;
 			} else if (repo_resolve_gitlink_ref(the_repository, path,
 							    "HEAD", &oid) == 0) {
 				mode = S_IFGITLINK;
@@ -1348,9 +1370,12 @@ static const char *builtin_object_mode_attr(struct index_state *istate, const ch
 		 * For GIT_ATTR_CHECKOUT and GIT_ATTR_INDEX we only check
 		 * for mode in the index.
 		 */
-		int pos = index_name_pos(istate, path, strlen(path));
-		if (pos >= 0)
-			mode = istate->cache[pos]->ce_mode;
+		int pos = source ? -1 : index_name_pos(istate, path, strlen(path));
+		const struct cache_entry *ce = source	? source->find(source->data, path) :
+					       pos >= 0 ? istate->cache[pos] :
+							  NULL;
+		if (ce)
+			mode = ce->ce_mode;
 		else
 			return ATTR__UNSET;
 	}
@@ -1358,17 +1383,18 @@ static const char *builtin_object_mode_attr(struct index_state *istate, const ch
 	return interned_mode_string(mode);
 }
 
-
 static const char *compute_builtin_attr(struct index_state *istate,
-					  const char *path,
-					  const struct git_attr *attr) {
+					const char *path,
+					const struct git_attr *attr,
+					const struct attr_index_source *source)
+{
 	static const struct git_attr *object_mode_attr;
 
 	if (!object_mode_attr)
 		object_mode_attr = git_attr("builtin_objectmode");
 
 	if (attr == object_mode_attr)
-		return builtin_object_mode_attr(istate, path);
+		return builtin_object_mode_attr(istate, path, source);
 	return ATTR__UNSET;
 }
 
@@ -1376,8 +1402,19 @@ void git_check_attr(struct index_state *istate,
 		    const char *path,
 		    struct attr_check *check)
 {
+	git_check_attr_with_source(istate, path, check, NULL);
+}
+
+void git_check_attr_with_source(struct index_state *istate, const char *path,
+				struct attr_check *check, const struct attr_index_source *source)
+{
 	int i;
 	const struct object_id *tree_oid = git_attr_source();
+
+	if (check->index_source != source) {
+		drop_attr_stack(&check->stack);
+		check->index_source = source;
+	}
 
 	collect_some_attrs(istate, tree_oid, path, check);
 
@@ -1385,7 +1422,7 @@ void git_check_attr(struct index_state *istate,
 		unsigned int n = check->items[i].attr->attr_nr;
 		const char *value = check->all_attrs[n].value;
 		if (value == ATTR__UNKNOWN)
-			value = compute_builtin_attr(istate, path, check->all_attrs[n].attr);
+			value = compute_builtin_attr(istate, path, check->all_attrs[n].attr, source);
 		check->items[i].value = value;
 	}
 }
@@ -1395,6 +1432,11 @@ void git_all_attrs(struct index_state *istate,
 {
 	int i;
 	const struct object_id *tree_oid = git_attr_source();
+
+	if (check->index_source) {
+		drop_attr_stack(&check->stack);
+		check->index_source = NULL;
+	}
 
 	attr_check_reset(check);
 	collect_some_attrs(istate, tree_oid, path, check);
