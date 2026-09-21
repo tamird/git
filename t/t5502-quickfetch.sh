@@ -7,6 +7,10 @@ export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
 . ./test-lib.sh
 
+test_lazy_prereq ODB_MONOTONIC_CLOCK '
+	test-tool trace2 012monotonic_clock
+'
+
 copy_sparse_object () {
 	git -C sparse-source cat-file "$1" "$2" |
 	git -C sparse-target hash-object -w -t "$1" --stdin >copied &&
@@ -264,6 +268,70 @@ test_expect_success 'quickfetch should handle ~1000 refs (on Windows)' '
 		git fetch
 	)
 
+'
+
+test_expect_success ODB_MONOTONIC_CLOCK 'fetch samples packed graph-hit existence checks' '
+	test_when_finished "rm -rf sampled-source sampled-client" &&
+	git init sampled-source &&
+	(
+		cd sampled-source &&
+		test_commit first &&
+		test_commit second
+	) &&
+	git clone --no-local sampled-source sampled-client &&
+	git -C sampled-client commit-graph write --reachable &&
+	git -C sampled-client repack -ad &&
+	git -C sampled-client multi-pack-index write &&
+	(
+		cd sampled-source &&
+		test_commit third
+	) &&
+	GIT_TRACE2_EVENT="$PWD/packed-fetch.trace" \
+		git -C sampled-client -c core.commitGraph=true fetch --no-tags origin &&
+	git -C sampled-source rev-parse HEAD >expect &&
+	git -C sampled-client rev-parse refs/remotes/origin/main >actual &&
+	test_cmp expect actual &&
+	test_trace2_data fetch-pack mark-complete/packed-lookup-selected-checks-total 2 \
+		<packed-fetch.trace &&
+	test_trace2_data fetch-pack mark-complete/packed-attempts-total 2 \
+		<packed-fetch.trace &&
+	test_trace2_data fetch-pack mark-complete/packed-midx-searches-total 2 \
+		<packed-fetch.trace &&
+	test_trace2_data fetch-pack mark-complete/packed-midx-resolves-total 2 \
+		<packed-fetch.trace &&
+	test_trace2_data fetch-pack mark-complete/packed-fallbacks-total 0 \
+		<packed-fetch.trace &&
+	test_trace2_data fetch-pack mark-complete/packed-invalid-total 0 \
+		<packed-fetch.trace
+'
+
+test_expect_success ODB_MONOTONIC_CLOCK 'sampled fetch retries a missing graph-only object' '
+	test_when_finished "rm -rf sampled-missing-source sampled-missing" &&
+	git init sampled-missing-source &&
+	git -C sampled-missing-source commit --allow-empty -m source &&
+	git init sampled-missing &&
+	(
+		cd sampled-missing &&
+		test_commit --no-tag missing &&
+		git commit-graph write --reachable &&
+		oid=$(git rev-parse HEAD) &&
+		rm .git/objects/"$(test_oid_to_path "$oid")" &&
+		GIT_TRACE2_EVENT="$PWD/missing-fetch.trace" \
+			test_must_fail git -c core.commitGraph=true fetch --no-tags \
+			../sampled-missing-source HEAD \
+			2>err &&
+		test_grep "in the commit graph file but not in the object database" err &&
+		test_trace2_data fetch-pack mark-complete/packed-lookup-selected-checks-total 1 \
+			<missing-fetch.trace &&
+		test_trace2_data fetch-pack mark-complete/packed-attempts-total 2 \
+			<missing-fetch.trace &&
+		test_trace2_data fetch-pack mark-complete/packed-prepares-total 1 \
+			<missing-fetch.trace &&
+		test_trace2_data fetch-pack mark-complete/packed-fallbacks-total 2 \
+			<missing-fetch.trace &&
+		test_trace2_data fetch-pack mark-complete/packed-invalid-total 0 \
+			<missing-fetch.trace
+	)
 '
 
 test_done

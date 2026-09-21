@@ -488,6 +488,58 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "ref-filter",
 		.name = "object_metadata/preload/packed-invalid-total",
 	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_LOOKUP_SELECTED_CHECKS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-lookup-selected-checks-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_ATTEMPTS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_ATTEMPT_NS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-attempt-ns-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_PREPARES] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-prepares-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_PREPARE_NS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-prepare-ns-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_MIDX_SEARCHES] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-midx-searches-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_MIDX_SEARCH_NS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-midx-search-ns-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_MIDX_RESOLVES] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-midx-resolves-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_MIDX_RESOLVE_NS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-midx-resolve-ns-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_FALLBACKS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-fallbacks-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_FALLBACK_NS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-fallback-ns-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_FALLBACK_PACK_ATTEMPTS] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-fallback-pack-attempts-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKED_INVALID] = {
+		.category = "fetch-pack",
+		.name = "mark-complete/packed-invalid-total",
+	},
 
 	[TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED] = {
 		.category = "grep",
@@ -990,4 +1042,8 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		emit_counter_snapshot("ref-filter",
 				      TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_LOOKUP_SELECTED_CHECKS,
 				      TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_INVALID);
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_FETCH_PACKED_LOOKUP_SELECTED_CHECKS].value)
+		emit_counter_snapshot("fetch-pack",
+				      TRACE2_COUNTER_ID_FETCH_PACKED_LOOKUP_SELECTED_CHECKS,
+				      TRACE2_COUNTER_ID_FETCH_PACKED_INVALID);
 }

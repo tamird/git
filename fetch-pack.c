@@ -136,6 +136,9 @@ static void die_in_commit_graph_only(const struct object_id *oid)
 	      oid_to_hex(oid));
 }
 
+#define FETCH_PACKED_LOOKUP_PROBE_PREFIX   256
+#define FETCH_PACKED_LOOKUP_PROBE_INTERVAL 128
+
 static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 					       int mark_tags_complete_and_check_obj_db)
 {
@@ -154,12 +157,24 @@ static struct commit *deref_without_lazy_fetch(const struct object_id *oid,
 	errno = saved_errno;
 	if (commit) {
 		if (mark_tags_complete_and_check_obj_db) {
+			static uint64_t graph_hits;
+			enum odb_has_object_flags flags = ODB_HAS_OBJECT_RECHECK_PACKED;
 			int has_object;
 
+			if (trace2_is_enabled()) {
+				graph_hits++;
+				/* Include startup, then sample the sorted OID stream. */
+				if (graph_hits <= FETCH_PACKED_LOOKUP_PROBE_PREFIX ||
+				    !(graph_hits % FETCH_PACKED_LOOKUP_PROBE_INTERVAL)) {
+					flags |= ODB_HAS_OBJECT_TRACE_FETCH_PACKED_LOOKUP;
+					trace2_counter_add(
+						TRACE2_COUNTER_ID_FETCH_PACKED_LOOKUP_SELECTED_CHECKS,
+						1);
+				}
+			}
 			trace2_timer_start(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_OBJECT_CHECK);
 			errno = saved_errno;
-			has_object = odb_has_object(the_repository->objects, oid,
-						    ODB_HAS_OBJECT_RECHECK_PACKED);
+			has_object = odb_has_object(the_repository->objects, oid, flags);
 			saved_errno = errno;
 			trace2_timer_stop(TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_OBJECT_CHECK);
 			errno = saved_errno;

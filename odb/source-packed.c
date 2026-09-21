@@ -15,7 +15,7 @@
 #include "strbuf.h"
 #include "trace2.h"
 
-/* Sample existence checks from cache-tree and ref-filter callers. */
+/* Sample existence checks without changing their lookup behavior. */
 struct packed_lookup_probe {
 	struct odb_packed_lookup lookup;
 	uint64_t started, attempt_ns;
@@ -202,9 +202,7 @@ static enum odb_read_status odb_source_packed_read_object_info(struct odb_source
 	if (result && !oi->contentp &&
 	    (!oi->sizep || !result->size_info_enabled))
 		result = NULL;
-	if (!oi && (flags & (OBJECT_INFO_TRACE_PACKED_LOOKUP |
-			     OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP |
-			     OBJECT_INFO_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP)))
+	if (!oi && (flags & OBJECT_INFO_TRACE_PACKED_LOOKUP_MASK))
 		diagnostic = &probe;
 	lookup = result ? &result->packed_lookup : NULL;
 	if (diagnostic)
@@ -309,22 +307,28 @@ out:
 		strbuf_addf(errmsg, _("packed object %s (stored in %s) is corrupt"),
 			    oid_to_hex(oid), bad_pack->pack_name);
 	if (diagnostic) {
-		int ordered_validation = !!(flags &
-					    OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP);
-		int ref_preload = !!(flags &
-				     OBJECT_INFO_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP);
-		enum trace2_counter_id first =
-			TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS;
-		enum trace2_counter_id invalid =
-			TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID;
+		enum trace2_counter_id first, invalid;
 		int saved_errno = errno;
 
-		if (ordered_validation) {
+		switch (flags & OBJECT_INFO_TRACE_PACKED_LOOKUP_MASK) {
+		case OBJECT_INFO_TRACE_PACKED_LOOKUP:
+			first = TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_ATTEMPTS;
+			invalid = TRACE2_COUNTER_ID_CACHE_TREE_UPDATE_REUSE_PACKED_INVALID;
+			break;
+		case OBJECT_INFO_TRACE_CACHE_TREE_VALIDATE_PACKED_LOOKUP:
 			first = TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_ATTEMPTS;
 			invalid = TRACE2_COUNTER_ID_CACHE_TREE_VALIDATE_OID_ORDER_PACKED_INVALID;
-		} else if (ref_preload) {
+			break;
+		case OBJECT_INFO_TRACE_REF_FILTER_PRELOAD_PACKED_LOOKUP:
 			first = TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_ATTEMPTS;
 			invalid = TRACE2_COUNTER_ID_REF_FILTER_PRELOAD_PACKED_INVALID;
+			break;
+		case OBJECT_INFO_TRACE_FETCH_PACKED_LOOKUP:
+			first = TRACE2_COUNTER_ID_FETCH_PACKED_ATTEMPTS;
+			invalid = TRACE2_COUNTER_ID_FETCH_PACKED_INVALID;
+			break;
+		default:
+			BUG("multiple packed lookup diagnostic selectors");
 		}
 		/* An invalid attempt contributes no partial stage measurements. */
 		if (diagnostic->invalid || lookup->invalid) {
@@ -345,9 +349,7 @@ out:
 				lookup->fallback_pack_attempts,
 			};
 
-			trace2_counter_add_many(first, values,
-						ARRAY_SIZE(values) -
-							!(ordered_validation || ref_preload));
+			trace2_counter_add_many(first, values, invalid - first);
 		}
 		errno = saved_errno;
 	}
