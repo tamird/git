@@ -334,6 +334,41 @@ static void mark_reachable(struct expire_reflog_policy_cb *cb)
 	cb->mark_list = leftover;
 }
 
+static int push_tip_to_list(const struct reference *ref, void *cb_data)
+{
+	struct commit_list **list = cb_data;
+	struct commit *tip_commit;
+	if (ref->flags & REF_ISSYMREF)
+		return 0;
+	tip_commit = lookup_commit_reference_gently(the_repository, ref->oid, 1);
+	if (!tip_commit)
+		return 0;
+	commit_list_insert(tip_commit, list);
+	return 0;
+}
+
+static void prepare_reachability(struct expire_reflog_policy_cb *cb)
+{
+	struct commit_list *elem;
+
+	switch (cb->unreachable_expire_kind) {
+	case UE_ALWAYS:
+		return;
+	case UE_HEAD:
+		refs_for_each_ref(get_main_ref_store(the_repository),
+				  push_tip_to_list, &cb->tips);
+		for (elem = cb->tips; elem; elem = elem->next)
+			commit_list_insert(elem->item, &cb->mark_list);
+		break;
+	case UE_NORMAL:
+		commit_list_insert(cb->tip_commit, &cb->mark_list);
+		break;
+	}
+	cb->mark_limit = cb->opts.expire_total;
+	mark_reachable(cb);
+	cb->reachability_initialized = 1;
+}
+
 static int is_unreachable(struct expire_reflog_policy_cb *cb, struct commit *commit, struct object_id *oid)
 {
 	/*
@@ -351,6 +386,9 @@ static int is_unreachable(struct expire_reflog_policy_cb *cb, struct commit *com
 		if (!commit)
 			return 0;
 	}
+
+	if (!cb->reachability_initialized)
+		prepare_reachability(cb);
 
 	/* Reachable from the current ref?  Don't prune. */
 	if (commit->object.flags & REACHABLE)
@@ -423,19 +461,6 @@ int should_expire_reflog_ent_verbose(struct object_id *ooid,
 	return expire;
 }
 
-static int push_tip_to_list(const struct reference *ref, void *cb_data)
-{
-	struct commit_list **list = cb_data;
-	struct commit *tip_commit;
-	if (ref->flags & REF_ISSYMREF)
-		return 0;
-	tip_commit = lookup_commit_reference_gently(the_repository, ref->oid, 1);
-	if (!tip_commit)
-		return 0;
-	commit_list_insert(tip_commit, list);
-	return 0;
-}
-
 static int is_head(const char *refname)
 {
 	const char *stripped_refname;
@@ -448,44 +473,28 @@ void reflog_expiry_prepare(const char *refname,
 			   void *cb_data)
 {
 	struct expire_reflog_policy_cb *cb = cb_data;
-	struct commit_list *elem;
-	struct commit *commit = NULL;
 
 	if (!cb->opts.expire_unreachable || is_head(refname)) {
 		cb->unreachable_expire_kind = UE_HEAD;
 	} else {
-		commit = lookup_commit_reference_gently(the_repository,
-							oid, 1);
-		if (commit && is_null_oid(&commit->object.oid))
-			commit = NULL;
-		cb->unreachable_expire_kind = commit ? UE_NORMAL : UE_ALWAYS;
+		cb->tip_commit = lookup_commit_reference_gently(the_repository,
+								oid, 1);
+		if (cb->tip_commit && is_null_oid(&cb->tip_commit->object.oid))
+			cb->tip_commit = NULL;
+		cb->unreachable_expire_kind = cb->tip_commit ? UE_NORMAL : UE_ALWAYS;
 	}
 
 	if (cb->opts.expire_unreachable <= cb->opts.expire_total)
 		cb->unreachable_expire_kind = UE_ALWAYS;
-
-	switch (cb->unreachable_expire_kind) {
-	case UE_ALWAYS:
-		return;
-	case UE_HEAD:
-		refs_for_each_ref(get_main_ref_store(the_repository),
-				  push_tip_to_list, &cb->tips);
-		for (elem = cb->tips; elem; elem = elem->next)
-			commit_list_insert(elem->item, &cb->mark_list);
-		break;
-	case UE_NORMAL:
-		commit_list_insert(commit, &cb->mark_list);
-		/* For reflog_expiry_cleanup() below */
-		cb->tip_commit = commit;
-	}
-	cb->mark_limit = cb->opts.expire_total;
-	mark_reachable(cb);
 }
 
 void reflog_expiry_cleanup(void *cb_data)
 {
 	struct expire_reflog_policy_cb *cb = cb_data;
 	struct commit_list *elem;
+
+	if (!cb->reachability_initialized)
+		return;
 
 	switch (cb->unreachable_expire_kind) {
 	case UE_ALWAYS:

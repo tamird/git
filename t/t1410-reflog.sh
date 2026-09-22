@@ -525,10 +525,14 @@ test_expect_success 'expire one of multiple worktrees' '
 test_expect_success 'empty reflog' '
 	test_when_finished "rm -rf empty" &&
 	git init empty &&
-	test_commit -C empty A &&
-	test-tool ref-store main create-reflog refs/heads/foo &&
-	git -C empty reflog expire --all 2>err &&
-	test_must_be_empty err
+	(
+		cd empty &&
+		test_commit A &&
+		git -c core.logAllRefUpdates=false branch foo &&
+		test-tool ref-store main create-reflog refs/heads/foo &&
+		git reflog expire --all 2>err &&
+		test_must_be_empty err
+	)
 '
 
 test_expect_success 'list reflogs' '
@@ -809,6 +813,29 @@ test_expect_success 'reflog expiration uses the default retention periods' '
 		git reflog expire refs/heads/main &&
 		git reflog --format=%gs refs/heads/main >actual &&
 		echo "commit (initial): initial" >expect &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'reflog expiration reaches past the initial date cutoff' '
+	test_create_repo expiry-cutoff &&
+	(
+		cd expiry-cutoff &&
+		sane_unset GIT_TEST_DATE_NOW &&
+		old_date=$(test-tool date timestamp "120 days ago") &&
+		old_date="${old_date##* } +0000" &&
+		reflog_date=$(test-tool date timestamp "45 days ago") &&
+		reflog_date="${reflog_date##* } +0000" &&
+		test_commit --no-tag --date "$old_date" root &&
+		test_commit --no-tag --date "$old_date" boundary &&
+		test_commit --no-tag --date "$reflog_date" tip &&
+		GIT_COMMITTER_DATE="$reflog_date" \
+			git update-ref --create-reflog -m root refs/heads/retained HEAD~2 &&
+		GIT_COMMITTER_DATE="$reflog_date" \
+			git update-ref -m tip refs/heads/retained HEAD &&
+		git reflog expire refs/heads/retained &&
+		git reflog --format=%gs refs/heads/retained >actual &&
+		printf "%s\n" tip root >expect &&
 		test_cmp expect actual
 	)
 '

@@ -55,6 +55,7 @@ struct expire_reflog_policy_cb {
 	struct commit *tip_commit;
 	struct commit_list *tips;
 	unsigned int dry_run:1;
+	unsigned int reachability_initialized:1;
 };
 
 int reflog_delete(const char *rev, enum expire_reflog_flags flags,

@@ -285,7 +285,6 @@ struct count_reflog_entries_data {
 	struct expire_reflog_policy_cb policy;
 	size_t count;
 	size_t limit;
-	int prepared;
 };
 
 static int count_reflog_expiry_candidates(const char *refname UNUSED,
@@ -304,20 +303,13 @@ static int count_reflog_expiry_candidates(const char *refname UNUSED,
 	return data->count >= data->limit;
 }
 
-static int count_reflog_entries(const char *refname,
+static int count_reflog_entries(const char *refname UNUSED,
 				struct object_id *old_oid, struct object_id *new_oid,
 				const char *committer, timestamp_t timestamp,
 				int tz, const char *msg, void *cb_data)
 {
 	struct count_reflog_entries_data *data = cb_data;
 
-	if (!data->prepared &&
-	    timestamp >= data->policy.opts.expire_total &&
-	    timestamp < data->policy.opts.expire_unreachable) {
-		/* HEAD reachability uses all ref tips, not this entry's OID. */
-		reflog_expiry_prepare(refname, new_oid, &data->policy);
-		data->prepared = 1;
-	}
 	if (should_expire_reflog_ent(old_oid, new_oid, committer, timestamp, tz, msg, &data->policy))
 		data->count++;
 	return data->count >= data->limit;
@@ -349,11 +341,11 @@ static int reflog_expire_condition(struct gc_config *cfg UNUSED)
 	    data.count < data.limit)
 		goto cleanup;
 	data.count = 0;
+	reflog_expiry_prepare("HEAD", null_oid(the_hash_algo), &data.policy);
 	refs_for_each_reflog_ent(get_main_ref_store(the_repository), "HEAD",
 				 count_reflog_entries, &data);
 
-	if (data.prepared)
-		reflog_expiry_cleanup(&data.policy);
+	reflog_expiry_cleanup(&data.policy);
 cleanup:
 	reflog_clear_expire_config(&data.policy.opts);
 	return data.count >= data.limit;
