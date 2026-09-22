@@ -15,7 +15,9 @@ test_expect_success 'setup subtree-merged repository' '
 
 	git init outer &&
 	echo outer >outer/outer.txt &&
-	git -C outer add outer.txt &&
+	mkdir outer/stable &&
+	echo stable >outer/stable/file &&
+	git -C outer add outer.txt stable &&
 	git -C outer commit -m "outer init" &&
 
 	git -C outer fetch ../inner master &&
@@ -51,7 +53,15 @@ test_expect_success '--follow finds the pre-merge commit through a subtree merge
 		log-follow-merge.trace &&
 	test_grep \
 		"\"event\":\"timer\".*\"category\":\"log\",\"name\":\"follow-parent/sibling-current-root-read\",\"intervals\":1," \
-		log-follow-merge.trace
+		log-follow-merge.trace &&
+	git -C outer config index.recordendofindexentries true &&
+	git -C outer update-index --force-write-index &&
+	GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+	GIT_TRACE2_EVENT="$PWD/log-follow-index.trace" \
+		git -C outer log --follow --pretty=tformat:%s inner/inner.txt >actual &&
+	test_cmp expect actual &&
+	test_trace2_data_singular diff follow-index/attempts 1 <log-follow-index.trace &&
+	test_trace2_data_singular diff follow-index/ready 1 <log-follow-index.trace
 '
 
 test_expect_success '--follow measures equal-root merge parent' '

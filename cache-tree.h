@@ -37,6 +37,10 @@ int cache_tree_root_matches_index(struct index_state *, const struct object_id *
  */
 int cache_tree_get_path(struct index_state *, const char *path,
 			struct object_id *, size_t *tree_count);
+/* Maximum directory depth relative to this node, including empty children. */
+int cache_tree_get_path_with_depth(struct index_state *, const char *path,
+				   struct object_id *, size_t *tree_count,
+				   size_t *max_depth);
 void cache_tree_discard(struct index_state *);
 void cache_tree_invalidate_path(struct index_state *, const char *);
 struct cache_tree_sub *cache_tree_sub(struct cache_tree *, const char *);

@@ -2,6 +2,7 @@
  * Helper functions for tree diff generation
  */
 
+#define USE_THE_REPOSITORY_VARIABLE
 #define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
@@ -18,6 +19,12 @@
 #include "tree-walk.h"
 #include "repository.h"
 #include "dir.h"
+#include "cache-tree.h"
+#include "read-cache-ll.h"
+#include "promisor-remote.h"
+#include "parse.h"
+#include "prio-queue.h"
+#include "trace.h"
 
 /*
  * Some mode bits are also used internally for computations.
@@ -131,6 +138,13 @@ static void ll_diff_tree_oid(const struct object_id *old_oid,
 static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 					  struct tree_desc *desc,
 					  const struct object_id *oid);
+static int follow_index_emit(const struct object_id *oid,
+			     const struct object_id **parents_oid, int nparent,
+			     struct strbuf *base, struct diff_options *opt,
+			     int depth);
+static void follow_index_prepare_roots(struct diff_options *opt,
+				       const struct tree_desc *old_tree,
+				       const struct tree_desc *new_tree);
 
 /*
  * Compare two tree entries, taking into account only path/S_ISDIR(mode),
@@ -448,6 +462,8 @@ static void ll_diff_tree_paths(
 
 	if (depth > opt->repo->settings.max_allowed_tree_depth)
 		die("exceeded maximum allowed tree depth");
+	if (follow_index_emit(oid, parents_oid, nparent, base, opt, depth))
+		return;
 
 	FAST_ARRAY_ALLOC(tp, nparent);
 	FAST_ARRAY_ALLOC(tptree, nparent);
@@ -485,6 +501,9 @@ static void ll_diff_tree_paths(
 			errno = saved_errno;
 		}
 	}
+
+	if (!depth && nparent == 1 && oid && parents_oid[0] && !base->len)
+		follow_index_prepare_roots(opt, &tp[0], &t);
 
 	/* Enable recursion indefinitely */
 	opt->pathspec.recursive = opt->flags.recursive;
@@ -988,6 +1007,7 @@ struct diff_follow_oid_sample {
 };
 
 struct follow_addremove_data {
+	struct diff_follow_index *index;
 	uint64_t *eligible_additions;
 	int skip_additions;
 	struct diff_follow_oid_sample *oid_sample;
@@ -997,6 +1017,438 @@ struct follow_addremove_data {
 			   TRACE2_COUNTER_ID_DIFF_FOLLOW_OID_INVALID + 1];
 	int oid_done;
 };
+
+/*
+ * The detached snapshot supplies unchanged historical sources, never
+ * worktree stat information. Like existing cache-tree shortcuts, this trusts
+ * matching TREE metadata and can skip reads of descendant tree objects.
+ */
+struct diff_follow_index {
+	struct index_state index;
+	int attempted, ready, trace_enabled, replace_mode;
+	uint64_t prepare_ns, read_ns, proof_ns, emit_ns;
+	uint64_t proofs, scopes, reused_entries, reused_trees, depth_fallbacks;
+	uint64_t probe_reads, probe_bytes, probe_trees, probe_scopes;
+	uint64_t probe_peak_memory, probe_dropped, probe_pending;
+};
+
+#define FOLLOW_INDEX_PROBE_READS  256
+#define FOLLOW_INDEX_PROBE_BYTES  (4 * 1024 * 1024)
+#define FOLLOW_INDEX_PROBE_ITEMS  8192
+#define FOLLOW_INDEX_PROBE_MEMORY (1024 * 1024)
+
+struct follow_index_probe_item {
+	struct object_id old_oid, new_oid;
+	size_t trees;
+	int depth;
+	char path[FLEX_ARRAY];
+};
+
+struct follow_index_probe {
+	struct diff_follow_index *state;
+	/* Borrowed only during the synchronous index admission callback. */
+	struct tree_desc old_root, new_root;
+	struct prio_queue pending;
+	size_t memory, items;
+};
+
+static int follow_index_probe_compare(const void *a, const void *b,
+				      void *data UNUSED)
+{
+	const struct follow_index_probe_item *one = a, *two = b;
+
+	if (one->trees != two->trees)
+		return one->trees > two->trees ? -1 : 1;
+	return strcmp(one->path, two->path);
+}
+
+static int follow_index_probe_children(struct follow_index_probe *probe,
+				       struct tree_desc old_tree,
+				       struct tree_desc new_tree,
+				       const char *parent, int depth,
+				       int prove, int descend)
+{
+	struct diff_follow_index *state = probe->state;
+	struct index_state *index = &state->index;
+	char *path = NULL;
+	size_t path_alloc = 0;
+	int ret = -1;
+
+	old_tree.flags |= TREE_DESC_SILENT_ERRORS;
+	new_tree.flags |= TREE_DESC_SILENT_ERRORS;
+	while (old_tree.size && new_tree.size) {
+		int cmp = tree_entry_pathcmp(&old_tree, &new_tree);
+		struct name_entry old = old_tree.entry, new = new_tree.entry;
+
+		if (cmp <= 0 && update_tree_entry_gently(&old_tree))
+			goto done;
+		if (cmp >= 0 && update_tree_entry_gently(&new_tree))
+			goto done;
+		if (!cmp && S_ISDIR(old.mode) && S_ISDIR(new.mode)) {
+			struct follow_index_probe_item *item;
+			struct object_id cached;
+			size_t trees, max_depth, allocation, path_len;
+			int count;
+
+			/* A discarded optional path must not grow temporary storage. */
+			path_len = strlen(parent) + old.pathlen + 1;
+			if (path_len + 1 > path_alloc &&
+			    path_len + 1 - path_alloc > FOLLOW_INDEX_PROBE_MEMORY - probe->memory) {
+				state->probe_dropped++;
+				continue;
+			}
+			if (path_len + 1 > path_alloc) {
+				probe->memory += path_len + 1 - path_alloc;
+				path_alloc = path_len + 1;
+				REALLOC_ARRAY(path, path_alloc);
+				if (state->probe_peak_memory < probe->memory)
+					state->probe_peak_memory = probe->memory;
+			}
+			memcpy(path, parent, strlen(parent));
+			memcpy(path + strlen(parent), old.path, old.pathlen);
+			path[path_len - 1] = '/';
+			path[path_len] = '\0';
+			count = cache_tree_get_path_with_depth(index, path, &cached,
+							       &trees, &max_depth);
+			if (count <= 0 || depth > index->repo->settings.max_allowed_tree_depth)
+				continue;
+			if (oideq(&old.oid, &new.oid) && oideq(&old.oid, &cached) &&
+			    max_depth <= (size_t)(index->repo->settings.max_allowed_tree_depth - depth)) {
+				if (prove) {
+					if (trees > UINT64_MAX - state->probe_trees)
+						goto done;
+					state->probe_trees += trees;
+					state->probe_scopes++;
+				}
+				continue;
+			}
+			if (!descend || trees <= 1)
+				continue;
+			allocation = sizeof(*item) + path_len + 1;
+			if (probe->items == FOLLOW_INDEX_PROBE_ITEMS ||
+			    allocation > FOLLOW_INDEX_PROBE_MEMORY - probe->memory) {
+				state->probe_dropped++;
+				continue;
+			}
+			probe->items++;
+			probe->memory += allocation;
+			if (state->probe_peak_memory < probe->memory)
+				state->probe_peak_memory = probe->memory;
+			FLEX_ALLOC_STR(item, path, path);
+			oidcpy(&item->old_oid, &old.oid);
+			oidcpy(&item->new_oid, &new.oid);
+			item->trees = trees;
+			item->depth = depth;
+			prio_queue_put(&probe->pending, item);
+		}
+	}
+	ret = 0;
+done:
+	probe->memory -= path_alloc;
+	free(path);
+	return ret;
+}
+
+static int follow_index_probe_read(struct follow_index_probe *probe,
+				   const struct object_id *oid,
+				   struct tree_desc *tree, void **buffer)
+{
+	struct diff_follow_index *state = probe->state;
+	struct object_info info = OBJECT_INFO_INIT;
+	enum object_type type;
+	size_t size;
+	unsigned int flags = OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK;
+
+	if (state->probe_reads == FOLLOW_INDEX_PROBE_READS)
+		return -1;
+	info.typep = &type;
+	info.sizep = &size;
+	if (odb_read_object_info_extended(state->index.repo->objects, oid, &info, flags) < 0 ||
+	    type != OBJ_TREE || size > FOLLOW_INDEX_PROBE_BYTES - state->probe_bytes)
+		return -1;
+	info.contentp = buffer;
+	state->probe_reads++;
+	if (odb_read_object_info_extended(state->index.repo->objects, oid, &info, flags) < 0 ||
+	    type != OBJ_TREE || size > FOLLOW_INDEX_PROBE_BYTES - state->probe_bytes)
+		return -1;
+	state->probe_bytes += size;
+	return init_tree_desc_gently(tree, oid, *buffer, size, TREE_DESC_SILENT_ERRORS);
+}
+
+struct diff_follow_index *diff_follow_index_begin(struct repository *repo)
+{
+	struct diff_follow_index *state;
+	int saved_errno = errno;
+
+	if (!git_env_bool("GIT_TEST_FOLLOW_INDEX", 1)) {
+		errno = saved_errno;
+		return NULL;
+	}
+	CALLOC_ARRAY(state, 1);
+	index_state_init(&state->index, repo);
+	state->index.lazy_cache_tree = 1;
+	state->trace_enabled = trace2_is_enabled();
+	errno = saved_errno;
+	return state;
+}
+
+static int follow_index_accept(struct index_state *index, void *data)
+{
+	struct follow_index_probe *probe = data;
+	struct diff_follow_index *state = probe->state;
+	struct follow_index_probe_item *item;
+	/*
+	 * Amortize full index decoding over proven tree reads saved, charging
+	 * optional discovery reads against that benefit. Sixteen entries per
+	 * net tree read is a cost screen, not a guarantee for every workload.
+	 */
+	size_t required = index->cache_nr / 16 + !!(index->cache_nr % 16);
+	int accepted = 0;
+
+	if (!required)
+		return 0;
+	/* Valid children remain useful even when their root TREE is invalid. */
+	/* First count matches in descriptors the normal walk already loaded. */
+	if (follow_index_probe_children(probe, probe->old_root, probe->new_root,
+					"", 1, 1, 0))
+		return 0;
+	if (state->probe_trees >= required)
+		return 1;
+	probe->pending.compare = follow_index_probe_compare;
+	probe->memory = FOLLOW_INDEX_PROBE_ITEMS * sizeof(*probe->pending.array);
+	if (state->probe_peak_memory < probe->memory)
+		state->probe_peak_memory = probe->memory;
+	ALLOC_ARRAY(probe->pending.array, FOLLOW_INDEX_PROBE_ITEMS);
+	probe->pending.alloc = FOLLOW_INDEX_PROBE_ITEMS;
+	if (follow_index_probe_children(probe, probe->old_root, probe->new_root,
+					"", 1, 0, 1))
+		goto done;
+	while (state->probe_reads < FOLLOW_INDEX_PROBE_READS &&
+	       (item = prio_queue_get(&probe->pending))) {
+		struct tree_desc old_tree, new_tree;
+		void *old_buffer = NULL, *new_buffer = NULL;
+		int failed = follow_index_probe_read(probe, &item->old_oid,
+						     &old_tree, &old_buffer);
+
+		if (!failed) {
+			if (oideq(&item->old_oid, &item->new_oid))
+				new_tree = old_tree;
+			else
+				failed = follow_index_probe_read(probe, &item->new_oid,
+								 &new_tree, &new_buffer);
+		}
+		if (!failed)
+			failed = follow_index_probe_children(probe, old_tree, new_tree,
+							     item->path, item->depth + 1, 1, 1);
+		free(old_buffer);
+		free(new_buffer);
+		/* Keep the active job charged until its children have been queued. */
+		probe->memory -= sizeof(*item) + strlen(item->path) + 1;
+		probe->items--;
+		free(item);
+		if (failed)
+			break;
+		if (state->probe_trees >= state->probe_reads + required) {
+			accepted = 1;
+			break;
+		}
+	}
+done:
+	state->probe_pending = prio_queue_size(&probe->pending);
+	while ((item = prio_queue_get(&probe->pending)))
+		free(item);
+	clear_prio_queue(&probe->pending);
+	return accepted;
+}
+
+static int follow_index_eligible(struct diff_options *opt)
+{
+	return opt->change == follow_change &&
+	       opt->pathchange == emit_diff_first_parent_only &&
+	       opt->flags.recursive && opt->flags.find_copies_harder &&
+	       !opt->flags.tree_in_recursive && !opt->flags.quick && !opt->max_changes &&
+	       !opt->max_depth_valid && !opt->pathspec.nr && opt->change_fn_data;
+}
+
+static void follow_index_prepare_roots(struct diff_options *opt,
+				       const struct tree_desc *old_tree,
+				       const struct tree_desc *new_tree)
+{
+	struct follow_addremove_data *data;
+	struct diff_follow_index *state;
+	struct follow_index_probe probe;
+	struct index_state *index;
+	struct repository *repo;
+	uint64_t begin, read_begin;
+	int saved_errno = errno, ret;
+
+	if (!follow_index_eligible(opt))
+		return;
+	data = opt->change_fn_data;
+	state = data->index;
+	if (!state || state->attempted)
+		return;
+	state->attempted = 1;
+	begin = getnanotime();
+	index = &state->index;
+	repo = index->repo;
+	if (repo != the_repository || repo->submodule_prefix ||
+	    repo != opt->repo || old_tree->algo != repo->hash_algo ||
+	    new_tree->algo != repo->hash_algo || repo_has_promisor_remote(repo))
+		goto done;
+	state->replace_mode = replace_refs_enabled(repo);
+	if (state->replace_mode) {
+		prepare_replace_object(repo);
+		if (oidmap_get_size(&repo->objects->replace_map))
+			goto done;
+	}
+	memset(&probe, 0, sizeof(probe));
+	probe.state = state;
+	probe.old_root = *old_tree;
+	probe.new_root = *new_tree;
+	read_begin = getnanotime();
+	ret = read_index_from_if_tree_accepted(
+		index, repo_get_index_file(repo), repo_get_git_dir(repo),
+		follow_index_accept, &probe);
+	state->read_ns = getnanotime() - read_begin;
+	if (ret < 0)
+		goto done;
+	for (unsigned int i = 0; i < index->cache_nr; i++) {
+		const struct cache_entry *ce = index->cache[i];
+
+		if (ce->ce_flags & (CE_STAGEMASK | CE_INTENT_TO_ADD | CE_REMOVE) ||
+		    ce->oid.algo != hash_algo_by_ptr(repo->hash_algo) ||
+		    is_null_oid(&ce->oid))
+			goto done;
+		switch (ce->ce_mode) {
+		case S_IFREG | 0644:
+		case S_IFREG | 0755:
+		case S_IFLNK:
+		case S_IFGITLINK:
+			break;
+		default:
+			goto done;
+		}
+	}
+	state->ready = 1;
+done:
+	if (!state->ready)
+		discard_index(index);
+	state->prepare_ns = getnanotime() - begin;
+	errno = saved_errno;
+}
+
+static int follow_index_emit(const struct object_id *oid,
+			     const struct object_id **parents_oid, int nparent,
+			     struct strbuf *base, struct diff_options *opt,
+			     int depth)
+{
+	struct follow_addremove_data *data;
+	struct diff_follow_index *state;
+	struct index_state *index;
+	struct object_id cached_oid;
+	size_t nodes, max_depth;
+	uint64_t begin;
+	int count, pos, first, saved_errno = errno;
+
+	if (!follow_index_eligible(opt) || nparent != 1 ||
+	    !oid || !parents_oid[0] || oid->algo != parents_oid[0]->algo ||
+	    !oideq(oid, parents_oid[0]))
+		return 0;
+	data = opt->change_fn_data;
+	state = data->index;
+	if (!state || !state->ready || state->index.repo != opt->repo ||
+	    state->replace_mode != replace_refs_enabled(opt->repo) ||
+	    oid->algo != hash_algo_by_ptr(opt->repo->hash_algo))
+		return 0;
+	index = &state->index;
+	begin = state->trace_enabled ? getnanotime() : 0;
+	state->proofs++;
+	count = cache_tree_get_path_with_depth(index, base->buf, &cached_oid,
+					       &nodes, &max_depth);
+	if (count <= 0 || !oideq(oid, &cached_oid))
+		goto fallback;
+	/* Include empty directories, which cannot be inferred from CE paths. */
+	if (max_depth >
+	    (size_t)(opt->repo->settings.max_allowed_tree_depth - depth)) {
+		state->depth_fallbacks++;
+		goto fallback;
+	}
+	pos = index_name_pos(index, base->buf, base->len);
+	first = pos < 0 ? -pos - 1 : pos;
+	if (count > index->cache_nr - first ||
+	    (first && starts_with(index->cache[first - 1]->name, base->buf)) ||
+	    (first + count < index->cache_nr &&
+	     starts_with(index->cache[first + count]->name, base->buf)))
+		goto fallback;
+	/* Validate the whole range before any callback: fallback emits nothing. */
+	for (int i = 0; i < count; i++)
+		if (!starts_with(index->cache[first + i]->name, base->buf))
+			goto fallback;
+	if (state->trace_enabled)
+		state->proof_ns += getnanotime() - begin;
+	begin = state->trace_enabled ? getnanotime() : 0;
+	for (int i = 0; i < count; i++) {
+		const struct cache_entry *ce = index->cache[first + i];
+
+		/* CE order is recursive tree leaf order; retain all modes and flags. */
+		opt->change(opt, ce->ce_mode, ce->ce_mode, &ce->oid, &ce->oid,
+			    1, 1, ce->name, 0, 0);
+	}
+	if (state->trace_enabled)
+		state->emit_ns += getnanotime() - begin;
+	state->scopes++;
+	state->reused_entries += count;
+	state->reused_trees += nodes;
+	errno = saved_errno;
+	return 1;
+fallback:
+	if (state->trace_enabled)
+		state->proof_ns += getnanotime() - begin;
+	errno = saved_errno;
+	return 0;
+}
+
+void diff_follow_index_end(struct diff_follow_index *state)
+{
+	struct repository *repo;
+	uint64_t begin, discard_ns;
+	unsigned int entries;
+	int saved_errno = errno;
+
+	if (!state)
+		return;
+	repo = state->index.repo;
+	entries = state->index.cache_nr;
+	begin = state->attempted ? getnanotime() : 0;
+	release_index(&state->index);
+	if (!state->attempted)
+		goto done;
+	discard_ns = getnanotime() - begin;
+	trace2_data_intmax("diff", repo, "follow-index/attempts", state->attempted);
+	trace2_data_intmax("diff", repo, "follow-index/ready", state->ready);
+	trace2_data_intmax("diff", repo, "follow-index/entries", entries);
+	trace2_data_intmax("diff", repo, "follow-index/prepare_ns", state->prepare_ns);
+	trace2_data_intmax("diff", repo, "follow-index/read_ns", state->read_ns);
+	trace2_data_intmax("diff", repo, "follow-index/proof_ns", state->proof_ns);
+	trace2_data_intmax("diff", repo, "follow-index/emit_ns", state->emit_ns);
+	trace2_data_intmax("diff", repo, "follow-index/discard_ns", discard_ns);
+	trace2_data_intmax("diff", repo, "follow-index/proofs", state->proofs);
+	trace2_data_intmax("diff", repo, "follow-index/scopes", state->scopes);
+	trace2_data_intmax("diff", repo, "follow-index/reused_entries", state->reused_entries);
+	trace2_data_intmax("diff", repo, "follow-index/reused_trees", state->reused_trees);
+	trace2_data_intmax("diff", repo, "follow-index/depth_fallbacks", state->depth_fallbacks);
+	trace2_data_intmax("diff", repo, "follow-index/probe_reads", state->probe_reads);
+	trace2_data_intmax("diff", repo, "follow-index/probe_bytes", state->probe_bytes);
+	trace2_data_intmax("diff", repo, "follow-index/probe_trees", state->probe_trees);
+	trace2_data_intmax("diff", repo, "follow-index/probe_scopes", state->probe_scopes);
+	trace2_data_intmax("diff", repo, "follow-index/probe_peak_memory", state->probe_peak_memory);
+	trace2_data_intmax("diff", repo, "follow-index/probe_dropped", state->probe_dropped);
+	trace2_data_intmax("diff", repo, "follow-index/probe_pending", state->probe_pending);
+done:
+	free(state);
+	errno = saved_errno;
+}
 
 static pthread_mutex_t follow_oid_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1691,6 +2143,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	diff_setup_done(&diff_opts);
 	diff_opts.change = follow_change;
 	diff_opts.change_fn_data = &addremove_data;
+	addremove_data.index = opt->follow_index;
 	saved_errno = errno;
 	follow_oid_sample_begin(opt->repo, &addremove_data);
 	/*

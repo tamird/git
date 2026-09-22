@@ -35,6 +35,7 @@ struct cache_tree_flat_entry {
 	/* Names and OIDs borrow storage from index_state.cache_tree_data. */
 	struct cache_tree_record record;
 	size_t children;
+	size_t nodes, max_depth;
 };
 
 struct cache_tree_flat {
@@ -1310,6 +1311,8 @@ static int read_flat_one(const char **buffer, unsigned long *size,
 		return -1;
 	flat->entries[pos].record = record;
 	flat->entries[pos].children = children = flat->nr;
+	flat->entries[pos].nodes = 1;
+	flat->entries[pos].max_depth = 0;
 	flat->nr = st_add(flat->nr, record.subtree_nr);
 	ALLOC_GROW(flat->entries, flat->nr, flat->alloc);
 	for (i = 0; i < record.subtree_nr; i++) {
@@ -1317,6 +1320,9 @@ static int read_flat_one(const char **buffer, unsigned long *size,
 
 		if (read_flat_one(buffer, size, flat, children + i))
 			return -1;
+		flat->entries[pos].nodes += flat->entries[children + i].nodes;
+		if (flat->entries[pos].max_depth < flat->entries[children + i].max_depth + 1)
+			flat->entries[pos].max_depth = flat->entries[children + i].max_depth + 1;
 		child = &flat->entries[children + i].record;
 		/* Leave legacy unordered or duplicate names to the full reader. */
 		if (previous && subtree_name_cmp(previous, previous_len,
@@ -1690,27 +1696,26 @@ static size_t cache_tree_flat_find(struct cache_tree_flat *flat, size_t pos,
 	return pos;
 }
 
-static size_t cache_tree_flat_node_count(struct cache_tree_flat *flat, size_t pos)
-{
-	struct cache_tree_flat_entry *entry = &flat->entries[pos];
-	size_t count = 1;
-
-	for (int i = 0; i < entry->record.subtree_nr; i++)
-		count += cache_tree_flat_node_count(flat, entry->children + i);
-	return count;
-}
-
-static size_t cache_tree_node_count(struct cache_tree *tree)
+static size_t cache_tree_node_count(struct cache_tree *tree, size_t *max_depth)
 {
 	size_t count = 1;
 
-	for (int i = 0; i < tree->subtree_nr; i++)
-		count += cache_tree_node_count(tree->down[i]->cache_tree);
+	if (max_depth)
+		*max_depth = 0;
+	for (int i = 0; i < tree->subtree_nr; i++) {
+		size_t depth;
+
+		count += cache_tree_node_count(tree->down[i]->cache_tree,
+					       max_depth ? &depth : NULL);
+		if (max_depth && *max_depth < depth + 1)
+			*max_depth = depth + 1;
+	}
 	return count;
 }
 
-int cache_tree_get_path(struct index_state *istate, const char *path,
-			struct object_id *oid, size_t *tree_count)
+int cache_tree_get_path_with_depth(struct index_state *istate, const char *path,
+				   struct object_id *oid, size_t *tree_count,
+				   size_t *max_depth)
 {
 	struct cache_tree *tree;
 
@@ -1728,16 +1733,28 @@ int cache_tree_get_path(struct index_state *istate, const char *path,
 			return -1;
 		oidread(oid, record->oid, istate->repo->hash_algo);
 		if (tree_count)
-			*tree_count = cache_tree_flat_node_count(istate->cache_tree_flat, pos);
+			*tree_count = istate->cache_tree_flat->entries[pos].nodes;
+		if (max_depth)
+			*max_depth = istate->cache_tree_flat->entries[pos].max_depth;
 		return record->entry_count;
 	}
 	tree = cache_tree_find(istate->cache_tree, path);
 	if (!tree || tree->entry_count < 0)
 		return -1;
 	oidcpy(oid, &tree->oid);
-	if (tree_count)
-		*tree_count = cache_tree_node_count(tree);
+	if (tree_count || max_depth) {
+		size_t count = cache_tree_node_count(tree, max_depth);
+
+		if (tree_count)
+			*tree_count = count;
+	}
 	return tree->entry_count;
+}
+
+int cache_tree_get_path(struct index_state *istate, const char *path,
+			struct object_id *oid, size_t *tree_count)
+{
+	return cache_tree_get_path_with_depth(istate, path, oid, tree_count, NULL);
 }
 
 static size_t find_flat_from_traversal(struct cache_tree_flat *flat,

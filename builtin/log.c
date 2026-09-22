@@ -571,8 +571,12 @@ static int cmd_log_walk(struct rev_info *rev,
 {
 	int retval;
 
+	if (rev->diffopt.flags.follow_renames)
+		rev->diffopt.follow_index = diff_follow_index_begin(rev->diffopt.repo);
 	rev->diffopt.no_free = 1;
 	retval = cmd_log_walk_no_free(rev, trace);
+	diff_follow_index_end(rev->diffopt.follow_index);
+	rev->diffopt.follow_index = NULL;
 	rev->diffopt.no_free = 0;
 	diff_free(&rev->diffopt);
 	return retval;

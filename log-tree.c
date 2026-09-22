@@ -1334,6 +1334,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 	}
 	repo_diff_setup(opt->diffopt.repo, &diff_opts);
 	diff_opts.trace_follow_sibling_root_read = sibling_parent;
+	diff_opts.follow_index = opt->diffopt.follow_index;
 	copy_pathspec(&diff_opts.pathspec, &opt->diffopt.pathspec);
 	diff_opts.flags.recursive = 1;
 	diff_opts.flags.follow_renames = 1;

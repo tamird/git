@@ -261,4 +261,22 @@ test_expect_success 'opportunistic write does not overwrite a replaced index' '
 	)
 '
 
+test_expect_success 'gentle detached reader rejects an index changed during admission' '
+	test_create_repo tree-snapshot &&
+	(
+		cd tree-snapshot &&
+		git config index.recordendofindexentries true &&
+		test_commit base &&
+		for skip_hash in false true
+		do
+			git -c index.skipHash=$skip_hash update-index --force-write-index &&
+			test-tool read-cache --tree-snapshot &&
+			test_expect_code 1 test-tool read-cache --tree-snapshot --touch-index \
+				>out 2>err &&
+			test_must_be_empty out &&
+			test_must_be_empty err || return 1
+		done
+	)
+'
+
 test_done

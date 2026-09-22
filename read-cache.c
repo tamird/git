@@ -94,6 +94,16 @@
  */
 #define CACHE_ENTRY_PATH_LENGTH 80
 
+static int index_file_same_stat(const struct stat *a, const struct stat *b)
+{
+	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+	       a->st_size == b->st_size &&
+	       a->st_mtime == b->st_mtime &&
+	       ST_MTIME_NSEC(*a) == ST_MTIME_NSEC(*b) &&
+	       a->st_ctime == b->st_ctime &&
+	       ST_CTIME_NSEC(*a) == ST_CTIME_NSEC(*b);
+}
+
 enum index_search_mode {
 	NO_EXPAND_SPARSE = 0,
 	EXPAND_SPARSE = 1
@@ -2541,7 +2551,7 @@ static int do_read_index_with_options(struct index_state *istate,
 			istate->index_file_identity_valid = 1;
 		}
 	}
-	if (fd >= 0) {
+	if (fd >= 0 && !gentle) {
 		close(fd);
 		fd = -1;
 	}
@@ -2633,6 +2643,16 @@ static int do_read_index_with_options(struct index_state *istate,
 	if (p.error || (gentle && (istate->sparse_index != INDEX_EXPANDED ||
 				   check_ce_order(istate, 1))))
 		goto unmap;
+	if (gentle) {
+		struct stat after;
+		int snapshot_fd = fd >= 0 ? fd : istate->index_file_fd;
+
+		if (fstat(snapshot_fd, &after) || !index_file_same_stat(&st, &after))
+			goto unmap;
+		if (fd >= 0)
+			close(fd);
+		fd = -1;
+	}
 	istate->index_file_parsed_generation_valid = 1;
 	munmap((void *)mmap, mmap_size);
 
@@ -2823,16 +2843,6 @@ void release_index_window(struct index_window *window)
 	free(window->blocks);
 	free(window->fsmonitor);
 	free(window);
-}
-
-static int index_window_same_stat(const struct stat *a, const struct stat *b)
-{
-	return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
-	       a->st_size == b->st_size &&
-	       a->st_mtime == b->st_mtime &&
-	       ST_MTIME_NSEC(*a) == ST_MTIME_NSEC(*b) &&
-	       a->st_ctime == b->st_ctime &&
-	       ST_CTIME_NSEC(*a) == ST_CTIME_NSEC(*b);
 }
 
 static int index_window_read_blocks(struct index_window *window,
@@ -3090,7 +3100,7 @@ static int read_index_window_internal(
 		}
 	}
 	if (index_window_decode_blocks(window, map, entry_end) ||
-	    fstat(fd, &after) || !index_window_same_stat(&before, &after))
+	    fstat(fd, &after) || !index_file_same_stat(&before, &after))
 		goto done;
 	trace2_data_intmax("index", repo, "read/window_entries", window->entries_nr);
 	{

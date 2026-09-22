@@ -67,6 +67,7 @@ struct oidset;
 struct combine_diff_path;
 struct commit;
 struct diff_filespec;
+struct diff_follow_index;
 struct diff_pickaxe_index;
 struct diff_options;
 struct diff_queue_struct;
@@ -369,6 +370,8 @@ struct diff_options {
 	int found_follow;
 	/* Measure the current root tree read on later merge parents. */
 	int trace_follow_sibling_root_read;
+	/* Detached historical snapshot; cmd_log_walk alone owns its lifetime. */
+	struct diff_follow_index *follow_index;
 	/* Time descriptor reads only during a measured revision pruning diff. */
 	int trace_pruning_tree_read;
 
@@ -790,6 +793,10 @@ long parse_algorithm_value(const char *value);
 void print_stat_summary(FILE *fp, int files,
 			int insertions, int deletions);
 void setup_diff_pager(struct diff_options *);
+
+/* Owned by the log walk; diff_options only borrows the detached snapshot. */
+struct diff_follow_index *diff_follow_index_begin(struct repository *);
+void diff_follow_index_end(struct diff_follow_index *);
 
 extern int diff_auto_refresh_index;
 

@@ -11,6 +11,18 @@
 #include "repository.h"
 #include "setup.h"
 
+static int accept_tree_snapshot(struct index_state *index, void *data)
+{
+	if (data) {
+		struct utimbuf times = { 0, 0 };
+
+		/* Change this generation without truncating the reader's mapping. */
+		if (utime(repo_get_index_file(index->repo), &times))
+			die_errno("unable to change index timestamp");
+	}
+	return 1;
+}
+
 static void update_index(int fail_write)
 {
 	struct lock_file lock = LOCK_INIT;
@@ -94,6 +106,23 @@ int cmd__read_cache(int argc, const char **argv)
 		cnt = strtol(argv[1], NULL, 0);
 	setup_git_directory(the_repository);
 	repo_config(the_repository, git_default_config, NULL);
+	if (argc >= 2 && !strcmp(argv[1], "--tree-snapshot")) {
+		struct index_state snapshot;
+		int result;
+
+		if (argc > 3 || (argc == 3 && strcmp(argv[2], "--touch-index")))
+			die("expected optional --touch-index after --tree-snapshot");
+		index_state_init(&snapshot, the_repository);
+		snapshot.lazy_cache_tree = 1;
+		result = read_index_from_if_tree_accepted(
+			&snapshot, repo_get_index_file(the_repository),
+			repo_get_git_dir(the_repository), accept_tree_snapshot,
+			argc == 3 ? &snapshot : NULL);
+		release_index(&snapshot);
+		if (the_repository->index->cache)
+			BUG("snapshot installed the repository index");
+		return result < 0;
+	}
 	if (write_updates) {
 		int fail_write = argc == 4 && !strcmp(argv[3], "--fail-write");
 		const char *alternate = argc == 4 && !fail_write ? argv[3] : NULL;

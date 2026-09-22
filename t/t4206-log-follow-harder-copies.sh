@@ -459,7 +459,18 @@ test_expect_success 'follow harder copies reads an unchanged subtree once' '
 		test_follow_full_tree_trace "$PWD/follow.event" 3 3 0 3 &&
 		test_follow_lookup_phases_trace "$PWD/follow.event" 0 0 3 3 &&
 		grep "/$pack_stem[.]pack $shared_offset$" pack-access >shared-access &&
-		test_line_count = 1 shared-access
+		test_line_count = 1 shared-access &&
+		git config index.recordendofindexentries true &&
+		git update-index --force-write-index &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/index.event" \
+			git log --follow --name-status --format=%s -n1 \
+				-- destination >actual-index &&
+		test_cmp expect actual-index &&
+		test_trace2_data_singular diff follow-index/attempts 1 <index.event &&
+		test_trace2_data_singular diff follow-index/ready 1 <index.event &&
+		test_trace2_data_singular diff follow-index/scopes 1 <index.event &&
+		test_trace2_data_singular diff follow-index/reused_entries 2 <index.event
 	)
 '
 
@@ -467,6 +478,9 @@ test_expect_success 'follow reports MIDX lookup phases without fallback' '
 	(
 		cd follow-shared-subtree &&
 		git multi-pack-index write &&
+		# Measure object lookup rather than the matching index snapshot.
+		GIT_TEST_FOLLOW_INDEX=0 &&
+		export GIT_TEST_FOLLOW_INDEX &&
 		GIT_TRACE2=0 GIT_TRACE2_PERF=0 GIT_TRACE2_EVENT=0 \
 			git log --follow --name-status --format=%s -n1 \
 				-- destination >actual-midx &&
@@ -835,7 +849,17 @@ test_expect_success 'follow preserves unchanged sources across exact and edited 
 			test_follow_additions_trace "$PWD/follow$break_opt.event" \
 				"$expected_additions" 3 ||
 			return 1
-		done
+		done &&
+		git config index.recordendofindexentries true &&
+		git update-index --force-write-index &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/index.event" \
+			git log --follow --name-status --format=%s -- destination \
+				>actual-index &&
+		test_cmp actual actual-index &&
+		test_trace2_data_singular diff follow-index/attempts 1 <index.event &&
+		test_trace2_data_singular diff follow-index/ready 0 <index.event &&
+		test_trace2_data diff follow-full-tree/count 3 <index.event
 	)
 '
 
@@ -949,9 +973,11 @@ test_expect_success SYMLINKS 'follow preserves unchanged symlink copy sources' '
 	test_create_repo follow-shared-symlinks &&
 	(
 		cd follow-shared-symlinks &&
-		ln -s target source &&
+		git config index.recordendofindexentries true &&
+		mkdir shared &&
+		ln -s target shared/source &&
 		ln -s before changed &&
-		git add source changed &&
+		git add shared/source changed &&
 		test_tick &&
 		git commit -m base &&
 
@@ -964,10 +990,10 @@ test_expect_success SYMLINKS 'follow preserves unchanged symlink copy sources' '
 		cat >expect <<-\EOF &&
 		copy
 
-		C100	source	destination
+		C100	shared/source	destination
 		base
 
-		A	source
+		A	shared/source
 		EOF
 		for break_opt in "" -B
 		do
@@ -985,7 +1011,14 @@ test_expect_success SYMLINKS 'follow preserves unchanged symlink copy sources' '
 			test_follow_additions_trace "$PWD/symlink$break_opt.event" \
 				"$expected_additions" 2 ||
 			return 1
-		done
+		done &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/index.event" \
+			git log --follow --name-status --format=%s -- destination \
+				>actual-index &&
+		test_cmp expect actual-index &&
+		test_trace2_data_singular diff follow-index/attempts 1 <index.event &&
+		test_trace2_data_singular diff follow-index/scopes 1 <index.event
 	)
 '
 
@@ -1051,6 +1084,149 @@ test_expect_success 'follow preserves a reversed regular-file deletion' '
 		test_follow_leaf_result expect 1 1 reverse-no-renames.event \
 			diff-tree -R -r --no-commit-id --follow --no-renames \
 			--name-status HEAD^ HEAD -- deleted
+	)
+'
+
+test_expect_success 'follow index preserves ordered sources and modes' '
+	test_create_repo follow-index-order &&
+	(
+		cd follow-index-order &&
+		sane_unset GIT_TEST_FOLLOW_INDEX &&
+		git config index.recordendofindexentries true &&
+		mkdir t &&
+		echo same >t-file &&
+		cp t-file t/source &&
+		echo executable >t/run &&
+		# Enough root files to require aggregate benefit, beyond t alone.
+		for n in $(test_seq 1 16)
+		do
+			echo "filler $n" >"filler-$n" || return 1
+		done &&
+		for dir in a b c d
+		do
+			mkdir -p probe/$dir &&
+			echo "$dir" >probe/$dir/file || return 1
+		done &&
+		git add t-file t filler-* probe &&
+		test_chmod +x t/run &&
+		test_tick &&
+		git commit -m base &&
+		anchor=$(git rev-parse HEAD) &&
+		git update-index --add --cacheinfo 160000,$anchor,t/module &&
+		test_tick &&
+		git commit -m module &&
+		mkdir z &&
+		cp t-file copied &&
+		cp t/source z/source &&
+		cp t/run run-copy &&
+		echo changed-parent >probe/new &&
+		git add copied z/source run-copy probe/new &&
+		test_chmod +x run-copy &&
+		git update-index --add --cacheinfo 160000,$anchor,module-copy &&
+		test_tick &&
+		git commit -m copies &&
+		git update-index --skip-worktree t/source &&
+		for version in 2 4
+		do
+			git update-index --index-version "$version" &&
+			git write-tree >written-tree &&
+			for pair in t-file:copied t/source:z/source t/run:run-copy t/module:module-copy
+			do
+				source=${pair%%:*} &&
+				destination=${pair#*:} &&
+				printf "copies\n\nC100\t%s\t%s\n" \
+					"$source" "$destination" >expect &&
+				GIT_TEST_FOLLOW_INDEX=0 git log --follow --name-status \
+					--format=%s -n1 -- "$destination" >baseline &&
+				test_cmp expect baseline &&
+				event="$version-${destination##*/}.event" &&
+				GIT_TRACE2_EVENT_NESTING=2 \
+				GIT_TRACE2_EVENT="$PWD/$event" \
+					git log --follow --name-status --format=%s -n1 \
+						-- "$destination" >actual &&
+				test_cmp expect actual &&
+				test_trace2_data_singular diff follow-index/scopes 5 \
+					<"$event" &&
+				test_trace2_data_singular diff follow-index/probe_reads 2 \
+					<"$event" || return 1
+			done || return 1
+		done &&
+		printf "copies\n\nA\tcopied\n" >expect &&
+		GIT_TRACE2_EVENT="$PWD/no-follow.event" \
+			git log --no-follow --name-status --format=%s -n1 \
+				-- copied >actual &&
+		test_cmp expect actual &&
+		test_grep ! "follow-index/" no-follow.event &&
+		GIT_TRACE2_EVENT="$PWD/no-attempt.event" \
+			git log --follow -n0 -- copied >actual &&
+		test_must_be_empty actual &&
+		test_grep ! "follow-index/" no-attempt.event
+	)
+'
+
+test_expect_success 'follow index falls back after an index change or missing index' '
+	(
+		cd follow-index-order &&
+		git update-index --no-skip-worktree t/source &&
+		echo staged >t/source &&
+		git add t/source &&
+		echo worktree-only >t/source &&
+		printf "copies\n\nC100\tt/source\tz/source\n" >expect &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/changed.event" \
+			git log --follow --name-status --format=%s -n1 \
+				-- z/source >actual &&
+		test_cmp expect actual &&
+		test_trace2_data_singular diff follow-index/ready 1 <changed.event &&
+		test_trace2_data_singular diff follow-index/scopes 4 <changed.event &&
+		echo intent >intent &&
+		git add -N intent &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/invalid.event" \
+			git log --follow --name-status --format=%s -n1 \
+				-- z/source >actual &&
+		test_cmp expect actual &&
+		test_trace2_data_singular diff follow-index/ready 0 <invalid.event &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_INDEX_FILE="$PWD/missing-index" \
+			git log --follow --name-status --format=%s -n1 \
+				-- z/source >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'follow index retains empty-directory recursion limits' '
+	test_create_repo follow-index-depth &&
+	(
+		cd follow-index-depth &&
+		git config index.recordendofindexentries true &&
+		blob=$(echo content | git hash-object -w --stdin) &&
+		empty=$(git mktree </dev/null) &&
+		deep=$(printf "040000 tree %s\tempty\n" "$empty" | git mktree) &&
+		# Multiple shallow empty children must not be mistaken for depth.
+		shared=$(printf "040000 tree %s\ta\n040000 tree %s\tb\n040000 tree %s\tdeep\n100644 blob %s\tsource\n" \
+			"$empty" "$empty" "$deep" "$blob" | git mktree) &&
+		old_tree=$(printf "040000 tree %s\tshared\n" "$shared" | git mktree) &&
+		new_tree=$(printf "100644 blob %s\tdestination\n040000 tree %s\tshared\n" \
+			"$blob" "$shared" | git mktree) &&
+		old_commit=$(echo base | git commit-tree "$old_tree") &&
+		new_commit=$(echo copy | git commit-tree "$new_tree" -p "$old_commit") &&
+		# The verifier reconstructs trees from CEs, which omit empty directories.
+		GIT_TEST_CHECK_CACHE_TREE=0 git read-tree "$new_tree" &&
+		for enabled in 0 1
+		do
+			GIT_TEST_FOLLOW_INDEX=$enabled \
+				test_expect_code 128 git -c core.maxTreeDepth=2 log \
+					--follow --name-status --format=%s -n1 "$new_commit" -- destination \
+					>actual-$enabled 2>err-$enabled || return 1
+		done &&
+		test_cmp actual-0 actual-1 &&
+		test_cmp err-0 err-1 &&
+		test_grep "exceeded maximum allowed tree depth" err-1 &&
+		GIT_TEST_FOLLOW_INDEX=1 GIT_TRACE2_EVENT_NESTING=2 \
+		GIT_TRACE2_EVENT="$PWD/depth.event" \
+			git -c core.maxTreeDepth=3 log --follow --name-status --format=%s \
+				-n1 "$new_commit" -- destination >actual &&
+		test_trace2_data_singular diff follow-index/scopes 1 <depth.event
 	)
 '
 
