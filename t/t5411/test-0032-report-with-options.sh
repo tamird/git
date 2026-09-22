@@ -108,7 +108,7 @@ test_expect_success "setup proc-receive hook (option refname and old-oid, $PROTO
 # Refs of workbench: main(A)  tags/v123
 # git push         :                       refs/for/next/topic(A)  refs/for/a/b/c/topic(A)  refs/for/main/topic(A)
 test_expect_success "proc-receive: report option refname and old-oid ($PROTOCOL)" '
-	git -C workbench push origin \
+	git -C workbench -c core.abbrev=12 push origin \
 		HEAD:refs/for/main/topic \
 		>out 2>&1 &&
 	make_user_friendly_and_stable_output <out >actual &&
@@ -213,7 +213,7 @@ test_expect_success "setup proc-receive hook (report with multiple rewrites, $PR
 # Refs of workbench: main(A)  tags/v123
 # git push         :                       refs/for/next/topic(A)  refs/for/a/b/c/topic(A)  refs/for/main/topic(A)
 test_expect_success "proc-receive: report with multiple rewrites ($PROTOCOL)" '
-	git -C workbench push origin \
+	git -C workbench -c core.abbrev=12 push origin \
 		HEAD:refs/for/next/topic \
 		HEAD:refs/for/a/b/c/topic \
 		HEAD:refs/for/main/topic \
@@ -241,8 +241,8 @@ test_expect_success "proc-receive: report with multiple rewrites ($PROTOCOL)" '
 	> remote: post-receive< <ZERO-OID> <COMMIT-A> refs/for/a/b/c/topic        Z
 	> remote: post-receive< <COMMIT-B> <COMMIT-A> refs/pull/124/head        Z
 	> To <URL/of/upstream.git>
-	>  * [new reference]   HEAD -> refs/pull/123/head
-	>  * [new reference]   HEAD -> refs/for/a/b/c/topic
+	>  * [new reference]             HEAD -> refs/pull/123/head
+	>  * [new reference]             HEAD -> refs/for/a/b/c/topic
 	>  + <COMMIT-B>...<COMMIT-A> HEAD -> refs/pull/124/head (forced update)
 	EOF
 	test_cmp expect actual &&

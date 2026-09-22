@@ -705,23 +705,25 @@ static void print_ref_status(char flag, const char *summary,
 	}
 }
 
+static void get_push_report_oids(const struct ref *ref,
+				 const struct ref_push_report *report,
+				 const struct object_id **old_oid,
+				 const struct object_id **new_oid)
+{
+	*old_oid = report && report->old_oid ? report->old_oid : &ref->old_oid;
+	*new_oid = report && report->new_oid ? report->new_oid : &ref->new_oid;
+}
+
 static void print_ok_ref_status(struct ref *ref,
 				struct ref_push_report *report,
 				int porcelain, int summary_width)
 {
-	struct object_id *old_oid;
-	struct object_id *new_oid;
+	const struct object_id *old_oid;
+	const struct object_id *new_oid;
 	const char *ref_name;
 	int forced_update;
 
-	if (report && report->old_oid)
-		old_oid = report->old_oid;
-	else
-		old_oid = &ref->old_oid;
-	if (report && report->new_oid)
-		new_oid = report->new_oid;
-	else
-		new_oid = &ref->new_oid;
+	get_push_report_oids(ref, report, &old_oid, &new_oid);
 	if (report && report->forced_update)
 		forced_update = report->forced_update;
 	else
@@ -893,13 +895,42 @@ int transport_summary_width(const struct ref *refs)
 	return (2 * maxw + 3);
 }
 
+static int push_summary_width(const struct ref *refs)
+{
+	int maxw = -1;
+
+	trace2_region_enter("transport_push", "summary_width", the_repository);
+	for (; refs; refs = refs->next) {
+		const struct ref_push_report *report = refs->report;
+
+		if (refs->status != REF_STATUS_OK || refs->deletion)
+			continue;
+		do {
+			const struct object_id *old_oid, *new_oid;
+
+			get_push_report_oids(refs, report, &old_oid, &new_oid);
+			/* New refs print a fixed label, not an object range. */
+			if (!is_null_oid(old_oid)) {
+				maxw = measure_abbrev(old_oid, maxw);
+				maxw = measure_abbrev(new_oid, maxw);
+			}
+			if (report)
+				report = report->next;
+		} while (report);
+	}
+	trace2_region_leave("transport_push", "summary_width", the_repository);
+	if (maxw < 0)
+		maxw = FALLBACK_DEFAULT_ABBREV;
+	return (2 * maxw + 3);
+}
+
 void transport_print_push_status(const char *dest, struct ref *refs,
 				  int verbose, int porcelain, unsigned int *reject_reasons)
 {
 	struct ref *ref;
 	int n = 0;
 	char *head;
-	int summary_width = transport_summary_width(refs);
+	int summary_width = porcelain ? 0 : push_summary_width(refs);
 
 	trace2_region_enter("transport_push", "print_status", the_repository);
 	if (transport_color_config() < 0)
