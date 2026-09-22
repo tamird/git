@@ -3608,8 +3608,14 @@ int repo_update_index_if_able(struct repository *repo,
 {
 	if ((repo->index->cache_changed ||
 	     has_racy_timestamp(repo->index)) &&
-	    repo_verify_index(repo))
-		return !write_locked_index(repo->index, lockfile, COMMIT_LOCK);
+	    repo_verify_index(repo)) {
+		if (write_locked_index(repo->index, lockfile, COMMIT_LOCK))
+			return 0;
+		/* Only publication to the normal index acknowledges its changes. */
+		if (!alternate_index_output)
+			repo->index->cache_changed = 0;
+		return 1;
+	}
 	rollback_lock_file(lockfile);
 	return 0;
 }

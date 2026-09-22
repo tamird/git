@@ -3,11 +3,59 @@
 #include "test-tool.h"
 #include "config.h"
 #include "environment.h"
+#include "fsmonitor.h"
 #include "grep-index-identity.h"
+#include "lockfile.h"
 #include "name-hash.h"
 #include "read-cache-ll.h"
 #include "repository.h"
 #include "setup.h"
+
+static void update_index(int fail_write)
+{
+	struct lock_file lock = LOCK_INIT;
+	int written;
+
+	repo_hold_locked_index(the_repository, &lock, LOCK_DIE_ON_ERROR);
+	/* The open fd is writable, but the writer cannot finish the tempfile. */
+	if (fail_write && unlink(get_lock_file_path(&lock)))
+		die_errno("unable to remove index lock file");
+	written = repo_update_index_if_able(the_repository, &lock);
+	printf("%d %d\n", written, !!the_repository->index->cache_changed);
+}
+
+static int write_index_updates(const char *name, const char *alternate,
+			       int fail_write)
+{
+	struct index_state *istate = the_repository->index;
+	int pos;
+
+	setup_work_tree(the_repository);
+	if (repo_read_index(the_repository) < 0)
+		die("unable to read index");
+	refresh_index(istate, REFRESH_QUIET, NULL, NULL, NULL);
+	pos = index_name_pos(istate, name, strlen(name));
+	if (pos < 0)
+		die("index entry to update does not exist");
+	if (chmod_index_entry(istate, istate->cache[pos], '+'))
+		die("unable to make index entry executable");
+	set_alternate_index_output(alternate);
+	update_index(fail_write);
+	set_alternate_index_output(NULL);
+	if (alternate || fail_write)
+		return 0;
+	update_index(0);
+	if (chmod_index_entry(istate, istate->cache[pos], '-'))
+		die("unable to make index entry non-executable");
+	update_index(0);
+	update_index(0);
+	if (istate->fsmonitor_last_update) {
+		mark_fsmonitor_valid(istate, istate->cache[pos]);
+		update_index(0);
+		update_index(0);
+	}
+	return 0;
+}
 
 int cmd__read_cache(int argc, const char **argv)
 {
@@ -17,6 +65,10 @@ int cmd__read_cache(int argc, const char **argv)
 	int probe_dir = 0;
 	const char *replace_old = NULL;
 	const char *replace_new = NULL;
+	int write_updates = argc > 1 && !strcmp(argv[1], "--write-index");
+
+	if (write_updates && argc != 3 && argc != 4)
+		die("expected path and optional alternate index after --write-index");
 
 	if (argc > 1 &&
 	    skip_prefix(argv[1], "--identity-replace=", &replace_old)) {
@@ -42,6 +94,12 @@ int cmd__read_cache(int argc, const char **argv)
 		cnt = strtol(argv[1], NULL, 0);
 	setup_git_directory(the_repository);
 	repo_config(the_repository, git_default_config, NULL);
+	if (write_updates) {
+		int fail_write = argc == 4 && !strcmp(argv[3], "--fail-write");
+		const char *alternate = argc == 4 && !fail_write ? argv[3] : NULL;
+
+		return write_index_updates(argv[2], alternate, fail_write);
+	}
 
 	if (replace_old) {
 		struct grep_index_identity before, after;

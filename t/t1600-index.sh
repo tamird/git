@@ -133,4 +133,132 @@ test_expect_success 'index version config precedence' '
 	test_index_version 0 true 2 2
 '
 
+test_expect_success 'setup opportunistic index writes' '
+	test_create_repo write-index &&
+	(
+		cd write-index &&
+		echo content >file &&
+		test-tool chmtime -60 file &&
+		git add file &&
+		git ls-files --stage >expect &&
+		sed s/100644/100755/ expect >expect-executable &&
+		cat expect-executable expect >expect-published &&
+		cat >expect-writes <<-\EOF &&
+		1 0
+		0 0
+		1 0
+		0 0
+		EOF
+		write_script .git/hooks/post-index-change <<-\EOF
+		git ls-files --stage >>actual
+		EOF
+	)
+'
+
+for split in false true
+do
+	for skip_hash in false true
+	do
+		test_expect_success "opportunistic writes acknowledge changes (split=$split, skipHash=$skip_hash)" '
+			(
+				cd write-index &&
+				git config core.splitIndex $split &&
+				git config index.skipHash $skip_hash &&
+				git update-index --refresh &&
+				>actual &&
+				test-tool read-cache --write-index file >writes &&
+				test_cmp expect-writes writes &&
+				test_cmp expect-published actual
+			)
+		'
+	done
+done
+
+test_expect_success 'opportunistic writes preserve dirty state after alternate output' '
+	(
+		cd write-index &&
+		>actual &&
+		echo "1 1" >expect-writes &&
+		test-tool read-cache --write-index file .git/alternate-index >writes &&
+		test_cmp expect-writes writes &&
+		test_cmp expect actual &&
+		GIT_INDEX_FILE=.git/alternate-index git ls-files --stage >alternate &&
+		test_cmp expect-executable alternate
+	)
+'
+
+# This fault removes a lockfile while its descriptor is still open.
+test_expect_success !MINGW 'failed opportunistic write preserves dirty state' '
+	(
+		cd write-index &&
+		echo "0 1" >expect-writes &&
+		test-tool read-cache --write-index file --fail-write >writes &&
+		test_cmp expect-writes writes &&
+		git ls-files --stage >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'fsmonitor changes after an opportunistic write are persisted' '
+	test_config -C write-index core.fsmonitor .git/hooks/fsmonitor &&
+	test_config -C write-index core.fsmonitorHookVersion 2 &&
+	test_when_finished "git -C write-index -c core.fsmonitor=false update-index --no-fsmonitor" &&
+	(
+		cd write-index &&
+		write_script .git/hooks/fsmonitor <<-\EOF &&
+		printf "token\\0"
+		EOF
+		write_script .git/hooks/post-index-change <<-\EOF &&
+		git ls-files --stage >>actual &&
+		git ls-files -f file >>actual-flags
+		EOF
+		>actual &&
+		>actual-flags &&
+		cat expect-published expect >expect-fsmonitor &&
+		cat >expect-writes <<-\EOF &&
+		1 0
+		0 0
+		1 0
+		0 0
+		1 0
+		0 0
+		EOF
+		cat >expect-flags <<-\EOF &&
+		H file
+		H file
+		h file
+		EOF
+		test-tool read-cache --write-index file >writes &&
+		test_cmp expect-writes writes &&
+		test_cmp expect-fsmonitor actual &&
+		test_cmp expect-flags actual-flags
+	)
+'
+
+test_expect_success 'opportunistic write does not overwrite a replaced index' '
+	(
+		cd write-index &&
+		cp .git/index .git/replacement-index &&
+		echo replacement >other &&
+		GIT_INDEX_FILE=.git/replacement-index git add other &&
+		GIT_INDEX_FILE=.git/replacement-index git ls-files --stage >expect-replacement &&
+		write_script .git/hooks/post-index-change <<-\EOF &&
+		if test -f .git/replacement-index
+		then
+			mv .git/replacement-index .git/index
+		fi
+		EOF
+		cat >expect-writes <<-\EOF &&
+		1 0
+		0 0
+		0 1
+		0 1
+		EOF
+		test-tool read-cache --write-index file >writes &&
+		test_cmp expect-writes writes &&
+		git ls-files --stage >actual &&
+		test_cmp expect-replacement actual
+	)
+'
+
 test_done
