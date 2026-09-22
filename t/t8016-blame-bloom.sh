@@ -34,9 +34,12 @@ test_expect_success 'blame follows renames across unchanged commits' '
 	git -C rename mv old-dir/file new-dir/file &&
 	git -C rename commit -m rename &&
 	test_commit -C rename after unrelated after &&
-	git -C rename commit-graph write --reachable --changed-paths &&
-
-	check_blame rename --porcelain new-dir/file &&
+	for version in 1 4
+	do
+		git -C rename -c commitGraph.changedPathsVersion=$version \
+			commit-graph write --reachable --changed-paths &&
+		check_blame rename --porcelain new-dir/file || return 1
+	done &&
 	base=$(git -C rename rev-parse base) &&
 	modified=$(git -C rename rev-parse modified) &&
 	test_grep "^$base " actual &&

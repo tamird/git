@@ -471,57 +471,62 @@ test_expect_success 'version 3 uses Bloom filters for literal basenames' '
 	)
 '
 
-test_expect_success 'version 3 prunes recursive directory globs' '
-	(
-		cd basename-v3 &&
-		git -c core.commitGraph=false log --format=%s -- \
-			":(glob)**/target/**" >expect &&
-		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-dir.event" \
-			git log --format=%s -- ":(glob)**/target/**" >actual &&
-		test_cmp expect actual &&
-		test_trace2_data bloom active 1 \
-			<"$TRASH_DIRECTORY/recursive-dir.event" &&
-		test_grep "\"definitely_not\":[1-9]" \
-			"$TRASH_DIRECTORY/recursive-dir.event" &&
-		test_grep "^root$" actual &&
-		test_grep "^nested$" actual &&
-		test_grep "^moved$" actual &&
-		test_grep ! "^named-file$" actual &&
-
-		git -c core.commitGraph=false log --format=%s -- \
-			":(glob)**/target/**" ":(glob)**/sibling/**" \
-			":(exclude,glob)**/target/**" >expect &&
-		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-multi.event" \
-			git log --format=%s -- \
-				":(glob)**/target/**" ":(glob)**/sibling/**" \
-				":(exclude,glob)**/target/**" >actual &&
-		test_cmp expect actual &&
-		test_trace2_data bloom active 1 \
-			<"$TRASH_DIRECTORY/recursive-multi.event" &&
-		test_grep "^sibling$" actual &&
-		test_grep ! "^root$" actual &&
-		test_grep ! "^nested$" actual &&
-
-		git -c core.commitGraph=false log --format=%s -- \
-			":(glob,attr:report)**/target/**" >expect &&
-		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-attr.event" \
-			git log --format=%s -- \
-				":(glob,attr:report)**/target/**" >actual &&
-		test_cmp expect actual &&
-		test_trace2_data bloom active 1 \
-			<"$TRASH_DIRECTORY/recursive-attr.event" &&
-		test_grep "^root$" actual &&
-		test_grep ! "^nested$" actual &&
-
+test_expect_success 'basename versions prune recursive directory globs' '
+	for version in 3 4
+	do
 		(
-			cd nested &&
+			cd basename-v3 &&
+			git -c commitGraph.changedPathsVersion=$version commit-graph write \
+				--reachable --changed-paths &&
 			git -c core.commitGraph=false log --format=%s -- \
 				":(glob)**/target/**" >expect &&
-			git log --format=%s -- \
-				":(glob)**/target/**" >actual &&
-			test_cmp expect actual
-		)
-	)
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-dir-$version.event" \
+				git log --format=%s -- ":(glob)**/target/**" >actual &&
+			test_cmp expect actual &&
+			test_trace2_data bloom active 1 \
+				<"$TRASH_DIRECTORY/recursive-dir-$version.event" &&
+			test_grep "\"definitely_not\":[1-9]" \
+				"$TRASH_DIRECTORY/recursive-dir-$version.event" &&
+			test_grep "^root$" actual &&
+			test_grep "^nested$" actual &&
+			test_grep "^moved$" actual &&
+			test_grep ! "^named-file$" actual &&
+
+			git -c core.commitGraph=false log --format=%s -- \
+				":(glob)**/target/**" ":(glob)**/sibling/**" \
+				":(exclude,glob)**/target/**" >expect &&
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-multi-$version.event" \
+				git log --format=%s -- \
+					":(glob)**/target/**" ":(glob)**/sibling/**" \
+					":(exclude,glob)**/target/**" >actual &&
+			test_cmp expect actual &&
+			test_trace2_data bloom active 1 \
+				<"$TRASH_DIRECTORY/recursive-multi-$version.event" &&
+			test_grep "^sibling$" actual &&
+			test_grep ! "^root$" actual &&
+			test_grep ! "^nested$" actual &&
+
+			git -c core.commitGraph=false log --format=%s -- \
+				":(glob,attr:report)**/target/**" >expect &&
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/recursive-attr-$version.event" \
+				git log --format=%s -- \
+					":(glob,attr:report)**/target/**" >actual &&
+			test_cmp expect actual &&
+			test_trace2_data bloom active 1 \
+				<"$TRASH_DIRECTORY/recursive-attr-$version.event" &&
+			test_grep "^root$" actual &&
+			test_grep ! "^nested$" actual &&
+
+			(
+				cd nested &&
+				git -c core.commitGraph=false log --format=%s -- \
+					":(glob)**/target/**" >expect &&
+				git log --format=%s -- \
+					":(glob)**/target/**" >actual &&
+				test_cmp expect actual
+			)
+		) || return 1
+	done
 '
 
 test_expect_success 'other glob shapes do not use directory basename filters' '
@@ -689,6 +694,29 @@ test_expect_success 'Bloom-positive paths avoid unrelated changed subtrees' '
 		mkdir -p deep/branch &&
 		test_commit keep deep/branch/keep &&
 		test_commit collision deep/branch/target &&
+		for version in 3 4
+		do
+			git -c commitGraph.changedPathsVersion=$version commit-graph write \
+				--reachable --changed-paths &&
+			git -c core.commitGraph=false log --format=%s -- target >expect &&
+			GIT_TRACE2_EVENT="$TRASH_DIRECTORY/root-$version.event" \
+				git log --format=%s -- target >actual &&
+			test_cmp expect actual &&
+			git -c commitGraph.changedPathsVersion=3 log --format=%s \
+				-- target >actual &&
+			test_cmp expect actual &&
+			git -c core.commitGraph=false log --format=%s -- ":(glob)**/target" >expect &&
+			git log --format=%s -- ":(glob)**/target" >actual &&
+			test_cmp expect actual &&
+			test_grep "^base$" actual &&
+			test_grep "^collision$" actual &&
+			git -c core.commitGraph=false log --format=%s -- \
+				target deep/branch/keep >expect &&
+			git log --format=%s -- target deep/branch/keep >actual &&
+			test_cmp expect actual || return 1
+		done &&
+		test_grep "\"false_positive\":[1-9]" "$TRASH_DIRECTORY/root-3.event" &&
+		test_grep "\"false_positive\":0" "$TRASH_DIRECTORY/root-4.event" &&
 		git -c commitGraph.changedPathsVersion=3 commit-graph write \
 			--reachable --changed-paths &&
 		git -c core.commitGraph=false log --format=%s -- \
@@ -733,23 +761,28 @@ test_expect_success '--remove-empty compares against the empty tree without a pa
 	test_grep "^c1$" actual
 '
 
-test_expect_success 'mixed version 2 and 3 layers ignore basename filters' '
-	git init basename-mixed &&
-	mkdir -p basename-mixed/nested/target &&
-	test_commit -C basename-mixed nested nested/target/file &&
-	git -C basename-mixed rev-parse HEAD >in &&
-	git -C basename-mixed -c commitGraph.changedPathsVersion=2 \
-		commit-graph write --stdin-commits --changed-paths --split <in &&
-	test_commit -C basename-mixed other unrelated &&
-	git -C basename-mixed rev-parse HEAD >in &&
-	git -C basename-mixed -c commitGraph.changedPathsVersion=3 \
-		commit-graph write --stdin-commits --changed-paths \
-		--split=no-merge <in &&
-	git -C basename-mixed -c core.commitGraph=false log --format=%s \
-		-- "**/target" >expect &&
-	git -C basename-mixed log --format=%s -- "**/target" >actual 2>err &&
-	test_cmp expect actual &&
-	test_must_be_empty err
+test_expect_success 'mixed versions preserve basename history' '
+	for versions in "2 3" "3 4" "4 3"
+	do
+		set -- $versions &&
+		repo=basename-mixed-$1-$2 &&
+		git init "$repo" &&
+		mkdir -p "$repo/nested/target" &&
+		test_commit -C "$repo" nested nested/target/file &&
+		git -C "$repo" rev-parse HEAD >in &&
+		git -C "$repo" -c commitGraph.changedPathsVersion=$1 \
+			commit-graph write --stdin-commits --changed-paths --split <in &&
+		test_commit -C "$repo" other unrelated &&
+		git -C "$repo" rev-parse HEAD >in &&
+		git -C "$repo" -c commitGraph.changedPathsVersion=$2 \
+			commit-graph write --stdin-commits --changed-paths \
+			--split=no-merge <in &&
+		git -C "$repo" -c core.commitGraph=false log --format=%s \
+			-- "**/target" >expect &&
+		git -C "$repo" log --format=%s -- "**/target" >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err || return 1
+	done
 '
 
 test_expect_success 'git log with path contains various magic signatures' '
@@ -1289,7 +1322,7 @@ test_expect_success 'when writing commit graph, do not reuse changed-path of ano
 	test_filter_upgraded 0 trace2.txt &&
 
 	git -C doublewrite commit-graph write --reachable --changed-paths &&
-	for v in -2 4
+	for v in -2 5
 	do
 		git -C doublewrite config --add commitGraph.changedPathsVersion $v &&
 		git -C doublewrite commit-graph write --reachable --changed-paths 2>err &&
@@ -1313,15 +1346,22 @@ test_expect_success 'when writing commit graph, do not reuse changed-path of ano
 		test_cmp expect actual
 	) &&
 
-	git -C doublewrite config --add commitGraph.changedPathsVersion 3 &&
-	>trace2.txt &&
-	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
-		git -C doublewrite commit-graph write --reachable --changed-paths &&
-	test_filter_computed 1 trace2.txt &&
-	test_filter_upgraded 0 trace2.txt
+	for v in 3 4
+	do
+		git -C doublewrite config --add commitGraph.changedPathsVersion $v &&
+		>trace2.txt &&
+		GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+			git -C doublewrite commit-graph write --reachable --changed-paths &&
+		test_filter_computed 1 trace2.txt &&
+		test_filter_upgraded 0 trace2.txt || return 1
+	done &&
+	git -C doublewrite -c commitGraph.changedPathsVersion=-1 \
+		commit-graph write --reachable --changed-paths &&
+	(cd doublewrite && test-tool read-graph) >graph-version &&
+	test_grep "bloom(4," graph-version
 '
 
-test_expect_success 'version 3 key limit accommodates basename keys' '
+test_expect_success 'basename versions allow twice as many keys as paths' '
 	(
 		cd doublewrite &&
 		mkdir -p nested/alpha deep/one/two/three &&
@@ -1334,9 +1374,9 @@ test_expect_success 'version 3 key limit accommodates basename keys' '
 		git add file1 file2 file3 file4 &&
 		git commit -m "over raw file limit" &&
 
-		for version in 2 3
+		for version in 2 3 4
 		do
-			# Three path keys become five with basenames. The deep
+			# Three path keys become five in v3 and six in v4. The deep
 			# path exceeds either key limit; four files exceed the
 			# unchanged raw-file limit.
 			rm .git/objects/info/commit-graph &&

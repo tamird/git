@@ -1303,7 +1303,8 @@ static void add_bloom_keyvec(struct blame_bloom_data *bd,
 		REALLOC_ARRAY(bd->keyvecs, bd->alloc);
 	}
 
-	bd->keyvecs[bd->nr] = bloom_keyvec_new(path, strlen(path), bd->settings);
+	bd->keyvecs[bd->nr] = bloom_keyvec_new(path, strlen(path), BLOOM_KEY_PATH,
+					       bd->settings);
 	bd->nr++;
 }
 

@@ -6,13 +6,14 @@
 #include "commit.h"
 #include "repository.h"
 #include "setup.h"
+#include "parse-options.h"
 
 static struct bloom_filter_settings settings = DEFAULT_BLOOM_FILTER_SETTINGS;
 
 static void add_string_to_filter(const char *data, struct bloom_filter *filter) {
 		struct bloom_key key;
 
-		bloom_key_fill(&key, data, strlen(data), &settings);
+		bloom_key_fill(&key, data, strlen(data), BLOOM_KEY_PATH, &settings);
 		printf("Hashes:");
 		for (size_t i = 0; i < settings.num_hashes; i++)
 			printf("0x%08x|", key.hashes[i]);
@@ -46,10 +47,10 @@ static void get_bloom_filter_for_commit(const struct object_id *commit_oid)
 }
 
 static const char *const bloom_usage = "\n"
-"  test-tool bloom get_murmur3 <string>\n"
-"  test-tool bloom get_murmur3_seven_highbit\n"
-"  test-tool bloom generate_filter <string> [<string>...]\n"
-"  test-tool bloom get_filter_for_commit <commit-hex>\n";
+				       "  test-tool bloom get_murmur3 <string>\n"
+				       "  test-tool bloom get_murmur3_seven_highbit\n"
+				       "  test-tool bloom generate_filter [--version=<n>] <string> [<string>...]\n"
+				       "  test-tool bloom get_filter_for_commit <commit-hex>\n";
 
 int cmd__bloom(int argc, const char **argv)
 {
@@ -74,20 +75,29 @@ int cmd__bloom(int argc, const char **argv)
 
 	if (!strcmp(argv[1], "generate_filter")) {
 		struct bloom_filter filter;
-		int i = 2;
+		int version = settings.hash_version;
+		const char *const usage[] = {
+			"test-tool bloom generate_filter [--version=<n>] <string>...",
+			NULL
+		};
+		struct option options[] = {
+			OPT_INTEGER(0, "version", &version, "Bloom filter version"),
+			OPT_END()
+		};
+
+		argc = parse_options(argc - 1, argv + 1, NULL, options, usage, 0);
+		if (!argc || version < 1 || version > 4)
+			usage_with_options(usage, options);
+		settings.hash_version = version;
 		filter.len =  (settings.bits_per_entry + BITS_PER_WORD - 1) / BITS_PER_WORD;
 		CALLOC_ARRAY(filter.data, filter.len);
 
-		if (argc - 1 < i)
-			usage(bloom_usage);
-
-		while (argv[i]) {
+		for (int i = 1; i <= argc; i++)
 			add_string_to_filter(argv[i], &filter);
-			i++;
-		}
 
 		print_bloom_filter(&filter);
 		free(filter.data);
+		return 0;
 	}
 
 	if (!strcmp(argv[1], "get_filter_for_commit")) {

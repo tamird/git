@@ -1047,7 +1047,7 @@ static int convert_pathspec_to_bloom_keyvec(
 	int res = -1;
 	const char *basename;
 
-	if (settings->hash_version == 3) {
+	if (settings->hash_version >= 3) {
 		if (pathspec_item_get_recursive_basename(pi, &basename)) {
 			path = basename;
 			len = strlen(path);
@@ -1058,9 +1058,10 @@ static int convert_pathspec_to_bloom_keyvec(
 			path = path_alloc;
 		}
 		if (path) {
-			*out = bloom_keyvec_new(path, len, settings);
+			*out = bloom_keyvec_new(path, len, BLOOM_KEY_BASENAME, settings);
 			if (components_out)
 				*components_out = bloom_keyvec_new(path, len,
+								   BLOOM_KEY_BASENAME,
 								   settings);
 			res = 0;
 			goto cleanup;
@@ -1090,8 +1091,8 @@ static int convert_pathspec_to_bloom_keyvec(
 	} else
 		path = pi->match;
 
-	*out = bloom_keyvec_new(path, len, settings);
-	if (components_out && settings->hash_version == 3) {
+	*out = bloom_keyvec_new(path, len, BLOOM_KEY_PATH, settings);
+	if (components_out && settings->hash_version >= 3) {
 		size_t count = 1;
 		size_t end = len;
 
@@ -1109,7 +1110,8 @@ static int convert_pathspec_to_bloom_keyvec(
 			while (start > 0 && path[start - 1] != '/')
 				start--;
 			bloom_key_fill(&(*components_out)->key[nr],
-				       path + start, end - start, settings);
+				       path + start, end - start,
+				       BLOOM_KEY_BASENAME, settings);
 			end = start ? start - 1 : 0;
 		}
 	}
@@ -1231,7 +1233,7 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 
 	CALLOC_ARRAY(revs->bloom_keyvecs, revs->bloom_keyvecs_nr);
 	if (revs->bloom_keyvecs_nr > 1 &&
-	    revs->bloom_filter_settings->hash_version == 3)
+	    revs->bloom_filter_settings->hash_version >= 3)
 		CALLOC_ARRAY(revs->bloom_query_components,
 			     revs->bloom_keyvecs_nr);
 
@@ -1261,7 +1263,7 @@ static int set_revisions_bloom_keyvecs(struct rev_info *revs,
 	/*
 	 * Each path is an AND of its full path and directory-prefix keys,
 	 * while the pathspec is an OR across paths. Factoring those keys into
-	 * a trie avoids repeating common predicates. Version 3 filters also
+	 * a trie avoids repeating common predicates. Version 3 and newer filters
 	 * contain every path component as a basename. Prefer those keys, but
 	 * use directory prefixes when basenames share too few roots.
 	 */

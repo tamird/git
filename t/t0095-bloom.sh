@@ -76,6 +76,26 @@ test_expect_success 'compute bloom key for test string 2' '
 	test_cmp expect actual
 '
 
+test_expect_success 'version 4 keeps seven probes distinct in small filters' '
+	cat >expect <<-\EOF &&
+	Hashes:0x9c9cd03b|0x9f81e5bb|0xa266fb3b|0xa54c10bb|0xa831263b|0xab163bbb|0xadfb513b|
+	Filter_Length:2
+	Filter_Data:00|08|
+	EOF
+	for version in 1 2 3
+	do
+		test-tool bloom generate_filter --version=$version bloom-path-283 >actual &&
+		test_cmp expect actual || return 1
+	done &&
+	cat >expect <<-\EOF &&
+	Hashes:0x9c9cd03b|0x9f81e5bc|0xa266fb3d|0xa54c10be|0xa831263f|0xab163bc0|0xadfb5141|
+	Filter_Length:2
+	Filter_Data:03|f8|
+	EOF
+	test-tool bloom generate_filter --version=4 bloom-path-283 >actual &&
+	test_cmp expect actual
+'
+
 test_expect_success 'get bloom filters for commit with no changes' '
 	git init &&
 	git commit --allow-empty -m "c0" &&

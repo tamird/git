@@ -8,11 +8,9 @@ struct commit_graph;
 struct bloom_filter_settings {
 	/*
 	 * The version of the hashing technique being used.
-	 * The newest version is 2, which is
-	 * the seeded murmur3 hashing technique implemented
-	 * in bloom.c. Bloom filters of version 1 were created
-	 * with prior versions of Git, which had a bug in the
-	 * implementation of the hash function.
+	 * Version 2 fixes the signed-byte Murmur3 bug in version 1.
+	 * Version 3 adds basenames. Version 4 gives basenames distinct
+	 * hash seeds and makes the double-hash step odd.
 	 */
 	uint32_t hash_version;
 
@@ -74,6 +72,11 @@ struct bloom_key {
 	uint32_t *hashes;
 };
 
+enum bloom_key_kind {
+	BLOOM_KEY_PATH,
+	BLOOM_KEY_BASENAME,
+};
+
 /*
  * A bloom_keyvec is a vector of bloom_keys, which
  * can be used to store multiple keys for a single
@@ -89,6 +92,7 @@ int load_bloom_filter_from_graph(struct commit_graph *g,
 				 uint32_t graph_pos);
 
 void bloom_key_fill(struct bloom_key *key, const char *data, size_t len,
+		    enum bloom_key_kind kind,
 		    const struct bloom_filter_settings *settings);
 void bloom_key_clear(struct bloom_key *key);
 
@@ -104,8 +108,10 @@ void bloom_key_clear(struct bloom_key *key);
  *   - "a"
  *
  * The resulting keys are stored in a newly allocated bloom_keyvec.
+ * A basename caller supplies a single path component and BLOOM_KEY_BASENAME.
  */
 struct bloom_keyvec *bloom_keyvec_new(const char *path, size_t len,
+				      enum bloom_key_kind kind,
 				      const struct bloom_filter_settings *settings);
 void bloom_keyvec_free(struct bloom_keyvec *vec);
 

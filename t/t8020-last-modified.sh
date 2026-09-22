@@ -45,11 +45,16 @@ test_expect_success 'last-modified non-recursive' '
 '
 
 test_expect_success 'last-modified recursive' '
-	check_last_modified -r <<-\EOF
-	3 a/b/file
-	2 a/file
-	1 file
-	EOF
+	for version in 1 4
+	do
+		git -c commitGraph.changedPathsVersion=$version commit-graph write \
+			--reachable --changed-paths &&
+		check_last_modified -r <<-\EOF || return 1
+		3 a/b/file
+		2 a/file
+		1 file
+		EOF
+	done
 '
 
 test_expect_success 'last-modified on annotated tag' '

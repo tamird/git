@@ -379,7 +379,7 @@ static int graph_read_bloom_data(const unsigned char *chunk_start,
 		return -1;
 	}
 	hash_version = get_be32(chunk_start);
-	if (hash_version < 1 || hash_version > 3) {
+	if (hash_version < 1 || hash_version > 4) {
 		warning(_("ignoring changed-path chunk with unsupported hash version %" PRIu32),
 			hash_version);
 		return -1;
@@ -2750,7 +2750,7 @@ int write_commit_graph(struct odb_source *source,
 	if (!commit_graph_compatible(r, 1))
 		return 0;
 	collect_shallow_oids(r, &ctx.shallow_oids);
-	if (r->settings.commit_graph_changed_paths_version < -1 || r->settings.commit_graph_changed_paths_version > 3) {
+	if (r->settings.commit_graph_changed_paths_version < -1 || r->settings.commit_graph_changed_paths_version > 4) {
 		warning(_("attempting to write a commit-graph, but "
 			  "'commitGraph.changedPathsVersion' (%d) is not supported"),
 			r->settings.commit_graph_changed_paths_version);
@@ -2789,8 +2789,8 @@ int write_commit_graph(struct odb_source *source,
 		}
 	}
 
-	if (bloom_settings.hash_version != 2 &&
-	    bloom_settings.hash_version != 3)
+	if (bloom_settings.hash_version < 2 ||
+	    bloom_settings.hash_version > 4)
 		bloom_settings.hash_version = 1;
 
 	if (ctx.split) {

@@ -143,7 +143,7 @@ All multi-byte numbers are in network byte order.
 ==== Bloom Filter Data (ID: {'B', 'D', 'A', 'T'}) [Optional]
     * It starts with header consisting of three unsigned 32-bit integers:
       - Version of the hash algorithm being used. We currently support
-	value 2 which corresponds to the 32-bit version of the murmur3 hash
+	versions 1 through 4. Version 2 uses the 32-bit murmur3 hash
 	implemented exactly as described in
 	https://en.wikipedia.org/wiki/MurmurHash#Algorithm and the double
 	hashing technique using seed values 0x293ae76f and 0x7e646e2c as
@@ -155,6 +155,12 @@ All multi-byte numbers are in network byte order.
 	Version 3 uses the version 2 hash algorithm and also adds the basename of
 	each changed path and leading directory to the filter. This allows a query
 	for a literal basename at any depth to use the filter.
+	Version 4 hashes full paths and directory prefixes with the version 2
+	seeds, and basenames with seeds 0x293ae76e and 0x7e646e2d. The second hash
+	is made odd by setting its least significant bit before computing the
+	32-bit double-hash sequence. Since filters contain a whole number of
+	bytes, the first eight probes then address distinct bit positions.
+	Path and basename keys are counted separately, including for root entries.
       - The number of times a path is hashed and hence the number of bit positions
 	      that cumulatively determine whether a file is present in the commit.
       - The minimum number of bits 'b' per entry in the Bloom filter. If the filter
@@ -165,7 +171,8 @@ All multi-byte numbers are in network byte order.
     * Commits with no changes have a one-byte filter with all bits set to zero.
       Commits exceeding the generation limits have a one-byte filter with all
       bits set to one. The default limits are 512 changed files and 512 keys
-      for versions 1 and 2, or 1024 keys for version 3 to accommodate basenames.
+      for versions 1 and 2, or 1024 keys for versions 3 and 4 to accommodate
+      basenames.
     * The BDAT chunk is present if and only if BIDX is present.
 
 ==== Base Graphs List (ID: {'B', 'A', 'S', 'E'}) [Optional]

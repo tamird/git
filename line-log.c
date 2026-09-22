@@ -1105,7 +1105,7 @@ static int bloom_filter_check(struct rev_info *rev,
 
 	while (!result && range) {
 		bloom_key_fill(&key, range->path, strlen(range->path),
-			       rev->bloom_filter_settings);
+			       BLOOM_KEY_PATH, rev->bloom_filter_settings);
 
 		if (bloom_filter_contains(&filter, &key,
 					  rev->bloom_filter_settings))

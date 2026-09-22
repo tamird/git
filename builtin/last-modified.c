@@ -116,7 +116,7 @@ static void add_path_from_diff(struct diff_queue_struct *q,
 		oidcpy(&ent->oid, &p->two->oid);
 		if (lm->rev.bloom_filter_settings)
 			bloom_key_fill(&ent->key, path, strlen(path),
-				       lm->rev.bloom_filter_settings);
+				       BLOOM_KEY_PATH, lm->rev.bloom_filter_settings);
 		hashmap_entry_init(&ent->hashent, strhash(ent->path));
 		hashmap_add(&lm->paths, &ent->hashent);
 	}

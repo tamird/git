@@ -900,6 +900,15 @@ test_expect_success 'line-log reports completed work at default trace depth' '
 		# The existing empty "diverge" commit guarantees a Bloom negative.
 		# The unchanged merge follows one parent, leaving the side range-less.
 		test_line_log_stats line-log-bloom.trace 1 1 2 1 1 3 0 6 3 &&
+		git -c commitGraph.changedPathsVersion=4 commit-graph write \
+			--reachable --changed-paths &&
+		git -c core.commitGraph=false log -M --format=%s --no-patch \
+			-L1,1:file pickaxe-rename >expect &&
+		line_log_trace line-log-bloom-v4.trace -c core.commitGraph=true \
+			-c commitGraph.changedPathsVersion=4 log -M \
+			--format=%s --no-patch -L1,1:file pickaxe-rename >actual &&
+		test_cmp expect actual &&
+		test_line_log_stats line-log-bloom-v4.trace 1 1 2 1 1 3 0 6 3 &&
 		# Two changed filepairs still count as one changed range-processing call.
 		test_line_log_stats line-log-two-files.trace 0 0 1 0 1 0 0 1 2 &&
 		test_line_log_stats line-log-one.trace 0 0 1 0 1 0 1 1 1 &&

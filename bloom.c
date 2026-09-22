@@ -22,8 +22,9 @@ static struct bloom_filter_slab bloom_filters;
 static int bloom_filter_slab_initialized;
 
 struct pathmap_hash_entry {
-    struct hashmap_entry entry;
-    const char path[FLEX_ARRAY];
+	struct hashmap_entry entry;
+	enum bloom_key_kind kind;
+	const char path[FLEX_ARRAY];
 };
 
 static uint32_t rotate_left(uint32_t value, int32_t count)
@@ -226,19 +227,28 @@ static uint32_t murmur3_seeded_v1(uint32_t seed, const char *data, size_t len)
 }
 
 void bloom_key_fill(struct bloom_key *key, const char *data, size_t len,
+		    enum bloom_key_kind kind,
 		    const struct bloom_filter_settings *settings)
 {
 	int i;
-	const uint32_t seed0 = 0x293ae76f;
-	const uint32_t seed1 = 0x7e646e2c;
+	uint32_t seed0 = 0x293ae76f;
+	uint32_t seed1 = 0x7e646e2c;
 	uint32_t hash0, hash1;
-	if (settings->hash_version == 2 || settings->hash_version == 3) {
+
+	if (settings->hash_version == 4 && kind == BLOOM_KEY_BASENAME) {
+		seed0 ^= 1;
+		seed1 ^= 1;
+	}
+	if (settings->hash_version >= 2) {
 		hash0 = murmur3_seeded_v2(seed0, data, len);
 		hash1 = murmur3_seeded_v2(seed1, data, len);
 	} else {
 		hash0 = murmur3_seeded_v1(seed0, data, len);
 		hash1 = murmur3_seeded_v1(seed1, data, len);
 	}
+	/* Byte-aligned filters then have distinct positions for the first 8 probes. */
+	if (settings->hash_version == 4)
+		hash1 |= 1;
 
 	key->hashes = (uint32_t *)xcalloc(settings->num_hashes, sizeof(uint32_t));
 	for (i = 0; i < settings->num_hashes; i++)
@@ -287,6 +297,7 @@ void deinit_bloom_filters(void)
 }
 
 struct bloom_keyvec *bloom_keyvec_new(const char *path, size_t len,
+				      enum bloom_key_kind kind,
 				      const struct bloom_filter_settings *settings)
 {
 	struct bloom_keyvec *vec;
@@ -313,12 +324,12 @@ struct bloom_keyvec *bloom_keyvec_new(const char *path, size_t len,
 		return NULL;
 	vec->count = nr;
 
-	bloom_key_fill(&vec->key[0], path, len, settings);
+	bloom_key_fill(&vec->key[0], path, len, kind, settings);
 	nr = 1;
 	p = path + len - 1;
 	while (p > path) {
 		if (*p == '/') {
-			bloom_key_fill(&vec->key[nr++], path, p - path, settings);
+			bloom_key_fill(&vec->key[nr++], path, p - path, kind, settings);
 		}
 		p--;
 	}
@@ -345,7 +356,21 @@ static int pathmap_cmp(const void *hashmap_cmp_fn_data UNUSED,
 	e1 = container_of(eptr, const struct pathmap_hash_entry, entry);
 	e2 = container_of(entry_or_key, const struct pathmap_hash_entry, entry);
 
-	return strcmp(e1->path, e2->path);
+	return e1->kind != e2->kind || strcmp(e1->path, e2->path);
+}
+
+static void add_path_to_map(struct hashmap *pathmap, const char *path,
+			    enum bloom_key_kind kind)
+{
+	struct pathmap_hash_entry *e;
+
+	FLEX_ALLOC_STR(e, path, path);
+	e->kind = kind;
+	hashmap_entry_init(&e->entry, strhash(path) ^ kind);
+	if (!hashmap_get(pathmap, &e->entry, NULL))
+		hashmap_add(pathmap, &e->entry);
+	else
+		free(e);
 }
 
 static void init_truncated_large_filter(struct bloom_filter *filter,
@@ -563,8 +588,8 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 		struct hashmap_iter iter;
 		uint64_t max_keys = settings->max_changed_paths;
 
-		/* Version 3 adds at most one basename per version 2 key. */
-		if (settings->hash_version == 3)
+		/* Versions 3 and 4 add at most one basename per path key. */
+		if (settings->hash_version >= 3)
 			max_keys *= 2;
 
 		for (i = 0; i < diff_queued_diff.nr; i++) {
@@ -581,23 +606,13 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 			do {
 				char *last_slash = strrchr(path, '/');
 
-				FLEX_ALLOC_STR(e, path, path);
-				hashmap_entry_init(&e->entry, strhash(path));
-
-				if (!hashmap_get(&pathmap, &e->entry, NULL))
-					hashmap_add(&pathmap, &e->entry);
-				else
-					free(e);
-
-				if (settings->hash_version == 3 && last_slash) {
-					FLEX_ALLOC_STR(e, path, last_slash + 1);
-					hashmap_entry_init(&e->entry,
-							   strhash(e->path));
-					if (!hashmap_get(&pathmap, &e->entry, NULL))
-						hashmap_add(&pathmap, &e->entry);
-					else
-						free(e);
-				}
+				add_path_to_map(&pathmap, path, BLOOM_KEY_PATH);
+				if (settings->hash_version == 3 && last_slash)
+					add_path_to_map(&pathmap, last_slash + 1,
+							BLOOM_KEY_PATH);
+				else if (settings->hash_version == 4)
+					add_path_to_map(&pathmap, last_slash ? last_slash + 1 : path,
+							BLOOM_KEY_BASENAME);
 
 				if (!last_slash)
 					last_slash = path;
@@ -626,7 +641,7 @@ struct bloom_filter *get_or_compute_bloom_filter(struct repository *r,
 
 		hashmap_for_each_entry(&pathmap, &iter, e, entry) {
 			struct bloom_key key;
-			bloom_key_fill(&key, e->path, strlen(e->path), settings);
+			bloom_key_fill(&key, e->path, strlen(e->path), e->kind, settings);
 			add_key_to_filter(&key, filter, settings);
 			bloom_key_clear(&key);
 		}
