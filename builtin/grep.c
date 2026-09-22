@@ -4334,6 +4334,23 @@ struct grep_revision_index {
 	enum grep_revision_index_state state;
 };
 
+static void grep_revision_index_normalize_paths(struct string_list *paths)
+{
+	size_t kept = 0;
+
+	string_list_sort(paths);
+	for (size_t i = 0; i < paths->nr; i++) {
+		struct string_list_item *item = &paths->items[i];
+
+		if (kept && starts_with(item->string, paths->items[kept - 1].string)) {
+			free(item->string);
+			continue;
+		}
+		paths->items[kept++] = *item;
+	}
+	paths->nr = kept;
+}
+
 /* Select scopes whose coverage can be estimated without tree reads. */
 static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 					struct grep_tree_query_context *query,
@@ -4386,61 +4403,12 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 		}
 	}
 	strbuf_release(&path);
-	string_list_sort(&probe->excluded);
-	{
-		size_t kept = 0;
-
-		for (size_t i = 0; i < probe->excluded.nr; i++) {
-			struct string_list_item *item = &probe->excluded.items[i];
-
-			if (kept && starts_with(item->string,
-						probe->excluded.items[kept - 1].string)) {
-				free(item->string);
-				continue;
-			}
-			if (kept != i)
-				probe->excluded.items[kept] = *item;
-			kept++;
-		}
-		probe->excluded.nr = kept;
-	}
+	grep_revision_index_normalize_paths(&probe->excluded);
 	if (universal)
 		string_list_clear(probe->paths, 0);
 	else
-		string_list_sort(probe->paths);
+		grep_revision_index_normalize_paths(probe->paths);
 	return positive > 0;
-}
-
-/* Count a selected directory only after its root child is proved unchanged. */
-static int grep_revision_index_add_scope(struct index_state *index,
-					 struct grep_revision_index_probe *probe,
-					 const char *path, struct string_list *paths,
-					 uintmax_t *total)
-{
-	struct object_id oid;
-	size_t count;
-
-	if (cache_tree_get_path(index, path, &oid, &count) <= 0)
-		return 0;
-	for (size_t i = 0; i < probe->excluded.nr; i++) {
-		const char *scope = probe->excluded.items[i].string;
-		size_t excluded;
-
-		if (starts_with(path, scope))
-			return 0;
-		if (starts_with(scope, path)) {
-			if (cache_tree_get_path(index, scope, &oid, &excluded) <= 0 ||
-			    excluded > count)
-				return 0;
-			count -= excluded;
-		}
-	}
-	if (count > UINTMAX_MAX - *total)
-		return -1;
-	if (count && paths)
-		string_list_append(paths, path);
-	*total += count;
-	return 0;
 }
 
 /* Bound optional lookahead even when the requested history shares little. */
@@ -4455,11 +4423,20 @@ struct grep_revision_probe_item {
 	char path[FLEX_ARRAY];
 };
 
+struct grep_revision_probe_group {
+	struct string_list paths;
+	uintmax_t trees;
+};
+
 struct grep_revision_lookahead {
 	struct index_state *index;
+	struct grep_revision_index_probe *root;
+	struct index_window *window;
 	struct prio_queue pending;
-	uintmax_t trees;
-	size_t memory, peak_memory;
+	struct grep_revision_probe_group *groups, **order;
+	size_t group_nr, items;
+	uintmax_t trees, selected_trees;
+	size_t selected_paths, memory, peak_memory;
 	uint64_t count_ns;
 	int trace_enabled;
 };
@@ -4473,8 +4450,119 @@ static int grep_revision_probe_compare(const void *a, const void *b, void *data 
 	return strcmp(one->path, two->path);
 }
 
+static int grep_revision_probe_reserve(struct grep_revision_lookahead *probe,
+				       size_t bytes, size_t items)
+{
+	if (bytes > GREP_REVISION_PROBE_MEMORY - probe->memory ||
+	    items > GREP_REVISION_PROBE_ITEMS - probe->items)
+		return -1;
+	probe->items += items;
+	probe->memory += bytes;
+	if (probe->memory > probe->peak_memory)
+		probe->peak_memory = probe->memory;
+	return 0;
+}
+
+static int grep_revision_probe_count_path(struct grep_revision_lookahead *probe,
+					  const char *path, struct object_id *oid,
+					  size_t *trees)
+{
+	uint64_t start = probe->trace_enabled ? getnanotime() : 0;
+	int entries = cache_tree_get_path(probe->index, path, oid, trees);
+
+	if (probe->trace_enabled)
+		probe->count_ns += getnanotime() - start;
+	return entries;
+}
+
+/* A proved ancestor permits counting a selected, valid descendant directly. */
+static int grep_revision_probe_add_scope(struct grep_revision_lookahead *probe,
+					 const char *path, size_t group)
+{
+	struct object_id oid;
+	struct string_list *paths = &probe->groups[group].paths;
+	size_t count;
+
+	if (grep_revision_probe_count_path(probe, path, &oid, &count) <= 0)
+		return 0;
+	for (size_t i = 0; i < probe->root->excluded.nr; i++) {
+		const char *scope = probe->root->excluded.items[i].string;
+		size_t excluded;
+
+		if (starts_with(path, scope))
+			return 0;
+		if (starts_with(scope, path)) {
+			if (grep_revision_probe_count_path(probe, scope, &oid, &excluded) <= 0 ||
+			    excluded > count)
+				return 0;
+			count -= excluded;
+		}
+	}
+	if (!count)
+		return 0;
+	if (count > UINTMAX_MAX - probe->trees)
+		return -1;
+	if (probe->window) {
+		size_t allocation = strlen(path) + 1;
+
+		if (paths->nr == paths->alloc)
+			allocation = st_add(allocation,
+					    st_mult(alloc_nr(paths->alloc) - paths->alloc,
+						    sizeof(*paths->items)));
+		if (grep_revision_probe_reserve(probe, allocation, 1))
+			return -1;
+		string_list_append(paths, path);
+	}
+	probe->groups[group].trees += count;
+	probe->trees += count;
+	return 0;
+}
+
+static int grep_revision_probe_match(struct grep_revision_lookahead *probe,
+				     const char *path)
+{
+	const struct string_list *scopes = probe->root->paths;
+
+	if (!scopes->nr)
+		return grep_revision_probe_add_scope(probe, path, 0);
+	for (size_t i = 0; i < scopes->nr; i++) {
+		const char *scope = scopes->items[i].string;
+
+		if (starts_with(path, scope))
+			return grep_revision_probe_add_scope(probe, path,
+							     probe->window ? i : 0);
+		if (starts_with(scope, path) &&
+		    grep_revision_probe_add_scope(probe, scope, probe->window ? i : 0))
+			return -1;
+	}
+	return 0;
+}
+
+static int grep_revision_probe_intersects(struct grep_revision_lookahead *probe,
+					  const char *path)
+{
+	const struct string_list *scopes = probe->root->paths;
+
+	for (size_t i = 0; i < probe->root->excluded.nr; i++)
+		if (starts_with(path, probe->root->excluded.items[i].string))
+			return 0;
+	if (!scopes->nr)
+		return 1;
+	for (size_t i = 0; i < scopes->nr; i++)
+		if (starts_with(path, scopes->items[i].string) ||
+		    starts_with(scopes->items[i].string, path))
+			return 1;
+	return 0;
+}
+
+enum grep_revision_probe_action {
+	GREP_REVISION_PROVE = 1,
+	GREP_REVISION_DESCEND = 2,
+};
+
 static int grep_revision_probe_children(struct grep_revision_lookahead *probe,
-					struct tree_desc tree, const char *parent)
+					struct tree_desc tree, const char *parent,
+					unsigned int action)
 {
 	struct strbuf path = STRBUF_INIT;
 	int ret = -1;
@@ -4485,7 +4573,6 @@ static int grep_revision_probe_children(struct grep_revision_lookahead *probe,
 		struct grep_revision_probe_item *item;
 		struct object_id oid;
 		size_t trees, allocation;
-		uint64_t start = 0;
 		int entries;
 
 		if (update_tree_entry_gently(&tree))
@@ -4496,33 +4583,30 @@ static int grep_revision_probe_children(struct grep_revision_lookahead *probe,
 		strbuf_addstr(&path, parent);
 		strbuf_addstr(&path, entry.path);
 		strbuf_addch(&path, '/');
-		if (probe->trace_enabled)
-			start = getnanotime();
-		entries = cache_tree_get_path(probe->index, path.buf, &oid, &trees);
-		if (probe->trace_enabled)
-			probe->count_ns += getnanotime() - start;
+		if (!grep_revision_probe_intersects(probe, path.buf))
+			continue;
+		entries = grep_revision_probe_count_path(probe, path.buf, &oid, NULL);
 		/* Leave invalid ancestors and any useful children to the walker. */
 		if (entries <= 0)
 			continue;
 		if (oideq(&oid, &entry.oid)) {
-			if (trees > UINTMAX_MAX - probe->trees)
+			if ((action & GREP_REVISION_PROVE) &&
+			    grep_revision_probe_match(probe, path.buf))
 				goto done;
-			probe->trees += trees;
 			continue;
 		}
-		if (trees <= 1)
+		if (!(action & GREP_REVISION_DESCEND))
+			continue;
+		entries = grep_revision_probe_count_path(probe, path.buf, &oid, &trees);
+		if (entries <= 0 || trees <= 1)
 			continue;
 		allocation = st_add(sizeof(*item), path.len + 1);
-		if (prio_queue_size(&probe->pending) >= GREP_REVISION_PROBE_ITEMS ||
-		    allocation > GREP_REVISION_PROBE_MEMORY - probe->memory)
+		if (grep_revision_probe_reserve(probe, allocation, 1))
 			goto done;
 		FLEX_ALLOC_STR(item, path, path.buf);
 		oidcpy(&item->oid, &entry.oid);
 		item->trees = trees;
 		prio_queue_put(&probe->pending, item);
-		probe->memory += allocation;
-		if (probe->memory > probe->peak_memory)
-			probe->peak_memory = probe->memory;
 	}
 	ret = 0;
 done:
@@ -4530,27 +4614,131 @@ done:
 	return ret;
 }
 
-static int grep_revision_index_lookahead(struct index_state *index,
-					 struct grep_revision_index_probe *root,
-					 size_t required)
+static int grep_revision_group_compare(const void *a, const void *b)
+{
+	const struct grep_revision_probe_group *one =
+		*(const struct grep_revision_probe_group *const *)a;
+	const struct grep_revision_probe_group *two =
+		*(const struct grep_revision_probe_group *const *)b;
+
+	if (one->trees != two->trees)
+		return one->trees > two->trees ? -1 : 1;
+	return one->trees ? strcmp(one->paths.items[0].string,
+				   two->paths.items[0].string) :
+			    0;
+}
+
+static size_t grep_revision_probe_entry_budget(uintmax_t trees, unsigned int reads)
+{
+	if (trees <= reads)
+		return 0;
+	return trees - reads > SIZE_MAX / 16 ? SIZE_MAX : (trees - reads) * 16;
+}
+
+static int grep_revision_probe_accept(struct grep_revision_lookahead *probe,
+				      size_t required, unsigned int reads)
+{
+	if (!probe->window)
+		return probe->trees >= reads && probe->trees - reads >= required;
+	/* Small groups may amortize a shared block only when admitted together. */
+	if (probe->group_nr > 1) {
+		struct string_list paths = STRING_LIST_INIT_NODUP;
+		size_t nr = 0, allocation;
+
+		for (size_t i = 0; i < probe->group_nr; i++)
+			nr += probe->groups[i].paths.nr;
+		allocation = st_mult(nr, sizeof(*paths.items));
+		if (nr && !grep_revision_probe_reserve(probe, allocation, 0)) {
+			int accepted;
+
+			ALLOC_ARRAY(paths.items, nr);
+			paths.alloc = nr;
+			for (size_t i = 0; i < probe->group_nr; i++) {
+				const struct string_list *group = &probe->groups[i].paths;
+
+				for (size_t j = 0; j < group->nr; j++)
+					paths.items[paths.nr++] = group->items[j];
+			}
+			accepted = index_tree_window_select(probe->window, &paths,
+							    grep_revision_probe_entry_budget(probe->trees, reads));
+			string_list_clear(&paths, 0);
+			probe->memory -= allocation;
+			if (accepted) {
+				if (accepted > 0) {
+					probe->selected_trees = probe->trees;
+					probe->selected_paths = nr;
+				}
+				return accepted;
+			}
+		}
+	}
+	QSORT(probe->order, probe->group_nr, grep_revision_group_compare);
+	for (size_t i = 0; i < probe->group_nr; i++) {
+		struct grep_revision_probe_group *group = probe->order[i];
+		uintmax_t trees = probe->selected_trees + group->trees;
+		size_t max_entries;
+		int accepted;
+
+		if (!group->trees || trees <= reads)
+			continue;
+		/* Charge even reads spent proving groups that were not admitted. */
+		max_entries = grep_revision_probe_entry_budget(trees, reads);
+		accepted = index_tree_window_select(probe->window, &group->paths, max_entries);
+		if (accepted < 0)
+			return -1;
+		if (accepted) {
+			probe->selected_trees = trees;
+			probe->selected_paths += group->paths.nr;
+		}
+	}
+	return probe->selected_paths != 0;
+}
+
+static int grep_revision_index_find(struct index_state *index,
+				    struct grep_revision_index_probe *root,
+				    struct index_window *window)
 {
 	struct grep_revision_lookahead probe = {
 		.index = index,
+		.root = root,
+		.window = window,
 		.pending = { .compare = grep_revision_probe_compare },
+		.group_nr = window ? root->paths->nr : 1,
 		.trace_enabled = trace2_is_enabled(),
 	};
 	struct grep_revision_probe_item *item;
 	unsigned int reads = 0;
-	size_t bytes = 0;
-	int accepted = 0;
+	size_t bytes = 0, required = index->cache_nr / 16 + !!(index->cache_nr % 16);
+	int accepted = 0, probing = 0;
 
+	if (window)
+		trace2_region_enter("grep", "revision_index_select", index->repo);
+	if (grep_revision_probe_reserve(&probe,
+					st_mult(probe.group_nr, sizeof(*probe.groups) + sizeof(*probe.order)),
+					probe.group_nr))
+		goto done;
+	CALLOC_ARRAY(probe.groups, probe.group_nr);
+	ALLOC_ARRAY(probe.order, probe.group_nr);
+	for (size_t i = 0; i < probe.group_nr; i++) {
+		string_list_init_dup(&probe.groups[i].paths);
+		probe.order[i] = &probe.groups[i];
+	}
+	/* Try cheap root matches before counting or queuing mismatched subtrees. */
+	if (grep_revision_probe_children(&probe, root->tree, "", GREP_REVISION_PROVE))
+		goto done;
+	accepted = grep_revision_probe_accept(&probe, required, reads);
+	if (accepted)
+		goto done;
 	trace2_region_enter("grep", "revision_index_probe", index->repo);
+	probing = 1;
 	/* Reserve the queue once, so its allocation is included in the bound. */
+	if (grep_revision_probe_reserve(&probe,
+					st_mult(GREP_REVISION_PROBE_ITEMS, sizeof(*probe.pending.array)), 0))
+		goto done;
 	ALLOC_ARRAY(probe.pending.array, GREP_REVISION_PROBE_ITEMS);
 	probe.pending.alloc = GREP_REVISION_PROBE_ITEMS;
-	probe.memory = st_mult(probe.pending.alloc, sizeof(*probe.pending.array));
-	probe.peak_memory = probe.memory;
-	if (grep_revision_probe_children(&probe, root->tree, ""))
+	/* The requested root is already read; valid children survive an invalid root. */
+	if (grep_revision_probe_children(&probe, root->tree, "", GREP_REVISION_DESCEND))
 		goto done;
 	/* A failed probe should not exceed the estimated index-decoding cost. */
 	while (reads < GREP_REVISION_PROBE_READS && reads < required &&
@@ -4580,131 +4768,64 @@ static int grep_revision_index_lookahead(struct index_state *index,
 			bytes += size;
 			failed = init_tree_desc_gently(&tree, &item->oid, buffer, size,
 						       TREE_DESC_SILENT_ERRORS) ||
-				 grep_revision_probe_children(&probe, tree, item->path);
+				 grep_revision_probe_children(&probe, tree, item->path,
+							      GREP_REVISION_PROVE | GREP_REVISION_DESCEND);
 		}
 		free(buffer);
 		probe.memory -= sizeof(*item) + strlen(item->path) + 1;
+		probe.items--;
 		free(item);
 		if (failed)
 			break;
-		/* These probe reads will be repeated by the ordinary traversal. */
-		if (probe.trees >= reads && probe.trees - reads >= required) {
-			accepted = 1;
+		accepted = grep_revision_probe_accept(&probe, required, reads);
+		if (accepted)
 			break;
-		}
 	}
 done:
 	while ((item = prio_queue_get(&probe.pending)))
 		free(item);
 	clear_prio_queue(&probe.pending);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_reads", reads);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_bytes", bytes);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_trees", probe.trees);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_count_us",
-			   probe.count_ns / 1000);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_peak_memory",
-			   probe.peak_memory);
-	trace2_data_intmax("grep", index->repo, "revision_index_probe_accepted", accepted);
-	trace2_region_leave("grep", "revision_index_probe", index->repo);
-	return accepted;
-}
-
-static uintmax_t grep_revision_index_matching_paths(
-	struct index_state *index, struct grep_revision_index_probe *probe,
-	struct string_list *paths)
-{
-	struct tree_desc tree = probe->tree;
-	struct name_entry entry;
-	struct object_id oid;
-	struct strbuf path = STRBUF_INIT;
-	uintmax_t trees = 0;
-	/*
-	 * An invalid cache-tree root can retain valid children. The requested
-	 * root is already read, so inspect its children without further I/O.
-	 */
-	tree.flags |= TREE_DESC_SILENT_ERRORS;
-	while (tree.size) {
-		const char *previous = NULL;
-
-		entry = tree.entry;
-		if (update_tree_entry_gently(&tree))
-			goto fail;
-		if (!S_ISDIR(entry.mode) ||
-		    cache_tree_get_path(index, entry.path, &oid, NULL) <= 0 ||
-		    !oideq(&oid, &entry.oid))
-			continue;
-		strbuf_reset(&path);
-		strbuf_addstr(&path, entry.path);
-		strbuf_addch(&path, '/');
-		if (!probe->paths->nr) {
-			if (grep_revision_index_add_scope(index, probe, path.buf,
-							  paths, &trees))
-				goto fail;
-			continue;
-		}
-		for (size_t i = 0; i < probe->paths->nr; i++) {
-			const char *selected = probe->paths->items[i].string;
-
-			if (starts_with(path.buf, selected)) {
-				if (grep_revision_index_add_scope(index, probe, path.buf,
-								  paths, &trees))
-					goto fail;
-				break;
-			}
-			if (!starts_with(selected, path.buf) ||
-			    (previous && starts_with(selected, previous)))
-				continue;
-			if (grep_revision_index_add_scope(index, probe, selected,
-							  paths, &trees))
-				goto fail;
-			previous = selected;
-		}
+	if (probe.groups)
+		for (size_t i = 0; i < probe.group_nr; i++)
+			string_list_clear(&probe.groups[i].paths, 0);
+	free(probe.groups);
+	free(probe.order);
+	if (probing)
+		trace2_region_leave("grep", "revision_index_probe", index->repo);
+	if (window)
+		trace2_region_leave("grep", "revision_index_select", index->repo);
+	if (probing) {
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_reads", reads);
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_bytes", bytes);
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_trees", probe.trees);
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_count_us",
+				   probe.count_ns / 1000);
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_peak_memory",
+				   probe.peak_memory);
+		trace2_data_intmax("grep", index->repo, "revision_index_probe_accepted", accepted > 0);
 	}
-	strbuf_release(&path);
-	return trees;
-fail:
-	strbuf_release(&path);
-	if (paths)
-		string_list_clear(paths, 0);
-	return 0;
+	if (window) {
+		trace2_data_intmax("grep", index->repo, "revision_index_selected_paths", probe.selected_paths);
+		trace2_data_intmax("grep", index->repo, "revision_index_selected_trees", probe.selected_trees);
+	}
+	return accepted > 0;
 }
 
 static int grep_revision_index_select_paths(struct index_state *index,
-					    struct string_list *paths,
-					    size_t *max_entries, void *data)
+					    struct index_window *window, void *data)
 {
-	uintmax_t trees;
-
-	trace2_region_enter("grep", "revision_index_select", index->repo);
-	trees = grep_revision_index_matching_paths(index, data, paths);
-	*max_entries = trees > SIZE_MAX / 16 ? SIZE_MAX : trees * 16;
-	trace2_region_leave("grep", "revision_index_select", index->repo);
-	trace2_data_intmax("grep", index->repo, "revision_index_selected_paths", paths->nr);
-	trace2_data_intmax("grep", index->repo, "revision_index_selected_trees", trees);
-	return trees != 0;
+	return grep_revision_index_find(index, data, window);
 }
 
 static int grep_revision_index_accept(struct index_state *index, void *data)
 {
 	struct grep_revision_index_probe *probe = data;
-	uintmax_t trees;
-	int accepted;
 
 	if (!probe->paths->nr && !probe->excluded.nr &&
 	    cache_tree_root_matches_index(index, probe->tree_oid))
 		return 1;
-	trees = grep_revision_index_matching_paths(index, probe, NULL);
-	/*
-	 * Tree object reads cost much more than decoding an index entry. Keep
-	 * small selections on the tree walker: require one avoided directory
-	 * read per sixteen entries we would decode from this index.
-	 */
-	accepted = trees && trees >= index->cache_nr / 16 +
-					     !!(index->cache_nr % 16);
-	if (!accepted && !probe->paths->nr && !probe->excluded.nr)
-		accepted = grep_revision_index_lookahead(index, probe,
-							 index->cache_nr / 16 + !!(index->cache_nr % 16));
-	return accepted;
+	/* Require one avoided directory read per sixteen decoded index entries. */
+	return grep_revision_index_find(index, probe, NULL);
 }
 
 static int grep_revision_index_load(struct repository *repo,

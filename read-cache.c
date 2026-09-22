@@ -2797,6 +2797,7 @@ struct index_window_block {
 	unsigned int nr, first, selected_first;
 	const char *first_name;
 	unsigned int selected : 1;
+	unsigned int candidate:1;
 };
 
 struct index_window {
@@ -2893,15 +2894,20 @@ static int index_window_read_blocks(struct index_window *window,
 	return first == window->tree.cache_nr ? 0 : -1;
 }
 
+/* Rejected groups must leave the previously selected blocks untouched. */
 static int index_window_select_blocks(struct index_window *window,
-				      const struct string_list *prefixes)
+				      const struct string_list *prefixes,
+				      size_t max_entries)
 {
+	unsigned int entries = 0;
+	int ret = -1;
+
 	for (size_t p = 0; p < prefixes->nr; p++) {
 		const char *prefix = prefixes->items[p].string;
 		size_t len = strlen(prefix);
 
 		if (!len)
-			return -1;
+			goto done;
 		for (size_t i = 0; i < window->block_nr; i++) {
 			struct index_window_block *block = &window->blocks[i];
 			int cmp = strcmp(block->first_name, prefix);
@@ -2913,18 +2919,42 @@ static int index_window_select_blocks(struct index_window *window,
 			if (i + 1 < window->block_nr &&
 			    strcmp(window->blocks[i + 1].first_name, prefix) < 0)
 				continue;
-			block->selected = 1;
+			block->candidate = 1;
 		}
 	}
+	for (size_t i = 0; i < window->block_nr; i++)
+		if (window->blocks[i].selected || window->blocks[i].candidate)
+			entries += window->blocks[i].nr;
+	if (!entries)
+		goto done;
+	if (entries > max_entries) {
+		ret = 0;
+		goto done;
+	}
+	window->entries_nr = 0;
 	for (size_t i = 0; i < window->block_nr; i++) {
 		struct index_window_block *block = &window->blocks[i];
 
+		block->selected |= block->candidate;
 		if (!block->selected)
 			continue;
 		block->selected_first = window->entries_nr;
 		window->entries_nr += block->nr;
 	}
-	return window->entries_nr ? 0 : -1;
+	ret = 1;
+done:
+	for (size_t i = 0; i < window->block_nr; i++)
+		window->blocks[i].candidate = 0;
+	return ret;
+}
+
+int index_tree_window_select(struct index_window *window,
+			     const struct string_list *prefixes, size_t max_entries)
+{
+	for (size_t i = 0; i < prefixes->nr; i++)
+		if (!ends_with(prefixes->items[i].string, "/"))
+			return -1;
+	return index_window_select_blocks(window, prefixes, max_entries);
 }
 
 static int index_window_decode_blocks(struct index_window *window,
@@ -2974,16 +3004,15 @@ static int index_window_decode_blocks(struct index_window *window,
 static int read_index_window_internal(
 	struct repository *repo, const char *path,
 	const struct string_list *prefixes,
-	int (*select_tree)(struct index_state *, struct string_list *, size_t *, void *),
+	int (*select_tree)(struct index_state *, struct index_window *, void *),
 	int (*accept_file)(const struct index_file_snapshot *, size_t, void *),
 	void *accept_data, struct index_window **result)
 {
 	struct index_window *window = NULL;
-	struct string_list selected = STRING_LIST_INIT_DUP;
 	struct load_index_extensions extensions = { 0 };
 	struct stat before, after;
 	const char *map = MAP_FAILED;
-	size_t size, entry_end, max_entries = SIZE_MAX;
+	size_t size, entry_end;
 	int fd = -1, ret = INDEX_WINDOW_UNAVAILABLE;
 
 	*result = NULL;
@@ -3019,20 +3048,12 @@ static int read_index_window_internal(
 		load_index_extensions(&extensions);
 		if (extensions.error || !window->tree.cache_tree_data)
 			goto done;
-		if (!select_tree(&window->tree, &selected, &max_entries, accept_data) ||
-		    !selected.nr) {
+		if (!select_tree(&window->tree, window, accept_data) ||
+		    !window->entries_nr) {
 			ret = INDEX_WINDOW_SKIPPED;
 			goto done;
 		}
-		for (size_t i = 0; i < selected.nr; i++)
-			if (!ends_with(selected.items[i].string, "/"))
-				goto done;
-		prefixes = &selected;
-	}
-	if (index_window_select_blocks(window, prefixes))
-		goto done;
-	if (window->entries_nr > max_entries) {
-		ret = INDEX_WINDOW_SKIPPED;
+	} else if (index_window_select_blocks(window, prefixes, SIZE_MAX) <= 0) {
 		goto done;
 	}
 	if (window->entries_nr == window->tree.cache_nr) {
@@ -3087,14 +3108,13 @@ done:
 		munmap((void *)map, size);
 	if (fd >= 0)
 		close(fd);
-	string_list_clear(&selected, 0);
 	release_index_window(window);
 	return ret;
 }
 
 int read_index_tree_window(
 	struct repository *repo, const char *path,
-	int (*select_paths)(struct index_state *, struct string_list *, size_t *, void *),
+	int (*select_paths)(struct index_state *, struct index_window *, void *),
 	void *data, struct index_window **result)
 {
 	int ret;

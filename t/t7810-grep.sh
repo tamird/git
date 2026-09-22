@@ -6637,11 +6637,12 @@ test_expect_success 'revision grep finds reuse below changed directories' '
 		for version in 2 4
 		do
 			git update-index --index-version "$version" &&
-			for selection in broad literal excluded
+			for selection in broad literal nested excluded
 			do
 				case "$selection" in
 				broad) set -- "*target.txt" ;;
 				literal) set -- a ;;
+				nested) set -- a/deep a/deep/child a/deep ;;
 				excluded) set -- "*target.txt" ":!b/**" ;;
 				esac &&
 				GIT_INDEX_FILE="$PWD/missing-index" \
@@ -6652,16 +6653,15 @@ test_expect_success 'revision grep finds reuse below changed directories' '
 						needle HEAD -- "$@" >actual-nested 2>err-nested &&
 				test_cmp expect-nested actual-nested &&
 				test_must_be_empty err-nested &&
-				case "$selection" in
-				broad)
-					test_trace2_data grep revision_index_probe_accepted 1 \
-						<"nested-$version-$selection.trace" &&
-					test_trace2_data_singular grep revision_index_reused 2 \
-						<"nested-$version-$selection.trace" ;;
-				*)
-					test_grep ! revision_index_probe_reads \
-						"nested-$version-$selection.trace" ;;
-				esac || return 1
+				test_trace2_data grep revision_index_probe_accepted 1 \
+					<"nested-$version-$selection.trace" &&
+				expected_reuse=1 &&
+				if test "$selection" = broad || test "$selection" = excluded
+				then
+					expected_reuse=2
+				fi &&
+				test_trace2_data_singular grep revision_index_reused "$expected_reuse" \
+					<"nested-$version-$selection.trace" || return 1
 			done || return 1
 		done &&
 		# Invalid deeper ancestors must not make optional reuse authoritative.
@@ -6718,6 +6718,50 @@ test_expect_success PTHREADS 'revision grep windows cover only reusable scopes' 
 				test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
 					"scopes-$version-$revisions.trace" || return 1
 			done || return 1
+		done &&
+		# Both groups now match, but b would add three unaffordable blocks.
+		mkdir -p a/deep/sibling/child &&
+		echo needle-sibling >a/deep/sibling/child/target.txt &&
+		echo needle-index-only >b/target.txt &&
+		git add a/deep/sibling b/target.txt &&
+		git write-tree >scope-tree &&
+		echo staged-only >a/target.txt &&
+		git add a/target.txt &&
+		git write-tree >changed-tree &&
+		for version in 2 4
+		do
+			GIT_TEST_INDEX_THREADS=4 \
+				git update-index --index-version "$version" --force-write-index &&
+			for selection in subset shared
+			do
+				case "$selection" in
+				subset)
+					set -- a/deep a/deep/child a/deep b &&
+					selected_paths=1 && selected_trees=6 ;;
+				shared)
+					# Each two-tree scope is too small alone; together they fit.
+					set -- a/deep/child/grandchild a/deep/sibling &&
+					selected_paths=2 && selected_trees=4 ;;
+				esac &&
+				GIT_INDEX_FILE="$PWD/missing-index" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle "$(cat scope-tree)" -- "$@" >expect-groups &&
+				GIT_TRACE2_EVENT="$PWD/groups-$version-$selection.trace" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle "$(cat scope-tree)" -- "$@" >actual-groups 2>err-groups &&
+				test_cmp expect-groups actual-groups &&
+				test_must_be_empty err-groups &&
+				if test "$selection" = subset
+				then
+					test_grep -F b/target.txt:1:needle-index-only actual-groups || return 1
+				fi &&
+				test_trace2_data grep revision_index_probe_reads 1 <"groups-$version-$selection.trace" &&
+				test_trace2_data grep revision_index_selected_paths "$selected_paths" <"groups-$version-$selection.trace" &&
+				test_trace2_data grep revision_index_selected_trees "$selected_trees" <"groups-$version-$selection.trace" &&
+				test_trace2_data index read/window_entries 41 <"groups-$version-$selection.trace" &&
+				test_trace2_data index read/window_blocks 1 <"groups-$version-$selection.trace" &&
+				test_trace2_data_singular grep revision_index_reused "$selected_paths" <"groups-$version-$selection.trace" || return 1
+			done || return 1
 		done
 	)
 '
@@ -6747,22 +6791,34 @@ test_expect_success 'revision grep bounds lookahead without shared subtrees' '
 		git fast-import <import &&
 		git reset --hard main &&
 		git write-tree >indexed-tree &&
-		GIT_INDEX_FILE="$PWD/missing-index" \
-			git grep --text --no-content-index --threads=1 -n \
-				needle HEAD^ -- "*target.txt" >expect &&
-		GIT_TRACE2_EVENT="$PWD/disjoint.trace" \
-			git grep --text --no-content-index --threads=1 -n \
-				needle HEAD^ -- "*target.txt" >actual 2>err &&
-		test_cmp expect actual &&
-		test_must_be_empty err &&
-		sed -n "s/.*\"key\":\"revision_index_probe_reads\",\"value\":\"\([0-9]*\)\".*/\1/p" \
-			disjoint.trace >probe-reads &&
-		read probe_reads <probe-reads &&
-		# Failed lookahead stays within the cost of decoding 257 entries.
-		test "$probe_reads" -le 17 &&
-		test_trace2_data grep revision_index_probe_accepted 0 <disjoint.trace &&
-		test_grep ! revision_index_reused disjoint.trace &&
-		test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" disjoint.trace
+		for selection in broad literal
+		do
+			set -- "*target.txt" &&
+			if test "$selection" = literal
+			then
+				set -- &&
+				for n in $(test_seq 1 257)
+				do
+					set -- "$@" "d$n" || return 1
+				done
+			fi &&
+			GIT_INDEX_FILE="$PWD/missing-index" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD^ -- "$@" >expect &&
+			GIT_TRACE2_EVENT="$PWD/disjoint-$selection.trace" \
+				git grep --text --no-content-index --threads=1 -n \
+					needle HEAD^ -- "$@" >actual 2>err &&
+			test_cmp expect actual &&
+			test_must_be_empty err &&
+			sed -n "s/.*\"key\":\"revision_index_probe_reads\",\"value\":\"\([0-9]*\)\".*/\1/p" \
+				disjoint-$selection.trace >probe-reads &&
+			read probe_reads <probe-reads &&
+			# Failed lookahead stays within the cost of decoding 257 entries.
+			test "$probe_reads" -le 17 &&
+			test_trace2_data grep revision_index_probe_accepted 0 <disjoint-$selection.trace &&
+			test_grep ! revision_index_reused disjoint-$selection.trace &&
+			test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" disjoint-$selection.trace || return 1
+		done
 	)
 '
 
