@@ -303,7 +303,7 @@ static void trace_worker_target_growth(void)
 #define GREP_TREE_INDEX_CACHE_MAX_ENTRIES (1U << 20)
 #define GREP_TREE_INDEX_BATCH_SIZE	  (1U << 16)
 #define GREP_TREE_INDEX_BATCH_MAX_BYTES	  (16U * 1024 * 1024)
-#define GREP_TREE_INDEX_MAX_REQUESTS	  2
+#define GREP_INDEX_QUERY_MAX_REQUESTS	   2
 #define GREP_MIN_FILES_FOR_THREADS 32
 #define GREP_LITERAL_PATH_MAX_FILES   128
 #define GREP_LITERAL_PATH_MAX_BYTES   (8 * 1024 * 1024)
@@ -1432,7 +1432,7 @@ static int grep_cache_query_content_index_oids(
 	trace2_region_enter("grep", "query_content_index_ipc", repo);
 	query_result = grep_index_ipc_query_with_max_parallel_requests(
 		repo, content_index_query, oids, nr_oids, maybe,
-		cached ? 0 : GREP_TREE_INDEX_MAX_REQUESTS,
+		GREP_INDEX_QUERY_MAX_REQUESTS,
 		trace_enabled ? &ipc_trace : NULL);
 	trace2_region_leave("grep", "query_content_index_ipc", repo);
 	if (trace_enabled) {
@@ -2520,9 +2520,10 @@ static int grep_cache(struct grep_opt *opt,
 					ALLOC_ARRAY(results, nr_oids);
 					trace2_region_enter(
 						"grep", "query_content_index_overlay", repo);
-					if (!grep_index_ipc_query(
+					if (!grep_index_ipc_query_with_max_parallel_requests(
 						    repo, content_index_query, oids,
-						    sample_size, results)) {
+						    sample_size, results,
+						    GREP_INDEX_QUERY_MAX_REQUESTS, NULL)) {
 						uint64_t rejected = 0;
 
 						queried = sample_size;
@@ -2535,15 +2536,15 @@ static int grep_cache(struct grep_opt *opt,
 							}
 						}
 						if (sample_size < nr_oids) {
-							if (sample_rejected * 8 < sample_size) {
+							if (sample_rejected * 8 < sample_size)
 								bypassed = 1;
-							} else if (!grep_index_ipc_query(
-								   repo, content_index_query,
-								   oids + sample_size,
-								   nr_oids - sample_size,
-								   results + sample_size)) {
+							else if (!grep_index_ipc_query_with_max_parallel_requests(
+									 repo, content_index_query,
+									 oids + sample_size,
+									 nr_oids - sample_size,
+									 results + sample_size,
+									 GREP_INDEX_QUERY_MAX_REQUESTS, NULL))
 								queried = nr_oids;
-							}
 						}
 						for (size_t i = 0; i < queried; i++) {
 							size_t index_pos = positions[i];
@@ -3727,7 +3728,7 @@ static int start_grep_tree_batch(struct grep_tree_batch *batch)
 	trace2_region_enter("grep", "start_content_index_ipc", batch->opt->repo);
 	buffer->request = grep_index_ipc_query_start(
 		batch->opt->repo, content_index_query, buffer->oids.oid,
-		buffer->oids.nr, GREP_TREE_INDEX_MAX_REQUESTS,
+		buffer->oids.nr, GREP_INDEX_QUERY_MAX_REQUESTS,
 		buffer->capture ? &buffer->trace : NULL);
 	trace2_region_leave("grep", "start_content_index_ipc", batch->opt->repo);
 	if (query->trace_enabled)

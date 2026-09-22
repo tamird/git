@@ -1162,7 +1162,7 @@ test_expect_success FSMONITOR_DAEMON 'daemon shares concurrent grep workers' '
 '
 
 test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
-	'daemon bounds worktree content-index request fanout' '
+	'daemon bounds grep content-index request fanout' '
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    test_might_fail git config --unset core.fsmonitor &&
 			    git read-tree HEAD &&
@@ -1226,19 +1226,14 @@ test_expect_success FSMONITOR_DAEMON,GREP_IPC_FANOUT \
 	test_must_be_empty actual &&
 	test_grep ! "$worker_events" worktree-point.trace &&
 	test_content_index_ipc_query worktree-point.trace 92 92 1 -1 -1 -1 &&
-	fanout_workers=$(test-tool online-cpus) &&
-	if test "$fanout_workers" -gt 8
-	then
-		fanout_workers=8
-	fi &&
 	test_must_fail env GIT_TRACE2_EVENT="$PWD/cached-fanout.trace" \
 		git grep --cached -F "absent daemon fanout" -- grep-fanout/broad \
 		>actual &&
 	test_must_be_empty actual &&
 	test_grep "$worker_events" cached-fanout.trace >fanout-events &&
-	test_line_count = "$fanout_workers" fanout-events &&
+	test_line_count = 2 fanout-events &&
 	test_content_index_ipc_query cached-fanout.trace 32768 32768 \
-		"$fanout_workers" -1 -1 -1
+		2 -1 -1 -1
 '
 
 test_expect_success FSMONITOR_DAEMON,MULTI_CPU 'daemon holds content index in memory' '
