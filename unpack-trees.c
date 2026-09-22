@@ -685,11 +685,29 @@ static void mark_ce_used(struct cache_entry *ce, struct unpack_trees_options *o)
 	}
 }
 
-static void mark_all_ce_unused(struct index_state *index)
+static int is_valid_diff_index_entry(const struct cache_entry *ce)
+{
+	if (ce_stage(ce) || ce_intent_to_add(ce))
+		return 0;
+	if (S_ISGITLINK(ce->ce_mode))
+		return (ce->ce_flags & CE_VALID) || ce_skip_worktree(ce);
+	return ce_uptodate(ce) ||
+	       (ce->ce_flags & (CE_VALID | CE_FSMONITOR_VALID)) ||
+	       ce_skip_worktree(ce);
+}
+
+static int mark_all_ce_unused(struct index_state *index, int check_valid)
 {
 	int i;
-	for (i = 0; i < index->cache_nr; i++)
-		index->cache[i]->ce_flags &= ~(CE_UNPACKED | CE_ADDED | CE_NEW_SKIP_WORKTREE);
+
+	for (i = 0; i < index->cache_nr; i++) {
+		struct cache_entry *ce = index->cache[i];
+
+		ce->ce_flags &= ~(CE_UNPACKED | CE_ADDED | CE_NEW_SKIP_WORKTREE);
+		if (check_valid && !is_valid_diff_index_entry(ce))
+			check_valid = 0;
+	}
+	return check_valid;
 }
 
 static int locate_in_src_index(const struct cache_entry *ce,
@@ -855,17 +873,6 @@ static int index_pos_by_traverse_info(struct name_entry *names,
 		    pos, name.buf);
 	strbuf_release(&name);
 	return pos;
-}
-
-static int is_valid_diff_index_entry(const struct cache_entry *ce)
-{
-	if (ce_stage(ce) || ce_intent_to_add(ce))
-		return 0;
-	if (S_ISGITLINK(ce->ce_mode))
-		return (ce->ce_flags & CE_VALID) || ce_skip_worktree(ce);
-	return ce_uptodate(ce) ||
-		(ce->ce_flags & (CE_VALID | CE_FSMONITOR_VALID)) ||
-		ce_skip_worktree(ce);
 }
 
 /*
@@ -1370,7 +1377,7 @@ static int unpack_failed(struct unpack_trees_options *o, const char *message)
 static int find_cache_pos(struct traverse_info *info,
 			  const char *p, size_t p_len)
 {
-	int pos;
+	int pos, searched = 0;
 	struct unpack_trees_options *o = info->data;
 	struct index_state *index = o->src_index;
 	int pfxlen = info->pathlen;
@@ -1388,6 +1395,20 @@ static int find_cache_pos(struct traverse_info *info,
 			 */
 			if (pos == o->internal.cache_bottom)
 				++o->internal.cache_bottom;
+			else if (!searched) {
+				struct strbuf path = STRBUF_INIT;
+				int next;
+
+				/* An earlier unmatched entry can pin cache_bottom. */
+				strbuf_make_traverse_path(&path, info, p, p_len);
+				next = index_name_pos_sparse(index, path.buf, path.len);
+				strbuf_release(&path);
+				if (next < 0)
+					next = -next - 1;
+				if (next > pos)
+					pos = next - 1;
+				searched = 1;
+			}
 			continue;
 		}
 		if (!ce_in_traverse_path(ce, info)) {
@@ -2004,18 +2025,6 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		if (o->dst_index)
 			ensure_full_index(o->dst_index);
 	}
-	if (o->diff_index_skip_valid) {
-		/*
-		 * When every entry can stand in for the worktree, cached
-		 * traversal can skip matching cache-tree subtrees without
-		 * changing index_only semantics.
-		 */
-		for (i = 0; i < o->src_index->cache_nr; i++)
-			if (!is_valid_diff_index_entry(o->src_index->cache[i]))
-				break;
-		if (i == o->src_index->cache_nr)
-			o->diff_index_cached = 1;
-	}
 
 	if (o->reset == UNPACK_RESET_OVERWRITE_UNTRACKED &&
 	    o->preserve_ignored)
@@ -2062,7 +2071,9 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	}
 	oidcpy(&o->internal.result.oid, &o->src_index->oid);
 	o->internal.merge_size = len;
-	mark_all_ce_unused(o->src_index);
+	/* Reuse this pass to prove that the index can stand in for the worktree. */
+	if (mark_all_ce_unused(o->src_index, o->diff_index_skip_valid))
+		o->diff_index_cached = 1;
 
 	o->internal.result.fsmonitor_last_update =
 		xstrdup_or_null(o->src_index->fsmonitor_last_update);
@@ -2130,7 +2141,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 				goto return_failed;
 		}
 	}
-	mark_all_ce_unused(o->src_index);
+	mark_all_ce_unused(o->src_index, 0);
 
 	if (o->trivial_merges_only && o->internal.nontrivial_merge) {
 		ret = unpack_failed(o, "Merge requires file-level merging");
@@ -2224,7 +2235,7 @@ done:
 return_failed:
 	if (o->internal.show_all_errors)
 		display_error_msgs(o);
-	mark_all_ce_unused(o->src_index);
+	mark_all_ce_unused(o->src_index, 0);
 	ret = unpack_failed(o, NULL);
 	if (o->exiting_early)
 		ret = 0;
@@ -2269,7 +2280,7 @@ enum update_sparsity_result update_sparsity(struct unpack_trees_options *o,
 	expand_index(o->src_index, o->internal.pl);
 
 	/* Set NEW_SKIP_WORKTREE on existing entries. */
-	mark_all_ce_unused(o->src_index);
+	mark_all_ce_unused(o->src_index, 0);
 	mark_new_skip_worktree(o->internal.pl, o->src_index, 0,
 			       CE_NEW_SKIP_WORKTREE, o->verbose_update);
 

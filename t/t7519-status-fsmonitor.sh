@@ -926,7 +926,7 @@ test_expect_success 'diff-index reuses valid cache trees with excluded globs' '
 	)
 '
 
-test_expect_success 'diff-index skips clean cache-tree entries beside dirty worktrees' '
+test_expect_success 'diff-index skips clean cache-tree entries for wildcard paths' '
 	test_when_finished "rm -rf diff-index-clean-entries" &&
 	test_create_repo diff-index-clean-entries &&
 	(
@@ -961,13 +961,17 @@ test_expect_success 'diff-index skips clean cache-tree entries beside dirty work
 		git ls-files -f bulk/clean-1 bulk/dirty >.git/fsmonitor-valid &&
 		test_grep "^h bulk/clean-1$" .git/fsmonitor-valid &&
 		test_grep "^h bulk/dirty$" .git/fsmonitor-valid &&
+		echo added >aaa-file &&
+		git add aaa-file &&
 		echo worktree >bulk/dirty &&
 		echo bulk/dirty >.git/fsmonitor-dirty &&
 		git --no-optional-locks \
 			-c core.fsmonitor=false -c core.preloadIndex=false \
-			diff HEAD^ >.git/diff-clean.expect &&
+			diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.expect &&
 		GIT_TRACE2_EVENT="$PWD/.git/diff-clean.trace" \
-			git diff HEAD^ >.git/diff-clean.actual &&
+			git diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.actual &&
 		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
 		test_grep "^diff --git a/bulk/dirty b/bulk/dirty$" \
 			.git/diff-clean.actual &&
@@ -985,8 +989,10 @@ test_expect_success 'diff-index skips clean cache-tree entries beside dirty work
 		do
 			git --no-optional-locks \
 				-c core.fsmonitor=false -c core.preloadIndex=false \
-				diff "$option" HEAD^ >.git/diff-clean.expect &&
-			git diff "$option" HEAD^ >.git/diff-clean.actual &&
+				diff "$option" HEAD^ -- "*dirty" "*file" "*clean*" \
+					>.git/diff-clean.expect &&
+			git diff "$option" HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.actual &&
 			test_cmp .git/diff-clean.expect .git/diff-clean.actual ||
 				exit 1
 		done &&
@@ -994,15 +1000,19 @@ test_expect_success 'diff-index skips clean cache-tree entries beside dirty work
 		git -c core.fsmonitor= add changes/file &&
 		git --no-optional-locks \
 			-c core.fsmonitor=false -c core.preloadIndex=false \
-			diff HEAD^ >.git/diff-clean.expect &&
-		git diff HEAD^ >.git/diff-clean.actual &&
+			diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.expect &&
+		git diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.actual &&
 		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
 		rm bulk/dirty &&
 		echo bulk/dirty >.git/fsmonitor-dirty &&
 		git --no-optional-locks \
 			-c core.fsmonitor=false -c core.preloadIndex=false \
-			diff HEAD^ >.git/diff-clean.expect &&
-		git diff HEAD^ >.git/diff-clean.actual &&
+			diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.expect &&
+		git diff HEAD^ -- "*dirty" "*file" "*clean*" \
+				>.git/diff-clean.actual &&
 		test_cmp .git/diff-clean.expect .git/diff-clean.actual &&
 		test_grep "^deleted file mode" .git/diff-clean.actual
 	)

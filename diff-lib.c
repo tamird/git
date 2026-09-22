@@ -680,26 +680,6 @@ static int oneway_diff(const struct cache_entry * const *src,
 	return 0;
 }
 
-static int only_excluded_pathspec(const struct pathspec *pathspec)
-{
-	int i, positives = 0;
-
-	if (pathspec->nr < 2)
-		return 0;
-
-	for (i = 0; i < pathspec->nr; i++) {
-		const struct pathspec_item *item = &pathspec->items[i];
-
-		if (item->magic & PATHSPEC_EXCLUDE)
-			continue;
-		if (!item->original || ++positives > 1 ||
-		    strcmp(item->original, "."))
-			return 0;
-	}
-
-	return positives == 1;
-}
-
 static void trace_cache_tree_root(struct index_state *istate,
 				  const struct object_id *tree_oid)
 {
@@ -747,10 +727,6 @@ static int diff_cache(struct rev_info *revs,
 	opts.diff_index_cached = (cached &&
 				  !revs->diffopt.flags.find_copies_harder);
 	opts.diff_index_skip_valid = (!cached &&
-				      ((!revs->diffopt.pathspec.nr &&
-					!revs->prune_data.nr) ||
-				       (only_excluded_pathspec(&revs->diffopt.pathspec) &&
-					only_excluded_pathspec(&revs->prune_data))) &&
 				      !revs->diffopt.flags.quick &&
 				      !revs->diffopt.flags.find_copies_harder);
 	opts.merge = 1;
