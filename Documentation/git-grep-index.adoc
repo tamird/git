@@ -24,7 +24,8 @@ searches, linkgit:git-grep[1] uses the filters to avoid reading blobs that
 cannot contain the pattern. Blobs not present in the content index are
 searched normally. Some case-insensitive regular expressions need an
 additional per-blob safety record before their filters can exclude a blob;
-without that record, the blob is searched normally.
+new filters include this record. Blobs in older indexes without that record
+are searched normally until `--compute-locale-safety` checks them.
 
 By default, blobs are selected from the indexes of all worktrees. With
 `--reachable`, blobs are instead selected by a revision walk. If no revision

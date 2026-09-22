@@ -1486,6 +1486,10 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
 		printf "\\377" >highbit-tail &&
 		git add clean match esc-tail highbit-tail &&
 		git grep-index --no-progress &&
+		transposed=$(awk "NR == 1 { print \$2 }" \
+			.git/objects/info/grep-index/chain-transposed) &&
+		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
+		test_path_is_file "$safety" &&
 		clean_oid=$(git rev-parse :clean) &&
 		clean_object=.git/objects/$(test_oid_to_path "$clean_oid") &&
 		mv "$clean_object" "$clean_object.save" &&
@@ -1494,6 +1498,13 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
 			"missing.*(target|other)" -- clean 2>err-c &&
 		test_must_be_empty err-c &&
 		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-new &&
+		test_must_be_empty err-new &&
+		test_must_fail git grep --cached -i \
+			"missing.*target" -- clean 2>err-bre-new &&
+		test_must_be_empty err-bre-new &&
+		rm "$safety" &&
+		test_must_fail git grep --cached -i -E \
 			"missing.*(target|other)" -- clean 2>err-old &&
 		test_grep "unable to read" err-old &&
 		test_must_fail git grep --cached -i \
@@ -1501,9 +1512,6 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
 		test_grep "unable to read" err-bre-old &&
 		mv "$clean_object.save" "$clean_object" &&
 		git grep-index --compute-locale-safety --no-progress &&
-		transposed=$(awk "NR == 1 { print \$2 }" \
-			.git/objects/info/grep-index/chain-transposed) &&
-		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
 		test_path_is_file "$safety" &&
 		env GIT_TRACE2_EVENT="$PWD/locale-mask.trace" \
 			git grep --cached -i -E \
@@ -1547,11 +1555,64 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
 			mv "$object.save" "$object" ||
 				return 1
 		done &&
+		rm "$safety" .git/objects/info/grep-index/chain &&
+		git grep-index --no-progress &&
+		test_path_is_file "$safety" &&
+		mv "$clean_object" "$clean_object.save" &&
+		test_must_fail git grep --cached -i -E \
+			"missing.*(target|other)" -- clean 2>err-mapped &&
+		test_must_be_empty err-mapped &&
+		mv "$clean_object.save" "$clean_object" &&
 		printf "missing new target\n" >clean &&
 		git grep -i -E \
 			"missing.*(target|other)" -- clean >actual-worktree &&
 		echo "clean:missing new target" >expect-worktree &&
 		test_cmp expect-worktree actual-worktree
+	)
+'
+
+test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE \
+	'incremental safety follows accepted objects across filter classes' '
+	test_create_repo incremental-safety &&
+	test_when_finished "rm -rf incremental-safety" &&
+	(
+		cd incremental-safety &&
+		unset LC_ALL &&
+		LC_CTYPE=en_US.UTF-8 LC_COLLATE=C &&
+		export LC_CTYPE LC_COLLATE &&
+		test_commit base &&
+		git grep-index --no-progress &&
+		printf s >short-clean &&
+		test_seq 1 1500 >large-clean &&
+		printf "\\377" >unsafe &&
+		printf "original clean content\n" >unverified &&
+		git add short-clean large-clean unsafe unverified &&
+		unverified_oid=$(git rev-parse :unverified) &&
+		unverified_object=.git/objects/$(test_oid_to_path "$unverified_oid") &&
+		printf "different clean content\n" >replacement &&
+		replacement_oid=$(git hash-object -w replacement) &&
+		rm "$unverified_object" &&
+		cp .git/objects/$(test_oid_to_path "$replacement_oid") \
+			"$unverified_object" &&
+		missing_oid=$(test_oid zero) &&
+		missing_oid="${missing_oid%?}1" &&
+		git update-index --add --cacheinfo "100644,$missing_oid,unavailable" &&
+		git grep-index --no-progress &&
+		test_line_count = 2 .git/objects/info/grep-index/chain &&
+		for path in short-clean large-clean unsafe unverified
+		do
+			oid=$(git rev-parse :"$path") &&
+			object=.git/objects/$(test_oid_to_path "$oid") &&
+			mv "$object" "$object.save" &&
+			test_must_fail git grep --cached -i -E \
+				"missing.*(target|other)" -- "$path" 2>err &&
+			case "$path" in
+			*-clean) test_must_be_empty err ;;
+			*) test_grep "unable to read" err ;;
+			esac &&
+			mv "$object.save" "$object" ||
+				return 1
+		done
 	)
 '
 
@@ -1573,6 +1634,10 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE,FSMONITOR_DAEMON \
 		printf "ASCII without a match\n" >clean &&
 		git add clean &&
 		git grep-index --no-progress &&
+		transposed=$(awk "NR == 1 { print \$2 }" \
+			.git/objects/info/grep-index/chain-transposed) &&
+		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
+		rm "$safety" &&
 		git config core.fsmonitor true &&
 		git fsmonitor--daemon start &&
 		oid=$(git rev-parse :clean) &&
@@ -1591,9 +1656,6 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE,FSMONITOR_DAEMON \
 		test_trace2_data grep content_index_ipc_candidates 0 \
 			<reload.trace &&
 		mv "$object.save" "$object" &&
-		transposed=$(awk "NR == 1 { print \$2 }" \
-			.git/objects/info/grep-index/chain-transposed) &&
-		safety=.git/objects/info/grep-index/safety-$transposed.idx &&
 		git fsmonitor--daemon stop &&
 		chmod +w "$safety" &&
 		: >"$safety" &&
@@ -1611,6 +1673,19 @@ test_expect_success LIBPCRE2,GREP_UTF8_C_COLLATE,FSMONITOR_DAEMON \
 		test_must_be_empty err-repaired &&
 		test_trace2_data grep content_index_ipc_candidates 0 \
 			<repaired.trace &&
+		mv "$object.save" "$object" &&
+		printf "new ASCII without a match\n" >new-clean &&
+		git add new-clean &&
+		git grep-index --no-progress &&
+		oid=$(git rev-parse :new-clean) &&
+		object=.git/objects/$(test_oid_to_path "$oid") &&
+		mv "$object" "$object.save" &&
+		test_must_fail env GIT_TRACE2_EVENT="$PWD/new-segment.trace" \
+			git grep --cached -i -E \
+			"missing.*(target|other)" -- new-clean 2>err-new &&
+		test_must_be_empty err-new &&
+		test_trace2_data grep content_index_ipc_candidates 0 \
+			<new-segment.trace &&
 		mv "$object.save" "$object" &&
 		git fsmonitor--daemon stop
 	)

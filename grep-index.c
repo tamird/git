@@ -3958,8 +3958,84 @@ cleanup:
 	return result;
 }
 
+struct grep_index_safety {
+	struct object_id legacy_checksum;
+	size_t nr;
+	/* Accepted legacy OID order; owned by the writer through transposition. */
+	unsigned char *safe;
+};
+
+static int grep_index_publish_safety_generation(struct repository *repo,
+						const char *hex, int replaced);
+static int write_grep_index_safety_segment(struct repository *repo,
+					   const struct grep_index_segment *segment,
+					   const unsigned char *unsafe,
+					   size_t rows_size);
+
+static size_t grep_index_safety_rows_size(const struct grep_index_segment *segment)
+{
+	size_t rows_size = 0;
+
+	for (size_t i = 0; i < GREP_INDEX_MEMORY_FILTER_CLASSES; i++)
+		rows_size += DIV_ROUND_UP(get_be32(segment->classes +
+						   i * GREP_INDEX_TRANSPOSED_CLASS_SIZE +
+						   sizeof(uint32_t)),
+					  8);
+	return rows_size;
+}
+
+static int write_new_grep_index_safety(struct repository *repo,
+				       const struct grep_index_segment *legacy,
+				       const char *transposed_hex,
+				       const struct grep_index_safety *safety)
+{
+	struct grep_index *index;
+	struct grep_index_segment *segment;
+	unsigned char *unsafe = NULL;
+	size_t rows_size;
+	int result = -1;
+
+	CALLOC_ARRAY(index, 1);
+	index->repo = repo;
+	if (!add_transposed_grep_index_segment(index, transposed_hex)) {
+		error(_("unable to load transposed grep index for safety proof"));
+		goto cleanup;
+	}
+	segment = &index->segments[0];
+	/* A concurrent writer may already have transposed this segment. */
+	if (segment->nr != legacy->nr || segment->nr != safety->nr ||
+	    memcmp(segment->oids, legacy->oids,
+		   st_mult(segment->nr, segment->rawsz))) {
+		error(_("grep index safety proof does not match segment objects"));
+		goto cleanup;
+	}
+	if (segment->unsafe_rows) {
+		result = grep_index_publish_safety_generation(repo, transposed_hex, 0);
+		goto cleanup;
+	}
+	rows_size = grep_index_safety_rows_size(segment);
+	ALLOC_ARRAY(unsafe, rows_size);
+	memset(unsafe, 0xff, rows_size);
+	for (size_t i = 0; i < safety->nr; i++) {
+		const unsigned char *locator = segment->locators +
+					       i * GREP_INDEX_TRANSPOSED_LOCATOR_SIZE;
+		uint32_t class_nr = get_be32(locator);
+		uint32_t pos = get_be32(locator + sizeof(uint32_t));
+
+		if (safety->safe[i])
+			unsafe[segment->unsafe_offsets[class_nr] + pos / 8] &=
+				~(1u << (pos & 7));
+	}
+	result = write_grep_index_safety_segment(repo, segment, unsafe, rows_size);
+cleanup:
+	free(unsafe);
+	grep_index_free(index);
+	return result;
+}
+
 static int write_transposed_grep_index_segment(struct repository *repo,
-					       const char *only_legacy_hex)
+					       const char *only_legacy_hex,
+					       const struct grep_index_safety *safety)
 {
 	struct grep_index *index;
 	struct string_list mappings = STRING_LIST_INIT_DUP;
@@ -4055,6 +4131,12 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 		if (mapping) {
 			strbuf_addf(&manifest, "%s %s\n", legacy_hex,
 				    (char *)mapping->util);
+			if (safety && oideq(&safety->legacy_checksum, &segment->checksum) &&
+			    write_new_grep_index_safety(repo, segment,
+							mapping->util, safety)) {
+				result = -1;
+				break;
+			}
 			continue;
 		}
 		ALLOC_ARRAY(class_ids, segment->nr);
@@ -4347,6 +4429,8 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 		    errno != EEXIST)
 			die_errno(_("unable to rename new grep index"));
 		strbuf_addf(&manifest, "%s %s\n", legacy_hex, hex);
+		if (safety && oideq(&safety->legacy_checksum, &segment->checksum))
+			result = write_new_grep_index_safety(repo, segment, hex, safety);
 
 		delete_tempfile(&temp);
 		delete_tempfile(&data_temp);
@@ -4359,7 +4443,11 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 		strbuf_release(&data_temp_path);
 		strbuf_release(&temp_path);
 		strbuf_release(&final_path);
+		if (result)
+			break;
 	}
+	if (result)
+		goto cleanup;
 	if (only_legacy_hex) {
 		strbuf_complete_line(&manifest);
 		strbuf_rtrim(&manifest);
@@ -4372,6 +4460,7 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 					  &manifest)) {
 		die_errno(_("unable to update grep index chain"));
 	}
+cleanup:
 	grep_index_free(index);
 	string_list_clear(&mappings, 1);
 	strbuf_release(&existing_manifest);
@@ -4381,7 +4470,7 @@ static int write_transposed_grep_index_segment(struct repository *repo,
 
 int write_transposed_grep_index(struct repository *repo)
 {
-	return write_transposed_grep_index_segment(repo, NULL);
+	return write_transposed_grep_index_segment(repo, NULL, NULL);
 }
 
 static int grep_index_publish_safety_generation(struct repository *repo,
@@ -4431,6 +4520,46 @@ cleanup:
 	return result;
 }
 
+static int write_grep_index_safety_segment(struct repository *repo,
+					   const struct grep_index_segment *segment,
+					   const unsigned char *unsafe,
+					   size_t rows_size)
+{
+	struct tempfile *temp;
+	struct hashfile *file;
+	struct strbuf temp_path = STRBUF_INIT;
+	struct strbuf final_path = STRBUF_INIT;
+	unsigned char checksum[GIT_MAX_RAWSZ];
+	char hex[GIT_MAX_HEXSZ + 1];
+	int result;
+
+	hash_to_hex_algop_r(hex, segment->checksum.hash, repo->hash_algo);
+	grep_index_path(repo, &temp_path, "tmp_grep_safety_XXXXXX");
+	temp = mks_tempfile_m(temp_path.buf, 0444);
+	if (!temp)
+		die_errno(_("unable to create temporary grep safety index"));
+	if (adjust_shared_perm(repo, get_tempfile_path(temp)))
+		die_errno(_("unable to adjust grep safety permissions"));
+	file = hashfd(repo->hash_algo, get_tempfile_fd(temp), get_tempfile_path(temp));
+	hashwrite_be32(file, GREP_INDEX_SAFETY_SIGNATURE);
+	hashwrite_be32(file, GREP_INDEX_SAFETY_VERSION);
+	hashwrite_be32(file, repo->hash_algo->format_id);
+	hashwrite_be32(file, segment->nr);
+	hashwrite(file, segment->checksum.hash, segment->rawsz);
+	hashwrite(file, unsafe, rows_size);
+	finalize_hashfile(file, checksum, FSYNC_COMPONENT_PACK_METADATA,
+			  CSUM_HASH_IN_STREAM | CSUM_FSYNC);
+	grep_index_path(repo, &final_path, "");
+	strbuf_addf(&final_path, "safety-%s.idx", hex);
+	if (rename_tempfile(&temp, final_path.buf) < 0)
+		die_errno(_("unable to publish grep safety index"));
+	result = grep_index_publish_safety_generation(repo, hex, 1);
+	delete_tempfile(&temp);
+	strbuf_release(&temp_path);
+	strbuf_release(&final_path);
+	return result;
+}
+
 /*
  * A safety sidecar is bound to the transposed segment's authenticated
  * metadata. One bit per class position means unknown/unsafe; only a proven
@@ -4455,31 +4584,17 @@ int write_grep_index_safety(struct repository *repo, int show_progress)
 						  total);
 	for (size_t i = 0; i < index->segments_nr; i++) {
 		struct grep_index_segment *segment = &index->segments[i];
-		struct tempfile *temp = NULL;
-		struct hashfile *file = NULL;
-		struct strbuf temp_path = STRBUF_INIT;
-		struct strbuf final_path = STRBUF_INIT;
 		unsigned char *unsafe = NULL;
-		unsigned char checksum[GIT_MAX_RAWSZ];
 		char hex[GIT_MAX_HEXSZ + 1];
-		size_t rows_size = 0;
+		size_t rows_size;
 
 		hash_to_hex_algop_r(hex, segment->checksum.hash, repo->hash_algo);
 		if (segment->unsafe_rows) {
 			if (grep_index_publish_safety_generation(repo, hex, 0))
 				goto cleanup_segment;
-			strbuf_release(&temp_path);
-			strbuf_release(&final_path);
 			continue;
 		}
-		for (size_t class_nr = 0;
-		     class_nr < GREP_INDEX_MEMORY_FILTER_CLASSES; class_nr++) {
-			const unsigned char *entry = segment->classes +
-						     class_nr * GREP_INDEX_TRANSPOSED_CLASS_SIZE;
-
-			rows_size += DIV_ROUND_UP(
-				get_be32(entry + sizeof(uint32_t)), 8);
-		}
+		rows_size = grep_index_safety_rows_size(segment);
 		ALLOC_ARRAY(unsafe, rows_size);
 		memset(unsafe, 0xff, rows_size);
 		for (size_t j = 0; j < segment->nr; j++) {
@@ -4519,41 +4634,13 @@ int write_grep_index_safety(struct repository *repo, int show_progress)
 			if (oideq(&oid, &verified))
 				unsafe[offset] &= ~(1u << (pos & 7));
 		}
-		grep_index_path(repo, &temp_path, "tmp_grep_safety_XXXXXX");
-		temp = mks_tempfile_m(temp_path.buf, 0444);
-		if (!temp)
-			die_errno(_("unable to create temporary grep safety index"));
-		if (adjust_shared_perm(repo, get_tempfile_path(temp)))
-			die_errno(_("unable to adjust grep safety permissions"));
-		file = hashfd(repo->hash_algo, get_tempfile_fd(temp),
-			      get_tempfile_path(temp));
-		hashwrite_be32(file, GREP_INDEX_SAFETY_SIGNATURE);
-		hashwrite_be32(file, GREP_INDEX_SAFETY_VERSION);
-		hashwrite_be32(file, repo->hash_algo->format_id);
-		hashwrite_be32(file, segment->nr);
-		hashwrite(file, segment->checksum.hash, segment->rawsz);
-		hashwrite(file, unsafe, rows_size);
-		finalize_hashfile(file, checksum, FSYNC_COMPONENT_PACK_METADATA,
-				  CSUM_HASH_IN_STREAM | CSUM_FSYNC);
-		file = NULL;
-		grep_index_path(repo, &final_path, "");
-		strbuf_addf(&final_path, "safety-%s.idx", hex);
-		if (rename_tempfile(&temp, final_path.buf) < 0)
-			die_errno(_("unable to publish grep safety index"));
-		if (grep_index_publish_safety_generation(repo, hex, 1))
+		if (write_grep_index_safety_segment(repo, segment, unsafe, rows_size))
 			goto cleanup_segment;
 		free(unsafe);
-		strbuf_release(&temp_path);
-		strbuf_release(&final_path);
 		continue;
 
 	cleanup_segment:
-		if (file)
-			free_hashfile(file);
-		delete_tempfile(&temp);
 		free(unsafe);
-		strbuf_release(&temp_path);
-		strbuf_release(&final_path);
 		goto cleanup;
 	}
 	result = 0;
@@ -4579,6 +4666,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 	uint32_t *filter_sizes = NULL;
 	unsigned long *blob_sizes = NULL;
 	unsigned char *filter = NULL;
+	struct grep_index_safety safety = { 0 };
 	unsigned char file_hash[GIT_MAX_RAWSZ];
 	char hex[GIT_MAX_HEXSZ + 1];
 	uint64_t offset = 0;
@@ -4599,6 +4687,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 	dst = 0;
 	CALLOC_ARRAY(filter_sizes, oids->nr);
 	CALLOC_ARRAY(blob_sizes, oids->nr);
+	CALLOC_ARRAY(safety.safe, oids->nr);
 	ALLOC_ARRAY(filter, 2 * GREP_INDEX_MAX_FILTER_SIZE);
 
 	grep_index_path(repo, &filter_temp_path,
@@ -4618,6 +4707,7 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 		unsigned long size;
 		void *content = NULL;
 		uint32_t filter_size;
+		int unsafe;
 
 		display_progress(progress, i + 1);
 		if (grep_index_contains_oid(existing, &oids->oid[i]))
@@ -4633,8 +4723,14 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 			continue;
 		}
 		filter_size = filter_size_for_blob(size);
-		fill_filter(filter, filter + filter_size,
-			    filter_size, content, size);
+		unsafe = fill_filter(filter, filter + filter_size,
+				     filter_size, content, size);
+		if (!unsafe && size <= GREP_INDEX_MEMORY_MAX_BLOB_SIZE) {
+			struct object_id verified;
+
+			hash_object_file(repo->hash_algo, content, size, OBJ_BLOB, &verified);
+			safety.safe[dst] = oideq(&oids->oid[i], &verified);
+		}
 		free(content);
 		if (write_in_full(get_tempfile_fd(filter_temp), filter,
 				  2 * filter_size) < 0)
@@ -4708,6 +4804,8 @@ int write_grep_index_oids(struct repository *repo, int show_progress,
 		die_errno(_("unable to update grep index chain"));
 	result = 0;
 	wrote_segment = 1;
+	oidread(&safety.legacy_checksum, file_hash, repo->hash_algo);
+	safety.nr = oids->nr;
 
 cleanup:
 	stop_progress(&progress);
@@ -4723,10 +4821,11 @@ cleanup:
 	strbuf_release(&temp_path);
 	strbuf_release(&filter_temp_path);
 	strbuf_release(&final_path);
-	if (!result && transpose_existing)
-		result = write_transposed_grep_index(repo);
-	else if (!result && wrote_segment)
-		result = write_transposed_grep_index_segment(repo, hex);
+	if (!result && (transpose_existing || wrote_segment))
+		result = write_transposed_grep_index_segment(
+			repo, transpose_existing ? NULL : hex,
+			wrote_segment ? &safety : NULL);
+	free(safety.safe);
 	return result;
 }
 
