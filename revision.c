@@ -1931,6 +1931,27 @@ static int process_parents(struct rev_info *revs, struct commit *commit,
 	return 0;
 }
 
+static uint64_t cherry_pick_prefix_limit(const struct rev_info *revs)
+{
+	/*
+	 * This list must already have its output order, and nothing after
+	 * cherry marking may change which commits get_revision() returns.
+	 * get_commit_action() accounts for the remaining per-commit filters.
+	 */
+	if (!revs->cherry_pick_prefix_only || !revs->cherry_pick ||
+	    revs->max_count <= 0 || revs->max_count_type ||
+	    revs->reverse || revs->topo_order || revs->graph || revs->boundary ||
+	    revs->left_only || revs->right_only || revs->prune ||
+	    revs->line_level_traverse || revs->ancestry_path ||
+	    revs->simplify_merges || revs->rewrite_parents || revs->children.name ||
+	    revs->tree_objects || revs->blob_objects || revs->tag_objects ||
+	    revs->count || revs->bisect)
+		return 0;
+
+	return (uint64_t)revs->max_count +
+	       (revs->skip_count > 0 ? revs->skip_count : 0);
+}
+
 static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 {
 	struct commit_list *p;
@@ -1938,6 +1959,7 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 	int left_first;
 	struct patch_ids ids;
 	unsigned cherry_flag;
+	uint64_t remaining = cherry_pick_prefix_limit(revs);
 	int saved_errno;
 
 	saved_errno = errno;
@@ -1994,20 +2016,34 @@ static void cherry_pick_list(struct commit_list *list, struct rev_info *revs)
 		 * If we have fewer left, left_first is set and we omit
 		 * commits on the left branch in this loop.
 		 */
-		if (left_first == !!(flags & SYMMETRIC_LEFT))
+		if (left_first == !!(flags & SYMMETRIC_LEFT)) {
+			/*
+			 * An unresolved commit on the indexed side can match
+			 * anywhere in the other side, including beyond the
+			 * requested output prefix. Finish all comparisons if
+			 * this commit might be returned.
+			 */
+			if (remaining &&
+			    get_commit_action(revs, commit) == commit_show)
+				remaining = 0;
 			continue;
+		}
 
 		/*
 		 * Have we seen the same patch id?
 		 */
 		id = patch_id_iter_first(commit, &ids);
-		if (!id)
-			continue;
+		if (id) {
+			commit->object.flags |= cherry_flag;
+			do {
+				id->commit->object.flags |= cherry_flag;
+			} while ((id = patch_id_iter_next(id, &ids)));
+		}
 
-		commit->object.flags |= cherry_flag;
-		do {
-			id->commit->object.flags |= cherry_flag;
-		} while ((id = patch_id_iter_next(id, &ids)));
+		/* Later comparisons cannot change this side's completed marks. */
+		if (remaining && get_commit_action(revs, commit) == commit_show &&
+		    !--remaining)
+			break;
 	}
 
 	free_patch_ids(&ids);

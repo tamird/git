@@ -197,6 +197,13 @@ struct rev_info {
 	struct oidset *connectivity_negative_trees;
 	unsigned int connectivity_dense_checked:1;
 
+	/*
+	 * The caller observes cherry marks only through get_revision() and
+	 * never increases max_count after a commit is returned. Other callers
+	 * may inspect the entire prepared list and need complete marking.
+	 */
+	unsigned int cherry_pick_prefix_only:1;
+
 	/* topo-sort */
 	enum rev_sort_order sort_order;
 

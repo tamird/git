@@ -260,6 +260,53 @@ test_expect_success '--cherry-pick with duplicates on each side' '
 	test_must_be_empty actual
 '
 
+test_expect_success 'setup bounded cherry comparisons' '
+	git branch bounded-left dup-orig &&
+	git checkout -b bounded-right dup-side &&
+	test_commit bounded-tail &&
+	test_commit bounded-one &&
+	test_commit bounded-two &&
+	git checkout -b bounded-match bounded-left &&
+	git cherry-pick --no-commit bounded-one &&
+	test_tick &&
+	git commit -m selected-left
+'
+
+test_expect_success 'bounded cherry log counts surviving commits and skipped output' '
+	test_write_lines bounded-two bounded-one bounded-tail >expect &&
+	git log --format=%s --cherry-pick -n 4 \
+		bounded-left...bounded-right >actual &&
+	test_cmp expect actual &&
+	echo bounded-one >expect &&
+	git log --format=%s --cherry-pick -n 1 --skip=1 \
+		bounded-left...bounded-right >actual &&
+	test_cmp expect actual &&
+	git log --format=%s --cherry-pick -n 1 --grep=dup-base \
+		bounded-left...bounded-right >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success 'bounded cherry log resolves an earlier smaller-side commit' '
+	echo bounded-two >expect &&
+	git log --format=%s --cherry-pick -n 1 \
+		bounded-match...bounded-right >actual &&
+	test_cmp expect actual &&
+	echo bounded-tail >expect &&
+	git log --format=%s --cherry-pick -n 1 --skip=1 \
+		bounded-match...bounded-right >actual &&
+	test_cmp expect actual &&
+	git log --format=%s --cherry-pick -n 1 --grep=selected-left \
+		bounded-match...bounded-right >actual &&
+	test_must_be_empty actual
+'
+
+test_expect_success 'bounded cherry-mark log retains both sides of a match' '
+	test_write_lines =selected-left ">bounded-two" >expect &&
+	git log --format=%m%s --left-right --cherry-mark -n 2 \
+		bounded-match...bounded-right >actual &&
+	test_cmp expect actual
+'
+
 # Corrupt the object store deliberately to make sure
 # the object is not even checked for its existence.
 remove_loose_object () {
@@ -279,6 +326,16 @@ test_expect_success '--cherry-pick avoids looking at full diffs' '
 	test_commit to-cherry-pick &&
 	remove_loose_object shy-diff^:dont-look-at-me.t &&
 	git rev-list --cherry-pick ...shy-diff
+'
+
+test_expect_success 'bounded cherry log reads only trees needed for its output' '
+	remove_loose_object bounded-tail^{tree} &&
+	echo bounded-two >expect &&
+	git log --format=%s --cherry-pick -n 1 \
+		bounded-left...bounded-right >actual &&
+	test_cmp expect actual &&
+	test_must_fail git log --format=%s --cherry-pick -n 2 \
+		bounded-left...bounded-right >actual 2>err
 '
 
 test_done

@@ -449,6 +449,10 @@ static int cmd_log_walk_no_free(struct rev_info *rev,
 	int saved_dcctc = 0;
 	int result;
 
+	/* Every returned commit is shown, so max_count cannot be refunded. */
+	rev->cherry_pick_prefix_only = rev->always_show_header && !rev->diff &&
+				       !rev->merges_need_diff && !rev->diffopt.flags.exit_with_status;
+
 	if (trace)
 		trace->prepare_begin = getnanotime();
 	if (prepare_revision_walk(rev))
