@@ -437,6 +437,7 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 			cd "$repo" &&
 			git config core.splitIndex "$split" &&
 			test_commit base tracked &&
+			test_commit second clean &&
 			if test "$split" = true
 			then
 				git update-index --split-index
@@ -454,8 +455,8 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 				git diff --name-only >.git/diff-refresh-actual &&
 			test_must_be_empty .git/diff-refresh-actual &&
 			case "$split" in
-			false) reuse=1 ;;
-			true) reuse=0 ;;
+			false) reuse=1 outcome=1 ;;
+			true) reuse=0 outcome=3 ;;
 			esac &&
 			test_trace2_data index refresh/reuse "$reuse" \
 				<.git/diff-refresh.trace &&
@@ -484,15 +485,30 @@ test_expect_success 'git diff reuses only a synchronized full index' '
 			sed -n "s/.*\"event\":\"\\([^\"]*\\)\".*/\\1/p" |
 			uniq >.git/diff-refresh-after &&
 			test_cmp .git/diff-refresh-before .git/diff-refresh-after &&
-			if test "$split" = true
-			then
-				test_trace2_data index refresh/reuse-outcome 3 \
-					<.git/diff-refresh.trace
-			else
-				test_trace2_data index refresh/reuse-outcome 1 \
-					<.git/diff-refresh.trace
-			fi &&
-			test_diff_reuse_outcome_trace .git/diff-refresh.trace
+			test_trace2_data index refresh/reuse-outcome "$outcome" \
+				<.git/diff-refresh.trace &&
+			test_diff_reuse_outcome_trace .git/diff-refresh.trace &&
+			printf "staged\n" >tracked &&
+			git add tracked &&
+			printf "worktree\n" >>tracked &&
+			git status --porcelain >.git/diff-refresh-status &&
+			printf "MM tracked\n" >.git/diff-refresh-expect &&
+			test_cmp .git/diff-refresh-expect .git/diff-refresh-status &&
+			git ls-files --stage >.git/diff-refresh-staged-before &&
+			test-tool chmtime +10 clean &&
+			GIT_TRACE2_EVENT="$PWD/.git/diff-refresh-index.trace" \
+				git diff HEAD --name-only -- tracked clean absent \
+				>.git/diff-refresh-actual &&
+			printf "tracked\n" >.git/diff-refresh-expect &&
+			test_cmp .git/diff-refresh-expect .git/diff-refresh-actual &&
+			git ls-files --stage >.git/diff-refresh-staged-after &&
+			test_cmp .git/diff-refresh-staged-before \
+				.git/diff-refresh-staged-after &&
+			test_trace2_data index refresh/reuse "$reuse" \
+				<.git/diff-refresh-index.trace &&
+			test_trace2_data index refresh/reuse-outcome "$outcome" \
+				<.git/diff-refresh-index.trace &&
+			test_diff_reuse_outcome_trace .git/diff-refresh-index.trace
 		) || return 1
 	done
 '

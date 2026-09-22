@@ -816,7 +816,9 @@ int cmd_diff(int argc,
 	if (1 < rev.diffopt.skip_stat_unmatch && use_optional_locks())
 		index_written = refresh_index_quietly(
 			&rev.prune_data,
-			!ent.nr && !blobs && !sparse_validation_scoped);
+			worktree_diff && !sparse_validation_scoped &&
+			(!ent.nr ||
+			 the_repository->index->sparse_index == INDEX_EXPANDED));
 	else if (worktree_diff &&
 		 diff_scope_is_full(&rev, sparse_validation_scoped) &&
 		 !rev.diffopt.flags.quick &&
