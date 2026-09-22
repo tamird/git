@@ -3149,6 +3149,14 @@ int oneway_merge(const struct cache_entry * const *src,
 			if (lstat(old->name, &st) ||
 			    ie_match_stat(o->src_index, old, &st, CE_MATCH_IGNORE_VALID|CE_MATCH_IGNORE_SKIP_WORKTREE))
 				update |= CE_UPDATE;
+			else if (!S_ISGITLINK(old->ce_mode)) {
+				struct cache_entry *ce = dup_cache_entry(old, &o->internal.result);
+
+				ce_mark_uptodate(ce);
+				mark_fsmonitor_valid(&o->internal.result, ce);
+				do_add_entry(o, ce, 0, CE_STAGEMASK);
+				return 0;
+			}
 		}
 		if (o->update && S_ISGITLINK(old->ce_mode) &&
 		    should_update_submodules() && !verify_uptodate(old, o))

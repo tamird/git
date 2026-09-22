@@ -3517,4 +3517,41 @@ test_expect_success 'failed edit commit snapshot is reused by commit and status'
 	)
 '
 
+test_expect_success 'hard reset preserves verified fsmonitor entries' '
+	test_when_finished "stop_daemon_delete_repo test_reset_validity" &&
+	git init test_reset_validity &&
+	(
+		cd test_reset_validity &&
+		echo constant >unchanged &&
+		echo before >changed &&
+		test-tool chmtime =-60 unchanged changed &&
+		git add unchanged changed &&
+		git commit -m before &&
+		test_commit after changed &&
+		git config core.fsmonitor true
+	) &&
+	start_daemon -C test_reset_validity &&
+	(
+		cd test_reset_validity &&
+		git status --porcelain >../reset-validity.actual &&
+		test_must_be_empty ../reset-validity.actual &&
+		git update-index --no-fsmonitor-valid -- unchanged changed &&
+		git ls-files -f -- unchanged >../reset-validity.actual &&
+		echo "H unchanged" >../reset-validity.expect &&
+		test_cmp ../reset-validity.expect ../reset-validity.actual &&
+		git reset --hard HEAD^ &&
+		echo before >../reset-validity.expect &&
+		test_cmp ../reset-validity.expect changed &&
+		git ls-files -f -- unchanged >../reset-validity.actual &&
+		echo "h unchanged" >../reset-validity.expect &&
+		test_cmp ../reset-validity.expect ../reset-validity.actual &&
+		git status --porcelain >../reset-validity.actual &&
+		test_must_be_empty ../reset-validity.actual &&
+		echo modified >>unchanged &&
+		git status --porcelain >../reset-validity.actual &&
+		echo " M unchanged" >../reset-validity.expect &&
+		test_cmp ../reset-validity.expect ../reset-validity.actual
+	)
+'
+
 test_done
