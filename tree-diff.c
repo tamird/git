@@ -962,17 +962,27 @@ struct ordinary_oid_sample_entry {
 	int replace_mode;
 };
 
+enum ordinary_sample_cohort {
+	ORDINARY_SAMPLE_FOLLOW,
+	ORDINARY_SAMPLE_PRUNING,
+	ORDINARY_SAMPLE_NR
+};
+
+struct ordinary_oid_sample {
+	struct ordinary_oid_sample_entry **buckets;
+	size_t distinct;
+	int done;
+};
+
 struct diff_follow_oid_sample {
 	struct follow_oid_sample_entry **buckets;
-	struct ordinary_oid_sample_entry **ordinary_buckets;
+	struct ordinary_oid_sample ordinary[ORDINARY_SAMPLE_NR];
 	pthread_mutex_t mutex;
 	uint64_t read_ordinal;
 	uint64_t scan_sequence;
 	size_t distinct;
-	size_t ordinary_distinct;
 	int truncated;
 	int invalid;
-	int ordinary_done;
 };
 
 struct follow_addremove_data {
@@ -1013,17 +1023,21 @@ void diff_follow_oid_sample_clear(struct repository *repo)
 			}
 		}
 		free(sample->buckets);
-		if (sample->ordinary_buckets) {
+		for (int cohort = 0; cohort < ORDINARY_SAMPLE_NR; cohort++) {
+			struct ordinary_oid_sample *map = &sample->ordinary[cohort];
+
+			if (!map->buckets)
+				continue;
 			for (i = 0; i < FOLLOW_OID_SAMPLE_BUCKETS; i++) {
 				struct ordinary_oid_sample_entry *ordinary, *next;
 
-				for (ordinary = sample->ordinary_buckets[i];
+				for (ordinary = map->buckets[i];
 				     ordinary; ordinary = next) {
 					next = ordinary->next;
 					free(ordinary);
 				}
 			}
-			free(sample->ordinary_buckets);
+			free(map->buckets);
 		}
 		pthread_mutex_unlock(&sample->mutex);
 		pthread_mutex_destroy(&sample->mutex);
@@ -1321,16 +1335,20 @@ static void follow_odb_validate_elapsed(struct follow_odb_read *read,
 		read->value[0] = 1;
 }
 
-/* Ordinary samples have their own cap and never alter full-search samples. */
-static struct {
+/* Each cohort has its own cap and never alters full-search samples. */
+struct ordinary_sample_stats {
 	uint64_t first, repeated, first_bytes, repeated_bytes;
 	uint64_t first_ns, repeated_ns;
 	uint64_t odb[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS -
 		     TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID + 1];
-	int invalid, truncated, registered;
-} ordinary_sample;
+	int invalid, truncated, active;
+};
 
-static void ordinary_sample_report(void)
+static struct ordinary_sample_stats ordinary_samples[ORDINARY_SAMPLE_NR];
+static int ordinary_sample_registered;
+
+static void ordinary_sample_report_one(const char *prefix,
+				       const struct ordinary_sample_stats *stats)
 {
 	static const struct {
 		enum trace2_counter_id cid;
@@ -1349,108 +1367,134 @@ static void ordinary_sample_report(void)
 		const char *name;
 		uint64_t value;
 	} fields[] = {
-		{ "first", ordinary_sample.first },
-		{ "repeated", ordinary_sample.repeated },
-		{ "first-bytes", ordinary_sample.first_bytes },
-		{ "repeated-bytes", ordinary_sample.repeated_bytes },
-		{ "first-ns", ordinary_sample.first_ns },
-		{ "repeated-ns", ordinary_sample.repeated_ns },
+		{ "valid", !stats->invalid },
+		{ "truncated", stats->truncated },
+		{ "modulus", TRACE2_FOLLOW_OID_SAMPLE_MODULUS },
+		{ "distinct-cap", TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT },
+	};
+	const struct {
+		const char *name;
+		uint64_t value;
+	} valid_fields[] = {
+		{ "first", stats->first },
+		{ "repeated", stats->repeated },
+		{ "first-bytes", stats->first_bytes },
+		{ "repeated-bytes", stats->repeated_bytes },
+		{ "first-ns", stats->first_ns },
+		{ "repeated-ns", stats->repeated_ns },
 	};
 	char key[128];
-	int saved_errno = errno;
-	int valid = !ordinary_sample.invalid;
 
-	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/valid", valid);
-	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/truncated",
-			   ordinary_sample.truncated);
-	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/modulus",
-			   TRACE2_FOLLOW_OID_SAMPLE_MODULUS);
-	trace2_data_intmax("diff", NULL, "follow-ordinary-tree/sample/distinct-cap",
-			   TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT);
-	for (size_t i = 0; valid && i < ARRAY_SIZE(fields); i++) {
-		xsnprintf(key, sizeof(key), "follow-ordinary-tree/sample/%s", fields[i].name);
+	for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+		xsnprintf(key, sizeof(key), "%s/sample/%s", prefix, fields[i].name);
 		trace2_data_intmax("diff", NULL, key, fields[i].value);
 	}
-	for (size_t i = 0; valid && i < ARRAY_SIZE(odb_fields); i++) {
-		xsnprintf(key, sizeof(key), "follow-ordinary-tree/sample/%s", odb_fields[i].name);
-		trace2_data_intmax("diff", NULL, key,
-				   ordinary_sample.odb[odb_fields[i].cid -
-						       TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
+	for (size_t i = 0; !stats->invalid && i < ARRAY_SIZE(valid_fields); i++) {
+		xsnprintf(key, sizeof(key), "%s/sample/%s", prefix, valid_fields[i].name);
+		trace2_data_intmax("diff", NULL, key, valid_fields[i].value);
 	}
+	for (size_t i = 0; !stats->invalid && i < ARRAY_SIZE(odb_fields); i++) {
+		xsnprintf(key, sizeof(key), "%s/sample/%s", prefix, odb_fields[i].name);
+		trace2_data_intmax("diff", NULL, key,
+				   stats->odb[odb_fields[i].cid -
+					      TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
+	}
+}
+
+static void ordinary_sample_report(void)
+{
+	static const char *const prefixes[ORDINARY_SAMPLE_NR] = {
+		[ORDINARY_SAMPLE_FOLLOW] = "follow-ordinary-tree",
+		[ORDINARY_SAMPLE_PRUNING] = "pruning-tree",
+	};
+	int saved_errno = errno;
+
+	for (int cohort = 0; cohort < ORDINARY_SAMPLE_NR; cohort++)
+		if (ordinary_samples[cohort].active)
+			ordinary_sample_report_one(prefixes[cohort],
+						   &ordinary_samples[cohort]);
 	errno = saved_errno;
 }
 
 /* Called under follow_oid_init_mutex, which also owns the ordinary maps. */
-static void ordinary_sample_add(uint64_t *sum, uint64_t value)
+static void ordinary_sample_add(struct ordinary_sample_stats *stats,
+				uint64_t *sum, uint64_t value)
 {
 	if (value > INTMAX_MAX - *sum)
-		ordinary_sample.invalid = 1;
+		stats->invalid = 1;
 	else
 		*sum += value;
 }
 
-static void ordinary_sample_read(struct repository *repo,
+static void ordinary_sample_read(enum ordinary_sample_cohort cohort,
+				 struct repository *repo,
 				 const struct object_id *oid, int replace_mode,
 				 size_t size, uint64_t elapsed_ns,
 				 const struct follow_odb_read *read)
 {
 	struct diff_follow_oid_sample *sample = follow_oid_sample_get(repo);
+	struct ordinary_sample_stats *stats = &ordinary_samples[cohort];
+	struct ordinary_oid_sample *map;
 	struct ordinary_oid_sample_entry *entry;
 	size_t bucket;
 
 	pthread_mutex_lock(&follow_oid_init_mutex);
-	if (!ordinary_sample.registered) {
+	stats->active = 1;
+	if (!ordinary_sample_registered) {
 		if (atexit(ordinary_sample_report))
-			ordinary_sample.invalid = 1;
+			stats->invalid = 1;
 		else
-			ordinary_sample.registered = 1;
+			ordinary_sample_registered = 1;
 	}
 	if (!sample || read->value[0] || replace_refs_enabled(repo) != replace_mode)
-		ordinary_sample.invalid = 1;
-	if (ordinary_sample.invalid || sample->ordinary_done)
+		stats->invalid = 1;
+	if (stats->invalid)
 		goto done;
-	if (!sample->ordinary_buckets) {
-		sample->ordinary_buckets = calloc(FOLLOW_OID_SAMPLE_BUCKETS,
-						  sizeof(*sample->ordinary_buckets));
-		if (!sample->ordinary_buckets) {
-			ordinary_sample.invalid = 1;
+	map = &sample->ordinary[cohort];
+	if (map->done)
+		goto done;
+	if (!map->buckets) {
+		map->buckets = calloc(FOLLOW_OID_SAMPLE_BUCKETS,
+				      sizeof(*map->buckets));
+		if (!map->buckets) {
+			stats->invalid = 1;
 			goto done;
 		}
 	}
 	bucket = (follow_oid_hash(oid) ^ (replace_mode * 0x9e3779b9U)) &
 		 (FOLLOW_OID_SAMPLE_BUCKETS - 1);
-	for (entry = sample->ordinary_buckets[bucket]; entry; entry = entry->next)
+	for (entry = map->buckets[bucket]; entry; entry = entry->next)
 		if (entry->replace_mode == replace_mode &&
 		    entry->oid.algo == oid->algo && oideq(&entry->oid, oid))
 			break;
 	if (!entry) {
-		if (sample->ordinary_distinct == TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT) {
-			sample->ordinary_done = ordinary_sample.truncated = 1;
+		if (map->distinct == TRACE2_FOLLOW_OID_SAMPLE_MAX_DISTINCT) {
+			map->done = stats->truncated = 1;
 			goto done;
 		}
 		entry = malloc(sizeof(*entry));
 		if (!entry) {
-			ordinary_sample.invalid = 1;
+			stats->invalid = 1;
 			goto done;
 		}
 		oidcpy(&entry->oid, oid);
 		entry->replace_mode = replace_mode;
-		entry->next = sample->ordinary_buckets[bucket];
-		sample->ordinary_buckets[bucket] = entry;
-		sample->ordinary_distinct++;
-		ordinary_sample_add(&ordinary_sample.first, 1);
-		ordinary_sample_add(&ordinary_sample.first_bytes, size);
-		ordinary_sample_add(&ordinary_sample.first_ns, elapsed_ns);
+		entry->next = map->buckets[bucket];
+		map->buckets[bucket] = entry;
+		map->distinct++;
+		ordinary_sample_add(stats, &stats->first, 1);
+		ordinary_sample_add(stats, &stats->first_bytes, size);
+		ordinary_sample_add(stats, &stats->first_ns, elapsed_ns);
 	} else {
-		ordinary_sample_add(&ordinary_sample.repeated, 1);
-		ordinary_sample_add(&ordinary_sample.repeated_bytes, size);
-		ordinary_sample_add(&ordinary_sample.repeated_ns, elapsed_ns);
+		ordinary_sample_add(stats, &stats->repeated, 1);
+		ordinary_sample_add(stats, &stats->repeated_bytes, size);
+		ordinary_sample_add(stats, &stats->repeated_ns, elapsed_ns);
 	}
 	for (enum trace2_counter_id cid = TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_READS;
 	     cid <= TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_COPY_NS; cid++)
-		ordinary_sample_add(
-			&ordinary_sample.odb[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID],
-			read->value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
+		ordinary_sample_add(stats,
+				    &stats->odb[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID],
+				    read->value[cid - TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID]);
 done:
 	pthread_mutex_unlock(&follow_oid_init_mutex);
 }
@@ -1473,22 +1517,24 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 	int saved_errno, traced, replace_mode, selected;
 
 	if (opt->change != follow_change) {
-		if (opt->trace_pruning_tree_read && oid && trace2_is_enabled()) {
-			saved_errno = errno;
-			trace2_timer_start(TRACE2_TIMER_ID_LOG_GET_REVISION_PRUNE_TREE_READ);
-			errno = saved_errno;
-			buffer = fill_tree_descriptor(opt->repo, desc, oid);
-			saved_errno = errno;
-			trace2_timer_stop(TRACE2_TIMER_ID_LOG_GET_REVISION_PRUNE_TREE_READ);
-			errno = saved_errno;
-			return buffer;
-		}
-		if (!oid || !opt->flags.follow_renames || opt->single_follow ||
+		enum ordinary_sample_cohort cohort;
+		enum trace2_timer_id timer;
+
+		if (!oid ||
+		    (!opt->trace_pruning_tree_read &&
+		     (!opt->flags.follow_renames || opt->single_follow)) ||
 		    !trace2_is_enabled())
 			return fill_tree_descriptor(opt->repo, desc, oid);
 
 		saved_errno = errno;
-		follow_tree_cache_probe_ordinary(opt->repo, oid);
+		if (opt->trace_pruning_tree_read) {
+			cohort = ORDINARY_SAMPLE_PRUNING;
+			timer = TRACE2_TIMER_ID_LOG_GET_REVISION_PRUNE_TREE_READ;
+		} else {
+			cohort = ORDINARY_SAMPLE_FOLLOW;
+			timer = TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ;
+			follow_tree_cache_probe_ordinary(opt->repo, oid);
+		}
 		selected = !(oid->hash[0] & (TRACE2_FOLLOW_OID_SAMPLE_MODULUS - 1)) &&
 			   follow_tree_cache_eligible(opt->repo, oid);
 		if (selected) {
@@ -1496,7 +1542,7 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 			memset(&read, 0, sizeof(read));
 		}
 		errno = saved_errno;
-		trace2_timer_start(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		trace2_timer_start(timer);
 		errno = saved_errno;
 		if (selected)
 			buffer = fill_tree_descriptor_with_results(
@@ -1504,10 +1550,10 @@ static void *fill_tree_descriptor_for_diff(struct diff_options *opt,
 		else
 			buffer = fill_tree_descriptor(opt->repo, desc, oid);
 		saved_errno = errno;
-		elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_ORDINARY_TREE_READ);
+		elapsed_ns = trace2_timer_stop(timer);
 		if (selected) {
 			follow_odb_validate_elapsed(&read, elapsed_ns);
-			ordinary_sample_read(opt->repo, oid, replace_mode, size,
+			ordinary_sample_read(cohort, opt->repo, oid, replace_mode, size,
 					     elapsed_ns, &read);
 		}
 		errno = saved_errno;
