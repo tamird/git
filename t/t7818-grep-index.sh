@@ -5634,10 +5634,16 @@ test_expect_success LIBPCRE2 'content index prunes PCRE boundaries' '
 	test_must_be_empty err
 '
 
-test_expect_success LIBPCRE2 'content index prunes PCRE wildcard ranges' '
+test_expect_success LIBPCRE2 'content index prunes PCRE wildcard and class ranges' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -P \
 		"import.{0,20}vendor_internal" -- agent-regex >actual &&
+	test_cmp expect actual &&
+	git grep --cached -P \
+		"import[^\\n]{0,20}vendor_internal" -- agent-regex >actual &&
+	test_cmp expect actual &&
+	git grep --cached -P \
+		"vendor_[x]{0}internal" -- agent-regex >actual &&
 	test_cmp expect actual &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -5650,14 +5656,24 @@ test_expect_success LIBPCRE2 'content index prunes PCRE wildcard ranges' '
 		"absent.{0,240}?needle" -- short 2>err &&
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -P \
+		"absent[^\\n]{0,240}?needle" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"absent[^\\n]{,3}needle" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
 		"absent.{,3}needle" -- short 2>err &&
 	test_grep "unable to read" err
 '
 
-test_expect_success LIBPCRE2 'content index prunes PCRE negative lookaheads' '
+test_expect_success LIBPCRE2 'content index prunes PCRE lookaheads' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -P \
 		"^(?!\\s*(#|from ))[^\\n]*vendor_internal" \
+		-- agent-regex >actual &&
+	test_cmp expect actual &&
+	git grep --cached -P \
+		-e "vendor_(?=internal)internal" -e "absent needle" \
 		-- agent-regex >actual &&
 	test_cmp expect actual &&
 	oid=$(git rev-parse :short) &&
@@ -5668,14 +5684,23 @@ test_expect_success LIBPCRE2 'content index prunes PCRE negative lookaheads' '
 		"^(?!\\s*(#|from |import ))[^\\n]*absent" -- short 2>err &&
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -P \
+		-e "absent(?=needle)needle" -e "another[^\\n]{0,20}absent" \
+		-- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P "(?=.)" -- short 2>err &&
+	test_grep "unable to read" err &&
+	test_must_fail git grep --cached -P \
 		"^(?!(?:prefix))absent" -- short 2>err &&
 	test_grep "unable to read" err
 '
 
-test_expect_success LIBPCRE2 'content index prunes PCRE negative lookbehinds' '
+test_expect_success LIBPCRE2 'content index prunes PCRE lookbehinds' '
 	echo "agent-regex:import sample_ext.vendor_internal" >expect &&
 	git grep --cached -P \
 		"(?<![A-Z_])vendor_internal" -- agent-regex >actual &&
+	test_cmp expect actual &&
+	git grep --cached -P \
+		"(?<=sample_ext\\.)vendor_internal" -- agent-regex >actual &&
 	test_cmp expect actual &&
 	oid=$(git rev-parse :short) &&
 	object=.git/objects/$(test_oid_to_path "$oid") &&
@@ -5683,6 +5708,9 @@ test_expect_success LIBPCRE2 'content index prunes PCRE negative lookbehinds' '
 	test_when_finished "mv \"$object.save\" \"$object\"" &&
 	test_must_fail git grep --cached -P \
 		"(?<![A-Z_])absent" -- short 2>err &&
+	test_must_be_empty err &&
+	test_must_fail git grep --cached -P \
+		"(?<=prefix)absent" -- short 2>err &&
 	test_must_be_empty err &&
 	test_must_fail git grep --cached -P \
 		"(?<!(prefix))absent" -- short 2>err &&

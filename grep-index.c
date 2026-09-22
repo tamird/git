@@ -2379,12 +2379,14 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 					if (i + 2 == scan_end)
 						goto unsupported;
 					j = i + 3;
-					/* Literals outside either assertion remain required. */
-					if (p->pattern[i + 2] == '!')
+					/* Literals outside these assertions remain required. */
+					if (p->pattern[i + 2] == '!' ||
+					    p->pattern[i + 2] == '=')
 						allow_nested = 1;
 					else if (p->pattern[i + 2] == '<' &&
 						 i + 3 < scan_end &&
-						 p->pattern[i + 3] == '!')
+						 (p->pattern[i + 3] == '!' ||
+						  p->pattern[i + 3] == '='))
 						j++;
 					else if (p->pattern[i + 2] != ':')
 						goto unsupported;
@@ -2428,9 +2430,8 @@ static struct grep_index_query *grep_index_query_compile(const struct grep_opt *
 							      scan_end, &j))
 					goto unsupported;
 				separator_len = j - i + 1;
-				if (j + 1 < scan_end &&
-				    strchr("*+?", p->pattern[j + 1]))
-					separator_len++;
+				separator_len += grep_index_pcre_quantifier_len(
+					p->pattern, i + separator_len, scan_end);
 			} else if ((pattern_type == GREP_PATTERN_TYPE_BRE ||
 				    pattern_type == GREP_PATTERN_TYPE_ERE) &&
 				   ch == '[') {
