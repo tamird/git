@@ -8,6 +8,8 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "hash.h"
+#include "hex.h"
+#include "json-writer.h"
 #include "list.h"
 #include "odb.h"
 #include "replace-object.h"
@@ -1653,6 +1655,7 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	struct diff_filepair *choice;
 	struct follow_addremove_data addremove_data = { 0 };
 	uint64_t eligible_additions = 0;
+	uint64_t elapsed_ns;
 	int i, saved_errno;
 
 	/*
@@ -1711,7 +1714,28 @@ static void try_to_follow_renames(const struct object_id *old_oid,
 	errno = saved_errno;
 	ll_diff_tree_oid(old_oid, new_oid, base, &diff_opts);
 	saved_errno = errno;
-	trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
+	elapsed_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_FOLLOW_FULL_TREE);
+	/* Limit per-traversal details to walks taking at least 100 ms. */
+	if (elapsed_ns >= 100000000) {
+		struct json_writer jw = JSON_WRITER_INIT;
+
+		/* Descriptor reads may peel or replace these requested roots. */
+		jw_object_begin(&jw, 0);
+		if (old_oid)
+			jw_object_string(&jw, "input_old_tree", oid_to_hex(old_oid));
+		else
+			jw_object_null(&jw, "input_old_tree");
+		if (new_oid)
+			jw_object_string(&jw, "input_new_tree", oid_to_hex(new_oid));
+		else
+			jw_object_null(&jw, "input_new_tree");
+		jw_object_intmax(&jw, "elapsed_us", elapsed_ns / 1000);
+		jw_object_bool(&jw, "replace_refs_enabled",
+			       replace_refs_enabled(opt->repo));
+		jw_end(&jw);
+		trace2_data_json("diff", opt->repo, "follow-full-tree/slow-traversal", &jw);
+		jw_release(&jw);
+	}
 	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_ELIGIBLE_ADDITIONS,
 			   eligible_additions);
 	trace2_counter_add(TRACE2_COUNTER_ID_DIFF_FOLLOW_FULL_TREE_COMPLETED, 1);
