@@ -1212,8 +1212,10 @@ static int get_untracked_files(const struct pathspec *ps, int include_untracked,
 	int found = 0;
 	struct dir_struct dir = DIR_INIT;
 
-	if (include_untracked != INCLUDE_ALL_FILES)
+	if (include_untracked != INCLUDE_ALL_FILES) {
+		dir.untracked = the_repository->index->untracked;
 		setup_standard_excludes(&dir);
+	}
 
 	fill_directory(&dir, the_repository->index, ps);
 	for (i = 0; i < dir.nr; i++) {

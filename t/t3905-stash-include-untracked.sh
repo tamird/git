@@ -8,6 +8,8 @@ test_description='Test git stash --include-untracked'
 . ./test-lib.sh
 
 test_expect_success 'stash save --include-untracked some dirty working directory' '
+	test_config core.untrackedCache true &&
+	test_config status.showUntrackedFiles all &&
 	echo 1 >file &&
 	git add file &&
 	test_tick &&
@@ -20,6 +22,7 @@ test_expect_success 'stash save --include-untracked some dirty working directory
 	echo 1 >HEAD &&
 	mkdir untracked &&
 	echo untracked >untracked/untracked &&
+	git status --porcelain >.git/status &&
 	git stash --include-untracked &&
 	git diff-files --quiet &&
 	git diff-index --cached --quiet HEAD
@@ -160,15 +163,18 @@ test_expect_success 'stash save --include-untracked removed files got stashed' '
 '
 
 test_expect_success 'stash save --include-untracked respects .gitignore' '
+	test_config core.untrackedCache true &&
+	test_config status.showUntrackedFiles all &&
+	echo ignored >ignored &&
+	mkdir ignored.d &&
+	echo ignored >ignored.d/untracked &&
+	git status --porcelain >.git/status &&
 	cat >.gitignore <<-EOF &&
 	.gitignore
 	ignored
 	ignored.d/
 	EOF
 
-	echo ignored >ignored &&
-	mkdir ignored.d &&
-	echo ignored >ignored.d/untracked &&
 	git stash -u &&
 	test_file_not_empty ignored &&
 	test_file_not_empty ignored.d/untracked &&
@@ -182,6 +188,8 @@ test_expect_success 'stash save -u can stash with only untracked files different
 '
 
 test_expect_success 'stash save --all does not respect .gitignore' '
+	test_config core.untrackedCache true &&
+	git status --porcelain >.git/status &&
 	git stash -a &&
 	test_path_is_missing ignored &&
 	test_path_is_missing ignored.d &&
