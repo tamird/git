@@ -1322,6 +1322,16 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 
 	trace2_timer_start(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
 	parse_commit_or_die(parent);
+	if (!sibling_parent &&
+	    revision_bloom_filter_query_follow_parent(opt, commit, parent) ==
+		    REVISION_BLOOM_FILTER_DEFINITELY_NOT) {
+		int saved_errno = errno;
+
+		trace2_counter_add(TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_BLOOM_NEGATIVE, 1);
+		errno = saved_errno;
+		record_follow_pathspec(opt, parent);
+		goto done;
+	}
 	repo_diff_setup(opt->diffopt.repo, &diff_opts);
 	diff_opts.trace_follow_sibling_root_read = sibling_parent;
 	copy_pathspec(&diff_opts.pathspec, &opt->diffopt.pathspec);
@@ -1350,6 +1360,7 @@ static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
 
 	diff_queue_clear(&diff_queued_diff);
 	diff_free(&diff_opts);
+done:
 	trace2_timer_stop(TRACE2_TIMER_ID_LOG_FOLLOW_PARENT);
 }
 

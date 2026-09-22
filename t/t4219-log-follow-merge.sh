@@ -91,7 +91,7 @@ test_expect_success '--follow measures equal-root merge parent' '
 test_expect_success 'setup merge of two branches that both renamed a file to README' '
 	git init foo &&
 	mkdir foo/foo &&
-	echo "foo readme" >foo/foo/README &&
+	echo "shared readme" >foo/foo/README &&
 	git -C foo add foo/README &&
 	git -C foo commit -m "add foo README" &&
 
@@ -104,12 +104,14 @@ test_expect_success 'setup merge of two branches that both renamed a file to REA
 
 	git init bar &&
 	mkdir bar/bar &&
-	echo "bar readme" >bar/bar/README &&
+	echo "shared readme" >bar/bar/README &&
 	git -C bar add bar/README &&
 	git -C bar commit -m "add bar README" &&
 
 	git -C bar mv bar/README README &&
 	git -C bar commit -m "promote bar README to toplevel" &&
+	git -C bar mv README SIDE &&
+	git -C bar commit -m "move bar README aside" &&
 
 	echo "bar c" >bar/bar.c &&
 	git -C bar add bar.c &&
@@ -119,19 +121,32 @@ test_expect_success 'setup merge of two branches that both renamed a file to REA
 	git -C foo merge -s ours --no-commit --allow-unrelated-histories \
 		FETCH_HEAD &&
 	git -C foo checkout FETCH_HEAD -- bar.c &&
-	git -C foo commit -m "merge bar into foo"
+	git -C foo commit -m "merge bar into foo" &&
+	git -C foo commit-graph write --reachable --changed-paths
 '
 
 test_expect_success '--follow follows renames across both sides of a merge' '
+	test_when_finished "rm -f log-follow-bloom.trace" &&
 	git -C foo log --follow --pretty=tformat:%s README >actual &&
 	sort actual >actual.sorted &&
 	cat >expect <<-\EOF &&
 	add bar README
 	add foo README
+	move bar README aside
 	promote bar README to toplevel
 	promote foo README to toplevel
 	EOF
-	test_cmp expect actual.sorted
+	test_cmp expect actual.sorted &&
+	git -C foo -c core.commitGraph=false log --follow --name-status \
+		--format=%s -- README >expect &&
+	test_grep "^R100[[:space:]]README[[:space:]]SIDE$" expect &&
+	GIT_TRACE2_EVENT="$PWD/log-follow-bloom.trace" \
+		git -C foo -c core.commitGraph=true log --follow --name-status \
+		--format=%s -- README >actual &&
+	test_cmp expect actual &&
+	test_grep \
+		"\"event\":\"counter\".*\"category\":\"log\",\"name\":\"follow-parent/bloom-negative-count\",\"count\":[1-9]" \
+		log-follow-bloom.trace
 '
 
 test_expect_success 'setup diamond with renames on both sides of a fork' '

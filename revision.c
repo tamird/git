@@ -1328,7 +1328,8 @@ fail:
 static enum revision_bloom_filter_result
 check_maybe_different_in_bloom_filter(struct rev_info *revs,
 				      struct commit *commit,
-				      struct bloom_filter *maybe_filter)
+				      struct bloom_filter *maybe_filter,
+				      int record_stats)
 {
 	struct bloom_filter filter;
 	int result = 0;
@@ -1339,7 +1340,8 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	if (!get_bloom_filter(revs->repo, commit, &filter)) {
-		count_bloom_filter_not_present++;
+		if (record_stats)
+			count_bloom_filter_not_present++;
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 	}
 
@@ -1347,7 +1349,8 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 		int node = revs->bloom_query_root;
 
 		while (node >= 0) {
-			count_bloom_filter_trie_steps++;
+			if (record_stats)
+				count_bloom_filter_trie_steps++;
 			if (bloom_filter_contains(
 				    &filter, revs->bloom_query[node].key,
 				    revs->bloom_filter_settings)) {
@@ -1375,13 +1378,15 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 				revs->bloom_filter_settings);
 	}
 
-	if (result)
-		count_bloom_filter_maybe++;
-	else
-		count_bloom_filter_definitely_not++;
-	/* A one-byte, all-ones filter cannot reject any queried path. */
-	if (result && filter.len == 1 && filter.data[0] == 0xff)
-		count_bloom_filter_trivial_maybe++;
+	if (record_stats) {
+		if (result)
+			count_bloom_filter_maybe++;
+		else
+			count_bloom_filter_definitely_not++;
+		/* A one-byte, all-ones filter cannot reject any queried path. */
+		if (result && filter.len == 1 && filter.data[0] == 0xff)
+			count_bloom_filter_trivial_maybe++;
+	}
 
 	if (result && maybe_filter)
 		*maybe_filter = filter;
@@ -1465,7 +1470,25 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 	    commit->parents->item != parent)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
-	return check_maybe_different_in_bloom_filter(revs, commit, NULL);
+	return check_maybe_different_in_bloom_filter(revs, commit, NULL, 1);
+}
+
+enum revision_bloom_filter_result
+revision_bloom_filter_query_follow_parent(struct rev_info *revs,
+					  struct commit *commit,
+					  struct commit *parent)
+{
+	/*
+	 * Rewritten parents need not describe the filter's original edge.
+	 * Remerge diffs can change the followed path without refreshing keys.
+	 */
+	if (!revs->diffopt.flags.follow_renames || revs->prune ||
+	    revs->rewrite_parents || revs->remerge_diff ||
+	    !commit->parents || commit->parents->item != parent)
+		return REVISION_BLOOM_FILTER_UNAVAILABLE;
+
+	/* Propagation does not classify the diff's eventual false positives. */
+	return check_maybe_different_in_bloom_filter(revs, commit, NULL, 0);
 }
 
 void revision_bloom_filter_finish_diff(struct rev_info *revs,
@@ -1558,7 +1581,7 @@ static int rev_compare_tree(struct rev_info *revs,
 
 	if (revs->bloom_keyvecs_nr && !nth_parent) {
 		bloom_ret = check_maybe_different_in_bloom_filter(
-			revs, commit, &maybe_filter);
+			revs, commit, &maybe_filter, 1);
 
 		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
 			return REV_TREE_SAME;

@@ -862,6 +862,7 @@ enum trace2_counter_id {
 	/* Invalidates only the checked DATA snapshot; raw counters still wrap. */
 	TRACE2_COUNTER_ID_DIFF_RENAME_POPULATE_SUMMARY_INVALID,
 	TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_SAME_ROOT,
+	TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_BLOOM_NEGATIVE,
 	TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED,
 	TRACE2_COUNTER_ID_GREP_SOURCE_SELECTED,
 	/* Checked subdivisions of the threaded grep packed-entry timer. */

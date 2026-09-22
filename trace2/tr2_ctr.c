@@ -97,6 +97,11 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.name = "follow-parent/same-root-count",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_COUNTER_ID_LOG_FOLLOW_PARENT_BLOOM_NEGATIVE] = {
+		.category = "log",
+		.name = "follow-parent/bloom-negative-count",
+		.want_per_thread_events = 0,
+	},
 	[TRACE2_COUNTER_ID_DIFF_FOLLOW_ODB_INVALID] = {
 		.category = "diff",
 		.name = "follow-full-tree/tree-read/odb/invalid",

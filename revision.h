@@ -569,6 +569,15 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 				 struct commit *parent);
 
 /*
+ * Query the original first-parent edge for path propagation, including merges.
+ * This does not consume a cached diff query or change commit elision state.
+ */
+enum revision_bloom_filter_result
+revision_bloom_filter_query_follow_parent(struct rev_info *revs,
+					  struct commit *commit,
+					  struct commit *parent);
+
+/*
  * Record the outcome of a queried diff and refresh the key after rename
  * detection changes the path. Call before diff flushing clears found_follow.
  */

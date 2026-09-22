@@ -387,6 +387,7 @@ test_expect_success '--follow does not elide remerge-diff commits' '
 	setup "--remerge-diff --follow -- file5_renamed" &&
 	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&
 	test "$(bloom_stat commits_elided)" = 0 &&
+	test_grep ! "follow-parent/bloom-negative-count" "$TRASH_DIRECTORY/trace.perf" &&
 	test_cmp log_wo_bloom log_w_bloom
 '
 
