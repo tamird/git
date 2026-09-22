@@ -1531,29 +1531,20 @@ static int rev_compare_tree(struct rev_info *revs,
 	return tree_difference;
 }
 
-static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit,
-				  int nth_parent)
+static int rev_same_tree_as_empty(struct rev_info *revs, struct commit *commit)
 {
 	struct tree *t1 = repo_get_commit_tree(the_repository, commit);
-	enum revision_bloom_filter_result bloom_ret =
-		REVISION_BLOOM_FILTER_UNAVAILABLE;
 
 	if (!t1)
 		return 0;
 
-	if (!nth_parent && revs->bloom_keyvecs_nr) {
-		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
-		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
-			return 1;
-	}
-
+	/*
+	 * Parent lists can be rewritten; a Bloom filter still describes the
+	 * original first-parent comparison.
+	 */
 	tree_difference = REV_TREE_SAME;
 	revs->pruning.flags.has_changes = 0;
 	diff_tree_for_pruning(revs, NULL, &t1->object.oid);
-
-	if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
-	    tree_difference == REV_TREE_SAME)
-		count_bloom_filter_false_positive++;
 
 	return tree_difference == REV_TREE_SAME;
 }
@@ -1592,7 +1583,7 @@ static int compact_treesame(struct rev_info *revs, struct commit *commit, unsign
 		if (nth_parent != 0)
 			die("compact_treesame %u", nth_parent);
 		old_same = !!(commit->object.flags & TREESAME);
-		if (rev_same_tree_as_empty(revs, commit, nth_parent))
+		if (rev_same_tree_as_empty(revs, commit))
 			commit->object.flags |= TREESAME;
 		else
 			commit->object.flags &= ~TREESAME;
@@ -1689,13 +1680,10 @@ static void try_to_simplify_commit(struct rev_info *revs, struct commit *commit)
 
 	if (!commit->parents) {
 		/*
-		 * Pretend as if we are comparing ourselves to the
-		 * (non-existent) first parent of this commit object. Even
-		 * though no such parent exists, its changed-path Bloom filter
-		 * (if one exists) is relative to the empty tree, using Bloom
-		 * filters is allowed here.
+		 * Compare against the empty tree. Earlier simplification may have
+		 * removed this commit's parents, so it need not be an original root.
 		 */
-		if (rev_same_tree_as_empty(revs, commit, 0))
+		if (rev_same_tree_as_empty(revs, commit))
 			commit->object.flags |= TREESAME;
 		return;
 	}
@@ -1780,7 +1768,7 @@ static void try_to_simplify_commit(struct rev_info *revs, struct commit *commit)
 
 		case REV_TREE_NEW:
 			if (revs->remove_empty_trees &&
-			    rev_same_tree_as_empty(revs, p, nth_parent)) {
+			    rev_same_tree_as_empty(revs, p)) {
 				/* We are adding all the specified
 				 * paths from this parent, so the
 				 * history beyond this parent is not

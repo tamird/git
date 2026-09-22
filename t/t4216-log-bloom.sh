@@ -680,6 +680,16 @@ test_expect_success 'version 3 factors distinct basenames by shared directory' '
 	)
 '
 
+test_expect_success '--remove-empty compares against the empty tree without a parent Bloom proof' '
+	git -c core.commitGraph=false log --remove-empty --format=%s -- \
+		A/file1 file4 >expect &&
+	git log --remove-empty --format=%s -- A/file1 file4 >actual &&
+	test_cmp expect actual &&
+	test_grep "^c7$" actual &&
+	test_grep "^c4$" actual &&
+	test_grep "^c1$" actual
+'
+
 test_expect_success 'mixed version 2 and 3 layers ignore basename filters' '
 	git init basename-mixed &&
 	mkdir -p basename-mixed/nested/target &&
@@ -747,7 +757,7 @@ test_expect_success 'setup - add commit-graph to the chain with Bloom filters' '
 
 test_bloom_filters_used_when_some_filters_are_missing () {
 	log_args=$1
-	bloom_trace_prefix="statistics:{\"filter_not_present\":3,\"maybe\":6,\"definitely_not\":10"
+	bloom_trace_prefix="statistics:{\"filter_not_present\":3,\"maybe\":6,\"definitely_not\":9"
 	setup "$log_args" &&
 	grep -q "$bloom_trace_prefix" "$TRASH_DIRECTORY/trace.perf" &&
 	test_cmp log_wo_bloom log_w_bloom
