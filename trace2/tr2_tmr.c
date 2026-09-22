@@ -809,6 +809,30 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "full",
 		.want_per_thread_events = 0,
 	},
+	/* One interval per unchanged-parent chain, including Bloom and commit reads. */
+	[TRACE2_TIMER_ID_BLAME_UNCHANGED_CHAIN] = {
+		.category = "blame",
+		.name = "unchanged-chain",
+		.want_per_thread_events = 0,
+	},
+	/* Includes both same-path lookup and rename discovery. */
+	[TRACE2_TIMER_ID_BLAME_FIND_ORIGIN] = {
+		.category = "blame",
+		.name = "find-origin",
+		.want_per_thread_events = 0,
+	},
+	/* Cache-miss materialization includes textconv, but not fingerprints. */
+	[TRACE2_TIMER_ID_BLAME_BLOB_LOAD] = {
+		.category = "blame",
+		.name = "blob-load",
+		.want_per_thread_events = 0,
+	},
+	/* Includes xdiff's blame callbacks. */
+	[TRACE2_TIMER_ID_BLAME_DIFF_HUNKS] = {
+		.category = "blame",
+		.name = "diff-hunks",
+		.want_per_thread_events = 0,
+	},
 
 	/* Add additional metadata before here. */
 };

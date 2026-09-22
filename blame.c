@@ -316,11 +316,19 @@ static int diff_hunks(mmfile_t *file_a, mmfile_t *file_b,
 	xpparam_t xpp = {0};
 	xdemitconf_t xecfg = {0};
 	xdemitcb_t ecb = {NULL};
+	int ret, saved_errno;
 
 	xpp.flags = xdl_opts;
 	xecfg.hunk_func = hunk_func;
 	ecb.priv = cb_data;
-	return xdi_diff(file_a, file_b, &xpp, &xecfg, &ecb);
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_BLAME_DIFF_HUNKS);
+	errno = saved_errno;
+	ret = xdi_diff(file_a, file_b, &xpp, &xecfg, &ecb);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_BLAME_DIFF_HUNKS);
+	errno = saved_errno;
+	return ret;
 }
 
 static const char *get_next_line(const char *start, const char *end)
@@ -1031,7 +1039,10 @@ static void fill_origin_blob(struct diff_options *opt,
 	if (!o->file.ptr) {
 		enum object_type type;
 		unsigned long file_size;
+		int saved_errno = errno;
 
+		trace2_timer_start(TRACE2_TIMER_ID_BLAME_BLOB_LOAD);
+		errno = saved_errno;
 		(*num_read_blob)++;
 		if (opt->flags.allow_textconv &&
 		    textconv_object(opt->repo, o->path, o->mode,
@@ -1044,6 +1055,9 @@ static void fill_origin_blob(struct diff_options *opt,
 						    &file_size_st);
 			file_size = cast_size_t_to_ulong(file_size_st);
 		}
+		saved_errno = errno;
+		trace2_timer_stop(TRACE2_TIMER_ID_BLAME_BLOB_LOAD);
+		errno = saved_errno;
 		file->size = file_size;
 
 		if (!file->ptr)
@@ -2442,14 +2456,20 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 		     i < num_sg && sg;
 		     sg = sg->next, i++) {
 			struct commit *p = sg->item;
-			int bloom_negative, j, same;
+			int bloom_negative, j, same, saved_errno;
 
 			if (sg_origin[i])
 				continue;
 			if (repo_parse_commit(the_repository, p))
 				continue;
+			saved_errno = errno;
+			trace2_timer_start(TRACE2_TIMER_ID_BLAME_FIND_ORIGIN);
+			errno = saved_errno;
 			porigin = find(sb->repo, p, origin, sb->bloom_data,
 				       &bloom_negative);
+			saved_errno = errno;
+			trace2_timer_stop(TRACE2_TIMER_ID_BLAME_FIND_ORIGIN);
+			errno = saved_errno;
 			if (!porigin)
 				continue;
 			if (oideq(&porigin->blob_oid, &origin->blob_oid)) {
@@ -2460,6 +2480,9 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 					 * The first edge is already known unchanged.
 					 * Extend that proof before queuing a parent.
 					 */
+					saved_errno = errno;
+					trace2_timer_start(TRACE2_TIMER_ID_BLAME_UNCHANGED_CHAIN);
+					errno = saved_errno;
 					while (!(unchanged->object.flags & UNINTERESTING) &&
 					       !(revs->max_age != -1 &&
 						 unchanged->date < revs->max_age) &&
@@ -2473,6 +2496,9 @@ static void pass_blame(struct blame_scoreboard *sb, struct blame_origin *origin,
 							break;
 						unchanged = parent;
 					}
+					saved_errno = errno;
+					trace2_timer_stop(TRACE2_TIMER_ID_BLAME_UNCHANGED_CHAIN);
+					errno = saved_errno;
 					if (unchanged != p) {
 						blame_origin_decref(porigin);
 						porigin = get_origin(unchanged,
