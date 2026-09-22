@@ -4,6 +4,7 @@
 #include "hash.h"
 #include "hex.h"
 #include "patch-ids.h"
+#include "trace2.h"
 
 static int patch_id_defined(struct commit *commit)
 {
@@ -14,8 +15,17 @@ static int patch_id_defined(struct commit *commit)
 int commit_patch_id(struct commit *commit, struct diff_options *options,
 		    struct object_id *oid, int diff_header_only)
 {
+	enum trace2_timer_id timer = diff_header_only ?
+					     TRACE2_TIMER_ID_PATCH_ID_HEADER :
+					     TRACE2_TIMER_ID_PATCH_ID_FULL;
+	int ret, saved_errno;
+
 	if (!patch_id_defined(commit))
 		return -1;
+
+	saved_errno = errno;
+	trace2_timer_start(timer);
+	errno = saved_errno;
 
 	if (commit->parents)
 		diff_tree_oid(&commit->parents->item->object.oid,
@@ -23,7 +33,12 @@ int commit_patch_id(struct commit *commit, struct diff_options *options,
 	else
 		diff_root_tree_oid(&commit->object.oid, "", options);
 	diffcore_std(options);
-	return diff_flush_patch_id(options, oid, diff_header_only);
+	ret = diff_flush_patch_id(options, oid, diff_header_only);
+
+	saved_errno = errno;
+	trace2_timer_stop(timer);
+	errno = saved_errno;
+	return ret;
 }
 
 /*
