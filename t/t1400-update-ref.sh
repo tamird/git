@@ -2428,10 +2428,12 @@ do
 			test_commit commit &&
 			head=$(git rev-parse HEAD) &&
 
-			format_command $type "delete refs/heads/non-existent" "$head" >stdin &&
+			test_path_is_missing .git/refs/heads/non-existent &&
+			format_command $type "delete refs/heads/non-existent/nested" "$head" >stdin &&
 			git update-ref $type --stdin --batch-updates <stdin >stdout 2>err &&
-			test_grep "rejected refs/heads/non-existent $ZERO_OID $head reference does not exist" stdout &&
-			test_grep "cannot lock ref ${SQ}refs/heads/non-existent${SQ}: unable to resolve reference ${SQ}refs/heads/non-existent${SQ}" err
+			test_grep "rejected refs/heads/non-existent/nested $ZERO_OID $head reference does not exist" stdout &&
+			test_grep "cannot lock ref ${SQ}refs/heads/non-existent/nested${SQ}: unable to resolve reference ${SQ}refs/heads/non-existent/nested${SQ}" err &&
+			test_path_is_missing .git/refs/heads/non-existent
 		)
 	'
 done

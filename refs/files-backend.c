@@ -2775,6 +2775,11 @@ static enum ref_transaction_error lock_ref_for_update(struct files_ref_store *re
 				   refnames_to_check, &lock, &referent, err);
 		if (ret) {
 			char *reason;
+			int saved_errno = errno;
+
+			try_remove_empty_parents(refs, update->refname,
+						 REMOVE_EMPTY_PARENTS_REF);
+			errno = saved_errno;
 
 			reason = strbuf_detach(err, NULL);
 			strbuf_addf(err, "cannot lock ref '%s': %s",
