@@ -2974,19 +2974,20 @@ static int index_window_decode_blocks(struct index_window *window,
 static int read_index_window_internal(
 	struct repository *repo, const char *path,
 	const struct string_list *prefixes,
-	int (*accept_tree)(struct index_state *, size_t, void *),
+	int (*select_tree)(struct index_state *, struct string_list *, size_t *, void *),
 	int (*accept_file)(const struct index_file_snapshot *, size_t, void *),
 	void *accept_data, struct index_window **result)
 {
 	struct index_window *window = NULL;
+	struct string_list selected = STRING_LIST_INIT_DUP;
 	struct load_index_extensions extensions = { 0 };
 	struct stat before, after;
 	const char *map = MAP_FAILED;
-	size_t size, entry_end;
+	size_t size, entry_end, max_entries = SIZE_MAX;
 	int fd = -1, ret = INDEX_WINDOW_UNAVAILABLE;
 
 	*result = NULL;
-	if (repo != the_repository || !prefixes->nr ||
+	if (repo != the_repository || (!select_tree && !prefixes->nr) ||
 	    (fd = git_open(path)) < 0 || fstat(fd, &before) ||
 	    before.st_size < 0 || (uintmax_t)before.st_size > SIZE_MAX)
 		goto done;
@@ -3007,9 +3008,33 @@ static int read_index_window_internal(
 	window->tree.cache_nr = get_be32(map + 8);
 	if (!window->tree.cache_nr || window->tree.cache_nr > INT_MAX)
 		goto done;
-	if (index_window_read_blocks(window, map, size, entry_end) ||
-	    index_window_select_blocks(window, prefixes))
+	if (index_window_read_blocks(window, map, size, entry_end))
 		goto done;
+	extensions.istate = &window->tree;
+	extensions.mmap = map;
+	extensions.mmap_size = size;
+	extensions.src_offset = entry_end;
+	extensions.gentle = 1;
+	if (select_tree) {
+		load_index_extensions(&extensions);
+		if (extensions.error || !window->tree.cache_tree_data)
+			goto done;
+		if (!select_tree(&window->tree, &selected, &max_entries, accept_data) ||
+		    !selected.nr) {
+			ret = INDEX_WINDOW_SKIPPED;
+			goto done;
+		}
+		for (size_t i = 0; i < selected.nr; i++)
+			if (!ends_with(selected.items[i].string, "/"))
+				goto done;
+		prefixes = &selected;
+	}
+	if (index_window_select_blocks(window, prefixes))
+		goto done;
+	if (window->entries_nr > max_entries) {
+		ret = INDEX_WINDOW_SKIPPED;
+		goto done;
+	}
 	if (window->entries_nr == window->tree.cache_nr) {
 		ret = INDEX_WINDOW_FULL;
 		goto done;
@@ -3026,19 +3051,10 @@ static int read_index_window_internal(
 		ret = INDEX_WINDOW_SKIPPED;
 		goto done;
 	}
-	extensions.istate = &window->tree;
-	extensions.mmap = map;
-	extensions.mmap_size = size;
-	extensions.src_offset = entry_end;
-	extensions.gentle = 1;
-	load_index_extensions(&extensions);
-	if (extensions.error || (accept_tree && !window->tree.cache_tree_data))
-		goto done;
-	if (accept_tree && !accept_tree(&window->tree, window->entries_nr, accept_data)) {
-		ret = INDEX_WINDOW_SKIPPED;
-		goto done;
-	}
-	if (!accept_tree) {
+	if (!select_tree) {
+		load_index_extensions(&extensions);
+		if (extensions.error)
+			goto done;
 		for (size_t offset = entry_end;
 		     offset < size - repo->hash_algo->rawsz;) {
 			size_t len = get_be32(map + offset + 4);
@@ -3056,6 +3072,13 @@ static int read_index_window_internal(
 	    fstat(fd, &after) || !index_window_same_stat(&before, &after))
 		goto done;
 	trace2_data_intmax("index", repo, "read/window_entries", window->entries_nr);
+	{
+		size_t nr = 0;
+
+		for (size_t i = 0; i < window->block_nr; i++)
+			nr += window->blocks[i].selected;
+		trace2_data_intmax("index", repo, "read/window_blocks", nr);
+	}
 	*result = window;
 	window = NULL;
 	ret = INDEX_WINDOW_READY;
@@ -3064,23 +3087,23 @@ done:
 		munmap((void *)map, size);
 	if (fd >= 0)
 		close(fd);
+	string_list_clear(&selected, 0);
 	release_index_window(window);
 	return ret;
 }
 
-int read_index_tree_window_if_tree_accepted(
+int read_index_tree_window(
 	struct repository *repo, const char *path,
-	const struct string_list *prefixes,
-	int (*accept_tree)(struct index_state *, size_t, void *),
-	void *accept_data, struct index_window **result)
+	int (*select_paths)(struct index_state *, struct string_list *, size_t *, void *),
+	void *data, struct index_window **result)
 {
-	for (size_t i = 0; i < prefixes->nr; i++)
-		if (!ends_with(prefixes->items[i].string, "/")) {
-			*result = NULL;
-			return INDEX_WINDOW_UNAVAILABLE;
-		}
-	return read_index_window_internal(repo, path, prefixes, accept_tree,
-					  NULL, accept_data, result);
+	int ret;
+
+	trace2_region_enter("index", "read_tree_window", repo);
+	ret = read_index_window_internal(repo, path, NULL, select_paths, NULL,
+					 data, result);
+	trace2_region_leave("index", "read_tree_window", repo);
+	return ret;
 }
 
 int read_index_window(struct repository *repo, const char *path,

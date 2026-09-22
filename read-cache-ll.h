@@ -335,16 +335,20 @@ enum index_window_result {
 	INDEX_WINDOW_READY = 1,
 };
 /*
- * An optional, read-only index view for selected directory prefixes. The
- * callback sees only the index header and TREE extension, never a partial
- * cache[]. Missing metadata permits the normal full reader; SKIPPED means
- * the selected directories cannot repay even the bounded entry decode.
+ * An optional, read-only index view for selected directory prefixes. With
+ * only the index header and TREE extension available, select_paths fills
+ * the reader-owned, initially empty strdup string list and sets an upper
+ * bound on decoded entries. Every selected prefix must end in '/'. Returning
+ * zero skips the decode. The callback never sees a partial cache[]. Missing
+ * metadata permits the normal full reader; SKIPPED means no selected scopes
+ * or that their whole IEOT blocks exceed the caller's decode budget.
  * READY alone supplies an owned window; all other outcomes leave it NULL.
  */
-int read_index_tree_window_if_tree_accepted(
-	struct repository *, const char *path, const struct string_list *prefixes,
-	int (*accept_tree)(struct index_state *, size_t decoded_entries, void *),
-	void *accept_data, struct index_window **window);
+int read_index_tree_window(
+	struct repository *, const char *path,
+	int (*select_paths)(struct index_state *, struct string_list *prefixes,
+			    size_t *max_entries, void *),
+	void *data, struct index_window **window);
 int index_tree_window_entries(
 	struct index_window *, const char *prefix,
 	const struct object_id *tree_oid,

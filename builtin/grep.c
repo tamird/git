@@ -4411,9 +4411,10 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 }
 
 /* Count a selected directory only after its root child is proved unchanged. */
-static int grep_revision_index_add_trees(struct index_state *index,
+static int grep_revision_index_add_scope(struct index_state *index,
 					 struct grep_revision_index_probe *probe,
-					 const char *path, uintmax_t *total)
+					 const char *path, struct string_list *paths,
+					 uintmax_t *total)
 {
 	struct object_id oid;
 	size_t count;
@@ -4435,6 +4436,8 @@ static int grep_revision_index_add_trees(struct index_state *index,
 	}
 	if (count > UINTMAX_MAX - *total)
 		return -1;
+	if (count && paths)
+		string_list_append(paths, path);
 	*total += count;
 	return 0;
 }
@@ -4605,20 +4608,15 @@ done:
 	return accepted;
 }
 
-static int grep_revision_index_accept_entries(struct index_state *index,
-					      size_t decoded_entries, void *data)
+static uintmax_t grep_revision_index_matching_paths(
+	struct index_state *index, struct grep_revision_index_probe *probe,
+	struct string_list *paths)
 {
-	struct grep_revision_index_probe *probe = data;
 	struct tree_desc tree = probe->tree;
 	struct name_entry entry;
 	struct object_id oid;
 	struct strbuf path = STRBUF_INIT;
 	uintmax_t trees = 0;
-	int accepted = 0;
-
-	if (!probe->paths->nr && !probe->excluded.nr &&
-	    cache_tree_root_matches_index(index, probe->tree_oid))
-		return 1;
 	/*
 	 * An invalid cache-tree root can retain valid children. The requested
 	 * root is already read, so inspect its children without further I/O.
@@ -4629,7 +4627,7 @@ static int grep_revision_index_accept_entries(struct index_state *index,
 
 		entry = tree.entry;
 		if (update_tree_entry_gently(&tree))
-			goto done;
+			goto fail;
 		if (!S_ISDIR(entry.mode) ||
 		    cache_tree_get_path(index, entry.path, &oid, NULL) <= 0 ||
 		    !oideq(&oid, &entry.oid))
@@ -4638,47 +4636,74 @@ static int grep_revision_index_accept_entries(struct index_state *index,
 		strbuf_addstr(&path, entry.path);
 		strbuf_addch(&path, '/');
 		if (!probe->paths->nr) {
-			if (grep_revision_index_add_trees(index, probe,
-							  path.buf, &trees))
-				goto done;
+			if (grep_revision_index_add_scope(index, probe, path.buf,
+							  paths, &trees))
+				goto fail;
 			continue;
 		}
 		for (size_t i = 0; i < probe->paths->nr; i++) {
 			const char *selected = probe->paths->items[i].string;
 
 			if (starts_with(path.buf, selected)) {
-				if (grep_revision_index_add_trees(index, probe,
-								  path.buf, &trees))
-					goto done;
+				if (grep_revision_index_add_scope(index, probe, path.buf,
+								  paths, &trees))
+					goto fail;
 				break;
 			}
 			if (!starts_with(selected, path.buf) ||
 			    (previous && starts_with(selected, previous)))
 				continue;
-			if (grep_revision_index_add_trees(index, probe,
-							  selected, &trees))
-				goto done;
+			if (grep_revision_index_add_scope(index, probe, selected,
+							  paths, &trees))
+				goto fail;
 			previous = selected;
 		}
 	}
+	strbuf_release(&path);
+	return trees;
+fail:
+	strbuf_release(&path);
+	if (paths)
+		string_list_clear(paths, 0);
+	return 0;
+}
+
+static int grep_revision_index_select_paths(struct index_state *index,
+					    struct string_list *paths,
+					    size_t *max_entries, void *data)
+{
+	uintmax_t trees;
+
+	trace2_region_enter("grep", "revision_index_select", index->repo);
+	trees = grep_revision_index_matching_paths(index, data, paths);
+	*max_entries = trees > SIZE_MAX / 16 ? SIZE_MAX : trees * 16;
+	trace2_region_leave("grep", "revision_index_select", index->repo);
+	trace2_data_intmax("grep", index->repo, "revision_index_selected_paths", paths->nr);
+	trace2_data_intmax("grep", index->repo, "revision_index_selected_trees", trees);
+	return trees != 0;
+}
+
+static int grep_revision_index_accept(struct index_state *index, void *data)
+{
+	struct grep_revision_index_probe *probe = data;
+	uintmax_t trees;
+	int accepted;
+
+	if (!probe->paths->nr && !probe->excluded.nr &&
+	    cache_tree_root_matches_index(index, probe->tree_oid))
+		return 1;
+	trees = grep_revision_index_matching_paths(index, probe, NULL);
 	/*
 	 * Tree object reads cost much more than decoding an index entry. Keep
 	 * small selections on the tree walker: require one avoided directory
 	 * read per sixteen entries we would decode from this index.
 	 */
-	accepted = trees && trees >= decoded_entries / 16 +
-					!!(decoded_entries % 16);
+	accepted = trees && trees >= index->cache_nr / 16 +
+					     !!(index->cache_nr % 16);
 	if (!accepted && !probe->paths->nr && !probe->excluded.nr)
 		accepted = grep_revision_index_lookahead(index, probe,
-							 decoded_entries / 16 + !!(decoded_entries % 16));
-done:
-	strbuf_release(&path);
+							 index->cache_nr / 16 + !!(index->cache_nr % 16));
 	return accepted;
-}
-
-static int grep_revision_index_accept(struct index_state *index, void *data)
-{
-	return grep_revision_index_accept_entries(index, index->cache_nr, data);
 }
 
 static int grep_revision_index_load(struct repository *repo,
@@ -4689,9 +4714,9 @@ static int grep_revision_index_load(struct repository *repo,
 	int window_result = INDEX_WINDOW_FULL;
 
 	if (revision->paths.nr) {
-		window_result = read_index_tree_window_if_tree_accepted(
-			repo, repo_get_index_file(repo), &revision->paths,
-			grep_revision_index_accept_entries, probe,
+		window_result = read_index_tree_window(
+			repo, repo_get_index_file(repo),
+			grep_revision_index_select_paths, probe,
 			&revision->window);
 		if (window_result == INDEX_WINDOW_READY) {
 			revision->state = GREP_REVISION_INDEX_ACTIVE;

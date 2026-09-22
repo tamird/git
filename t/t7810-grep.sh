@@ -6679,6 +6679,49 @@ test_expect_success 'revision grep finds reuse below changed directories' '
 	)
 '
 
+test_expect_success PTHREADS 'revision grep windows cover only reusable scopes' '
+	test_when_finished "git -C revision-index-partial reset --hard HEAD" &&
+	(
+		cd revision-index-partial &&
+		# The original scopes span every block, but only a/deep is reusable.
+		for n in $(test_seq 1 128)
+		do
+			echo index-only >b/extra-$n || return 1
+		done &&
+		echo index-only >b/target.txt &&
+		git add b &&
+		for version in 2 4
+		do
+			GIT_TEST_INDEX_THREADS=4 \
+				git update-index --index-version "$version" --force-write-index &&
+			for revisions in one two
+			do
+				set -- HEAD^ &&
+				expected_reuse=1 &&
+				if test "$revisions" = two
+				then
+					set -- "$@" HEAD &&
+					expected_reuse=2
+				fi &&
+				GIT_INDEX_FILE="$PWD/missing-index" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle "$@" -- a/deep b >expect-scopes &&
+				GIT_TRACE2_EVENT="$PWD/scopes-$version-$revisions.trace" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle "$@" -- a/deep b >actual-scopes 2>err-scopes &&
+				test_cmp expect-scopes actual-scopes &&
+				test_must_be_empty err-scopes &&
+				test_grep -F "HEAD^:b/target.txt:1:needle-old" actual-scopes &&
+				test_trace2_data_singular grep revision_index_reused "$expected_reuse" \
+					<"scopes-$version-$revisions.trace" &&
+				test_grep read/window_entries "scopes-$version-$revisions.trace" &&
+				test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" \
+					"scopes-$version-$revisions.trace" || return 1
+			done || return 1
+		done
+	)
+'
+
 test_expect_success 'revision grep bounds lookahead without shared subtrees' '
 	test_create_repo revision-index-disjoint &&
 	(
