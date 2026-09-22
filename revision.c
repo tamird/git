@@ -1325,7 +1325,8 @@ fail:
 
 static enum revision_bloom_filter_result
 check_maybe_different_in_bloom_filter(struct rev_info *revs,
-				      struct commit *commit)
+				      struct commit *commit,
+				      struct bloom_filter *maybe_filter)
 {
 	struct bloom_filter filter;
 	int result = 0;
@@ -1380,9 +1381,47 @@ check_maybe_different_in_bloom_filter(struct rev_info *revs,
 	if (result && filter.len == 1 && filter.data[0] == 0xff)
 		count_bloom_filter_trivial_maybe++;
 
+	if (result && maybe_filter)
+		*maybe_filter = filter;
+
 	if (result)
 		return REVISION_BLOOM_FILTER_MAYBE;
 	return REVISION_BLOOM_FILTER_DEFINITELY_NOT;
+}
+
+/* Retain exclusions and only those positive paths that might have changed. */
+static int bloom_pruning_pathspec(struct rev_info *revs,
+				  const struct bloom_filter *filter)
+{
+	struct pathspec *pathspec = &revs->pruning.pathspec;
+	int key_nr = 0, kept = 0, selected = 0, dropped = 0;
+
+	if (revs->bloom_keyvecs_nr < 2 ||
+	    (filter->len == 1 && filter->data[0] == 0xff))
+		return 0;
+
+	ALLOC_GROW(revs->bloom_pruning_items, pathspec->nr,
+		   revs->bloom_pruning_items_alloc);
+	for (int nr = 0; nr < pathspec->nr; nr++) {
+		struct pathspec_item *item = &pathspec->items[nr];
+
+		if (!(item->magic & PATHSPEC_EXCLUDE)) {
+			if (key_nr >= revs->bloom_keyvecs_nr)
+				return 0;
+			if (!bloom_filter_contains_vec(filter,
+						       revs->bloom_keyvecs[key_nr++],
+						       revs->bloom_filter_settings)) {
+				dropped = 1;
+				continue;
+			}
+			selected++;
+		}
+		revs->bloom_pruning_items[kept++] = *item;
+	}
+
+	if (key_nr != revs->bloom_keyvecs_nr || !dropped || !selected)
+		return 0;
+	return kept;
 }
 
 void revision_bloom_filter_refresh(struct rev_info *revs)
@@ -1424,7 +1463,7 @@ revision_bloom_filter_query_diff(struct rev_info *revs,
 	    commit->parents->item != parent)
 		return REVISION_BLOOM_FILTER_UNAVAILABLE;
 
-	return check_maybe_different_in_bloom_filter(revs, commit);
+	return check_maybe_different_in_bloom_filter(revs, commit, NULL);
 }
 
 void revision_bloom_filter_finish_diff(struct rev_info *revs,
@@ -1486,8 +1525,11 @@ static int rev_compare_tree(struct rev_info *revs,
 {
 	struct tree *t1 = repo_get_commit_tree(the_repository, parent);
 	struct tree *t2 = repo_get_commit_tree(the_repository, commit);
+	struct bloom_filter maybe_filter;
+	struct pathspec_item *original_items;
 	enum revision_bloom_filter_result bloom_ret =
 		REVISION_BLOOM_FILTER_UNAVAILABLE;
+	int kept = 0, original_nr;
 
 	if (!t1)
 		return REV_TREE_NEW;
@@ -1513,7 +1555,8 @@ static int rev_compare_tree(struct rev_info *revs,
 	}
 
 	if (revs->bloom_keyvecs_nr && !nth_parent) {
-		bloom_ret = check_maybe_different_in_bloom_filter(revs, commit);
+		bloom_ret = check_maybe_different_in_bloom_filter(
+			revs, commit, &maybe_filter);
 
 		if (bloom_ret == REVISION_BLOOM_FILTER_DEFINITELY_NOT)
 			return REV_TREE_SAME;
@@ -1521,7 +1564,19 @@ static int rev_compare_tree(struct rev_info *revs,
 
 	tree_difference = REV_TREE_SAME;
 	revs->pruning.flags.has_changes = 0;
+	if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE)
+		kept = bloom_pruning_pathspec(revs, &maybe_filter);
+	if (kept) {
+		original_items = revs->pruning.pathspec.items;
+		original_nr = revs->pruning.pathspec.nr;
+		revs->pruning.pathspec.items = revs->bloom_pruning_items;
+		revs->pruning.pathspec.nr = kept;
+	}
 	diff_tree_for_pruning(revs, &t1->object.oid, &t2->object.oid);
+	if (kept) {
+		revs->pruning.pathspec.items = original_items;
+		revs->pruning.pathspec.nr = original_nr;
+	}
 
 	if (!nth_parent)
 		if (bloom_ret == REVISION_BLOOM_FILTER_MAYBE &&
@@ -4115,6 +4170,7 @@ void release_revisions(struct rev_info *revs)
 	diff_pickaxe_index_clear(&revs->pickaxe_index);
 	diff_free(&revs->diffopt);
 	diff_free(&revs->pruning);
+	free(revs->bloom_pruning_items);
 	reflog_walk_info_release(revs->reflog_info);
 	release_revisions_topo_walk_info(revs->topo_walk_info);
 	clear_decoration(&revs->children, free_void_commit_list);

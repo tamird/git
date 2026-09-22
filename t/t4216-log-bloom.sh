@@ -680,6 +680,49 @@ test_expect_success 'version 3 factors distinct basenames by shared directory' '
 	)
 '
 
+test_expect_success 'Bloom-positive paths avoid unrelated changed subtrees' '
+	test_when_finished "rm -rf bloom-pruning-v3" &&
+	git init bloom-pruning-v3 &&
+	(
+		cd bloom-pruning-v3 &&
+		test_commit base target &&
+		mkdir -p deep/branch &&
+		test_commit keep deep/branch/keep &&
+		test_commit collision deep/branch/target &&
+		git -c commitGraph.changedPathsVersion=3 commit-graph write \
+			--reachable --changed-paths &&
+		git -c core.commitGraph=false log --format=%s -- \
+			target deep/branch/keep >expect &&
+		test_grep "^base$" expect &&
+		test_grep "^keep$" expect &&
+		test_grep ! "^collision$" expect &&
+		branch_tree=$(git rev-parse HEAD:deep/branch) &&
+		test_path_is_file .git/objects/"$(test_oid_to_path "$branch_tree")" &&
+		rm .git/objects/"$(test_oid_to_path "$branch_tree")" &&
+		test_must_fail git -c core.commitGraph=false log \
+			--format=%s -- target deep/branch/keep >without-graph 2>err &&
+		GIT_TRACE2_EVENT="$TRASH_DIRECTORY/pruning-subset.event" \
+			git log --format=%s -- target deep/branch/keep >actual &&
+		test_cmp expect actual &&
+		test_trace2_data bloom active 1 \
+			<"$TRASH_DIRECTORY/pruning-subset.event"
+	)
+'
+
+test_expect_success 'Bloom pruning preserves merge and full diff' '
+	for options in \
+		"" \
+		"--full-history" \
+		"--full-history --simplify-merges" \
+		"--full-diff -m -p"
+	do
+		git -c core.commitGraph=false log $options --format=%s -- \
+			A/file1 file4 >expect &&
+		git log $options --format=%s -- A/file1 file4 >actual &&
+		test_cmp expect actual || return 1
+	done
+'
+
 test_expect_success '--remove-empty compares against the empty tree without a parent Bloom proof' '
 	git -c core.commitGraph=false log --remove-empty --format=%s -- \
 		A/file1 file4 >expect &&

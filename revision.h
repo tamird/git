@@ -424,6 +424,9 @@ struct rev_info {
 	int bloom_query_nr;
 	int bloom_query_alloc;
 	int bloom_query_root;
+	/* Borrowed pathspec items used only for one Bloom-backed tree comparison. */
+	struct pathspec_item *bloom_pruning_items;
+	size_t bloom_pruning_items_alloc;
 	enum follow_bloom_elision_state follow_bloom_elision;
 	/* Query result produced while choosing the next --follow commit. */
 	struct commit *bloom_filter_queried_commit;
