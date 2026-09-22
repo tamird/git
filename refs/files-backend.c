@@ -21,6 +21,7 @@
 #include "../path.h"
 #include "../dir.h"
 #include "../setup.h"
+#include "../trace2.h"
 #include "../worktree.h"
 #include "../wrapper.h"
 #include "../write-or-die.h"
@@ -1111,6 +1112,7 @@ static struct ref_iterator *files_ref_iterator_begin(
 	struct files_ref_iterator *iter;
 	struct ref_iterator *ref_iterator;
 	unsigned int required_flags = REF_STORE_READ;
+	int saved_errno;
 
 	if (!(flags & REFS_FOR_EACH_INCLUDE_BROKEN))
 		required_flags |= REF_STORE_ODB;
@@ -1134,9 +1136,15 @@ static struct ref_iterator *files_ref_iterator_begin(
 	 * disk, and re-reads it if not.
 	 */
 
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_REFS_FILES_LOOSE_SETUP);
+	errno = saved_errno;
 	loose_iter = cache_ref_iterator_begin(get_loose_ref_cache(refs, flags),
 					      prefix, ref_store->repo, 1,
 					      casefold_prefixes);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_REFS_FILES_LOOSE_SETUP);
+	errno = saved_errno;
 
 	/*
 	 * The packed-refs file might contain broken references, for
@@ -1149,9 +1157,15 @@ static struct ref_iterator *files_ref_iterator_begin(
 	 * ones in files_ref_iterator_advance(), after we have merged
 	 * the packed and loose references.
 	 */
+	saved_errno = errno;
+	trace2_timer_start(TRACE2_TIMER_ID_REFS_FILES_PACKED_SETUP);
+	errno = saved_errno;
 	packed_iter = refs_ref_iterator_begin(
 			refs->packed_ref_store, prefix, exclude_patterns, 0,
 			REFS_FOR_EACH_INCLUDE_BROKEN);
+	saved_errno = errno;
+	trace2_timer_stop(TRACE2_TIMER_ID_REFS_FILES_PACKED_SETUP);
+	errno = saved_errno;
 
 	overlay_iter = overlay_ref_iterator_begin(loose_iter, packed_iter);
 

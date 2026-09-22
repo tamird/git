@@ -253,6 +253,16 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "filter",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_REFS_FILES_LOOSE_SETUP] = {
+		.category = "refs",
+		.name = "files/loose-setup",
+		.want_per_thread_events = 0,
+	},
+	[TRACE2_TIMER_ID_REFS_FILES_PACKED_SETUP] = {
+		.category = "refs",
+		.name = "files/packed-setup",
+		.want_per_thread_events = 0,
+	},
 	/* Iterative filtering includes formatting, item cleanup, and stdio. */
 	[TRACE2_TIMER_ID_REF_FILTER_ITERATIVE_FILTER_FORMAT] = {
 		.category = "ref-filter",
