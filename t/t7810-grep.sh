@@ -6330,7 +6330,7 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 					needle HEAD -- ":(glob)**/target.txt" \
 					>actual &&
 			test_cmp expect actual &&
-			test_trace2_data grep revision_index_reused 1 \
+			test_trace2_data_singular grep revision_index_reused 1 \
 				<"reused-$version.trace" || return 1
 		done &&
 		for selection in reusable pruned prefixless
@@ -6352,7 +6352,7 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 			test_must_be_empty err-exclusions &&
 			case "$selection" in
 			reusable)
-				test_trace2_data grep revision_index_reused 1 \
+				test_trace2_data_singular grep revision_index_reused 1 \
 					<"exclusions-$selection.trace" ;;
 			*)
 				test_grep ! revision_index_reused "exclusions-$selection.trace" &&
@@ -6366,7 +6366,7 @@ test_expect_success 'revision grep reuses a matching full index and falls back g
 				>actual-tree &&
 		sed "s/^HEAD:/$tree:/" expect >expect-tree &&
 		test_cmp expect-tree actual-tree &&
-		test_trace2_data grep revision_index_reused 1 <tree.trace &&
+		test_trace2_data_singular grep revision_index_reused 1 <tree.trace &&
 		empty_tree=$(git mktree </dev/null) &&
 		test_expect_code 1 env GIT_TRACE2_EVENT="$PWD/other-tree.trace" \
 			git grep --text --no-content-index --threads=1 -n \
@@ -6402,7 +6402,7 @@ test_expect_success 'revision grep reuses an exact index for wildcard pathspecs'
 					needle HEAD -- "$@" >actual-wildcard 2>err-wildcard &&
 			test_cmp expect-wildcard actual-wildcard &&
 			test_must_be_empty err-wildcard &&
-			test_trace2_data grep revision_index_reused 1 \
+			test_trace2_data_singular grep revision_index_reused 1 \
 				<"wildcard-$selection.trace" || return 1
 		done &&
 		GIT_TRACE2_EVENT="$PWD/wildcard-narrow.trace" \
@@ -6509,7 +6509,7 @@ test_expect_success 'revision grep reuses valid children of an invalid cache tre
 						needle HEAD -- "$pathspec" >actual 2>err &&
 				test_cmp expect-staged actual &&
 				test_must_be_empty err &&
-				test_trace2_data grep revision_index_reused 1 \
+				test_trace2_data_singular grep revision_index_reused 1 \
 					<changed.trace || return 1
 			done || return 1
 		done
@@ -6522,7 +6522,7 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		cd revision-index-partial &&
 		git config index.recordendofindexentries true &&
 		git config index.threads 4 &&
-		mkdir -p a/deep/child b &&
+		mkdir -p a/deep/child/grandchild/stable b &&
 		echo needle-first >0-target.txt &&
 		echo needle-root >target.txt &&
 		echo needle-last >z-target.txt &&
@@ -6530,6 +6530,7 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		echo needle-two >a/deep/target.txt &&
 		echo needle-three >a/deep/other.txt &&
 		echo needle-child >a/deep/child/target.txt &&
+		echo needle-stable >a/deep/child/grandchild/stable/target.txt &&
 		echo needle-old >b/target.txt &&
 		# A small selected subtree should not justify decoding unrelated entries.
 		for n in $(test_seq 1 13)
@@ -6579,12 +6580,12 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 				a/deep|a/deep/child)
 					if test_have_prereq PTHREADS
 					then
-						test_trace2_data grep revision_index_reused 1 \
+						test_trace2_data_singular grep revision_index_reused 1 \
 							<partial.trace || return 1
 					fi
 					;;
 				*)
-					test_trace2_data grep revision_index_reused 1 \
+					test_trace2_data_singular grep revision_index_reused 1 \
 						<partial.trace || return 1
 					;;
 				esac &&
@@ -6623,6 +6624,102 @@ test_expect_success 'revision grep reuses unchanged subtrees with broad coverage
 		test_must_be_empty actual &&
 		test_must_be_empty err &&
 		test_region ! index do_read_index missing-literal.trace
+	)
+'
+
+test_expect_success 'revision grep finds reuse below changed directories' '
+	test_when_finished "git -C revision-index-partial reset --hard HEAD" &&
+	(
+		cd revision-index-partial &&
+		echo staged-only >a/target.txt &&
+		git add a/target.txt &&
+		git write-tree >staged-tree &&
+		for version in 2 4
+		do
+			git update-index --index-version "$version" &&
+			for selection in broad literal excluded
+			do
+				case "$selection" in
+				broad) set -- "*target.txt" ;;
+				literal) set -- a ;;
+				excluded) set -- "*target.txt" ":!b/**" ;;
+				esac &&
+				GIT_INDEX_FILE="$PWD/missing-index" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD -- "$@" >expect-nested &&
+				GIT_TRACE2_EVENT="$PWD/nested-$version-$selection.trace" \
+					git grep --text --no-content-index --threads=1 -n \
+						needle HEAD -- "$@" >actual-nested 2>err-nested &&
+				test_cmp expect-nested actual-nested &&
+				test_must_be_empty err-nested &&
+				case "$selection" in
+				broad)
+					test_trace2_data grep revision_index_probe_accepted 1 \
+						<"nested-$version-$selection.trace" &&
+					test_trace2_data_singular grep revision_index_reused 2 \
+						<"nested-$version-$selection.trace" ;;
+				*)
+					test_grep ! revision_index_probe_reads \
+						"nested-$version-$selection.trace" ;;
+				esac || return 1
+			done || return 1
+		done &&
+		# Invalid deeper ancestors must not make optional reuse authoritative.
+		echo staged-only >a/deep/target.txt &&
+		git add a/deep/target.txt &&
+		GIT_INDEX_FILE="$PWD/missing-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- "*target.txt" >expect-invalid &&
+		GIT_TRACE2_EVENT="$PWD/nested-invalid.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD -- "*target.txt" >actual-invalid 2>err-invalid &&
+		test_cmp expect-invalid actual-invalid &&
+		test_must_be_empty err-invalid &&
+		test_grep ! revision_index_reused nested-invalid.trace
+	)
+'
+
+test_expect_success 'revision grep bounds lookahead without shared subtrees' '
+	test_create_repo revision-index-disjoint &&
+	(
+		cd revision-index-disjoint &&
+		git config index.recordendofindexentries true &&
+		{
+			for version in before after
+			do
+				cat <<-EOF &&
+				commit refs/heads/main
+				committer A U Thor <author@example.com> 1112911993 +0000
+				data 6
+				change
+				EOF
+				for n in $(test_seq 1 257)
+				do
+					printf "M 100644 inline d%s/child/target.txt\ndata %s\nneedle-%s\n" \
+						"$n" "$((8 + ${#version}))" "$version" || return 1
+				done &&
+				echo || return 1
+			done
+		} >import &&
+		git fast-import <import &&
+		git reset --hard main &&
+		git write-tree >indexed-tree &&
+		GIT_INDEX_FILE="$PWD/missing-index" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- "*target.txt" >expect &&
+		GIT_TRACE2_EVENT="$PWD/disjoint.trace" \
+			git grep --text --no-content-index --threads=1 -n \
+				needle HEAD^ -- "*target.txt" >actual 2>err &&
+		test_cmp expect actual &&
+		test_must_be_empty err &&
+		sed -n "s/.*\"key\":\"revision_index_probe_reads\",\"value\":\"\([0-9]*\)\".*/\1/p" \
+			disjoint.trace >probe-reads &&
+		read probe_reads <probe-reads &&
+		# Failed lookahead stays within the cost of decoding 257 entries.
+		test "$probe_reads" -le 17 &&
+		test_trace2_data grep revision_index_probe_accepted 0 <disjoint.trace &&
+		test_grep ! revision_index_reused disjoint.trace &&
+		test_grep ! "\"category\":\"index\",\"key\":\"read/cache_nr\"" disjoint.trace
 	)
 '
 

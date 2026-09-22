@@ -46,6 +46,7 @@
 #include "pager.h"
 #include "packfile.h"
 #include "path.h"
+#include "prio-queue.h"
 #include "promisor-remote.h"
 #include "read-cache-ll.h"
 #include "cache-tree.h"
@@ -2971,6 +2972,7 @@ struct grep_tree_query_context {
 	uint64_t bypassed;
 	uint64_t tree_entries;
 	uint64_t tree_directories;
+	uint64_t revision_index_reused;
 	uint64_t pathspec_checks;
 	uint64_t pathspec_rejected;
 	uint64_t basename_rejected;
@@ -4437,6 +4439,172 @@ static int grep_revision_index_add_trees(struct index_state *index,
 	return 0;
 }
 
+/* Bound optional lookahead even when the requested history shares little. */
+#define GREP_REVISION_PROBE_READS  256
+#define GREP_REVISION_PROBE_BYTES  (4 * 1024 * 1024)
+#define GREP_REVISION_PROBE_ITEMS  8192
+#define GREP_REVISION_PROBE_MEMORY (1024 * 1024)
+
+struct grep_revision_probe_item {
+	struct object_id oid;
+	size_t trees;
+	char path[FLEX_ARRAY];
+};
+
+struct grep_revision_lookahead {
+	struct index_state *index;
+	struct prio_queue pending;
+	uintmax_t trees;
+	size_t memory, peak_memory;
+	uint64_t count_ns;
+	int trace_enabled;
+};
+
+static int grep_revision_probe_compare(const void *a, const void *b, void *data UNUSED)
+{
+	const struct grep_revision_probe_item *one = a, *two = b;
+
+	if (one->trees != two->trees)
+		return one->trees > two->trees ? -1 : 1;
+	return strcmp(one->path, two->path);
+}
+
+static int grep_revision_probe_children(struct grep_revision_lookahead *probe,
+					struct tree_desc tree, const char *parent)
+{
+	struct strbuf path = STRBUF_INIT;
+	int ret = -1;
+
+	tree.flags |= TREE_DESC_SILENT_ERRORS;
+	while (tree.size) {
+		struct name_entry entry = tree.entry;
+		struct grep_revision_probe_item *item;
+		struct object_id oid;
+		size_t trees, allocation;
+		uint64_t start = 0;
+		int entries;
+
+		if (update_tree_entry_gently(&tree))
+			goto done;
+		if (!S_ISDIR(entry.mode))
+			continue;
+		strbuf_reset(&path);
+		strbuf_addstr(&path, parent);
+		strbuf_addstr(&path, entry.path);
+		strbuf_addch(&path, '/');
+		if (probe->trace_enabled)
+			start = getnanotime();
+		entries = cache_tree_get_path(probe->index, path.buf, &oid, &trees);
+		if (probe->trace_enabled)
+			probe->count_ns += getnanotime() - start;
+		/* Leave invalid ancestors and any useful children to the walker. */
+		if (entries <= 0)
+			continue;
+		if (oideq(&oid, &entry.oid)) {
+			if (trees > UINTMAX_MAX - probe->trees)
+				goto done;
+			probe->trees += trees;
+			continue;
+		}
+		if (trees <= 1)
+			continue;
+		allocation = st_add(sizeof(*item), path.len + 1);
+		if (prio_queue_size(&probe->pending) >= GREP_REVISION_PROBE_ITEMS ||
+		    allocation > GREP_REVISION_PROBE_MEMORY - probe->memory)
+			goto done;
+		FLEX_ALLOC_STR(item, path, path.buf);
+		oidcpy(&item->oid, &entry.oid);
+		item->trees = trees;
+		prio_queue_put(&probe->pending, item);
+		probe->memory += allocation;
+		if (probe->memory > probe->peak_memory)
+			probe->peak_memory = probe->memory;
+	}
+	ret = 0;
+done:
+	strbuf_release(&path);
+	return ret;
+}
+
+static int grep_revision_index_lookahead(struct index_state *index,
+					 struct grep_revision_index_probe *root,
+					 size_t required)
+{
+	struct grep_revision_lookahead probe = {
+		.index = index,
+		.pending = { .compare = grep_revision_probe_compare },
+		.trace_enabled = trace2_is_enabled(),
+	};
+	struct grep_revision_probe_item *item;
+	unsigned int reads = 0;
+	size_t bytes = 0;
+	int accepted = 0;
+
+	trace2_region_enter("grep", "revision_index_probe", index->repo);
+	/* Reserve the queue once, so its allocation is included in the bound. */
+	ALLOC_ARRAY(probe.pending.array, GREP_REVISION_PROBE_ITEMS);
+	probe.pending.alloc = GREP_REVISION_PROBE_ITEMS;
+	probe.memory = st_mult(probe.pending.alloc, sizeof(*probe.pending.array));
+	probe.peak_memory = probe.memory;
+	if (grep_revision_probe_children(&probe, root->tree, ""))
+		goto done;
+	/* A failed probe should not exceed the estimated index-decoding cost. */
+	while (reads < GREP_REVISION_PROBE_READS && reads < required &&
+	       (item = prio_queue_get(&probe.pending))) {
+		struct object_info info = OBJECT_INFO_INIT;
+		struct tree_desc tree;
+		enum object_type type;
+		size_t size;
+		void *buffer = NULL;
+		int failed;
+		unsigned int flags = OBJECT_INFO_SKIP_FETCH_OBJECT | OBJECT_INFO_QUICK;
+
+		info.typep = &type;
+		info.sizep = &size;
+		/* Check size before asking the object database to allocate contents. */
+		failed = odb_read_object_info_extended(index->repo->objects,
+						       &item->oid, &info, flags) < 0 ||
+			 type != OBJ_TREE || size > GREP_REVISION_PROBE_BYTES - bytes;
+		if (!failed) {
+			info.contentp = &buffer;
+			reads++;
+			failed = odb_read_object_info_extended(index->repo->objects,
+							       &item->oid, &info, flags) < 0 ||
+				 type != OBJ_TREE || size > GREP_REVISION_PROBE_BYTES - bytes;
+		}
+		if (!failed) {
+			bytes += size;
+			failed = init_tree_desc_gently(&tree, &item->oid, buffer, size,
+						       TREE_DESC_SILENT_ERRORS) ||
+				 grep_revision_probe_children(&probe, tree, item->path);
+		}
+		free(buffer);
+		probe.memory -= sizeof(*item) + strlen(item->path) + 1;
+		free(item);
+		if (failed)
+			break;
+		/* These probe reads will be repeated by the ordinary traversal. */
+		if (probe.trees >= reads && probe.trees - reads >= required) {
+			accepted = 1;
+			break;
+		}
+	}
+done:
+	while ((item = prio_queue_get(&probe.pending)))
+		free(item);
+	clear_prio_queue(&probe.pending);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_reads", reads);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_bytes", bytes);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_trees", probe.trees);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_count_us",
+			   probe.count_ns / 1000);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_peak_memory",
+			   probe.peak_memory);
+	trace2_data_intmax("grep", index->repo, "revision_index_probe_accepted", accepted);
+	trace2_region_leave("grep", "revision_index_probe", index->repo);
+	return accepted;
+}
+
 static int grep_revision_index_accept_entries(struct index_state *index,
 					      size_t decoded_entries, void *data)
 {
@@ -4500,6 +4668,9 @@ static int grep_revision_index_accept_entries(struct index_state *index,
 	 */
 	accepted = trees && trees >= decoded_entries / 16 +
 					!!(decoded_entries % 16);
+	if (!accepted && !probe->paths->nr && !probe->excluded.nr)
+		accepted = grep_revision_index_lookahead(index, probe,
+							 decoded_entries / 16 + !!(decoded_entries % 16));
 done:
 	strbuf_release(&path);
 	return accepted;
@@ -4664,8 +4835,7 @@ static int grep_tree_from_matching_index(
 		matching_entries = (const struct cache_entry *const *)(index->cache + first);
 	}
 	if (query->trace_enabled)
-		trace2_data_intmax("grep", opt->repo,
-				   "revision_index_reused", 1);
+		query->revision_index_reused++;
 	for (unsigned int i = 0; i < count; i++) {
 		const struct cache_entry *ce = matching_entries[i];
 		const char *slash = strrchr(ce->name, '/');
@@ -4956,6 +5126,9 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 				break;
 		}
 	}
+	if (query.revision_index_reused)
+		trace2_data_intmax("grep", opt->repo, "revision_index_reused",
+				   query.revision_index_reused);
 	if (query.objects) {
 		trace2_data_intmax("grep", the_repository,
 				   "content_index_tree_objects", query.objects);
