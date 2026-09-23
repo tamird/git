@@ -1050,8 +1050,15 @@ static int get_pack(struct fetch_pack_args *args,
 
 	if (!args->keep_pack && unpack_limit && !index_pack_args &&
 	    !no_ref_delta) {
+		int saved_errno = errno;
 
-		if (read_pack_header(demux.out, &header))
+		trace2_region_enter("fetch-pack", "read_pack_header", the_repository);
+		errno = saved_errno;
+		ret = read_pack_header(demux.out, &header);
+		saved_errno = errno;
+		trace2_region_leave("fetch-pack", "read_pack_header", the_repository);
+		errno = saved_errno;
+		if (ret)
 			die(_("protocol error: bad pack header"));
 		pass_header = 1;
 		if (ntohl(header.hdr_entries) < unpack_limit)
@@ -2214,12 +2221,18 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 				state = FETCH_SEND_REQUEST;
 			}
 			break;
-		case FETCH_GET_PACK:
+		case FETCH_GET_PACK: {
+			int saved_errno;
+
 			trace2_region_leave("fetch-pack",
 					    "negotiation_v2",
 					    the_repository);
 			trace2_data_intmax("negotiation_v2", the_repository,
 					   "total_rounds", negotiation_round);
+			saved_errno = errno;
+			trace2_region_enter("fetch-pack", "receive_pack_response",
+					    the_repository);
+			errno = saved_errno;
 			/* Check for shallow-info section */
 			if (process_section_header(&reader, "shallow-info", 1))
 				receive_shallow_info(args, &reader, shallows, si);
@@ -2236,6 +2249,10 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 			reader.options &= ~PACKET_READ_REDACT_URI_PATH;
 
 			process_section_header(&reader, "packfile", 0);
+			saved_errno = errno;
+			trace2_region_leave("fetch-pack", "receive_pack_response",
+					    the_repository);
+			errno = saved_errno;
 
 			/*
 			 * this is the final request we'll make of the server;
@@ -2254,6 +2271,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 
 			state = FETCH_DONE;
 			break;
+		}
 		case FETCH_DONE:
 			continue;
 		}
