@@ -231,6 +231,56 @@ test_expect_success '--follow refreshes Bloom keys for each history line' '
 	test_cmp expect actual
 '
 
+test_expect_success '--follow author filtering preserves conflicting parent paths' '
+	(
+		cd diamond &&
+		git checkout --orphan author-base &&
+		git rm -rf . &&
+		GIT_AUTHOR_NAME=Keep &&
+		export GIT_AUTHOR_NAME &&
+		printf "$test_lines" >A &&
+		cp A B &&
+		git add A B &&
+		test_tick &&
+		git commit -m P &&
+
+		git checkout -b author-left &&
+		git rm B &&
+		test_tick &&
+		git commit --author="Drop <drop@example.com>" -m X &&
+		test_commit Y unrelated &&
+		git mv A left &&
+		test_tick &&
+		git commit -m Z &&
+
+		git checkout -b author-right author-base &&
+		git rm A &&
+		test_tick &&
+		git commit -m Q &&
+		git mv B right &&
+		test_tick &&
+		git commit -m R &&
+		git checkout author-left &&
+		git merge -s ours --no-commit author-right &&
+		git mv left common &&
+		git rm unrelated &&
+		test_tick &&
+		git commit -m M &&
+		git commit-graph write --reachable --changed-paths &&
+
+		# Q records P with path B before visiting Z, Y, and X. Y
+		# activates Bloom elision for A. X has only P queued, but must
+		# not overwrite its B path when the author filter rejects X.
+		git -c core.commitGraph=false log --follow --author=Keep \
+			--name-status --format=%s -- common >expect &&
+		test_grep "^A[[:space:]]B$" expect &&
+		test_grep ! "^A[[:space:]]A$" expect &&
+		git -c core.commitGraph=true log --follow --author=Keep \
+			--name-status --format=%s -- common >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success 'setup repeated commit across a rename' '
 	git init repeated &&
 	test_commit -C repeated A old &&

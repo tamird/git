@@ -1268,6 +1268,14 @@ static const char *recall_follow_pathspec(struct rev_info *opt,
 	return slot ? *slot : NULL;
 }
 
+int follow_pathspec_matches_active(struct rev_info *opt, struct commit *commit)
+{
+	const char *current = pathspec_single_path(&opt->diffopt.pathspec);
+	const char *stored = recall_follow_pathspec(opt, commit);
+
+	return current && (!stored || !strcmp(current, stored));
+}
+
 void restore_follow_pathspec(struct rev_info *opt, struct commit *commit)
 {
 	const char *current;

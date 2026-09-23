@@ -5256,6 +5256,29 @@ static int commit_early_ignore(struct rev_info *revs, struct commit *commit)
 	return 0;
 }
 
+static int commit_ignore_before_match(struct rev_info *revs,
+				      struct commit *commit)
+{
+	if (commit_early_ignore(revs, commit))
+		return 1;
+	if (revs->min_age != -1 &&
+	    comparison_date(revs, commit) > revs->min_age)
+		return 1;
+	if (revs->max_age_as_filter != -1 &&
+	    comparison_date(revs, commit) < revs->max_age_as_filter)
+		return 1;
+	if (revs->min_parents || (revs->max_parents >= 0)) {
+		int n = commit_list_count(commit->parents);
+		if ((n < revs->min_parents) ||
+		    ((revs->max_parents >= 0) && (n > revs->max_parents)))
+			return 1;
+	}
+	if (revs->prune && revs->dense &&
+	    (commit->object.flags & TREESAME) && !want_ancestry(revs))
+		return 1;
+	return 0;
+}
+
 /*
  * Decide whether this commit is shown or ignored.  Keep it a pure
  * predicate: callers such as the commit graph depend on it having no
@@ -5264,22 +5287,7 @@ static int commit_early_ignore(struct rev_info *revs, struct commit *commit)
  */
 enum commit_action get_commit_action(struct rev_info *revs, struct commit *commit)
 {
-	if (commit_early_ignore(revs, commit))
-		return commit_ignore;
-	if (revs->min_age != -1 &&
-	    comparison_date(revs, commit) > revs->min_age)
-			return commit_ignore;
-	if (revs->max_age_as_filter != -1 &&
-	    comparison_date(revs, commit) < revs->max_age_as_filter)
-			return commit_ignore;
-	if (revs->min_parents || (revs->max_parents >= 0)) {
-		int n = commit_list_count(commit->parents);
-		if ((n < revs->min_parents) ||
-		    ((revs->max_parents >= 0) && (n > revs->max_parents)))
-			return commit_ignore;
-	}
-	if (revs->prune && revs->dense &&
-	    (commit->object.flags & TREESAME) && !want_ancestry(revs))
+	if (commit_ignore_before_match(revs, commit))
 		return commit_ignore;
 	if (!commit_match(commit, revs))
 		return commit_ignore;
@@ -5450,13 +5458,11 @@ static enum rev_walk_mode get_walk_mode(struct rev_info *revs)
 	return REV_WALK_STREAMING;
 }
 
-static int skip_bloom_negative_follow_commit(struct rev_info *revs,
-					     enum rev_walk_mode mode,
-					     struct commit *commit)
+static struct commit *follow_bloom_elision_parent(struct rev_info *revs,
+						  enum rev_walk_mode mode,
+						  struct commit *commit)
 {
 	struct commit_list *parents;
-	struct commit *parent;
-	enum revision_bloom_filter_result bloom_ret;
 
 	if (mode != REV_WALK_STREAMING ||
 	    !revs->diffopt.flags.follow_renames || revs->prune ||
@@ -5464,12 +5470,33 @@ static int skip_bloom_negative_follow_commit(struct rev_info *revs,
 	    revs->boundary || revs->rewrite_parents || revs->children.name ||
 	    revs->reverse || revs->skip_count >= 0 || revs->max_count_type ||
 	    revs->count || revs->full_diff || revs->remerge_diff)
-		return 0;
+		return NULL;
 
 	parents = get_saved_parents(revs, commit);
 	if (!parents || parents->next)
+		return NULL;
+	return parents->item;
+}
+
+static void elide_follow_commit(struct rev_info *revs, struct commit *commit,
+				struct commit *parent)
+{
+	record_follow_pathspec(revs, parent);
+	free_commit_buffer(revs->repo->parsed_objects, commit);
+	commit_list_free(commit->parents);
+	commit->parents = NULL;
+	count_bloom_filter_commits_elided++;
+}
+
+static int skip_bloom_negative_follow_commit(struct rev_info *revs,
+					     enum rev_walk_mode mode,
+					     struct commit *commit)
+{
+	struct commit *parent = follow_bloom_elision_parent(revs, mode, commit);
+	enum revision_bloom_filter_result bloom_ret;
+
+	if (!parent)
 		return 0;
-	parent = parents->item;
 
 	restore_follow_pathspec(revs, commit);
 	if (revs->follow_bloom_elision != FOLLOW_BLOOM_ELISION_ACTIVE)
@@ -5484,11 +5511,44 @@ static int skip_bloom_negative_follow_commit(struct rev_info *revs,
 		return 0;
 	}
 
-	record_follow_pathspec(revs, parent);
-	free_commit_buffer(revs->repo->parsed_objects, commit);
-	commit_list_free(commit->parents);
-	commit->parents = NULL;
-	count_bloom_filter_commits_elided++;
+	elide_follow_commit(revs, commit, parent);
+	return 1;
+}
+
+static int skip_bloom_negative_before_match(struct rev_info *revs,
+					    enum rev_walk_mode mode,
+					    struct commit *commit)
+{
+	struct commit *parent;
+
+	if ((!revs->grep_filter.pattern_list && !revs->grep_filter.header_list) ||
+	    revs->line_level_traverse)
+		return 0;
+	parent = follow_bloom_elision_parent(revs, mode, commit);
+	if (!parent || !commit->parents || commit->parents->next ||
+	    commit->parents->item != parent ||
+	    prio_queue_size(&revs->commit_queue) != 1 ||
+	    prio_queue_peek(&revs->commit_queue) != parent ||
+	    !follow_pathspec_matches_active(revs, commit) ||
+	    !follow_pathspec_matches_active(revs, parent) ||
+	    commit_ignore_before_match(revs, commit))
+		return 0;
+
+	/*
+	 * A rejected message normally leaves followed paths untouched. Only
+	 * elide early when the parent is next and remembering the active path
+	 * cannot change either commit's effective path. In particular, do not
+	 * restore a branch's path or overwrite a conflicting parent path here.
+	 *
+	 * A failed proof must also leave the ordinary diff's Bloom state and
+	 * statistics alone. It may query again if the message later matches.
+	 */
+	if (check_maybe_different_in_bloom_filter(revs, commit, NULL, 0) !=
+	    REVISION_BLOOM_FILTER_DEFINITELY_NOT)
+		return 0;
+
+	count_bloom_filter_definitely_not++;
+	elide_follow_commit(revs, commit, parent);
 	return 1;
 }
 
@@ -5553,6 +5613,10 @@ static struct commit *get_revision_1(struct rev_info *revs)
 		case REV_WALK_LIMITED:
 			break;
 		}
+
+		if (revs->follow_bloom_elision == FOLLOW_BLOOM_ELISION_ACTIVE &&
+		    skip_bloom_negative_before_match(revs, mode, commit))
+			continue;
 
 		switch (simplify_commit(revs, commit)) {
 		case commit_ignore:

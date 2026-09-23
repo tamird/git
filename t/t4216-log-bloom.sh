@@ -272,6 +272,56 @@ test_expect_success '--follow keeps an all-positive history' '
 	)
 '
 
+test_expect_success '--follow rejects unchanged paths before matching authors' '
+	(
+		cd follow-positive &&
+		test_commit four tracked &&
+		test_commit --author "Other Author <other@example.com>" skipped unrelated &&
+		test_commit --author "Other Author <other@example.com>" rejected tracked &&
+		test_commit activate unrelated &&
+		git commit-graph write --reachable --changed-paths &&
+
+		for author in "$GIT_AUTHOR_NAME" "Other Author"
+		do
+			git -c core.commitGraph=false log --follow --name-status \
+				--format=%s --author="$author" -- tracked >expect &&
+			git -c core.commitGraph=true log --follow --name-status \
+				--format=%s --author="$author" -- tracked >actual &&
+			test_cmp expect actual || return 1
+		done &&
+		test_grep -x rejected actual &&
+
+		# The top unchanged commit activates elision. The next commit
+		# changes tracked but fails the author filter; that failed Bloom
+		# proof must not prevent skipping the unchanged commit below it.
+		for graph in false true
+		do
+			GIT_TRACE2_EVENT="$PWD/author-$graph.event" \
+				git -c core.commitGraph=$graph log --follow --format=%s \
+				--author="$GIT_AUTHOR_NAME" -- tracked >actual-$graph &&
+			grep "\"event\":\"timer\".*\"name\":\"commit-match/message\"," \
+				author-$graph.event >author-$graph.timer || return 1
+		done &&
+		printf "four\nthree\ntwo\none\n" >expect &&
+		test_cmp expect actual-false &&
+		test_cmp expect actual-true &&
+		without=$(sed -n "s/.*\"intervals\":\\([0-9]*\\),.*/\\1/p" author-false.timer) &&
+		with=$(sed -n "s/.*\"intervals\":\\([0-9]*\\),.*/\\1/p" author-true.timer) &&
+		test "$with" -lt "$without" &&
+
+		# A layer without filters must still load and match its commits.
+		test_commit --author "Other Author <other@example.com>" missing tracked &&
+		git commit-graph write --reachable --split --no-changed-paths &&
+		test_commit activate-again unrelated &&
+		git commit-graph write --reachable --split=no-merge --changed-paths &&
+		git -c core.commitGraph=false log --follow --name-status \
+			--format=%s --author="$GIT_AUTHOR_NAME" -- tracked >expect &&
+		git -c core.commitGraph=true log --follow --name-status \
+			--format=%s --author="$GIT_AUTHOR_NAME" -- tracked >actual &&
+		test_cmp expect actual
+	)
+'
+
 test_expect_success '--follow Bloom skips preserve diff output' '
 	setup "--name-status --follow -- file5_renamed" &&
 	test_grep "\"definitely_not\":[1-9]" "$TRASH_DIRECTORY/trace.perf" &&

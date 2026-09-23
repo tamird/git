@@ -28,6 +28,7 @@ int log_tree_diff_flush(struct rev_info *);
 int log_tree_commit(struct rev_info *, struct commit *);
 void restore_follow_pathspec(struct rev_info *, struct commit *);
 void record_follow_pathspec(struct rev_info *, struct commit *);
+int follow_pathspec_matches_active(struct rev_info *, struct commit *);
 void release_follow_pathspec_slab(struct rev_info *);
 void show_log(struct rev_info *opt);
 void format_decorations(struct strbuf *sb, const struct commit *commit,
