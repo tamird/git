@@ -755,21 +755,34 @@ static struct line_log_data *line_log_data_merge(struct line_log_data *a,
 	return head;
 }
 
+static int line_log_data_has_ranges(const struct line_log_data *range)
+{
+	for (; range; range = range->next)
+		if (range->ranges.nr)
+			return 1;
+	return 0;
+}
+
 static void add_line_range(struct rev_info *revs, struct commit *commit,
 			   struct line_log_data *range)
 {
 	struct line_log_data *old_line = NULL;
 	struct line_log_data *new_line = NULL;
+	int had_ranges;
 
 	old_line = lookup_decoration(&revs->line_log_data, &commit->object);
+	had_ranges = line_log_data_has_ranges(old_line);
 	if (old_line && range) {
 		new_line = line_log_data_merge(old_line, range);
 		free_line_log_data(old_line);
 	} else if (range)
 		new_line = line_log_data_copy(range);
 
-	if (new_line)
+	if (new_line) {
+		if (!had_ranges && line_log_data_has_ranges(new_line))
+			revs->line_log_pending++;
 		add_decoration(&revs->line_log_data, &commit->object, new_line);
+	}
 }
 
 static void clear_commit_line_range(struct rev_info *revs, struct commit *commit)
@@ -1212,6 +1225,12 @@ int line_log_process_ranges_arbitrary_commit(struct rev_info *rev, struct commit
 	int changed = 0;
 
 	if (range) {
+		/* Keep the ranges for output, but consume this frontier entry. */
+		if (rev->topo_order && !rev->no_walk && !rev->reflog_info &&
+		    line_log_data_has_ranges(range)) {
+			assert(rev->line_log_pending);
+			rev->line_log_pending--;
+		}
 		if (commit->parents && !bloom_filter_check(rev, commit, range)) {
 			add_line_range(rev, commit->parents->item, range);
 			clear_commit_line_range(rev, commit);
@@ -1287,4 +1306,5 @@ static void free_void_line_log_data(void *data)
 void line_log_free(struct rev_info *rev)
 {
 	clear_decoration(&rev->line_log_data, free_void_line_log_data);
+	rev->line_log_pending = 0;
 }

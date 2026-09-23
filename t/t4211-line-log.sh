@@ -917,4 +917,51 @@ test_expect_success 'line-log reports completed work at default trace depth' '
 	)
 '
 
+test_expect_success 'line-log stops when all tracked ranges end' '
+	test_when_finished "rm -f line-log-frontier.trace" &&
+	git checkout -b line-frontier parent-oids &&
+	frontier_parent=$(git rev-parse HEAD) &&
+	test_commit frontier-add added frontier-one &&
+	frontier_add=$(git rev-parse HEAD) &&
+	test_commit frontier-change added frontier-two &&
+	frontier_change=$(git rev-parse HEAD) &&
+	cat >expect <<-EOF &&
+	$frontier_change $frontier_add frontier-change
+	$frontier_add $frontier_parent frontier-add
+	EOF
+	line_log_trace line-log-frontier.trace -c core.commitGraph=false \
+		log --no-renames --format="%H %P %s" --no-patch -L1,1:added \
+		>actual &&
+	test_cmp expect actual &&
+	test_line_log_stats line-log-frontier.trace 0 0 2 0 2 0 2 2 2 &&
+	cat >expect <<-EOF &&
+	frontier-add
+	frontier-change
+	EOF
+	git log --reverse --format=%s --no-patch -L1,1:added >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'line-log keeps an older live range after another ends' '
+	cat >expect <<-EOF &&
+	frontier-change
+	frontier-add
+	Modify func2() in file.c
+	Add func1() and func2() in file.c
+	EOF
+	git log --no-renames --format=%s --no-patch \
+		-L1,1:added -L:func2:file.c >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'line-log rewrites parents after tracked ranges end' '
+	cat >expect <<-EOF &&
+	$frontier_change $frontier_add frontier-change
+	$frontier_add  frontier-add
+	EOF
+	git log --no-renames --parents --format="%H %P %s" --no-patch \
+		-L1,1:added >actual &&
+	test_cmp expect actual
+'
+
 test_done

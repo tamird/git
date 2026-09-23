@@ -5562,6 +5562,12 @@ static struct commit *get_revision_1(struct rev_info *revs)
 	while (1) {
 		struct commit *commit;
 
+		/* No later commit can acquire line ranges after this frontier ends. */
+		if (revs->line_level_traverse && revs->topo_order &&
+		    !want_ancestry(revs) && mode != REV_WALK_REFLOG &&
+		    mode != REV_WALK_NO_WALK && !revs->line_log_pending)
+			return NULL;
+
 		switch (mode) {
 		case REV_WALK_REFLOG:
 			commit = next_reflog_entry(revs->reflog_info);

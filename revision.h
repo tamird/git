@@ -400,6 +400,8 @@ struct rev_info {
 
 	/* line level range that we are chasing */
 	struct decoration line_log_data;
+	/* Unprocessed commits with nonempty line ranges, in topological order. */
+	size_t line_log_pending;
 
 	/* copies of the parent lists, for --full-diff display */
 	struct saved_parents *saved_parents_slab;
