@@ -1498,7 +1498,10 @@ done:
 	return ret;
 }
 
-/* Return 1 for no changes, 0 for a created stash, and -1 on failure. */
+/*
+ * Callers prepare the identity and write the refreshed index.
+ * Return 1 for no changes, 0 for a created stash, and -1 on failure.
+ */
 static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_buf,
 			   int include_untracked, int patch_mode,
 			   struct interactive_options *interactive_opts,
@@ -1517,15 +1520,6 @@ static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_b
 	struct strbuf msg = STRBUF_INIT;
 	struct strbuf commit_tree_label = STRBUF_INIT;
 	struct strbuf untracked_files = STRBUF_INIT;
-
-	prepare_fallback_ident("git stash", "git@stash");
-
-	repo_read_index_preload(the_repository, NULL, 0);
-	if (repo_refresh_and_write_index(the_repository, REFRESH_QUIET, 0, 0,
-					 NULL, NULL, NULL) < 0) {
-		ret = error(_("could not write index"));
-		goto done;
-	}
 
 	if (repo_get_oid(the_repository, "HEAD", &info->b_commit)) {
 		if (!quiet)
@@ -1660,11 +1654,20 @@ static int create_stash(int argc, const char **argv, const char *prefix UNUSED,
 	if (!check_changes_tracked_files(&ps))
 		return 0;
 
+	prepare_fallback_ident("git stash", "git@stash");
+	repo_read_index_preload(the_repository, NULL, 0);
+	if (repo_refresh_and_write_index(the_repository, REFRESH_QUIET, 0, 0,
+					 NULL, NULL, NULL) < 0) {
+		ret = error(_("could not write index"));
+		goto done;
+	}
+
 	ret = do_create_stash(&ps, &stash_msg_buf, 0, 0, NULL, 0, &info,
 			      NULL, 0);
 	if (!ret)
 		printf_ln("%s", oid_to_hex(&info.w_commit));
 
+done:
 	free_stash_info(&info);
 	strbuf_release(&stash_msg_buf);
 	return ret;
@@ -1729,6 +1732,7 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 
 	if (stash_msg)
 		strbuf_addstr(&stash_msg_buf, stash_msg);
+	prepare_fallback_ident("git stash", "git@stash");
 	ret = do_create_stash(ps, &stash_msg_buf, include_untracked, patch_mode,
 			      interactive_opts, only_staged, &info, &patch, quiet);
 	if (ret < 0)
