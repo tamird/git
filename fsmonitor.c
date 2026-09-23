@@ -421,23 +421,29 @@ static int find_icase_match(
 			(size_t)(slash - component) : remaining;
 		size_t j;
 		size_t dir_start = SIZE_MAX;
+		size_t prefix_len = 0;
 
 		if (stats->scans == scan_limit)
 			return -1;
 		stats->scans++;
 
-		if (component_len &&
-		    fspathncmp(component_name, component, 1)) {
+		while (prefix_len < component_len && prefix_len < candidate_len &&
+		       !fspathncmp(component_name + prefix_len,
+				   component + prefix_len, 1))
+			prefix_len++;
+		if (prefix_len < candidate_len) {
 			size_t lo = i + 1;
 			size_t hi = range_end;
 
-			/* Raw first-byte groups are contiguous in index order. */
+			/* Include the byte that makes this prefix incompatible. */
+			prefix_len++;
+			/* Raw prefix groups are contiguous in index order. */
 			while (lo < hi) {
 				size_t mid = lo + (hi - lo) / 2;
 				const char *next_component =
 					istate->cache[mid]->name + parent_len;
 
-				if (*next_component == *component)
+				if (!strncmp(next_component, component, prefix_len))
 					lo = mid + 1;
 				else
 					hi = mid;

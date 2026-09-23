@@ -1859,8 +1859,8 @@ test_expect_success CASE_INSENSITIVE_FS 'fsmonitor file case wrong on disk' '
 	git init file_case_wrong &&
 	(
 		cd file_case_wrong &&
-		# Unrelated siblings must not exhaust the case-correction budget.
-		test_seq -f "zzzz-%04g" 1 1100 >names &&
+		# Siblings sharing the dir1 prefix must not exhaust the scan budget.
+		test_seq -f "dirz-%04g" 1 1100 >names &&
 		while read name
 		do
 			echo x >"$name" || return 1
