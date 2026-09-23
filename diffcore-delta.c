@@ -89,6 +89,7 @@ struct span_sample_entry {
 struct span_sample_state {
 	struct span_sample_entry **buckets;
 	uint64_t build, selected, first, repeat_hit, repeat_miss;
+	uint64_t first_build_ns, repeat_build_ns;
 	uint64_t miss_gap_le_4096, miss_gap_le_65536, miss_gap_gt_65536;
 	size_t keys;
 	int invalid, truncated, registered;
@@ -134,6 +135,10 @@ static void span_sample_report(void)
 			   span_sample.repeat_hit);
 	trace2_data_intmax("diff", NULL, "spanhash/build-sample/repeat-miss",
 			   span_sample.repeat_miss);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/first-build-ns",
+			   span_sample.first_build_ns);
+	trace2_data_intmax("diff", NULL, "spanhash/build-sample/repeat-build-ns",
+			   span_sample.repeat_build_ns);
 	trace2_data_intmax("diff", NULL, "spanhash/build-sample/miss-gap-le-4096",
 			   span_sample.miss_gap_le_4096);
 	trace2_data_intmax("diff", NULL, "spanhash/build-sample/miss-gap-le-65536",
@@ -146,11 +151,12 @@ static void span_sample_report(void)
 /* Called under span_cache_mutex; gaps count build lookups, not time or bytes. */
 static uint64_t span_sample_probe(struct repository *r,
 				  const struct object_id *oid,
-				  enum span_hash_mode mode)
+				  enum span_hash_mode mode, uint64_t build_ns)
 {
 	struct span_sample_entry *entry;
 	size_t bucket;
 	uint64_t gap = 0;
+	uint64_t *build_total;
 
 	if (!trace2_is_enabled() || !oid->algo || span_sample.invalid)
 		return 0;
@@ -204,9 +210,16 @@ static uint64_t span_sample_probe(struct repository *r,
 		span_sample.buckets[bucket] = entry;
 		span_sample.keys++;
 		span_sample.first++;
+		build_total = &span_sample.first_build_ns;
 	} else {
 		gap = span_sample.build - entry->last_build;
+		build_total = &span_sample.repeat_build_ns;
 	}
+	if (build_ns > INTMAX_MAX - *build_total) {
+		span_sample.invalid = 1;
+		return 0;
+	}
+	*build_total += build_ns;
 	entry->last_build = span_sample.build;
 	span_sample.selected++;
 	return gap;
@@ -386,13 +399,13 @@ done:
 }
 
 static void span_sample_record(struct repository *r, const struct object_id *oid,
-			       enum span_hash_mode mode, int hit)
+			       enum span_hash_mode mode, int hit, uint64_t build_ns)
 {
 	uint64_t sample_gap;
 
 	/* The mode is known only after lookup or hashing. */
 	pthread_mutex_lock(&span_cache_mutex);
-	sample_gap = span_sample_probe(r, oid, mode);
+	sample_gap = span_sample_probe(r, oid, mode, build_ns);
 	if (sample_gap) {
 		if (hit)
 			span_sample.repeat_hit++;
@@ -643,6 +656,7 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 	if (!count) {
 		int saved_errno = errno;
 		enum span_hash_mode mode;
+		uint64_t build_ns = 0;
 		int hit;
 
 		if (one->oid_data_unreplaced)
@@ -654,13 +668,13 @@ static struct spanhash_top *get_spanhash(struct repository *r,
 			errno = saved_errno;
 			count = hash_chars(r, one, &mode);
 			saved_errno = errno;
-			trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
+			build_ns = trace2_timer_stop(TRACE2_TIMER_ID_DIFF_SPANHASH_BUILD);
 			if (one->oid_data_unreplaced)
 				span_cache_insert(r, one, mode, count);
 		}
 		/* Prepopulation probes do not necessarily lead to a build lookup. */
 		if (one->oid_data_unreplaced)
-			span_sample_record(r, &one->oid, mode, hit);
+			span_sample_record(r, &one->oid, mode, hit, build_ns);
 		errno = saved_errno;
 		if (count_p)
 			*count_p = count;
