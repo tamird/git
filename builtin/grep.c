@@ -3418,7 +3418,7 @@ static int grep_tree_rooted_recursive_basename(
 {
 	const char *recursive;
 
-	if (item->prefix || item->magic != PATHSPEC_GLOB)
+	if (item->prefix || (item->magic & ~PATHSPEC_GLOB))
 		return 0;
 	recursive = strstr(item->match, "/**/");
 	if (!recursive || recursive == item->match ||
@@ -4363,6 +4363,7 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 		return 1;
 	for (int i = 0; i < pathspec->nr; i++) {
 		const struct pathspec_item *item = &pathspec->items[i];
+		const char *basename;
 
 		if (!(item->magic & ~(PATHSPEC_LITERAL | PATHSPEC_FROMTOP)) &&
 		    item->nowildcard_len == item->len) {
@@ -4374,6 +4375,11 @@ static int grep_revision_index_pathspec(const struct pathspec *pathspec,
 			strbuf_reset(&path);
 			strbuf_add(&path, item->match, item->len);
 			strbuf_complete(&path, '/');
+			string_list_append(probe->paths, path.buf);
+		} else if (grep_tree_rooted_recursive_basename(item, &basename)) {
+			positive++;
+			strbuf_reset(&path);
+			strbuf_add(&path, item->match, item->nowildcard_len);
 			string_list_append(probe->paths, path.buf);
 		} else if (!item->magic && !item->prefix &&
 			   !item->nowildcard_len && item->len &&
@@ -5217,7 +5223,8 @@ static int grep_objects(struct grep_opt *opt, const struct pathspec *pathspec,
 
 		if (item->magic & PATHSPEC_EXCLUDE)
 			continue;
-		if (grep_tree_rooted_recursive_basename(item, &basename)) {
+		if (item->magic == PATHSPEC_GLOB &&
+		    grep_tree_rooted_recursive_basename(item, &basename)) {
 			has_rooted_recursive_basename = 1;
 			continue;
 		}

@@ -6637,13 +6637,21 @@ test_expect_success 'revision grep finds reuse below changed directories' '
 		for version in 2 4
 		do
 			git update-index --index-version "$version" &&
-			for selection in broad literal nested excluded
+			for selection in broad literal nested excluded rooted-default \
+				rooted-glob rooted-overlapping rooted-disjoint rooted-wildcard
 			do
 				case "$selection" in
 				broad) set -- "*target.txt" ;;
 				literal) set -- a ;;
 				nested) set -- a/deep a/deep/child a/deep ;;
 				excluded) set -- "*target.txt" ":!b/**" ;;
+				rooted-default) set -- "a/**/target.txt" ;;
+				rooted-glob) set -- ":(glob)a/**/target.txt" ;;
+				rooted-overlapping)
+					set -- "a/**/target.txt" "a/deep/**/other.txt" \
+						"a/**/target.txt" ;;
+				rooted-disjoint) set -- "a/**/target.txt" "b/**/target.txt" ;;
+				rooted-wildcard) set -- "a/**/*?target.txt" ;;
 				esac &&
 				GIT_INDEX_FILE="$PWD/missing-index" \
 					git grep --text --no-content-index --threads=1 -n \
@@ -6656,10 +6664,9 @@ test_expect_success 'revision grep finds reuse below changed directories' '
 				test_trace2_data grep revision_index_probe_accepted 1 \
 					<"nested-$version-$selection.trace" &&
 				expected_reuse=1 &&
-				if test "$selection" = broad || test "$selection" = excluded
-				then
-					expected_reuse=2
-				fi &&
+				case "$selection" in
+				broad|excluded|rooted-disjoint) expected_reuse=2 ;;
+				esac &&
 				test_trace2_data_singular grep revision_index_reused "$expected_reuse" \
 					<"nested-$version-$selection.trace" || return 1
 			done || return 1
