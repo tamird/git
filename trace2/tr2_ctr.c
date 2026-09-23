@@ -545,6 +545,18 @@ static struct tr2_counter_metadata tr2_counter_metadata[TRACE2_NUMBER_OF_COUNTER
 		.category = "fetch-pack",
 		.name = "mark-complete/packed-invalid-total",
 	},
+	[TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_COUNT] = {
+		.category = "fetch-pack",
+		.name = "packfile-uri/count-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_WORKER_SLOTS] = {
+		.category = "fetch-pack",
+		.name = "packfile-uri/worker-slots-total",
+	},
+	[TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_ORDERED_BATCHES] = {
+		.category = "fetch-pack",
+		.name = "packfile-uri/ordered-batches-total",
+	},
 
 	[TRACE2_COUNTER_ID_GREP_SOURCE_PROCESSED] = {
 		.category = "grep",
@@ -1051,4 +1063,8 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		emit_counter_snapshot("fetch-pack",
 				      TRACE2_COUNTER_ID_FETCH_PACKED_LOOKUP_SELECTED_CHECKS,
 				      TRACE2_COUNTER_ID_FETCH_PACKED_INVALID);
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_COUNT].value)
+		emit_counter_snapshot("fetch-pack",
+				      TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_COUNT,
+				      TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_ORDERED_BATCHES);
 }

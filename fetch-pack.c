@@ -1934,7 +1934,8 @@ static void finish_packfile_uri_task(struct packfile_uri_task *task)
 	strbuf_release(&task->output);
 }
 
-static void fetch_packfile_uris_parallel(
+/* Return the worker limit used for the batch. */
+static size_t fetch_packfile_uris_parallel(
 	struct string_list *uris, struct strvec *index_pack_args,
 	struct string_list *pack_lockfiles, struct oidset *gitmodules_oids,
 	int show_progress, int index_in_order)
@@ -2054,6 +2055,7 @@ static void fetch_packfile_uris_parallel(
 
 	free(pollfds);
 	free(tasks);
+	return task_nr;
 }
 
 enum fetch_state {
@@ -2097,6 +2099,7 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	int no_ref_delta = 0;
 	int done_sent;
 	struct string_list packfile_uris = STRING_LIST_INIT_DUP;
+	size_t packfile_uri_workers = 1;
 	int parallel_uri_downloads;
 	struct strvec index_pack_args = STRVEC_INIT;
 	const char *promisor_remote_config;
@@ -2277,6 +2280,12 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 		}
 	}
 
+	if (packfile_uris.nr) {
+		int saved_errno = errno;
+
+		trace2_timer_start(TRACE2_TIMER_ID_FETCH_PACKFILE_URIS);
+		errno = saved_errno;
+	}
 	parallel_uri_downloads = pack_lockfiles &&
 				 fetch_packfile_uri_jobs > 1 &&
 				 packfile_uris.nr > 1 &&
@@ -2286,11 +2295,10 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 			/* Independent packs can use concurrent, single-threaded indexers. */
 			strvec_push(&index_pack_args, "--threads=1");
 		}
-		fetch_packfile_uris_parallel(&packfile_uris, &index_pack_args,
-					     pack_lockfiles,
-					     &fsck_options.gitmodules_found,
-					     !args->quiet && !args->no_progress,
-					     !no_ref_delta);
+		packfile_uri_workers = fetch_packfile_uris_parallel(
+			&packfile_uris, &index_pack_args, pack_lockfiles,
+			&fsck_options.gitmodules_found,
+			!args->quiet && !args->no_progress, !no_ref_delta);
 		goto packfile_uris_done;
 	}
 
@@ -2348,6 +2356,18 @@ static struct ref *do_fetch_pack_v2(struct fetch_pack_args *args,
 	}
 
 packfile_uris_done:
+	if (packfile_uris.nr) {
+		int saved_errno = errno;
+
+		trace2_timer_stop(TRACE2_TIMER_ID_FETCH_PACKFILE_URIS);
+		trace2_counter_add(TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_COUNT,
+				   packfile_uris.nr);
+		trace2_counter_add(TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_WORKER_SLOTS,
+				   packfile_uri_workers);
+		trace2_counter_add(TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_ORDERED_BATCHES,
+				   !parallel_uri_downloads || !no_ref_delta);
+		errno = saved_errno;
+	}
 	string_list_clear(&packfile_uris, 0);
 	strvec_clear(&index_pack_args);
 

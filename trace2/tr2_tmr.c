@@ -719,6 +719,10 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.category = "fetch-pack",
 		.name = "v2/send-request",
 	},
+	[TRACE2_TIMER_ID_FETCH_PACKFILE_URIS] = {
+		.category = "fetch-pack",
+		.name = "packfile-uris",
+	},
 	[TRACE2_TIMER_ID_FETCH_MARK_COMPLETE_REFS] = {
 		.category = "fetch-pack",
 		.name = "mark-complete/refs",
