@@ -12,11 +12,12 @@
 #include "wrapper.h"
 
 #define GREP_INDEX_TOKEN_SIGNATURE 0x47574944
-#define GREP_INDEX_TOKEN_VERSION	7
+#define GREP_INDEX_TOKEN_VERSION	8
 #define GREP_INDEX_TOKEN_HEADER_SIZE	92
 #define GREP_INDEX_TOKEN_V5_HEADER_SIZE 76
 #define GREP_INDEX_EOIE_SIZE		32
 #define GREP_INDEX_IEOT_SIGNATURE	0x49454f54 /* IEOT */
+#define GREP_INDEX_ENTRY_FLAGS		(CE_STAGEMASK | CE_INTENT_TO_ADD | CE_REMOVE)
 
 /* Numeric Trace2 outcomes; token reads and writes are best effort. */
 enum grep_index_token_read_outcome {
@@ -83,8 +84,7 @@ static int serialize_worktree_entry(struct worktree_entry_data *data,
 	size_t name_len = ce_namelen(ce);
 	unsigned char *stat = data->stat;
 
-	if (ce_stage(ce) || ce_intent_to_add(ce) ||
-	    ce->ce_flags & CE_REMOVE || name_len > UINT32_MAX)
+	if (name_len > UINT32_MAX)
 		return -1;
 	put_be32(data->header, ce->ce_mode);
 	put_be32(data->header + sizeof(uint32_t), name_len);
@@ -123,7 +123,8 @@ int grep_worktree_entry_identity_hash(
 	struct git_hash_ctx ctx;
 	const struct git_hash_algo *algo = &hash_algos[GIT_HASH_SHA256];
 
-	if (serialize_worktree_entry(&data, ce))
+	if ((ce->ce_flags & GREP_INDEX_ENTRY_FLAGS) ||
+	    serialize_worktree_entry(&data, ce))
 		return -1;
 	git_hash_init(&ctx, algo);
 	git_hash_update(&ctx, "grep-worktree-entry-v1", 22);
@@ -145,6 +146,7 @@ static int compute_identity(struct repository *repo,
 	unsigned char entries_hash[GIT_SHA256_RAWSZ];
 	struct git_hash_ctx entries_ctx;
 	struct git_hash_ctx oids_ctx;
+	int have_entry_flags = 0;
 	int result = -1;
 
 	grep_index_identity_oid_sequence_init(
@@ -167,6 +169,7 @@ static int compute_identity(struct repository *repo,
 
 		if (serialize_worktree_entry(&data, ce))
 			goto cleanup;
+		have_entry_flags |= !!(ce->ce_flags & GREP_INDEX_ENTRY_FLAGS);
 		strbuf_add(&entries, data.header, sizeof(data.header));
 		strbuf_add(&entries, ce->name, data.name_len);
 		strbuf_add(&entries, ce->oid.hash,
@@ -185,6 +188,24 @@ static int compute_identity(struct repository *repo,
 	git_hash_update(&oids_ctx, oids.buf, oids.len);
 	git_hash_final_oid(&identity->oid_sequence, &oids_ctx);
 	git_hash_update(&entries_ctx, entries.buf, entries.len);
+	if (have_entry_flags) {
+		/*
+		 * Keep ordinary index identities unchanged. Exceptional entries
+		 * still occupy their physical positions, but cannot share an
+		 * identity with entries whose worktree bytes may be cached.
+		 */
+		git_hash_update(&entries_ctx, "grep-worktree-index-flags-v1",
+				sizeof("grep-worktree-index-flags-v1") - 1);
+		for (size_t i = 0; i < istate->cache_nr; i++) {
+			unsigned int flags =
+				istate->cache[i]->ce_flags & GREP_INDEX_ENTRY_FLAGS;
+
+			if (flags) {
+				hash_uint32(&entries_ctx, i);
+				hash_uint32(&entries_ctx, flags);
+			}
+		}
+	}
 	git_hash_final(entries_hash, &entries_ctx);
 	git_hash_init(&entries_ctx, repo->hash_algo);
 	git_hash_update(&entries_ctx, "grep-worktree-index-sha256-v1",
@@ -369,10 +390,10 @@ static enum grep_index_token_read_outcome load_token(
 	if (map_size < 8)
 		goto unmap;
 	version = get_be32(map + 4);
-	if (version != 5 && version != 6 &&
+	if (version != 5 && version != 6 && version != 7 &&
 	    version != GREP_INDEX_TOKEN_VERSION)
 		goto unmap;
-	if (!istate && version != GREP_INDEX_TOKEN_VERSION)
+	if (!istate && version < 7)
 		goto unmap;
 	header_size = version == 5 ? GREP_INDEX_TOKEN_V5_HEADER_SIZE :
 				     GREP_INDEX_TOKEN_HEADER_SIZE;
@@ -409,7 +430,7 @@ static enum grep_index_token_read_outcome load_token(
 	    get_be64(map + 64) == ST_CTIME_NSEC(*st) &&
 	    hasheq(map + header_size, snapshot->oid.hash, repo->hash_algo))
 		result = GREP_INDEX_TOKEN_READ_HIT;
-	else if (istate && version == GREP_INDEX_TOKEN_VERSION &&
+	else if (istate && version >= 7 &&
 		 get_be32(map + 76) == istate->version &&
 		 get_be64(map + 80) == istate->index_file_entries_end &&
 		 istate->index_file_entries_end_valid &&

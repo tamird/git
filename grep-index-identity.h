@@ -34,7 +34,7 @@ int grep_worktree_entry_identity_hash(
 int grep_index_identity_get(struct repository *repo,
 			    struct index_state *istate,
 			    struct grep_index_identity *identity);
-/* Requires an exact current-format token; never scans entries or writes. */
+/* Requires a compatible token matching the snapshot; never scans or writes. */
 int grep_index_identity_from_snapshot(struct repository *,
 				      const struct index_file_snapshot *, struct grep_index_identity *);
 

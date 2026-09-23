@@ -4482,12 +4482,14 @@ test_expect_success FSMONITOR_DAEMON \
 	test_when_finished "test_might_fail git fsmonitor--daemon stop &&
 			    git checkout -- ordinary present &&
 			    git update-index --force-remove \
-				candidate-clean candidate-depth/deep &&
+				candidate-clean candidate-depth/deep \
+				candidate-exception-intent candidate-exception-conflict &&
 			    rm -f .git/index.grep-worktree \
 				.git/index.grep-worktree-generation \
 				.git/index.grep-worktree-recovery \
 				candidate-clean \
 				candidate-untracked \
+				candidate-exception-* \
 				candidate-*.trace \
 				.git/candidate-untracked-* &&
 			    rm -rf candidate-depth" &&
@@ -4804,7 +4806,42 @@ test_expect_success FSMONITOR_DAEMON \
 		test_cmp expected actual &&
 		test_trace2_data grep producer_driver_lookup_count 2 \
 			<candidate-producer-I.trace
-	fi
+	fi &&
+	echo "exceptional needle" >candidate-exception-intent &&
+	git add -N candidate-exception-intent &&
+	stage=$(git rev-parse :ordinary) &&
+	{
+		for n in 1 2 3
+		do
+			printf "100644 %s %s\tcandidate-exception-conflict\n" \
+				"$stage" "$n" || return 1
+		done
+	} | git update-index --index-info &&
+	git status --porcelain >/dev/null &&
+	test_expect_code 1 env GIT_TEST_GREP_LITERAL_PATHS=0 \
+		git grep --no-content-index --threads=1 \
+		"exceptional needle" -- ordinary &&
+	for state in initial changed
+	do
+		echo "$state exceptional needle" >candidate-exception-intent &&
+		echo "$state exceptional needle" >candidate-exception-conflict &&
+		git status --porcelain >/dev/null &&
+		printf "%s\n" \
+			"candidate-exception-conflict:$state exceptional needle" \
+			"candidate-exception-intent:$state exceptional needle" >expected &&
+		GIT_TEST_GREP_LITERAL_PATHS=0 \
+		GIT_TRACE2_EVENT="$PWD/candidate-exception-$state.trace" \
+			git grep --threads=1 "exceptional needle" \
+			-- "ord*" "candidate-exception-*" >actual &&
+		test_cmp expected actual &&
+		test_trace2_data grep content_index_worktree_candidates 4 \
+			<candidate-exception-$state.trace &&
+		test_trace2_data grep content_index_worktree_rejected_before_pathspec \
+			"[1-9][0-9]*" <candidate-exception-$state.trace &&
+		test_grep_timer candidate-exception-$state.trace source/file-read 2 &&
+		test_grep_timer candidate-exception-$state.trace source/object-read 0 ||
+		return 1
+	done
 '
 
 test_expect_success FSMONITOR_DAEMON \

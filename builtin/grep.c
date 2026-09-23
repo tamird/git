@@ -2899,10 +2899,16 @@ static int grep_cache(struct grep_opt *opt,
 			continue;
 		}
 
-		if (!use_selected && ce_stage(ce)) {
-			while (nr < repo->index->cache_nr &&
-			       !strcmp(ce->name, repo->index->cache[nr]->name))
-				nr++;
+		if (ce_stage(ce)) {
+			if (use_selected)
+				while (selected_pos < selected_nr &&
+				       !strcmp(ce->name,
+					       repo->index->cache[selected[selected_pos]]->name))
+					selected_pos++;
+			else
+				while (nr < repo->index->cache_nr &&
+				       !strcmp(ce->name, repo->index->cache[nr]->name))
+					nr++;
 		}
 		if (hit && opt->status_only)
 			break;
