@@ -627,6 +627,10 @@ void odb_assert_oid_type(struct object_database *odb,
  * following functions in parallel: odb_read_object(),
  * odb_read_object_peeled(), odb_read_object_info() and odb().
  *
+ * Readers borrow immutable MIDX mappings while locking is enabled. Keep their
+ * repositories, object sources and loaded MIDX chains alive until the readers
+ * have joined and locking is disabled.
+ *
  * obj_read_lock() and obj_read_unlock() may also be used to protect other
  * section which cannot execute in parallel with object reading. Since the used
  * lock is a recursive mutex, these sections can even contain calls to object

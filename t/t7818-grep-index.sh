@@ -6749,7 +6749,7 @@ test_expect_success 'packed lookup fixture preserves MIDX, fallback and loose re
 		midx_tree=$(printf "100644 blob %s\tmidx-file\n" "$blob" | git mktree) &&
 		fallback_tree=$(printf "100644 blob %s\tfallback-file\n" "$blob" | git mktree) &&
 		loose_tree=$(printf "100644 blob %s\tloose-file\n" "$blob" | git mktree) &&
-		printf "%s\n" "$midx_tree" |
+		printf "%s\n" "$midx_tree" "$blob" |
 			git pack-objects --window=0 .git/objects/pack/pack >midx-pack &&
 		git multi-pack-index write &&
 		printf "%s\n" "$fallback_tree" |

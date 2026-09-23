@@ -1499,6 +1499,14 @@ test_expect_success 'lookup recovers object whose midx-owning pack was removed' 
 		test_cmp expect actual &&
 		GIT_TEST_MIDX_EXIST_NO_OFFSET=0 git cat-file -e "$dup_oid" &&
 		GIT_TEST_MIDX_EXIST_NO_OFFSET=1 git cat-file -e "$dup_oid" &&
+		if test_have_prereq PTHREADS
+		then
+			printf "%s\n" "HEAD:dup:duplicated-content" \
+				"HEAD:nested/file:nested-content" >expect &&
+			git grep --no-content-index --threads=2 \
+				-e duplicated-content -e nested-content HEAD >actual &&
+			test_cmp expect actual
+		fi &&
 		GIT_TEST_CACHE_TREE_OID_ORDER=1 \
 		GIT_TRACE2_EVENT="$PWD/.git/ordered.trace" \
 			git commit --allow-empty -m recovered &&

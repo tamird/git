@@ -741,18 +741,25 @@ enum midx_fill_result midx_fill_entry_with_lookup(struct multi_pack_index *m,
 	uint32_t pos;
 	uint32_t pack_int_id;
 	struct packed_git *p;
-	uint64_t started = lookup ? packed_lookup_begin(lookup) : 0;
-	int found = bsearch_midx(oid, m, &pos);
+	uint64_t started = 0;
+	int found;
 	int trace_prepare = lookup && obj_read_lock_trace_enabled() &&
 			    trace2_is_enabled();
 	enum midx_fill_result ret = MIDX_FILL_MISS;
 
+	/* Object readers retain the immutable MIDX mappings until they join. */
+	obj_read_unlock();
 	if (lookup)
-		started = packed_lookup_end(lookup, ODB_PACKED_LOOKUP_MIDX_SEARCH,
-					    started);
+		started = packed_lookup_begin(lookup);
+	found = bsearch_midx(oid, m, &pos);
+	if (lookup)
+		packed_lookup_end(lookup, ODB_PACKED_LOOKUP_MIDX_SEARCH, started);
+	obj_read_lock();
 	if (!found)
 		return MIDX_FILL_MISS;
 
+	if (lookup)
+		started = packed_lookup_begin(lookup);
 	midx_for_object(&m, pos);
 	pack_int_id = nth_midxed_pack_int_id(m, pos);
 
