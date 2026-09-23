@@ -4008,6 +4008,7 @@ static void emit_traversal_statistics(struct dir_struct *dir,
 int read_directory(struct dir_struct *dir, struct index_state *istate,
 		   const char *path, int len, const struct pathspec *pathspec)
 {
+	struct untracked_cache *untracked_cache = NULL;
 	struct untracked_cache_dir *untracked;
 	struct untracked_cache_dir *untracked_prune = NULL;
 	int has_pathspec = pathspec && pathspec->nr;
@@ -4049,7 +4050,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		 */
 		dir->untracked = NULL;
 	if (untracked) {
-		struct untracked_cache *untracked_cache = dir->untracked;
+		untracked_cache = dir->untracked;
 
 		/*
 		 * Negative-only scans must not replay or populate cached
@@ -4113,8 +4114,9 @@ done:
 				   negative_only);
 		errno = saved_errno;
 	}
-	if (dir->untracked && dir->untracked->gitignore_invalidated) {
-		struct untracked_cache *uc = dir->untracked;
+	if (untracked_cache && untracked_cache->gitignore_invalidated) {
+		struct untracked_cache *uc = untracked_cache;
+		int saved_errno = errno;
 
 		trace2_data_intmax("untracked_cache", istate->repo,
 				   "gitignore-invalidation/global",
@@ -4134,6 +4136,7 @@ done:
 		trace2_data_intmax("untracked_cache", istate->repo,
 				   "gitignore-invalidation/nodes-invalidated",
 				   uc->gitignore_nodes_invalidated);
+		errno = saved_errno;
 	}
 	if (dir->untracked) {
 		static int force_untracked_cache = -1;
