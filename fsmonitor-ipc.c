@@ -492,15 +492,22 @@ static int parse_tracked_snapshot(struct index_state *istate,
 	return 0;
 }
 
-static int compress_untracked_cache(struct strbuf *snapshot)
+enum untracked_cache_compress_result {
+	UNTRACKED_CACHE_COMPRESS_OK,
+	UNTRACKED_CACHE_COMPRESS_TOO_LARGE,
+	UNTRACKED_CACHE_COMPRESS_ERROR,
+};
+
+static enum untracked_cache_compress_result compress_untracked_cache(
+	struct strbuf *snapshot)
 {
 	struct strbuf compressed = STRBUF_INIT;
 	git_zstream stream;
 	unsigned long bound;
-	int status;
+	int status, end_status, too_large;
 
 	if (snapshot->len > FSMONITOR_IPC_UNCOMPRESSED_CACHE_MAX)
-		return -1;
+		return UNTRACKED_CACHE_COMPRESS_TOO_LARGE;
 
 	git_deflate_init(&stream, Z_BEST_SPEED);
 	bound = git_deflate_bound(&stream, snapshot->len);
@@ -520,17 +527,21 @@ static int compress_untracked_cache(struct strbuf *snapshot)
 	stream.next_out = (unsigned char *)compressed.buf + compressed.len;
 	stream.avail_out = bound;
 	status = git_deflate(&stream, Z_FINISH);
-	if (git_deflate_end_gently(&stream) != Z_OK ||
+	too_large = !stream.avail_out &&
+		    (status == Z_OK || status == Z_BUF_ERROR);
+	end_status = git_deflate_end_gently(&stream);
+	if (end_status != Z_OK ||
 	    status != Z_STREAM_END || stream.avail_in) {
 		strbuf_release(&compressed);
-		return -1;
+		return too_large ? UNTRACKED_CACHE_COMPRESS_TOO_LARGE :
+				   UNTRACKED_CACHE_COMPRESS_ERROR;
 	}
 	strbuf_setlen(&compressed,
 		      FSMONITOR_IPC_COMPRESSED_SNAPSHOT_HEADER_LEN +
 		      stream.total_out);
 	strbuf_swap(snapshot, &compressed);
 	strbuf_release(&compressed);
-	return 0;
+	return UNTRACKED_CACHE_COMPRESS_OK;
 }
 
 static int decompress_untracked_cache(const char *data, size_t len,
@@ -901,6 +912,7 @@ void fsmonitor_ipc__save_untracked_cache(
 	enum untracked_snapshot_bound bound;
 	size_t start;
 	int supports_reason = 0;
+	int include_raw = 1;
 
 	trace2_region_enter("fsmonitor", "untracked-cache/save", istate->repo);
 	if (!istate->untracked || !istate->untracked->root ||
@@ -915,9 +927,10 @@ void fsmonitor_ipc__save_untracked_cache(
 		goto done;
 	}
 
+encode_snapshot:
 	trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_SERIALIZE);
 	encoding = write_untracked_snapshot(&snapshot, istate->untracked,
-					    &bound);
+					    &bound, include_raw);
 	trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_SERIALIZE);
 	if (encoding == UNTRACKED_CACHE_ENCODING_TOO_LARGE) {
 		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_BOUNDS_EXCEEDED;
@@ -943,27 +956,19 @@ void fsmonitor_ipc__save_untracked_cache(
 		}
 		free_untracked_cache(candidate);
 	}
-	if (add_tracked_snapshot(istate, &snapshot)) {
-		outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
-		trace2_data_string("fsmonitor", istate->repo,
-				   "untracked-cache/save-reason",
-				   "oversize-snapshot");
-		goto done;
-	}
+	if (add_tracked_snapshot(istate, &snapshot))
+		goto snapshot_too_large;
 	if (snapshot.len > FSMONITOR_IPC_UNTRACKED_CACHE_MAX ||
 	    git_env_bool("GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE", 0)) {
-		int ret;
+		enum untracked_cache_compress_result ret;
 
 		trace2_timer_start(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_COMPRESS);
 		ret = compress_untracked_cache(&snapshot);
 		trace2_timer_stop(TRACE2_TIMER_ID_UNTRACKED_CACHE_SAVE_COMPRESS);
-		if (ret) {
-			outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
-			trace2_data_string("fsmonitor", istate->repo,
-					   "untracked-cache/save-reason",
-					   "oversize-snapshot");
-			goto done;
-		}
+		if (ret == UNTRACKED_CACHE_COMPRESS_TOO_LARGE)
+			goto snapshot_too_large;
+		if (ret != UNTRACKED_CACHE_COMPRESS_OK)
+			goto snapshot_unusable;
 		trace2_data_intmax("fsmonitor", istate->repo,
 				   "untracked-cache/compressed", 1);
 	}
@@ -1082,6 +1087,19 @@ void fsmonitor_ipc__save_untracked_cache(
 			   "untracked-cache/save-root-can-skip",
 			   istate->untracked->root->can_skip_replay);
 	outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_SAVED;
+	goto done;
+
+snapshot_too_large:
+	if (encoding == UNTRACKED_CACHE_ENCODING_RAW) {
+		/* Optional inventories must not prevent saving the derived cache. */
+		include_raw = 0;
+		strbuf_reset(&snapshot);
+		goto encode_snapshot;
+	}
+snapshot_unusable:
+	outcome = FSMONITOR_UNTRACKED_CACHE_SAVE_OVERSIZE;
+	trace2_data_string("fsmonitor", istate->repo,
+			   "untracked-cache/save-reason", "oversize-snapshot");
 
 done:
 	strbuf_release(&answer);

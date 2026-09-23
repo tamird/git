@@ -2221,6 +2221,118 @@ test_expect_success 'snapshot replay preserves history needed by the disk index'
 	)
 '
 
+test_expect_success !MINGW 'lock-free status restores raw inventory after ignore changes' '
+	test_when_finished "stop_daemon_delete_repo test_raw_snapshot" &&
+	git init test_raw_snapshot &&
+	(
+		cd test_raw_snapshot &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 &&
+		export GIT_TEST_UNTRACKED_CACHE_RAW &&
+		mkdir one two &&
+		echo old >.gitignore &&
+		>one/old && >one/new && >two/old && >two/new &&
+		test-tool chmtime =-300 . one two &&
+		git add .gitignore &&
+		git commit -m base &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		git config status.showUntrackedFiles all
+	) &&
+	start_daemon -C test_raw_snapshot &&
+	(
+		cd test_raw_snapshot &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 git update-index --untracked-cache &&
+		git hash-object .git/index >../raw-snapshot.index-before &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 &&
+		export GIT_TEST_UNTRACKED_CACHE_RAW &&
+		printf "?? one/new\n?? two/new\n" >../raw-snapshot.expect &&
+		GIT_TEST_FSMONITOR_COMPRESS_UNTRACKED_CACHE=1 \
+		GIT_TRACE2_EVENT="$PWD/../raw-snapshot-cold.trace" \
+			git --no-optional-locks status --porcelain \
+			>../raw-snapshot.actual &&
+		test_cmp ../raw-snapshot.expect ../raw-snapshot.actual &&
+		test_trace2_data status untracked/cache-root-present 0 \
+			<../raw-snapshot-cold.trace &&
+		test_trace2_data status untracked-cache/restore miss \
+			<../raw-snapshot-cold.trace &&
+		test_trace2_data untracked_cache raw/captured-directories 3 \
+			<../raw-snapshot-cold.trace &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../raw-snapshot-cold.trace &&
+		test_trace2_data fsmonitor untracked-cache/compressed 1 \
+			<../raw-snapshot-cold.trace &&
+		GIT_TRACE2_EVENT="$PWD/../raw-snapshot-warm.trace" \
+			git --no-optional-locks status --porcelain \
+			>../raw-snapshot.actual &&
+		test_cmp ../raw-snapshot.expect ../raw-snapshot.actual &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../raw-snapshot-warm.trace &&
+		test_trace2_data fsmonitor untracked-cache/decompressed 1 \
+			<../raw-snapshot-warm.trace &&
+		test_trace2_data untracked_cache raw/entries "[1-9][0-9]*" \
+			<../raw-snapshot-warm.trace &&
+		echo new >.gitignore &&
+		printf " M .gitignore\n?? one/old\n?? two/old\n" \
+			>../raw-snapshot.expect &&
+		GIT_TRACE2_EVENT="$PWD/../raw-snapshot-changed.trace" \
+			git --no-optional-locks status --porcelain \
+			>../raw-snapshot.actual &&
+		test_cmp ../raw-snapshot.expect ../raw-snapshot.actual &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../raw-snapshot-changed.trace &&
+		test_trace2_data untracked_cache raw/replayed-directories \
+			"[1-9][0-9]*" <../raw-snapshot-changed.trace &&
+		git hash-object .git/index >../raw-snapshot.index-after &&
+		test_cmp ../raw-snapshot.index-before ../raw-snapshot.index-after
+	)
+'
+
+test_expect_success !MINGW 'oversize raw snapshot preserves the derived cache' '
+	test_when_finished "stop_daemon_delete_repo test_raw_snapshot_bound" &&
+	git init test_raw_snapshot_bound &&
+	(
+		cd test_raw_snapshot_bound &&
+		test_commit base tracked &&
+		>sentinel &&
+		git config core.fsmonitor true &&
+		git config core.untrackedCache true &&
+		git config core.precomposeUnicode false &&
+		git config status.showUntrackedFiles all
+	) &&
+	start_daemon -C test_raw_snapshot_bound &&
+	(
+		cd test_raw_snapshot_bound &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 git status --porcelain \
+			>../raw-bound.expect &&
+		git hash-object .git/index >../raw-bound.index-before &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 \
+		GIT_TRACE2_EVENT="$PWD/../raw-bound-save.trace" \
+			test-tool fsmonitor-client test-untracked-snapshot-raw-fallback \
+			>../raw-bound.actual &&
+		cat >../raw-bound.entries <<-EOF &&
+		raw-entries 98304
+		restored-raw-entries 0
+		restored-raw-bytes 0
+		EOF
+		test_cmp ../raw-bound.entries ../raw-bound.actual &&
+		test_trace2_data fsmonitor untracked-cache/save-outcome 7 \
+			<../raw-bound-save.trace &&
+		test_trace2_data fsmonitor untracked-cache/restore hit \
+			<../raw-bound-save.trace &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 \
+		GIT_TRACE2_EVENT="$PWD/../raw-bound-restore.trace" \
+			git --no-optional-locks status --porcelain \
+			>../raw-bound.actual &&
+		test_cmp ../raw-bound.expect ../raw-bound.actual &&
+		test_trace2_data status untracked-cache/restore hit \
+			<../raw-bound-restore.trace &&
+		test_trace2_data untracked_cache raw/entries 0 \
+			<../raw-bound-restore.trace &&
+		git hash-object .git/index >../raw-bound.index-after &&
+		test_cmp ../raw-bound.index-before ../raw-bound.index-after
+	)
+'
+
 test_expect_success 'lock-free status reuses current untracked snapshot' '
 	test_when_finished "stop_daemon_delete_repo test_untracked_snapshot" &&
 	git init test_untracked_snapshot &&

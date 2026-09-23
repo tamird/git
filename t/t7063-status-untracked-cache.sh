@@ -357,6 +357,7 @@ EOF
 test_expect_success 'new .gitignore invalidates recursively' '
 	echo four >.gitignore &&
 	: >../trace.output &&
+	GIT_TEST_UNTRACKED_CACHE_RAW=0 \
 	GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace.output" \
 	git status --porcelain >../actual &&
 	iuc status --porcelain >../status.iuc &&
@@ -407,6 +408,7 @@ EOF
 test_expect_success 'new info/exclude invalidates everything' '
 	echo three >>.git/info/exclude &&
 	: >../trace.output &&
+	GIT_TEST_UNTRACKED_CACHE_RAW=0 \
 	GIT_TRACE2_PERF="$TRASH_DIRECTORY/trace.output" \
 	git status --porcelain >../actual &&
 	iuc status --porcelain >../status.iuc &&
@@ -1066,6 +1068,207 @@ test_expect_success PTHREADS 'parallel directory snapshots ignore weak file-stat
 	)
 '
 
+test_lazy_prereq RAW_UNTRACKED_CACHE '
+	case "$uname_s" in
+	Linux|Darwin) return 0 ;;
+	*) return 1 ;;
+	esac
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'raw directory inventory rechecks changed ignore rules without opening directories' '
+	test_create_repo raw-inventory &&
+	(
+		cd raw-inventory &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 &&
+		export GIT_TEST_UNTRACKED_CACHE_RAW &&
+		git config core.untrackedCache true &&
+		git config core.fsmonitor false &&
+		git config status.showUntrackedFiles all &&
+		mkdir -p one two hidden/deep &&
+		printf "old\nhidden/\n" >.gitignore &&
+		>one/old && >one/new && >two/old && >two/new &&
+		>hidden/deep/unseen &&
+		test-tool chmtime =-300 one two &&
+		avoid_racy &&
+		git add .gitignore &&
+		git commit -m base &&
+		cat >.git/expect-a <<-\EOF &&
+		?? one/new
+		?? two/new
+		EOF
+		GIT_TRACE2_EVENT="$PWD/.git/prime.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect-a .git/actual &&
+		test_trace2_data untracked_cache raw/captured-directories 3 \
+			<.git/prime.trace &&
+
+		printf "new\nhidden/\n" >.gitignore &&
+		cat >.git/expect-b <<-\EOF &&
+		 M .gitignore
+		?? one/old
+		?? two/old
+		EOF
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 GIT_OPTIONAL_LOCKS=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/off.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect-b .git/actual &&
+		test_trace2_data read_directory opendir 3 <.git/off.trace &&
+		GIT_TRACE2_EVENT="$PWD/.git/change.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect-b .git/actual &&
+		test_trace2_data untracked_cache raw/replayed-directories 3 \
+			<.git/change.trace &&
+		test_trace2_data read_directory opendir 0 <.git/change.trace
+	)
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'malformed raw inventory is omitted on write and falls back on replay' '
+	test_when_finished "printf \"new\\nhidden/\\n\" >raw-inventory/.gitignore" &&
+	(
+		cd raw-inventory &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 &&
+		export GIT_TEST_UNTRACKED_CACHE_RAW &&
+		git config index.skipHash false &&
+		git config core.splitIndex false &&
+		git config index.recordEndOfIndexEntries false &&
+		git config index.recordOffsetTable false &&
+		git config index.threads 1 &&
+		git update-index --index-version=2 --force-write-index &&
+		test-tool dump-untracked-cache inspect-index .git/index >.git/inventory &&
+		test_grep "^raw version=2 " .git/inventory &&
+		test-tool dump-untracked-cache >.git/derived-expect &&
+		git ls-files --stage >.git/tracked-expect &&
+		test-tool dump-untracked-cache rewrite-index \
+			.git/index .git/raw-malformed --invalid-raw-dtype &&
+		cp .git/raw-malformed .git/raw-rewritten &&
+		GIT_INDEX_FILE=.git/raw-rewritten \
+			git update-index --force-write-index &&
+		test-tool dump-untracked-cache inspect-index .git/raw-rewritten \
+			>.git/inventory &&
+		test_grep "^UNTR " .git/inventory &&
+		test_grep ! "^UNRV " .git/inventory &&
+		GIT_INDEX_FILE=.git/raw-rewritten \
+			test-tool dump-untracked-cache >.git/derived-actual &&
+		test_cmp .git/derived-expect .git/derived-actual &&
+		GIT_INDEX_FILE=.git/raw-rewritten \
+			git ls-files --stage >.git/tracked-actual &&
+		test_cmp .git/tracked-expect .git/tracked-actual &&
+
+		printf "old\nhidden/\n" >.gitignore &&
+		GIT_INDEX_FILE=.git/raw-malformed GIT_OPTIONAL_LOCKS=0 \
+			git -c core.untrackedCache=false status --porcelain \
+			>.git/uncached-expect &&
+		test_cmp .git/expect-a .git/uncached-expect &&
+		GIT_INDEX_FILE=.git/raw-malformed GIT_OPTIONAL_LOCKS=0 \
+		GIT_TRACE2_EVENT="$PWD/.git/malformed.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/uncached-expect .git/actual &&
+		test_trace2_data untracked_cache raw/replayed-directories 0 \
+			<.git/malformed.trace &&
+		test_trace2_data read_directory opendir 3 <.git/malformed.trace
+	)
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'raw inventory falls back after a feature-off legacy cache write' '
+	(
+		cd raw-inventory &&
+		printf "old\nhidden/\n" >.gitignore &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect-a .git/actual &&
+		printf "new\nhidden/\n" >.gitignore &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/legacy.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect-b .git/actual &&
+		test_trace2_data untracked_cache raw/replayed-directories 0 \
+			<.git/legacy.trace &&
+		test_trace2_data read_directory opendir 3 <.git/legacy.trace
+	)
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'raw inventory opens newly unmasked subtrees' '
+	(
+		cd raw-inventory &&
+		echo new >.gitignore &&
+		cat >.git/expect <<-\EOF &&
+		 M .gitignore
+		?? hidden/deep/unseen
+		?? one/old
+		?? two/old
+		EOF
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 \
+		GIT_TRACE2_EVENT="$PWD/.git/unmask.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_trace2_data untracked_cache raw/replayed-directories 3 \
+			<.git/unmask.trace &&
+		test_trace2_data read_directory opendir 2 <.git/unmask.trace
+	)
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'raw inventory rejects changed names and types despite restored directory mtime' '
+	(
+		cd raw-inventory &&
+		git config core.trustCtime false &&
+		git config core.checkStat minimal &&
+		one_mtime=$(test-tool chmtime --get one) &&
+		two_mtime=$(test-tool chmtime --get two) &&
+		avoid_racy &&
+		mv one/old one/renamed &&
+		rm two/old &&
+		mkdir two/old &&
+		>two/old/leaf &&
+		test-tool chmtime =$one_mtime one &&
+		test-tool chmtime =$two_mtime two &&
+		cat >.git/expect <<-\EOF &&
+		 M .gitignore
+		?? hidden/deep/unseen
+		?? one/renamed
+		?? two/old/leaf
+		EOF
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual
+	)
+'
+
+test_expect_success RAW_UNTRACKED_CACHE 'check-only traversal cannot supply a complete raw inventory' '
+	test_create_repo raw-check-only &&
+	(
+		cd raw-check-only &&
+		GIT_TEST_UNTRACKED_CACHE_RAW=1 &&
+		export GIT_TEST_UNTRACKED_CACHE_RAW &&
+		git config core.untrackedCache true &&
+		git config core.fsmonitor false &&
+		mkdir loose &&
+		>.gitignore && >loose/one && >loose/two &&
+		avoid_racy &&
+		git add .gitignore &&
+		git commit -m base &&
+		echo "?? loose/" >.git/expect &&
+		git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test-tool dump-untracked-cache >.git/dump &&
+		test_grep "^/loose/ .* check_only valid$" .git/dump &&
+		sed -n "/^\\/loose\\/ /{n;p;}" .git/dump >.git/first &&
+		test_line_count = 1 .git/first &&
+		first=$(cat .git/first) &&
+		case "$first" in one|two) ;; *) return 1 ;; esac &&
+		echo "loose/$first" >.gitignore &&
+		cat >.git/expect <<-\EOF &&
+		 M .gitignore
+		?? loose/
+		EOF
+		GIT_TRACE2_EVENT="$PWD/.git/incomplete.trace" \
+			git status --porcelain >.git/actual &&
+		test_cmp .git/expect .git/actual &&
+		test_trace2_data untracked_cache raw/replayed-directories 1 \
+			<.git/incomplete.trace &&
+		test_trace2_data read_directory opendir 1 <.git/incomplete.trace
+	)
+'
+
 test_expect_success 'prepare production pending-cache index' '
 	test_create_repo pending-cache &&
 	(
@@ -1091,7 +1294,8 @@ test_expect_success 'prepare production pending-cache index' '
 		git status --porcelain >.git/actual &&
 		test_cmp .git/expect .git/actual &&
 		cp .git/index .git/trusted &&
-		test-tool dump-untracked-cache rewrite-index \
+		GIT_TEST_UNTRACKED_CACHE_RAW=0 \
+			test-tool dump-untracked-cache rewrite-index \
 			.git/trusted .git/pending --mark-pending &&
 		GIT_INDEX_FILE=.git/pending \
 			test-tool dump-untracked-cache state >.git/pending-state &&

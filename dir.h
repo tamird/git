@@ -186,9 +186,20 @@ enum untracked_stat_result {
 	UNTRACKED_STAT_UNSAFE,
 };
 
+/* Complete physical inventory, independent of classified untracked entries. */
+struct untracked_cache_raw {
+	struct stat_data stat;
+	/* Payloads are immutable after capture or decoding. */
+	unsigned int validated:1;
+	size_t len, alloc, nr;
+	char data[FLEX_ARRAY];
+};
+
 struct untracked_cache_dir {
 	struct untracked_cache_dir **dirs;
 	char **untracked;
+	/* Optional, complete physical inventory; independent of ignore results. */
+	struct untracked_cache_raw *raw;
 	struct stat_data stat_data;
 	/* Transient subtree size for parallel validation; not serialized. */
 	size_t validation_nr;
@@ -220,6 +231,9 @@ struct untracked_cache {
 	 */
 	unsigned dir_flags;
 	struct untracked_cache_dir *root;
+	/* Includes allocated inventories and captures currently in progress. */
+	size_t raw_bytes, raw_entries;
+	unsigned raw_name_flags;
 	/* Statistics */
 	int dir_created;
 	int gitignore_invalidated;
@@ -395,6 +409,10 @@ struct dir_struct {
 		unsigned untracked_cache_revalidated:1;
 		/* Excludes pending revalidation and non-traversal ignore consumers. */
 		unsigned trace_normal_ignore_loads:1;
+		unsigned raw_enabled:1;
+		uintmax_t raw_captured_dirs, raw_captured_entries;
+		uintmax_t raw_replayed_dirs, raw_replayed_entries;
+		uintmax_t raw_discarded_dirs;
 		size_t icase_scan_budget_used;
 		size_t exact_lookup_budget_used;
 
@@ -668,6 +686,7 @@ enum untracked_cache_encoding {
 	UNTRACKED_CACHE_ENCODING_NONE,
 	UNTRACKED_CACHE_ENCODING_LEGACY,
 	UNTRACKED_CACHE_ENCODING_PENDING,
+	UNTRACKED_CACHE_ENCODING_RAW,
 	UNTRACKED_CACHE_ENCODING_TOO_LARGE,
 };
 /* Stable Trace2 values for a bounded untracked-cache snapshot. */
@@ -682,7 +701,7 @@ enum untracked_cache_encoding write_untracked_extension(
 /* Apply the resource limits of read_untracked_snapshot() when writing. */
 enum untracked_cache_encoding write_untracked_snapshot(
 	struct strbuf *out, struct untracked_cache *untracked,
-	enum untracked_snapshot_bound *bound);
+	enum untracked_snapshot_bound *bound, int include_raw);
 struct untracked_cache *read_pending_untracked_extension(const void *data,
 							 size_t sz);
 struct untracked_cache *read_untracked_snapshot(const void *data, size_t sz);

@@ -44,6 +44,10 @@
   */
 #define PATTERN_MAX_FILE_SIZE (100 * 1024 * 1024)
 
+/* Directory inventories are bounded independently of derived UC data. */
+#define UNTRACKED_RAW_MAX_BYTES	  (32 * 1024 * 1024)
+#define UNTRACKED_RAW_MAX_ENTRIES (1024 * 1024)
+
 /*
  * Tells read_directory_recursive how a file or directory should be treated.
  * Values are ordered by significance, e.g. if a directory contains both
@@ -63,6 +67,12 @@ enum path_treatment {
 struct cached_dir {
 	DIR *fdir;
 	struct untracked_cache_dir *untracked;
+	struct untracked_cache *raw_owner;
+	struct untracked_cache_raw *capture;
+	size_t raw_pos;
+	unsigned raw_replay:1;
+	unsigned raw_eof:1;
+	unsigned raw_capture_failed:1;
 	int nr_files;
 	int nr_dirs;
 
@@ -106,6 +116,120 @@ static int match_untracked_dir_stat_racy(const struct cache_time *timestamp,
 #endif
 		return MTIME_CHANGED;
 	return match_untracked_dir_stat(sd, st);
+}
+
+static int untracked_raw_enabled(void)
+{
+	/* Capture requires a descriptor for the directory stream. */
+#if defined(__linux__) || defined(__APPLE__)
+	return git_env_bool("GIT_TEST_UNTRACKED_CACHE_RAW", 1);
+#else
+	return 0;
+#endif
+}
+
+static unsigned untracked_raw_name_flags(void)
+{
+#ifdef PRECOMPOSE_UNICODE
+	return repo_config_values(the_repository)->precomposed_unicode == 1 ? 2 : 0;
+#else
+	return 0;
+#endif
+}
+
+static int untracked_raw_fstat(DIR *dir, struct stat *st)
+{
+#if defined(__linux__) || defined(__APPLE__)
+	return fstat(dirfd(dir), st);
+#else
+	(void)dir;
+	(void)st;
+	return -1;
+#endif
+}
+
+static void free_untracked_raw(struct untracked_cache *uc,
+			       struct untracked_cache_raw **raw)
+{
+	if (!*raw)
+		return;
+	uc->raw_bytes -= sizeof(**raw) + (*raw)->alloc;
+	uc->raw_entries -= (*raw)->nr;
+	FREE_AND_NULL(*raw);
+}
+
+/* Stable on-disk values, independent of the platform's DT_* constants. */
+static int encode_untracked_dtype(int dtype)
+{
+	switch (dtype) {
+	case DT_UNKNOWN:
+		return 0;
+	case DT_REG:
+		return 1;
+	case DT_DIR:
+		return 2;
+	case DT_LNK:
+		return 3;
+	default:
+		return -1;
+	}
+}
+
+static int decode_untracked_dtype(unsigned char dtype)
+{
+	switch (dtype) {
+	case 1:
+		return DT_REG;
+	case 2:
+		return DT_DIR;
+	case 3:
+		return DT_LNK;
+	default:
+		return DT_UNKNOWN;
+	}
+}
+
+static int untracked_raw_name_cmp(const void *a, const void *b)
+{
+	return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int valid_untracked_raw(struct untracked_cache_raw *raw,
+			       size_t remaining_bytes)
+{
+	const char **names;
+	size_t pos = 0;
+	int valid = 0;
+
+	if (raw->validated)
+		return 1;
+	if (raw->nr > remaining_bytes / sizeof(*names))
+		return 0;
+	ALLOC_ARRAY(names, raw->nr);
+	for (size_t i = 0; i < raw->nr; i++) {
+		const char *end;
+
+		if (pos >= raw->len || (unsigned char)raw->data[pos++] > 3)
+			goto out;
+		names[i] = raw->data + pos;
+		end = memchr(names[i], '\0', raw->len - pos);
+		if (!end || end == names[i] || strchr(names[i], '/') ||
+		    is_dot_or_dotdot(names[i]))
+			goto out;
+		pos += end - names[i] + 1;
+	}
+	if (pos != raw->len)
+		goto out;
+	QSORT(names, raw->nr, untracked_raw_name_cmp);
+	for (size_t i = 1; i < raw->nr; i++)
+		if (!strcmp(names[i - 1], names[i]))
+			goto out;
+	valid = 1;
+out:
+	free(names);
+	if (valid)
+		raw->validated = 1;
+	return valid;
 }
 
 static enum path_treatment read_directory_recursive(struct dir_struct *dir,
@@ -3122,6 +3246,39 @@ serial:
 	return shared.pending;
 }
 
+static void capture_untracked_raw(struct cached_dir *cdir,
+				  const char *name, int dtype)
+{
+	struct untracked_cache_raw *raw = cdir->capture;
+	struct untracked_cache *uc = cdir->raw_owner;
+	size_t len = strlen(name) + 2;
+	size_t available = UNTRACKED_RAW_MAX_BYTES - uc->raw_bytes;
+	int encoded_type = encode_untracked_dtype(dtype);
+
+	if (encoded_type < 0 || uc->raw_entries == UNTRACKED_RAW_MAX_ENTRIES ||
+	    len > raw->alloc - raw->len + available)
+		goto discard;
+	if (len > raw->alloc - raw->len) {
+		size_t needed = raw->len + len;
+		size_t alloc = alloc_nr(needed);
+
+		if (alloc > raw->alloc + available)
+			alloc = needed;
+		uc->raw_bytes += alloc - raw->alloc;
+		cdir->capture = raw = xrealloc(raw, sizeof(*raw) + alloc);
+		raw->alloc = alloc;
+	}
+	raw->data[raw->len++] = encoded_type;
+	memcpy(raw->data + raw->len, name, len - 1);
+	raw->len += len - 1;
+	raw->nr++;
+	uc->raw_entries++;
+	return;
+discard:
+	free_untracked_raw(uc, &cdir->capture);
+	cdir->raw_capture_failed = 1;
+}
+
 static int open_cached_dir(struct cached_dir *cdir,
 			   struct dir_struct *dir,
 			   struct untracked_cache_dir *untracked,
@@ -3130,12 +3287,32 @@ static int open_cached_dir(struct cached_dir *cdir,
 			   int check_only)
 {
 	const char *c_path;
+	struct stat st, opened;
+	int capture = 0;
 
 	memset(cdir, 0, sizeof(*cdir));
 	cdir->untracked = untracked;
 	if (valid_cached_dir(dir, untracked, istate, path, check_only))
 		return 0;
 	c_path = path->len ? path->buf : ".";
+	if (dir->internal.raw_enabled && untracked && istate->timestamp.sec) {
+		struct untracked_cache_raw *raw = untracked->raw;
+
+		cdir->raw_owner = dir->untracked;
+		if (!lstat(c_path, &st) && S_ISDIR(st.st_mode)) {
+			if (raw && !match_untracked_dir_stat_racy(&istate->timestamp, &raw->stat, &st) &&
+			    valid_untracked_raw(raw, UNTRACKED_RAW_MAX_BYTES -
+							     dir->untracked->raw_bytes)) {
+				invalidate_directory(dir->untracked, untracked);
+				untracked->stat_data = raw->stat;
+				cdir->raw_replay = 1;
+				dir->internal.raw_replayed_dirs++;
+				return 0;
+			}
+			capture = 1;
+		}
+		free_untracked_raw(dir->untracked, &untracked->raw);
+	}
 	cdir->fdir = opendir(c_path);
 	if (!cdir->fdir && !is_missing_file_error(errno))
 		warning_errno(_("could not open directory '%s'"), c_path);
@@ -3145,6 +3322,19 @@ static int open_cached_dir(struct cached_dir *cdir,
 	}
 	if (!cdir->fdir)
 		return -1;
+	if (capture && !untracked_raw_fstat(cdir->fdir, &opened)) {
+		struct stat_data before;
+
+		fill_stat_data(&before, &st);
+		if (!match_untracked_dir_stat_racy(&istate->timestamp,
+						   &before, &opened) &&
+		    dir->untracked->raw_bytes <=
+			    UNTRACKED_RAW_MAX_BYTES - sizeof(*cdir->capture)) {
+			CALLOC_ARRAY(cdir->capture, 1);
+			cdir->capture->stat = before;
+			dir->untracked->raw_bytes += sizeof(*cdir->capture);
+		}
+	}
 	return 0;
 }
 
@@ -3153,7 +3343,16 @@ static int read_cached_dir(struct cached_dir *cdir)
 	struct dirent *de;
 
 	if (cdir->fdir) {
+		int saved_errno = errno;
+
+		if (cdir->capture)
+			errno = 0;
 		de = readdir_skip_dot_and_dotdot(cdir->fdir);
+		if (cdir->capture) {
+			cdir->raw_eof = !de && !errno;
+			if (!errno)
+				errno = saved_errno;
+		}
 		if (!de) {
 			cdir->d_name = NULL;
 			cdir->d_type = DT_UNKNOWN;
@@ -3161,6 +3360,18 @@ static int read_cached_dir(struct cached_dir *cdir)
 		}
 		cdir->d_name = de->d_name;
 		cdir->d_type = DTYPE(de);
+		if (cdir->capture)
+			capture_untracked_raw(cdir, cdir->d_name, cdir->d_type);
+		return 0;
+	}
+	if (cdir->raw_replay) {
+		struct untracked_cache_raw *raw = cdir->untracked->raw;
+
+		if (cdir->raw_pos == raw->len)
+			return -1;
+		cdir->d_type = decode_untracked_dtype(raw->data[cdir->raw_pos++]);
+		cdir->d_name = raw->data + cdir->raw_pos;
+		cdir->raw_pos += strlen(cdir->d_name) + 1;
 		return 0;
 	}
 	while (cdir->nr_dirs < cdir->untracked->dirs_nr) {
@@ -3182,8 +3393,31 @@ static int read_cached_dir(struct cached_dir *cdir)
 	return -1;
 }
 
-static void close_cached_dir(struct cached_dir *cdir)
+static void close_cached_dir(struct cached_dir *cdir, struct dir_struct *dir,
+			     const char *path)
 {
+	if (cdir->capture) {
+		struct stat opened, named;
+		struct untracked_cache_raw *raw = cdir->capture;
+
+		if (cdir->raw_eof &&
+		    !untracked_raw_fstat(cdir->fdir, &opened) &&
+		    !lstat(*path ? path : ".", &named) &&
+		    !match_untracked_dir_stat(&raw->stat, &opened) &&
+		    !match_untracked_dir_stat(&raw->stat, &named) &&
+		    valid_untracked_raw(raw, UNTRACKED_RAW_MAX_BYTES -
+						     cdir->raw_owner->raw_bytes)) {
+			cdir->untracked->raw = raw;
+			dir->internal.raw_captured_dirs++;
+			dir->internal.raw_captured_entries += raw->nr;
+			cdir->capture = NULL;
+		} else {
+			free_untracked_raw(cdir->raw_owner, &cdir->capture);
+			cdir->raw_capture_failed = 1;
+		}
+	}
+	if (cdir->raw_capture_failed)
+		dir->internal.raw_discarded_dirs++;
 	if (cdir->fdir)
 		closedir(cdir->fdir);
 	/* We have gone through this directory. Mark it valid. */
@@ -3230,7 +3464,7 @@ static void add_path_to_appropriate_result_list(struct dir_struct *dir,
 		if (dir->flags & DIR_SHOW_IGNORED)
 			break;
 		dir_add_name(dir, istate, path->buf, path->len);
-		if (cdir->fdir)
+		if (cdir->fdir || cdir->raw_replay)
 			add_untracked(untracked, path->buf + baselen);
 		break;
 
@@ -3300,6 +3534,8 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 		untracked->check_only = !!check_only;
 
 	while (!read_cached_dir(&cdir)) {
+		if (cdir.raw_replay)
+			dir->internal.raw_replayed_entries++;
 		/* check how the file or directory should be treated */
 		state = treat_path(dir, untracked, untracked_prune, &cdir,
 				   istate, &path,
@@ -3359,7 +3595,7 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 
 			/* abort early if maximum state has been reached */
 			if (dir_state == path_untracked) {
-				if (cdir.fdir)
+				if (cdir.fdir || cdir.raw_replay)
 					add_untracked(untracked, path.buf + baselen);
 				invalidate_skipped_resync_descendants(dir, untracked);
 				break;
@@ -3372,7 +3608,8 @@ static enum path_treatment read_directory_recursive(struct dir_struct *dir,
 						    istate, &path, baselen,
 						    pathspec, state);
 	}
-	close_cached_dir(&cdir);
+	strbuf_setlen(&path, baselen);
+	close_cached_dir(&cdir, dir, path.buf);
 	if (!check_only && dir->internal.can_prune_replay &&
 	    (!pathspec || !pathspec->nr) && untracked_prune &&
 	    dir_state < path_untracked &&
@@ -4027,6 +4264,12 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 	dir->internal.untracked_cache_revalidated = 0;
 	dir->internal.icase_scan_budget_used = 0;
 	dir->internal.exact_lookup_budget_used = 0;
+	dir->internal.raw_enabled = 0;
+	dir->internal.raw_captured_dirs = 0;
+	dir->internal.raw_captured_entries = 0;
+	dir->internal.raw_replayed_dirs = 0;
+	dir->internal.raw_replayed_entries = 0;
+	dir->internal.raw_discarded_dirs = 0;
 
 	if (has_symlink_leading_path(path, len)) {
 		trace2_region_leave("dir", "read_directory", istate->repo);
@@ -4051,6 +4294,11 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		dir->untracked = NULL;
 	if (untracked) {
 		untracked_cache = dir->untracked;
+		dir->internal.raw_enabled = !negative_only && untracked_raw_enabled() &&
+					    (!untracked_cache->raw_bytes ||
+					     untracked_cache->raw_name_flags == untracked_raw_name_flags());
+		if (dir->internal.raw_enabled)
+			untracked_cache->raw_name_flags = untracked_raw_name_flags();
 
 		/*
 		 * Negative-only scans must not replay or populate cached
@@ -4106,6 +4354,25 @@ done:
 	emit_traversal_statistics(dir, istate->repo, path, len);
 
 	trace2_region_leave("dir", "read_directory", istate->repo);
+	if (dir->internal.raw_enabled) {
+		int saved_errno = errno;
+
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/captured-directories", dir->internal.raw_captured_dirs);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/captured-entries", dir->internal.raw_captured_entries);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/replayed-directories", dir->internal.raw_replayed_dirs);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/replayed-entries", dir->internal.raw_replayed_entries);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/discarded-directories", dir->internal.raw_discarded_dirs);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/bytes", untracked_cache->raw_bytes);
+		trace2_data_intmax("untracked_cache", istate->repo,
+				   "raw/entries", untracked_cache->raw_entries);
+		errno = saved_errno;
+	}
 	{
 		int saved_errno = errno;
 
@@ -4698,7 +4965,8 @@ static int write_one_dir(struct untracked_cache_dir *untracked,
 
 static int write_untracked_body(struct strbuf *out,
 				struct untracked_cache *untracked, int bounded_snapshot,
-				enum untracked_snapshot_bound *bound)
+				enum untracked_snapshot_bound *bound,
+				size_t *remaining_entries)
 {
 	struct ondisk_untracked_cache *ouc;
 	struct write_data wd;
@@ -4725,6 +4993,8 @@ static int write_untracked_body(struct strbuf *out,
 	if (!untracked->root) {
 		varint_len = encode_varint(0, varbuf);
 		strbuf_add(out, varbuf, varint_len);
+		if (remaining_entries)
+			*remaining_entries = UNTRACKED_SNAPSHOT_MAX_ENTRIES;
 		return 0;
 	}
 
@@ -4752,6 +5022,8 @@ static int write_untracked_body(struct strbuf *out,
 	strbuf_addbuf(out, &wd.sb_stat);
 	strbuf_addbuf(out, &wd.sb_sha1);
 	strbuf_addch(out, '\0'); /* safe guard for string lists */
+	if (remaining_entries)
+		*remaining_entries = wd.remaining_entries;
 
 done:
 	ewah_free(wd.valid);
@@ -4768,10 +5040,100 @@ done:
 #define UNTRACKED_PENDING_HEADER_LEN 21
 #define UNTRACKED_PENDING_OVERHEAD 22
 #define UNTRACKED_PENDING_SENTINEL 0xa5
+#define UNTRACKED_RAW_HEADER_LEN	29
+#define UNTRACKED_RAW_RECORD_HEADER_LEN (12 + sizeof(struct stat_data))
+
+static void write_untracked_raw_dirs(struct strbuf *out,
+				     struct untracked_cache *uc,
+				     const struct untracked_cache_dir *node,
+				     uint32_t *ordinal, uint32_t *records,
+				     size_t *remaining_entries,
+				     size_t *remaining_bytes)
+{
+	struct untracked_cache_raw *raw = node->raw;
+	uint32_t current = (*ordinal)++;
+
+	/* Include the decoder's temporary duplicate-name validation array. */
+	if (raw && raw->nr < *remaining_entries &&
+	    sizeof(*raw) <= *remaining_bytes &&
+	    raw->len <= *remaining_bytes - sizeof(*raw) &&
+	    raw->nr <= (*remaining_bytes - sizeof(*raw) - raw->len) /
+			       sizeof(const char *) &&
+	    valid_untracked_raw(raw, UNTRACKED_RAW_MAX_BYTES - uc->raw_bytes)) {
+		unsigned char header[UNTRACKED_RAW_RECORD_HEADER_LEN];
+		struct stat_data stat;
+
+		put_be32(header, current);
+		put_be32(header + 4, raw->nr);
+		put_be32(header + 8, raw->len);
+		stat_data_to_disk(&stat, &raw->stat);
+		memcpy(header + 12, &stat, sizeof(stat));
+		strbuf_add(out, header, sizeof(header));
+		strbuf_add(out, raw->data, raw->len);
+		*remaining_entries -= raw->nr + 1;
+		*remaining_bytes -= sizeof(*raw) + raw->len;
+		(*records)++;
+	}
+	for (size_t i = 0; i < node->dirs_nr; i++)
+		if (node->dirs[i]->recurse)
+			write_untracked_raw_dirs(out, uc, node->dirs[i], ordinal,
+						 records, remaining_entries,
+						 remaining_bytes);
+}
+
+/*
+ * Version 2 keeps the legacy classified body intact. Optional raw records
+ * address its exact emitted preorder, and may be omitted independently.
+ * Old UNRV readers reject the version without interpreting raw names as
+ * classified results. The daemon transports this container opaquely.
+ */
+static int write_untracked_raw_extension(struct strbuf *out,
+					 struct untracked_cache *uc)
+{
+	struct strbuf body = STRBUF_INIT, raw = STRBUF_INIT;
+	enum untracked_snapshot_bound bound;
+	unsigned char header[UNTRACKED_RAW_HEADER_LEN] = { 0 };
+	size_t remaining_entries, remaining_bytes = UNTRACKED_RAW_MAX_BYTES;
+	uint32_t ordinal = 0, records = 0;
+	int written = 0;
+
+	if (!uc->root || *uc->root->name ||
+	    !valid_untracked_topology(uc->root, 0, 0) ||
+	    write_untracked_body(&body, uc, 1, &bound, &remaining_entries))
+		goto done;
+	strbuf_addchars(&raw, 0, sizeof(uint32_t));
+	write_untracked_raw_dirs(&raw, uc, uc->root, &ordinal, &records,
+				 &remaining_entries, &remaining_bytes);
+	if (!records)
+		goto done;
+	put_be32(raw.buf, records);
+	memcpy(header, UNTRACKED_PENDING_MAGIC, UNTRACKED_PENDING_MAGIC_LEN);
+	put_be32(header + 5, 2);
+	put_be32(header + 9, (uc->fsmonitor_resync ? 1 : 0) | uc->raw_name_flags);
+	if (uc->fsmonitor_resync) {
+		put_be32(header + 13, uc->fsmonitor_resync_cutoff.sec);
+		put_be32(header + 17, uc->fsmonitor_resync_cutoff.nsec);
+	}
+	if (body.len > UINT32_MAX || raw.len > UINT32_MAX ||
+	    body.len + raw.len > UINT32_MAX - sizeof(header) - 1)
+		goto done;
+	put_be32(header + 21, body.len);
+	put_be32(header + 25, raw.len);
+	strbuf_add(out, header, sizeof(header));
+	strbuf_addbuf(out, &body);
+	strbuf_addbuf(out, &raw);
+	strbuf_addch(out, UNTRACKED_PENDING_SENTINEL);
+	written = 1;
+done:
+	strbuf_release(&raw);
+	strbuf_release(&body);
+	return written;
+}
 
 static enum untracked_cache_encoding write_untracked_extension_1(
 	struct strbuf *out, struct untracked_cache *untracked,
-	int bounded_snapshot, enum untracked_snapshot_bound *bound)
+	int bounded_snapshot, enum untracked_snapshot_bound *bound,
+	int include_raw)
 {
 	size_t start = out->len, body_start, body_len;
 
@@ -4779,10 +5141,13 @@ static enum untracked_cache_encoding write_untracked_extension_1(
 	    (!untracked->fsmonitor_resync_cutoff.sec ||
 	     untracked->fsmonitor_resync_cutoff.nsec >= 1000000000))
 		return UNTRACKED_CACHE_ENCODING_NONE;
+	if (include_raw && untracked_raw_enabled() && untracked->raw_bytes &&
+	    write_untracked_raw_extension(out, untracked))
+		return UNTRACKED_CACHE_ENCODING_RAW;
 	if (untracked->fsmonitor_resync)
 		strbuf_addchars(out, '\0', UNTRACKED_PENDING_HEADER_LEN);
 	body_start = out->len;
-	if (write_untracked_body(out, untracked, bounded_snapshot, bound)) {
+	if (write_untracked_body(out, untracked, bounded_snapshot, bound, NULL)) {
 		strbuf_setlen(out, start);
 		return UNTRACKED_CACHE_ENCODING_TOO_LARGE;
 	}
@@ -4809,15 +5174,15 @@ omit:
 enum untracked_cache_encoding write_untracked_extension(
 	struct strbuf *out, struct untracked_cache *untracked)
 {
-	return write_untracked_extension_1(out, untracked, 0, NULL);
+	return write_untracked_extension_1(out, untracked, 0, NULL, 1);
 }
 
 enum untracked_cache_encoding write_untracked_snapshot(
 	struct strbuf *out, struct untracked_cache *untracked,
-	enum untracked_snapshot_bound *bound)
+	enum untracked_snapshot_bound *bound, int include_raw)
 {
 	*bound = UNTRACKED_SNAPSHOT_BOUND_NONE;
-	return write_untracked_extension_1(out, untracked, 1, bound);
+	return write_untracked_extension_1(out, untracked, 1, bound, include_raw);
 }
 
 static void free_untracked(struct untracked_cache_dir *ucd)
@@ -4830,6 +5195,7 @@ static void free_untracked(struct untracked_cache_dir *ucd)
 	for (i = 0; i < ucd->untracked_nr; i++)
 		free(ucd->untracked[i]);
 	free(ucd->untracked);
+	free(ucd->raw);
 	free(ucd->dirs);
 	free(ucd);
 }
@@ -4857,6 +5223,11 @@ struct read_data {
 	struct ewah_bitmap *sha1_valid;
 	const unsigned char *data;
 	const unsigned char *end;
+};
+
+struct untracked_raw_read {
+	struct untracked_cache_dir **dirs;
+	size_t nr, remaining_entries;
 };
 
 static int read_untracked_varint(const unsigned char **data,
@@ -5074,7 +5445,7 @@ static void load_oid_stat(struct oid_stat *oid_stat, const unsigned char *data,
 
 static struct untracked_cache *read_untracked_extension_1(
 	const void *data, unsigned long sz, size_t max_nodes,
-	size_t max_entries, size_t max_depth)
+	size_t max_entries, size_t max_depth, struct untracked_raw_read *raw)
 {
 	struct untracked_cache *uc;
 	struct read_data rd;
@@ -5165,7 +5536,13 @@ static struct untracked_cache *read_untracked_extension_1(
 	valid = 1;
 
 done:
-	free(rd.ucd);
+	if (raw && valid && next == end) {
+		raw->dirs = rd.ucd;
+		raw->nr = rd.nr;
+		raw->remaining_entries = rd.remaining_entries;
+	} else {
+		free(rd.ucd);
+	}
 	ewah_free(rd.valid);
 	ewah_free(rd.check_only);
 	ewah_free(rd.sha1_valid);
@@ -5181,16 +5558,108 @@ struct untracked_cache *read_untracked_extension(const void *data,
 						unsigned long sz)
 {
 	return read_untracked_extension_1(data, sz, SIZE_MAX, SIZE_MAX,
-					  SIZE_MAX);
+					  SIZE_MAX, NULL);
 }
 
 struct untracked_cache *read_untracked_extension_bounded(const void *data,
 							unsigned long sz)
 {
 	return read_untracked_extension_1(data, sz,
-					 UNTRACKED_SNAPSHOT_MAX_DIRS,
-					 UNTRACKED_SNAPSHOT_MAX_ENTRIES,
-					 UNTRACKED_SNAPSHOT_MAX_DEPTH);
+					  UNTRACKED_SNAPSHOT_MAX_DIRS,
+					  UNTRACKED_SNAPSHOT_MAX_ENTRIES,
+					  UNTRACKED_SNAPSHOT_MAX_DEPTH, NULL);
+}
+
+static struct untracked_cache *read_untracked_raw_extension(
+	const unsigned char *p, size_t sz)
+{
+	struct untracked_raw_read context = { 0 };
+	struct untracked_cache *uc = NULL;
+	const unsigned char *next, *end = p + sz - 1;
+	uint32_t flags, sec, nsec, body_len, raw_len, records, previous = 0;
+	size_t raw_bytes = 0;
+	int keep_raw, valid = 0;
+
+	if (sz < UNTRACKED_RAW_HEADER_LEN + 5 || sz > UINT32_MAX)
+		return NULL;
+	flags = get_be32(p + 9);
+	sec = get_be32(p + 13);
+	nsec = get_be32(p + 17);
+	body_len = get_be32(p + 21);
+	raw_len = get_be32(p + 25);
+	if (flags > 3 ||
+	    ((flags & 1) ? (!sec || nsec >= 1000000000) : (sec || nsec)) ||
+	    body_len > sz - UNTRACKED_RAW_HEADER_LEN - 1 ||
+	    raw_len != sz - UNTRACKED_RAW_HEADER_LEN - 1 - body_len ||
+	    raw_len < sizeof(uint32_t) || raw_len > UNTRACKED_RAW_MAX_BYTES)
+		return NULL;
+	uc = read_untracked_extension_1(p + UNTRACKED_RAW_HEADER_LEN, body_len,
+					UNTRACKED_SNAPSHOT_MAX_DIRS,
+					UNTRACKED_SNAPSHOT_MAX_ENTRIES,
+					UNTRACKED_SNAPSHOT_MAX_DEPTH, &context);
+	if (!uc || !uc->root || *uc->root->name ||
+	    !valid_untracked_topology(uc->root, 0, 0))
+		goto done;
+	uc->fsmonitor_resync = flags & 1;
+	uc->raw_name_flags = flags & 2;
+	uc->fsmonitor_resync_cutoff.sec = sec;
+	uc->fsmonitor_resync_cutoff.nsec = nsec;
+	keep_raw = untracked_raw_enabled() &&
+		   uc->raw_name_flags == untracked_raw_name_flags();
+	next = p + UNTRACKED_RAW_HEADER_LEN + body_len;
+	records = get_be32(next);
+	next += sizeof(uint32_t);
+	if (!records || records > context.nr)
+		goto done;
+	for (size_t i = 0; i < records; i++) {
+		struct untracked_cache_raw *raw;
+		struct stat_data stat;
+		uint32_t ordinal, nr, len;
+
+		if ((size_t)(end - next) < UNTRACKED_RAW_RECORD_HEADER_LEN)
+			goto done;
+		ordinal = get_be32(next);
+		nr = get_be32(next + 4);
+		len = get_be32(next + 8);
+		if (ordinal >= context.nr || (i && ordinal <= previous) ||
+		    nr >= context.remaining_entries || nr > len / 3 ||
+		    len > (size_t)(end - next) - UNTRACKED_RAW_RECORD_HEADER_LEN ||
+		    sizeof(*raw) > UNTRACKED_RAW_MAX_BYTES - raw_bytes ||
+		    len > UNTRACKED_RAW_MAX_BYTES - raw_bytes - sizeof(*raw))
+			goto done;
+		previous = ordinal;
+		raw_bytes += sizeof(*raw) + len;
+		if (nr > (UNTRACKED_RAW_MAX_BYTES - raw_bytes) / sizeof(const char *))
+			goto done;
+		stat_data_from_disk(&stat, next + 12);
+		if (stat.sd_mtime.nsec >= 1000000000 ||
+		    stat.sd_ctime.nsec >= 1000000000)
+			goto done;
+		next += UNTRACKED_RAW_RECORD_HEADER_LEN;
+		if (keep_raw) {
+			raw = xcalloc(1, sizeof(*raw) + len);
+			raw->len = raw->alloc = len;
+			raw->nr = nr;
+			raw->stat = stat;
+			memcpy(raw->data, next, len);
+			context.dirs[ordinal]->raw = raw;
+			uc->raw_bytes = raw_bytes;
+			uc->raw_entries += nr;
+		}
+		next += len;
+		context.remaining_entries -= nr + 1;
+	}
+	if (next != end)
+		goto done;
+	/* Payload names are checked only before replay or serialization. */
+	valid = 1;
+done:
+	free(context.dirs);
+	if (!valid) {
+		free_untracked_cache(uc);
+		uc = NULL;
+	}
+	return uc;
 }
 
 static struct untracked_cache *read_pending_untracked_extension_1(
@@ -5202,8 +5671,11 @@ static struct untracked_cache *read_pending_untracked_extension_1(
 
 	if (sz < UNTRACKED_PENDING_OVERHEAD || sz > UINT32_MAX ||
 	    memcmp(p, UNTRACKED_PENDING_MAGIC, UNTRACKED_PENDING_MAGIC_LEN) ||
-	    get_be32(p + 5) != 1 ||
 	    p[sz - 1] != UNTRACKED_PENDING_SENTINEL)
+		return NULL;
+	if (get_be32(p + 5) == 2)
+		return read_untracked_raw_extension(p, sz);
+	if (get_be32(p + 5) != 1)
 		return NULL;
 	sec = get_be32(p + 9);
 	nsec = get_be32(p + 13);
@@ -5246,6 +5718,8 @@ static void invalidate_one_directory(struct untracked_cache *uc,
 	size_t i;
 
 	uc->dir_invalidated++;
+	/* Filesystem and index changes both conservatively discard inventories. */
+	free_untracked_raw(uc, &ucd->raw);
 	ucd->can_skip_replay = 0;
 	ucd->valid = 0;
 	ucd->stat_result = UNTRACKED_STAT_UNCHECKED;

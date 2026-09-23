@@ -4,6 +4,23 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "untracked-inventory-benchmark",
+    size = "large",
+    srcs = ["untracked-inventory-benchmark.py"],
+    args = [
+        "$(rlocationpath //:git)",
+        "$(COMPILATION_MODE)",
+    ],
+    data = ["//:git"],
+    tags = [
+        "exclusive",
+        "manual",
+        "no-remote",
+    ],
+    deps = ["@rules_python//python/runfiles"],
+)
+
 # Opt-in measurement, not a performance gate. Use -c opt --stamp and the
 # intended platform; the runner records the exact executable's identity.
 py_test(

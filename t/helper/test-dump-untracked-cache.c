@@ -91,13 +91,20 @@ static void read_cache_index(struct cache_index *index, const char *path,
 		    !memcmp(data + pos, "IEOT", 4))
 			die("split-index, EOIE and IEOT are not supported");
 		if (inventory) {
+			const unsigned char *body = data + pos + 8;
+
 			printf("%.4s %u\n", (const char *)data + pos, size);
-			if (signature == UNRV_SIGNATURE && size >= 22)
+			if (signature == UNRV_SIGNATURE && size >= 22 &&
+			    get_be32(body + 5) == 1)
 				printf("pending version=%u cutoff=%u.%09u body=%u\n",
-				       get_be32(data + pos + 13),
-				       get_be32(data + pos + 17),
-				       get_be32(data + pos + 21),
-				       get_be32(data + pos + 25));
+				       get_be32(body + 5), get_be32(body + 9),
+				       get_be32(body + 13), get_be32(body + 17));
+			else if (signature == UNRV_SIGNATURE && size >= 30 &&
+				 get_be32(body + 5) == 2)
+				printf("raw version=2 flags=%u cutoff=%u.%09u body=%u raw=%u\n",
+				       get_be32(body + 9), get_be32(body + 13),
+				       get_be32(body + 17), get_be32(body + 21),
+				       get_be32(body + 25));
 		}
 		if (signature == UNTR_SIGNATURE || signature == UNRV_SIGNATURE) {
 			if (index->cache_signature && !inventory)
@@ -133,6 +140,68 @@ static uint32_t parse_number(const char *value)
 	if (errno || !*value || *end || number > UINT32_MAX)
 		die("invalid number: %s", value);
 	return number;
+}
+
+static void copy_legacy_body(struct strbuf *legacy, const struct strbuf *body)
+{
+	size_t offset, length_offset, len;
+
+	if (body->len < 22)
+		die("pending header is truncated");
+	switch (get_be32(body->buf + 5)) {
+	case 1:
+		offset = 21;
+		length_offset = 17;
+		break;
+	case 2:
+		offset = 29;
+		length_offset = 21;
+		break;
+	default:
+		die("unknown untracked-cache version");
+	}
+	if (body->len <= offset)
+		die("untracked-cache header is truncated");
+	len = get_be32(body->buf + length_offset);
+	if (len > body->len - offset - 1)
+		die("untracked-cache body is truncated");
+	strbuf_reset(legacy);
+	strbuf_add(legacy, body->buf + offset, len);
+}
+
+static void corrupt_raw_dtype(struct strbuf *body)
+{
+	size_t pos, end, header = 12 + sizeof(struct stat_data);
+	uint32_t records;
+	int changed = 0;
+
+	if (body->len < 34 || get_be32(body->buf + 5) != 2)
+		die("raw dtype mutation requires version 2");
+	end = body->len - 1;
+	pos = 29 + (size_t)get_be32(body->buf + 21);
+	if (pos > end || end - pos < 4 ||
+	    get_be32(body->buf + 25) != end - pos)
+		die("raw record section is truncated");
+	records = get_be32(body->buf + pos);
+	pos += 4;
+	for (size_t i = 0; i < records; i++) {
+		uint32_t nr, len;
+
+		if (end - pos < header)
+			die("raw record header is truncated");
+		nr = get_be32(body->buf + pos + 4);
+		len = get_be32(body->buf + pos + 8);
+		pos += header;
+		if (len > end - pos || (nr && !len))
+			die("raw record payload is truncated");
+		if (nr) {
+			body->buf[pos] = 4; /* Outside the portable dtype encoding. */
+			changed = 1;
+		}
+		pos += len;
+	}
+	if (pos != end || !changed)
+		die("expected complete nonempty raw records");
 }
 
 static struct untracked_cache_dir **find_node(
@@ -223,18 +292,20 @@ static void rewrite_index(const char *input, const char *output,
 		die("index has no untracked cache");
 	if (argc && !strcmp(argv[0], "--mark-pending")) {
 		struct untracked_cache *uc;
+		enum untracked_cache_encoding encoding;
 
-		if (index.cache_signature != UNTR_SIGNATURE ||
-		    repo_read_index(the_repository) < 0)
-			die("mark-pending requires a trusted legacy index");
+		if (repo_read_index(the_repository) < 0)
+			die("mark-pending requires a readable index");
 		uc = the_repository->index->untracked;
 		if (!uc || !uc->root || !uc->root->valid ||
 		    uc->fsmonitor_resync ||
 		    !the_repository->index->timestamp.sec)
 			die("mark-pending requires a trusted root and timestamp");
 		untracked_cache_invalidate_all(the_repository->index);
-		if (write_untracked_extension(&body, uc) !=
-		    UNTRACKED_CACHE_ENCODING_PENDING)
+		encoding = write_untracked_extension(&body, uc);
+		if (!uc->fsmonitor_resync ||
+		    (encoding != UNTRACKED_CACHE_ENCODING_PENDING &&
+		     encoding != UNTRACKED_CACHE_ENCODING_RAW))
 			die("mark-pending did not produce a pending cache");
 		argc--;
 		argv++;
@@ -250,18 +321,18 @@ static void rewrite_index(const char *input, const char *output,
 			die("mutation requires a valid pending cache");
 		free_untracked_cache(uc);
 	}
-	strbuf_add(&legacy, body.buf + 21, get_be32(body.buf + 17));
+	copy_legacy_body(&legacy, &body);
 	for (int i = 0; i < argc; i++) {
 		const char *arg = argv[i], *value;
 
 		if (skip_prefix(arg, "--node-name=", &value)) {
 			mutate_node(&body, value, 0);
-			strbuf_reset(&legacy);
-			strbuf_add(&legacy, body.buf + 21, get_be32(body.buf + 17));
+			copy_legacy_body(&legacy, &body);
 		} else if (skip_prefix(arg, "--siblings=", &value)) {
 			mutate_node(&body, value, 1);
-			strbuf_reset(&legacy);
-			strbuf_add(&legacy, body.buf + 21, get_be32(body.buf + 17));
+			copy_legacy_body(&legacy, &body);
+		} else if (!strcmp(arg, "--invalid-raw-dtype")) {
+			corrupt_raw_dtype(&body);
 		} else if (!strcmp(arg, "--rename-pending=UXRV")) {
 			signature = 0x55585256;
 		} else if (skip_prefix(arg, "--set-pending=", &value)) {

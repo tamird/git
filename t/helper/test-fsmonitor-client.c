@@ -174,7 +174,7 @@ static int test_untracked_snapshot_dir_bound(void)
 	}
 	synthetic.root = root;
 
-	if (write_untracked_snapshot(&snapshot, &synthetic, &bound) !=
+	if (write_untracked_snapshot(&snapshot, &synthetic, &bound, 1) !=
 		    UNTRACKED_CACHE_ENCODING_LEGACY ||
 	    bound != UNTRACKED_SNAPSHOT_BOUND_NONE) {
 		error("snapshot rejected %d directory nodes", nr_children + 1);
@@ -199,6 +199,119 @@ done:
 	free(root);
 	strbuf_release(&synthetic.ident);
 	strbuf_release(&snapshot);
+	return ret;
+}
+
+/* Exercise the real 8 MiB wire limit without creating thousands of files. */
+static int test_untracked_snapshot_raw_fallback(void)
+{
+	enum { nr_names = 96 * 1024,
+	       name_len = 160 };
+	static const char alphabet[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+	struct index_state *istate = the_repository->index;
+	struct untracked_cache *original, *synthetic = NULL, *checked = NULL;
+	struct untracked_cache_raw *raw;
+	struct strbuf expected = STRBUF_INIT, encoded = STRBUF_INIT;
+	enum untracked_snapshot_bound bound;
+	enum untracked_cache_encoding encoding;
+	const char *reason;
+	uint32_t random = 1;
+	size_t payload_len = nr_names * (name_len + 2);
+	int ret = 1;
+
+	if (do_read_index(istate, the_repository->index_file, 1) < 0)
+		die("unable to read index file");
+	refresh_fsmonitor(istate);
+	original = istate->untracked;
+	if (!original || !original->root)
+		die("test requires a populated untracked cache");
+	encoding = write_untracked_snapshot(&expected, original, &bound, 0);
+	if (encoding != UNTRACKED_CACHE_ENCODING_LEGACY ||
+	    bound != UNTRACKED_SNAPSHOT_BOUND_NONE)
+		die("test requires a non-pending derived snapshot");
+	synthetic = read_untracked_snapshot(expected.buf, expected.len);
+	if (!synthetic || !synthetic->root ||
+	    synthetic->root->untracked_nr != 1 ||
+	    strcmp(synthetic->root->untracked[0], "sentinel")) {
+		error("test requires the derived sentinel");
+		goto done;
+	}
+
+	raw = xcalloc(1, sizeof(*raw) + payload_len);
+	raw->stat = synthetic->root->stat_data;
+	raw->len = raw->alloc = payload_len;
+	raw->nr = nr_names;
+	for (size_t i = 0; i < nr_names; i++) {
+		char *entry = raw->data + i * (name_len + 2);
+		char *name = entry + 1;
+
+		entry[0] = 1; /* Portable regular-file type. */
+		xsnprintf(name, 9, "%08x", (unsigned int)i);
+		for (size_t j = 8; j < name_len; j++) {
+			/* Deterministic entropy, with a unique fixed-width prefix. */
+			random ^= random << 13;
+			random ^= random >> 17;
+			random ^= random << 5;
+			name[j] = alphabet[random & 63];
+		}
+		name[name_len] = '\0';
+	}
+	synthetic->root->raw = raw;
+	synthetic->raw_bytes = sizeof(*raw) + payload_len;
+	synthetic->raw_entries = nr_names;
+	if (write_untracked_snapshot(&encoded, synthetic, &bound, 1) !=
+		    UNTRACKED_CACHE_ENCODING_RAW ||
+	    bound != UNTRACKED_SNAPSHOT_BOUND_NONE) {
+		error("test inventory was omitted before the wire limit");
+		goto done;
+	}
+	checked = read_untracked_snapshot(encoded.buf, encoded.len);
+	if (!checked || checked->raw_entries != nr_names ||
+	    !checked->root || checked->root->untracked_nr != 1 ||
+	    strcmp(checked->root->untracked[0], "sentinel")) {
+		error("raw snapshot did not round-trip before publication");
+		goto done;
+	}
+	free_untracked_cache(checked);
+	checked = NULL;
+	strbuf_release(&encoded);
+
+	istate->untracked = synthetic;
+	synthetic = NULL; /* Restore owns and replaces this candidate on success. */
+	fsmonitor_ipc__save_untracked_cache(istate,
+					    FSMONITOR_UNTRACKED_CACHE_SAVE_NORMAL);
+	if (istate->untracked->root->raw != raw ||
+	    istate->untracked->raw_entries != nr_names ||
+	    istate->untracked->raw_bytes != sizeof(*raw) + payload_len) {
+		error("snapshot fallback modified the live inventory");
+		goto restore_owner;
+	}
+	if (fsmonitor_ipc__restore_untracked_cache(istate, &reason) !=
+		    FSMONITOR_UNTRACKED_CACHE_HIT ||
+	    !istate->untracked->root || istate->untracked->root->raw ||
+	    istate->untracked->raw_entries || istate->untracked->raw_bytes) {
+		error("oversize raw snapshot did not restore the derived cache");
+		goto restore_owner;
+	}
+	if (write_untracked_snapshot(&encoded, istate->untracked, &bound, 0) !=
+		    UNTRACKED_CACHE_ENCODING_LEGACY ||
+	    strbuf_cmp(&expected, &encoded)) {
+		error("snapshot fallback changed the derived cache");
+		goto restore_owner;
+	}
+	printf("raw-entries %d\nrestored-raw-entries %zu\nrestored-raw-bytes %zu\n",
+	       nr_names, istate->untracked->raw_entries,
+	       istate->untracked->raw_bytes);
+	ret = 0;
+restore_owner:
+	free_untracked_cache(istate->untracked);
+	istate->untracked = original;
+done:
+	free_untracked_cache(checked);
+	free_untracked_cache(synthetic);
+	strbuf_release(&expected);
+	strbuf_release(&encoded);
 	return ret;
 }
 
@@ -456,6 +569,7 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		"test-tool fsmonitor-client save-untracked-cache [--token=<token> | --current-token] [--if-absent]",
 		"test-tool fsmonitor-client save-overdeep-untracked-cache",
 		"test-tool fsmonitor-client test-untracked-snapshot-dir-bound",
+		"test-tool fsmonitor-client test-untracked-snapshot-raw-fallback",
 		"test-tool fsmonitor-client poison-untracked-cache [--token=<token>]",
 		"test-tool fsmonitor-client legacy-untracked-cache-save-miss --token=<token>",
 		"test-tool fsmonitor-client legacy-untracked-cache-get-miss --token=<token>",
@@ -507,6 +621,8 @@ int cmd__fsmonitor_client(int argc, const char **argv)
 		return do_save_overdeep_untracked_cache();
 	if (!strcmp(subcmd, "test-untracked-snapshot-dir-bound"))
 		return test_untracked_snapshot_dir_bound();
+	if (!strcmp(subcmd, "test-untracked-snapshot-raw-fallback"))
+		return test_untracked_snapshot_raw_fallback();
 
 	if (!strcmp(subcmd, "poison-untracked-cache"))
 		return do_send_untracked_cache_raw(token, "put", "ok");

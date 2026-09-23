@@ -3980,9 +3980,11 @@ static int do_write_index(struct index_state *istate, struct tempfile *tempfile,
 		encoding = write_untracked_extension(&sb, istate->untracked);
 		if (encoding != UNTRACKED_CACHE_ENCODING_NONE) {
 			err = write_index_ext_header(f, eoie_c,
-				encoding == UNTRACKED_CACHE_ENCODING_PENDING ?
-				CACHE_EXT_UNTRACKED_PENDING : CACHE_EXT_UNTRACKED,
-				sb.len) < 0;
+						     (encoding == UNTRACKED_CACHE_ENCODING_PENDING ||
+						      encoding == UNTRACKED_CACHE_ENCODING_RAW) ?
+							     CACHE_EXT_UNTRACKED_PENDING :
+							     CACHE_EXT_UNTRACKED,
+						     sb.len) < 0;
 			hashwrite(f, sb.buf, sb.len);
 			if (err) {
 				ret = -1;

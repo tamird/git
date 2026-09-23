@@ -341,37 +341,85 @@ The remaining data of each directory block is grouped by type:
 
   - One NUL.
 
-=== Pending untracked-cache revalidation
+=== Untracked-cache revalidation and directory inventories
 
-The optional `UNRV` extension retains untracked-cache candidates after
-filesystem-monitor history is lost. It replaces `UNTR` while revalidation
-is pending; writers must not emit both extensions. Readers that do not
-understand `UNRV` may ignore it and rebuild the untracked cache.
+The optional `UNRV` extension embeds an ordinary `UNTR` payload with
+pending revalidation state, optional complete directory inventories, or
+both. Writers must emit only one of `UNTR` and `UNRV`. Readers that do not
+understand the extension or its version may discard it and rebuild the
+untracked cache.
 
-Its payload is:
+Both versions begin with five magic bytes, `00 55 4e 52 56`, followed by a
+32-bit version. All integers use network byte order. Both end with one
+byte, `a5`, which prevents older untracked-cache snapshot readers from
+interpreting the container as ordinary `UNTR` data. The total length must
+fit the index extension's 32-bit length.
 
-  - Five magic bytes: `00 55 4e 52 56`.
-  - 32-bit version, currently 1.
+Version 1 continues after the version field with:
+
   - 32-bit seconds and 32-bit nanoseconds of the original index timestamp.
     Seconds must be nonzero and nanoseconds must be less than 1,000,000,000.
   - 32-bit length of the following `UNTR` payload.
   - An ordinary `UNTR` payload of exactly that length.
-  - One byte, `a5`.
 
-All integers use network byte order. The total payload length is the
-embedded length plus 22 and must fit the index extension's 32-bit length.
-The non-NUL final byte also prevents older untracked-cache snapshot readers
-from interpreting pending candidates as validated `UNTR` data. Unknown
-versions, malformed payloads, duplicate representations, and a mixture of
-`UNTR` and `UNRV` cause the optional cache to be discarded.
+Including the magic, version and sentinel, its length is the embedded
+payload length plus 22. Version 1 always requires revalidation.
 
-The embedded valid bits identify candidates, not permission to replay them.
-A reader must validate their directory stat data against the saved timestamp
-and validate the applicable ignore rules before using them. Advancing the
-tracked-entry filesystem-monitor token does not discharge this requirement.
-After complete revalidation, a writer may return to the ordinary `UNTR`
-representation. Failure to encode an optional cache must not prevent writing
-the tracked index.
+Version 2 continues after the version field with:
+
+  - 32-bit flags. Bit 0 means revalidation is pending. Bit 1 records
+    precomposed Unicode directory names. Other bits must be zero.
+  - 32-bit seconds and 32-bit nanoseconds of the original index timestamp.
+    With bit 0 set, the version 1 timestamp constraints apply; otherwise
+    both fields must be zero.
+  - 32-bit length of the embedded `UNTR` payload.
+  - 32-bit length of the raw inventory section.
+  - The `UNTR` payload, then the raw inventory section, of exactly those
+    lengths.
+
+Including the magic, version and sentinel, its length is the two embedded
+lengths plus 30. The raw section starts with a positive 32-bit record count,
+followed by that many records. Each record contains:
+
+  - A 32-bit, zero-based directory ordinal in the embedded `UNTR` body's
+    preorder, with the root at ordinal 0. Ordinals must be in range and
+    strictly increasing.
+  - A 32-bit entry count and a 32-bit entry-payload length.
+  - Nine 32-bit stat fields: ctime seconds, ctime nanoseconds, mtime seconds,
+    mtime nanoseconds, device, inode, uid, gid and size. Nanoseconds must be
+    less than 1,000,000,000.
+  - Exactly the stated number of entries occupying exactly the stated
+    payload length. Each entry is a one-byte type followed by a NUL-terminated
+    name. Types are 0 (unknown), 1 (regular file), 2 (directory) and 3
+    (symbolic link), independent of platform `DT_*` values. Names must be
+    nonempty, unique within the record, contain no slash, and differ from
+    `.` and `..`.
+
+An inventory contains every entry except `.` and `..` from a completed
+directory enumeration, including tracked and ignored entries, with the
+type reported by that enumeration. Capture requires unchanged full
+directory stat data bound to the opened directory and its pathname, and a
+directory mtime older than the index timestamp. Before replay, a reader
+must check the full stat data and timestamp again, require a compatible
+name representation, and run the ordinary index, pathspec and ignore
+classification on each name. A parent inventory does not establish
+completeness for any child directory.
+
+When revalidation is pending, the embedded valid bits identify candidates,
+not permission to replay them. A reader must validate their directory stat
+data against the saved timestamp and validate applicable ignore rules.
+Advancing the tracked-entry filesystem-monitor token does not discharge
+this requirement.
+
+Unknown versions or flags, malformed framing or directory topology,
+invalid revalidation or inventory timestamps, exceeded decoding bounds,
+duplicate extensions, and a mixture of `UNTR` and `UNRV` discard the optional
+cache. Inventory name, type and duplicate checks may be deferred until
+replay or serialization. An unusable inventory record is omitted independently;
+the validated derived `UNTR` body remains usable, with physical enumeration
+where needed. Writers may omit inventories and use version 1 if
+revalidation is pending, or ordinary `UNTR` otherwise. Failure to encode
+an optional cache must not prevent writing the tracked index.
 
 == File System Monitor cache
 

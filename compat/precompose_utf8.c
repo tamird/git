@@ -196,6 +196,10 @@ struct dirent_prec_psx *precompose_utf8_readdir(PREC_DIR *prec_dir)
 	return NULL;
 }
 
+int precompose_utf8_dirfd(PREC_DIR *prec_dir)
+{
+	return dirfd(prec_dir->dirp);
+}
 
 int precompose_utf8_closedir(PREC_DIR *prec_dir)
 {

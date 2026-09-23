@@ -36,13 +36,15 @@ void probe_utf8_pathname_composition(void);
 PREC_DIR *precompose_utf8_opendir(const char *dirname);
 struct dirent_prec_psx *precompose_utf8_readdir(PREC_DIR *dirp);
 int precompose_utf8_closedir(PREC_DIR *dirp);
+int precompose_utf8_dirfd(PREC_DIR *dirp);
 
 #ifndef PRECOMPOSE_UNICODE_C
 #define dirent dirent_prec_psx
 #define opendir(n) precompose_utf8_opendir(n)
 #define readdir(d) precompose_utf8_readdir(d)
 #define closedir(d) precompose_utf8_closedir(d)
-#define DIR PREC_DIR
+# define dirfd(d)   precompose_utf8_dirfd(d)
+# define DIR	    PREC_DIR
 #endif /* PRECOMPOSE_UNICODE_C */
 
 #endif /* PRECOMPOSE_UNICODE_H */
