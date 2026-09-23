@@ -572,7 +572,8 @@ static struct spanhash_top *hash_chars(struct repository *r,
 				       enum span_hash_mode *mode)
 {
 	int i, n;
-	unsigned int accum1, accum2, hashval;
+	unsigned int hashval;
+	uint64_t accum;
 	size_t buckets, occupied = 0;
 	struct spanhash_top *hash;
 	unsigned char *buf = one->data;
@@ -588,10 +589,9 @@ static struct spanhash_top *hash_chars(struct repository *r,
 	MEMZERO_ARRAY(hash->data, (size_t)1 << i);
 
 	n = 0;
-	accum1 = accum2 = 0;
+	accum = 0;
 	while (sz) {
 		unsigned int c = *buf++;
-		unsigned int old_1 = accum1;
 		sz--;
 
 		/* Text and binary hashes differ only for CRLF sequences. */
@@ -604,18 +604,18 @@ static struct spanhash_top *hash_chars(struct repository *r,
 				continue;
 		}
 
-		accum1 = (accum1 << 7) ^ (accum2 >> 25);
-		accum2 = (accum2 << 7) ^ (old_1 >> 25);
-		accum1 += c;
+		/* Keep the byte accumulator high so its overflow is discarded. */
+		accum = (accum << 7) | (accum >> 57);
+		accum += (uint64_t)c << 32;
 		if (++n < 64 && c != '\n')
 			continue;
-		hashval = (accum1 + accum2 * 0x61) % HASHBASE;
+		hashval = (uint32_t)((accum >> 32) + (uint32_t)accum * 0x61u) % HASHBASE;
 		hash = add_spanhash(hash, hashval, n);
 		n = 0;
-		accum1 = accum2 = 0;
+		accum = 0;
 	}
 	if (n > 0) {
-		hashval = (accum1 + accum2 * 0x61) % HASHBASE;
+		hashval = (uint32_t)((accum >> 32) + (uint32_t)accum * 0x61u) % HASHBASE;
 		hash = add_spanhash(hash, hashval, n);
 	}
 	/* The similarity comparison reads only the sorted, occupied prefix. */
