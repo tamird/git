@@ -1067,4 +1067,9 @@ void tr2_emit_final_counters(tr2_tgt_evt_counter_t *fn_apply)
 		emit_counter_snapshot("fetch-pack",
 				      TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_COUNT,
 				      TRACE2_COUNTER_ID_FETCH_PACKFILE_URI_ORDERED_BATCHES);
+	if (final_counter_block.counter[TRACE2_COUNTER_ID_GREP_LOOKUP_COUNT].value ||
+	    final_counter_block.counter[TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID].value)
+		emit_counter_snapshot("grep",
+				      TRACE2_COUNTER_ID_GREP_LOOKUP_INVALID,
+				      TRACE2_COUNTER_ID_GREP_LOOKUP_FALLBACK_NS);
 }
