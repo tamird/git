@@ -469,6 +469,8 @@ test_expect_success 'follow harder copies reads an unchanged subtree once' '
 		test_cmp expect actual-index &&
 		test_trace2_data_singular diff follow-index/attempts 1 <index.event &&
 		test_trace2_data_singular diff follow-index/ready 1 <index.event &&
+		test_trace2_data_singular diff follow-index/probe_index_entries 3 <index.event &&
+		test_trace2_data_singular diff follow-index/probe_accepted 1 <index.event &&
 		test_trace2_data_singular diff follow-index/scopes 1 <index.event &&
 		test_trace2_data_singular diff follow-index/reused_entries 2 <index.event
 	)
@@ -859,6 +861,9 @@ test_expect_success 'follow preserves unchanged sources across exact and edited 
 		test_cmp actual actual-index &&
 		test_trace2_data_singular diff follow-index/attempts 1 <index.event &&
 		test_trace2_data_singular diff follow-index/ready 0 <index.event &&
+		test_trace2_data_singular diff follow-index/entries 0 <index.event &&
+		test_trace2_data_singular diff follow-index/probe_index_entries 5 <index.event &&
+		test_trace2_data_singular diff follow-index/probe_accepted 0 <index.event &&
 		test_trace2_data diff follow-full-tree/count 3 <index.event
 	)
 '
@@ -1147,6 +1152,8 @@ test_expect_success 'follow index preserves ordered sources and modes' '
 				test_cmp expect actual &&
 				test_trace2_data_singular diff follow-index/scopes 5 \
 					<"$event" &&
+				test_trace2_data_singular diff follow-index/probe_accepted 1 \
+					<"$event" &&
 				test_trace2_data_singular diff follow-index/probe_reads 2 \
 					<"$event" || return 1
 			done || return 1
@@ -1187,6 +1194,7 @@ test_expect_success 'follow index falls back after an index change or missing in
 				-- z/source >actual &&
 		test_cmp expect actual &&
 		test_trace2_data_singular diff follow-index/ready 0 <invalid.event &&
+		test_trace2_data_singular diff follow-index/probe_accepted 1 <invalid.event &&
 		GIT_TEST_FOLLOW_INDEX=1 GIT_INDEX_FILE="$PWD/missing-index" \
 			git log --follow --name-status --format=%s -n1 \
 				-- z/source >actual &&

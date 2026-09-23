@@ -1025,11 +1025,12 @@ struct follow_addremove_data {
  */
 struct diff_follow_index {
 	struct index_state index;
-	int attempted, ready, trace_enabled, replace_mode;
+	int attempted, ready, trace_enabled, replace_mode, probe_accepted;
 	uint64_t prepare_ns, read_ns, proof_ns, emit_ns;
 	uint64_t proofs, scopes, reused_entries, reused_trees, depth_fallbacks;
 	uint64_t probe_reads, probe_bytes, probe_trees, probe_scopes;
 	uint64_t probe_peak_memory, probe_dropped, probe_pending;
+	uint64_t probe_index_entries;
 };
 
 #define FOLLOW_INDEX_PROBE_READS  256
@@ -1203,8 +1204,8 @@ static int follow_index_accept(struct index_state *index, void *data)
 	 * net tree read is a cost screen, not a guarantee for every workload.
 	 */
 	size_t required = index->cache_nr / 16 + !!(index->cache_nr % 16);
-	int accepted = 0;
 
+	state->probe_index_entries = index->cache_nr;
 	if (!required)
 		return 0;
 	/* Valid children remain useful even when their root TREE is invalid. */
@@ -1212,8 +1213,10 @@ static int follow_index_accept(struct index_state *index, void *data)
 	if (follow_index_probe_children(probe, probe->old_root, probe->new_root,
 					"", 1, 1, 0))
 		return 0;
-	if (state->probe_trees >= required)
+	if (state->probe_trees >= required) {
+		state->probe_accepted = 1;
 		return 1;
+	}
 	probe->pending.compare = follow_index_probe_compare;
 	probe->memory = FOLLOW_INDEX_PROBE_ITEMS * sizeof(*probe->pending.array);
 	if (state->probe_peak_memory < probe->memory)
@@ -1249,7 +1252,7 @@ static int follow_index_accept(struct index_state *index, void *data)
 		if (failed)
 			break;
 		if (state->probe_trees >= state->probe_reads + required) {
-			accepted = 1;
+			state->probe_accepted = 1;
 			break;
 		}
 	}
@@ -1258,7 +1261,7 @@ done:
 	while ((item = prio_queue_get(&probe->pending)))
 		free(item);
 	clear_prio_queue(&probe->pending);
-	return accepted;
+	return state->probe_accepted;
 }
 
 static int follow_index_eligible(struct diff_options *opt)
@@ -1438,6 +1441,8 @@ void diff_follow_index_end(struct diff_follow_index *state)
 	trace2_data_intmax("diff", repo, "follow-index/reused_entries", state->reused_entries);
 	trace2_data_intmax("diff", repo, "follow-index/reused_trees", state->reused_trees);
 	trace2_data_intmax("diff", repo, "follow-index/depth_fallbacks", state->depth_fallbacks);
+	trace2_data_intmax("diff", repo, "follow-index/probe_index_entries", state->probe_index_entries);
+	trace2_data_intmax("diff", repo, "follow-index/probe_accepted", state->probe_accepted);
 	trace2_data_intmax("diff", repo, "follow-index/probe_reads", state->probe_reads);
 	trace2_data_intmax("diff", repo, "follow-index/probe_bytes", state->probe_bytes);
 	trace2_data_intmax("diff", repo, "follow-index/probe_trees", state->probe_trees);
