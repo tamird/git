@@ -711,6 +711,26 @@ static struct tr2_timer_metadata tr2_timer_metadata[TRACE2_NUMBER_OF_TIMERS] = {
 		.name = "get-ref-map",
 		.want_per_thread_events = 0,
 	},
+	[TRACE2_TIMER_ID_TRANSPORT_CONNECT_SETUP] = {
+		.category = "transport",
+		.name = "connect-setup",
+	},
+	[TRACE2_TIMER_ID_TRANSPORT_PROTOCOL_DISCOVERY] = {
+		.category = "transport",
+		.name = "protocol-discovery",
+	},
+	[TRACE2_TIMER_ID_TRANSPORT_REF_ADVERTISEMENT] = {
+		.category = "transport",
+		.name = "ref-advertisement",
+	},
+	[TRACE2_TIMER_ID_TRANSPORT_HELPER_CONNECT] = {
+		.category = "transport",
+		.name = "helper-connect",
+	},
+	[TRACE2_TIMER_ID_TRANSPORT_HELPER_LIST_REFS] = {
+		.category = "transport",
+		.name = "helper-list-refs",
+	},
 	[TRACE2_TIMER_ID_FETCH_PACK_V2_PREPARE] = {
 		.category = "fetch-pack",
 		.name = "v2/prepare",

@@ -20,6 +20,7 @@
 #include "transport-internal.h"
 #include "protocol.h"
 #include "packfile.h"
+#include "trace2.h"
 
 static int debug;
 
@@ -1250,9 +1251,14 @@ static int has_attribute(const char *attrs, const char *attr)
 static struct ref *get_refs_list(struct transport *transport, int for_push,
 				 struct transport_ls_refs_options *transport_options)
 {
-	get_helper(transport);
+	int connected;
 
-	if (process_connect(transport, for_push))
+	trace2_timer_start(TRACE2_TIMER_ID_TRANSPORT_HELPER_CONNECT);
+	get_helper(transport);
+	connected = process_connect(transport, for_push);
+	trace2_timer_stop(TRACE2_TIMER_ID_TRANSPORT_HELPER_CONNECT);
+
+	if (connected)
 		return transport->vtable->get_refs_list(transport, for_push,
 							transport_options);
 
@@ -1269,6 +1275,7 @@ static struct ref *get_refs_list_using_list(struct transport *transport,
 	struct ref *posn;
 	struct strbuf buf = STRBUF_INIT;
 
+	trace2_timer_start(TRACE2_TIMER_ID_TRANSPORT_HELPER_LIST_REFS);
 	data->get_refs_list_called = 1;
 	helper = get_helper(transport);
 
@@ -1328,6 +1335,7 @@ static struct ref *get_refs_list_using_list(struct transport *transport,
 	for (posn = ret; posn; posn = posn->next)
 		resolve_remote_symref(posn, ret);
 
+	trace2_timer_stop(TRACE2_TIMER_ID_TRANSPORT_HELPER_LIST_REFS);
 	return ret;
 }
 

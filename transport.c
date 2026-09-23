@@ -302,6 +302,7 @@ static int connect_setup(struct transport *transport, int for_push)
 	if (data->conn)
 		return 0;
 
+	trace2_timer_start(TRACE2_TIMER_ID_TRANSPORT_CONNECT_SETUP);
 	switch (transport->family) {
 	case TRANSPORT_FAMILY_ALL: break;
 	case TRANSPORT_FAMILY_IPV4: flags |= CONNECT_IPV4; break;
@@ -316,6 +317,7 @@ static int connect_setup(struct transport *transport, int for_push)
 					data->options.receivepack :
 					data->options.uploadpack,
 				 flags);
+	trace2_timer_stop(TRACE2_TIMER_ID_TRANSPORT_CONNECT_SETUP);
 
 	return 0;
 }
@@ -354,7 +356,10 @@ static struct ref *handshake(struct transport *transport, int for_push,
 			   PACKET_READ_GENTLE_ON_EOF |
 			   PACKET_READ_DIE_ON_ERR_PACKET);
 
+	trace2_timer_start(TRACE2_TIMER_ID_TRANSPORT_PROTOCOL_DISCOVERY);
 	data->version = discover_version(&reader);
+	trace2_timer_stop(TRACE2_TIMER_ID_TRANSPORT_PROTOCOL_DISCOVERY);
+	trace2_timer_start(TRACE2_TIMER_ID_TRANSPORT_REF_ADVERTISEMENT);
 	switch (data->version) {
 	case protocol_v2:
 		if ((!transport->server_options || !transport->server_options->nr) &&
@@ -385,6 +390,7 @@ static struct ref *handshake(struct transport *transport, int for_push,
 	case protocol_unknown_version:
 		BUG("unknown protocol version");
 	}
+	trace2_timer_stop(TRACE2_TIMER_ID_TRANSPORT_REF_ADVERTISEMENT);
 	data->finished_handshake = 1;
 	transport->hash_algo = reader.hash_algo;
 
